@@ -268,3 +268,24 @@ def fingerprints_match(fp1: Optional[str], fp2: Optional[str]) -> bool:
     if not fp1 or not fp2:
         return False
     return fp1 == fp2
+
+
+def fingerprint_unknown(fp: Optional[str]) -> bool:
+    """True when a fingerprint could not be taken at all.
+
+    :func:`compute_graph_fingerprint` returns ``""`` when every probe failed
+    — the fast counters could not answer for this graph AND the scan fell
+    over or ran past its budget. That is the absence of a measurement, and
+    it is NOT the same fact as "the graph changed", however convenient it
+    was to treat the two alike: ``fingerprints_match`` says False for both,
+    so an unmeasurable graph read as permanently drifting.
+
+    What that cost, on exactly the large graphs where the scan cannot
+    finish: the scope-wide read generation was bumped on every automatic
+    check, so no cached read of that source ever survived to be hit, and a
+    rebuild was queued every time, which made the next scan slower still.
+
+    Callers that have their OWN evidence of a write (an external loader
+    saying so, an operator forcing a refresh) are right to proceed anyway.
+    Callers whose only evidence was the probe have none when it fails."""
+    return not fp

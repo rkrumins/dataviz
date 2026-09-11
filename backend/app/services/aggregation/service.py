@@ -41,7 +41,11 @@ from .schemas import (
     JobLimitsPatch,
     SourceChangedResponse,
 )
-from .fingerprint import compute_graph_fingerprint, fingerprints_match
+from .fingerprint import (
+    compute_graph_fingerprint,
+    fingerprint_unknown,
+    fingerprints_match,
+)
 from .holds import (  # noqa: F401  (HeldError re-exported for callers)
     AUTOMATION_ORIGINS, FLEET_KEY, HELD_TRIGGER_SOURCES, HeldError, Hold,
     read_scope_holds, resolve_hold, resolve_scope_hold, set_scope_hold,
@@ -449,6 +453,12 @@ def _is_resumable(job) -> bool:
     """
     return job.status in ("failed", "cancelled")
 
+
+#: Origins whose ONLY evidence that a source changed is the fingerprint
+#: probe itself. When that probe cannot answer, they have nothing — so they
+#: must not assert a change (see the gate in ``signal_source_changed``).
+#: Every other origin is a caller who watched a write happen.
+_PROBE_ONLY_ORIGINS = frozenset({"drift", "reconcile", "reconcile-sweep"})
 
 #: ``JobLimitsPatch.reset`` keys (the wire names) → the ``live_overrides``
 #: fields they clear.
@@ -908,7 +918,12 @@ class AggregationService:
                         compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                         timeout=_DRIFT_TIMEOUT,
                     )
-                    drift = not fingerprints_match(state.graph_fingerprint, current_fp)
+                    # Unknown is not drift: a probe that could not answer
+                    # says nothing about whether the graph moved.
+                    drift = (
+                        not fingerprint_unknown(current_fp)
+                        and not fingerprints_match(state.graph_fingerprint, current_fp)
+                    )
             except Exception:
                 pass  # Can't reach the graph — don't block or false-warn
 
@@ -2056,7 +2071,16 @@ class AggregationService:
                 last_checked_at=_now(),
             )
 
-        drift = not fingerprints_match(state.graph_fingerprint, current_fp)
+        # A fingerprint that could not be taken is the absence of a
+        # measurement, not a change. Reporting drift from it queued a rebuild
+        # on every check of a graph too large to fingerprint, and each rebuild
+        # made the next probe slower — while the caches were invalidated on
+        # the way past. The caller that could not measure reports what it
+        # knows: nothing.
+        drift = (
+            not fingerprint_unknown(current_fp)
+            and not fingerprints_match(state.graph_fingerprint, current_fp)
+        )
 
         return DriftCheckResponse(
             drift_detected=drift,
@@ -2161,6 +2185,44 @@ class AggregationService:
 
         # 3. Change gate. A matching fingerprint (and no force) is a no-op —
         # nothing below runs.
+        #
+        # An UNKNOWN fingerprint is a third outcome, and conflating it with
+        # the second was expensive. The probe returns "" when the fast
+        # counters cannot answer for this graph AND the fallback scan failed
+        # or ran past its budget — which is the absence of a measurement,
+        # not evidence of a change. ``fingerprints_match`` says False for
+        # both, so on a graph too large to scan inside the probe's budget
+        # every automatic check asserted "changed": the scope-wide read
+        # generation was bumped each time, so no cached read of that source
+        # could ever survive to be hit (an aggregated-lineage hit ratio
+        # pinned at 0% is what that looks like from the outside), and a
+        # rebuild was queued each time, which made the next scan slower.
+        #
+        # A caller with its OWN evidence of a write — an external loader
+        # saying so, an operator forcing a refresh, the API signal — is
+        # still right to proceed; ``force`` and the explicit origins carry
+        # that. A caller whose only evidence WAS the probe has none.
+        if not force and fingerprint_unknown(current_fp) and origin in _PROBE_ONLY_ORIGINS:
+            logger.info(
+                "signal_source_changed: the graph fingerprint for %s could not "
+                "be taken (origin=%s) — treating it as unknown rather than as a "
+                "change. Nothing is invalidated and no rebuild is queued; the "
+                "reconciliation sweep's edge counts remain the evidence that "
+                "does not need a scan.", ds_id, origin,
+            )
+            event_id = await self._emit_signal_event(
+                workspace_id=workspace_id, ds_id=ds_id, origin=origin,
+                actor=actor, gate="unknown", actions={}, outcome="noop",
+                audit_reason=audit_reason, evidence=evidence, run_id=run_id,
+            )
+            return SourceChangedResponse(
+                changed=False,
+                job_id=None,
+                reason=reason,
+                current_fingerprint=current_fp,
+                stored_fingerprint=stored_fp,
+                event_id=event_id,
+            )
         if not force and fingerprints_match(stored_fp, current_fp):
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,

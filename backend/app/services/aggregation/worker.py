@@ -764,8 +764,16 @@ class AggregationWorker:
                         )
                     except (TypeError, ValueError):
                         pass
+                # An EMPTY fingerprint means the probe could not answer, not
+                # that the graph has no shape. Storing it poisons the change
+                # gate forever: every later signal compares against "" and
+                # reads as changed, which bumps the read generation (no cached
+                # read of this source survives) and queues another rebuild.
+                # None leaves the previous figure standing — ``_update_ds_state``
+                # skips None — so the gate keeps the last fingerprint it could
+                # actually take.
                 job.graph_fingerprint_after = await compute_graph_fingerprint(
-                    provider, budget_s=_FINGERPRINT_BUDGET_S)
+                    provider, budget_s=_FINGERPRINT_BUDGET_S) or None
 
                 # Update aggregation-owned data source state
                 await self._update_ds_state(

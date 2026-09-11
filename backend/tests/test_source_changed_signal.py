@@ -1770,3 +1770,94 @@ def test_signal_under_act_off_is_held_fleet_wide(monkeypatch):
     svc, session, order, captured = _build(monkeypatch, state=state, current_fp="NEW")
     resp = _run(svc.signal_source_changed("ds-1", session, reason="drift", origin="api"))
     assert resp.held is False and "trigger" in order
+
+
+# ── an unmeasurable graph is not a changing graph ────────────────────────
+
+
+def _state_row(fp="OLD", status="ready"):
+    return types.SimpleNamespace(
+        data_source_id="ds-1", workspace_id="ws-1", graph_fingerprint=fp,
+        aggregation_status=status, last_aggregated_at=None,
+        rebuild_min_interval_secs=None, drift_state=None,
+        reconcile_consecutive_actions=0,
+    )
+
+
+@pytest.mark.parametrize("origin", ["drift", "reconcile", "reconcile-sweep"])
+def test_a_probe_that_could_not_answer_invalidates_nothing(monkeypatch, origin):
+    """The bug behind an aggregated-lineage hit ratio pinned at 0%.
+
+    ``compute_graph_fingerprint`` returns "" when the fast counters cannot
+    answer for this graph AND the fallback scan failed or ran past its
+    budget — the absence of a measurement. ``fingerprints_match`` says False
+    for that exactly as it does for a real mismatch, so on a graph too large
+    to scan inside the probe's budget every automatic check asserted a
+    change: the scope-wide read generation was bumped each time (so no
+    cached read of that source ever survived to be hit) and a rebuild was
+    queued, which made the next probe slower still.
+    """
+    svc, session, order, _ = _build(
+        monkeypatch, state=_state_row(), ds=_ds_row(), current_fp="",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session, origin=origin))
+    assert resp.changed is False and resp.job_id is None
+    assert order == []                       # nothing invalidated, nothing queued
+    assert svc._events[-1]["gate"] == "unknown"
+
+
+def test_a_caller_that_watched_the_write_still_proceeds(monkeypatch):
+    """An external loader, the API signal, an operator's refresh: their
+    evidence is that they saw the write, not the probe. They are right to
+    converge even when the graph cannot be fingerprinted."""
+    svc, session, order, _ = _build(
+        monkeypatch, state=_state_row(), ds=_ds_row(), current_fp="",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session, origin="api"))
+    assert resp.changed is True
+    assert "invalidate_hierarchy_reads" in order
+
+    # …and force overrides the gate from any origin at all.
+    svc2, session2, order2, _ = _build(
+        monkeypatch, state=_state_row(), ds=_ds_row(), current_fp="",
+    )
+    assert _run(svc2.signal_source_changed(
+        "ds-1", session2, origin="drift", force=True,
+    )).changed is True
+    assert "invalidate_hierarchy_reads" in order2
+
+
+def test_a_real_mismatch_from_an_automatic_origin_still_converges(monkeypatch):
+    """The gate narrows to the UNKNOWN case only: a probe that answered and
+    disagreed is still a change, from every origin."""
+    svc, session, order, _ = _build(
+        monkeypatch, state=_state_row(fp="OLD"), ds=_ds_row(), current_fp="NEW",
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session, origin="drift"))
+    assert resp.changed is True
+    assert "invalidate_hierarchy_reads" in order
+    assert svc._events[-1]["gate"] == "changed"
+
+
+def test_unknown_is_its_own_answer():
+    from backend.app.services.aggregation.fingerprint import (
+        fingerprint_unknown, fingerprints_match,
+    )
+
+    assert fingerprint_unknown("") is True and fingerprint_unknown(None) is True
+    assert fingerprint_unknown("abc123") is False
+    # Both read False through the match — which is why they had to be told apart.
+    assert fingerprints_match("OLD", "") is False
+    assert fingerprints_match("OLD", "NEW") is False
+
+
+def test_the_worker_never_stores_a_fingerprint_it_could_not_take():
+    """One failed post-run probe used to poison the gate forever: the stored
+    value became "", every later comparison read as changed, and the source's
+    caches were invalidated on every tick from then on."""
+    import inspect
+
+    from backend.app.services.aggregation.worker import AggregationWorker
+
+    src = inspect.getsource(AggregationWorker.run)
+    assert "budget_s=_FINGERPRINT_BUDGET_S) or None" in src

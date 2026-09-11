@@ -221,6 +221,31 @@ across its outbound call, and that pool is shared by all data sources.
   a misspelling leaves the pool at the code default and the admission gate sizes itself
   from a number you did not choose.
 
+### The cache hit ratio for a source sits at 0%
+
+Almost always the read generation is being bumped, which makes every cached
+entry for that source unreachable. The bump comes from `signal_source_changed`
+passing its change gate, and the gate used to pass on a fingerprint it could not
+take: `compute_graph_fingerprint` returns `""` when the fast label/relation
+counters cannot answer for the graph and the fallback scan fails or runs past
+`SCHEDULER_DRIFT_CHECK_TIMEOUT` (5 s), and `""` compared unequal to everything.
+So on a graph too large to scan in five seconds, every automatic check asserted
+a change, invalidated every cached read, and queued a rebuild that made the next
+scan slower.
+
+An unknown fingerprint is now its own answer: the automatic origins (`drift`,
+`reconcile`, `reconcile-sweep`) treat it as "could not tell" and do nothing,
+while a caller with its own evidence of a write — an external loader, the API
+signal, a forced refresh — still converges. A failed post-run probe also no
+longer overwrites the stored fingerprint with `""`, which used to poison the
+gate permanently.
+
+To confirm it on a live source: the refresh-event audit rows show
+`gate: "unknown"` for checks that could not measure, and `gate: "changed"` for
+real ones. If the ratio is still 0% with no `changed` rows, the reads genuinely
+differ — the canvas asks for a different set of container URNs each time — and
+the cache key is doing its job.
+
 ### Aggregation runs make the platform unusable
 
 1. Confirm read-pressure signalling is live: `/health/deps` → `resilience.read_pressure`.

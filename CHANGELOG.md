@@ -26,6 +26,20 @@ budget counts the container too, and the deployment guide's sizing rule now coun
 replication buffers. The run record keeps every hold by reason, and the run settings panel
 says so.
 
+**A graph that cannot be fingerprinted is no longer treated as one that
+changed.** `compute_graph_fingerprint` returns an empty string when the fast
+label/relation counters cannot answer for a graph and the fallback scan fails or
+runs past its five-second budget. That empty string compared unequal to
+everything, so on any graph too large to scan in five seconds every automatic
+check asserted a change: the scope-wide read generation was bumped each time, so
+no cached read of that source could survive to be hit — an aggregated-lineage
+cache hit ratio pinned at 0% is exactly what that looks like — and a rebuild was
+queued, which made the next probe slower still. Unknown is now its own answer:
+the automatic origins do nothing with it, a caller who watched the write
+(external loader, API signal, forced refresh) still converges, and a failed
+post-run probe no longer overwrites the stored fingerprint with an empty one,
+which used to poison the gate permanently.
+
 **Densely connected graphs aggregate, and full detail is never truncated.**
 Half a million lineage edges over a few thousand containers used to be the
 pathological case, for three reasons that were not about the graph store. A
