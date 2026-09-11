@@ -120,9 +120,18 @@ _LKG_PREFIX = "graphcache:lkg:v1"
 # Bounds rationale:
 #   * lo = 1s — anything shorter is effectively no-cache and would
 #     trigger thundering-herd compute on every render.
-#   * hi = 1 hour — beyond this, ``bump_generation`` on writes is the
-#     only invalidation lever and operators would lose all ability to
-#     see fresh data without restarting.
+#   * hi = 24 hours. This used to be 1 hour, on the reasoning that beyond
+#     it ``bump_generation`` is the only invalidation lever. That reasoning
+#     had it backwards: the gen bump IS the invalidation lever, and it is
+#     event-driven, so a TTL is not what keeps data fresh — it is only what
+#     throws cache away on a clock. An aggregation run completing, failing
+#     mid-write, being purged or skipped all reach
+#     ``invalidate_aggregated_reads`` -> gen bump (event_listener.py:247),
+#     and every app write path bumps too. For an EXTERNAL graph with no
+#     branch and no in-app writes — the common case — the aggregation event
+#     is the only thing that changes the answer, and it invalidates.
+#     Kept finite so a deployment whose writes genuinely bypass the app
+#     still converges without a restart.
 #
 # The long defaults below (5-15 min, up from 30-60s) are SAFE ONLY
 # BECAUSE every APP write path bumps the per-scope generation counter
@@ -139,10 +148,10 @@ _LKG_PREFIX = "graphcache:lkg:v1"
 # an external ingest not routed through the write endpoints) do NOT
 # bump the generation and will be masked for up to the TTL. Route bulk
 # mutations through the app, or bump the generation manually.
-_TTL_LO, _TTL_HI = 1, 3600
+_TTL_LO, _TTL_HI = 1, 86_400
 
-_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
-_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Trace responses are large and expensive; 60s catches repeat navigation
 # inside the lineage preview drawer without serving stale data for long.
 # The same gen counter (bumped on writes) invalidates trace entries.
@@ -151,17 +160,17 @@ _DEFAULT_TRACE_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_EXPAND_TTL_S", 3
 _DEFAULT_TRACE_CLOSURE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_CLOSURE_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
 # Top-level nodes change only when a write inside the workspace shuffles
 # containment — gen counter bumps invalidate. Small payloads, hot path.
-_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 600, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Layer assignment is deterministic for a given (ws, ds, request body)
 # and touches the same node/edge set as a trace. 60s matches /trace.
-_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Batched canvas contract (open/expand). These compose top-level +
 # aggregated + children into one entry; a canvas gesture repeats the
 # exact same request until a write bumps the generation, so a longer
 # TTL amortises the whole bootstrap/expand cost. gen-bump keeps them
 # fresh on edits.
-_DEFAULT_CANVAS_BOOTSTRAP_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
-_DEFAULT_CANVAS_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_EXPAND_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CANVAS_BOOTSTRAP_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CANVAS_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_EXPAND_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Short TTL for empty/404 results — absorbs herds asking for the same
 # missing URN without committing to caching nonsense for long. Floor of
 # 5s keeps the herd-absorption property; ceiling of 5min limits damage

@@ -1188,19 +1188,32 @@ async def test_purge_lkg_swallows_redis_errors() -> None:
 # ── WS7: TTL posture + new endpoint coverage ─────────────────────────
 
 def test_ws7_ttl_defaults_are_long_and_gen_bump_safe():
-    """The long TTLs (5-15 min) are safe because gen-bump invalidates on
-    write; assert the defaults landed so a regression to 30/60s is caught."""
+    """The long TTLs are safe because gen-bump invalidates on write and on
+    every aggregation terminal event — freshness is event-driven, so the TTL
+    is only a backstop. Asserts the RULE rather than the numbers: structural
+    endpoints (what a view IS) hold for at least an hour; trace endpoints
+    (what a user is exploring right now) stay short."""
     from backend.app.services import graph_cache as gc
-    assert gc._resolve_ttl(None, gc.ENDPOINT_CHILDREN) == 900
-    assert gc._resolve_ttl(None, gc.ENDPOINT_AGGREGATED) == 900
-    assert gc._resolve_ttl(None, gc.ENDPOINT_TOP_LEVEL) == 600
-    assert gc._resolve_ttl(None, gc.ENDPOINT_TRACE) == 300
-    assert gc._resolve_ttl(None, gc.ENDPOINT_LAYER_ASSIGNMENT) == 900
-    # New hydration + canvas endpoints are cache-covered.
-    assert gc._resolve_ttl(None, gc.ENDPOINT_EDGES_BETWEEN) == 900
-    assert gc._resolve_ttl(None, gc.ENDPOINT_NODES_QUERY) == 900
-    assert gc._resolve_ttl(None, gc.ENDPOINT_CANVAS_BOOTSTRAP) == 300
-    assert gc._resolve_ttl(None, gc.ENDPOINT_CANVAS_EXPAND) == 300
+
+    structural = (
+        gc.ENDPOINT_CHILDREN, gc.ENDPOINT_AGGREGATED, gc.ENDPOINT_TOP_LEVEL,
+        gc.ENDPOINT_LAYER_ASSIGNMENT, gc.ENDPOINT_CANVAS_BOOTSTRAP,
+        gc.ENDPOINT_CANVAS_EXPAND, gc.ENDPOINT_EDGES_BETWEEN,
+        gc.ENDPOINT_NODES_QUERY,
+    )
+    for endpoint in structural:
+        assert gc._resolve_ttl(None, endpoint) >= 3600, endpoint
+    # An endpoint nobody registered still gets the structural default rather
+    # than falling to something short — nodes_degree reaches it this way.
+    assert gc._resolve_ttl(None, "nodes_degree") >= 3600
+
+    for endpoint in (gc.ENDPOINT_TRACE, gc.ENDPOINT_TRACE_EXPAND,
+                     gc.ENDPOINT_TRACE_CLOSURE):
+        assert gc._resolve_ttl(None, endpoint) <= 900, endpoint
+
+    # An explicit TTL still wins, and the clamp permits a full day.
+    assert gc._resolve_ttl(42, gc.ENDPOINT_CHILDREN) == 42
+    assert gc._TTL_HI == 86_400
 
 
 def test_ws7_new_endpoints_registered_enabled():
@@ -1809,3 +1822,79 @@ async def test_a_shed_leader_does_not_strand_its_followers(shed) -> None:
     for task in done:
         with pytest.raises(exc_cls):
             task.result()
+
+
+# ── why a long TTL is safe ───────────────────────────────────────────────
+#
+# The structural endpoints cache for an hour. That is only sound because the
+# TTL is not what keeps data fresh — the generation bump is, and it is
+# event-driven. These pin the two properties the long TTL rests on:
+#
+#   1. An aggregation terminal event invalidates a BRANCHLESS scope, which is
+#      every external graph: no branch, no in-app writes, so the aggregation
+#      run is the only thing that changes the answer.
+#   2. The invalidation covers every PHYSICAL graph the source has pointed at,
+#      because _gen_key deliberately omits graph_ns while read keys include it.
+#
+# If either stopped holding, an hour-long TTL would start serving an hour of
+# stale data to every user of that source.
+
+
+@pytest.mark.asyncio
+async def test_an_aggregation_event_invalidates_a_branchless_external_source() -> None:
+    """The fake Redis does not keep counter state, so this asserts the WIRING:
+    a terminal aggregation event must INCR the generation key of the
+    branchless scope. That key is what every read composes into its cache key,
+    so incrementing it is what makes an hour of cached entries unreachable."""
+    from unittest.mock import patch as _patch
+
+    from backend.app.services.graph_cache import _gen_key, invalidate_aggregated_reads
+
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1", branch_id="", graph_ns="abc123")
+
+    with _patch("backend.app.services.graph_cache.get_graph_cache", return_value=cache):
+        await invalidate_aggregated_reads("ws1", "ds1")
+
+    bumped = [c.args[0] for c in redis.incr.await_args_list]
+    assert _gen_key(scope) in bumped, (
+        "an aggregation run completing must bump the generation for the "
+        f"branchless scope ({_gen_key(scope)}); it bumped {bumped}. With a 1h "
+        "TTL nothing else will unreach those entries."
+    )
+
+
+def test_invalidation_reaches_every_physical_graph_the_source_has_used() -> None:
+    """_gen_key omits graph_ns on purpose; read keys include it. So one bump
+    kills entries cached under the old graph AND the new one after a re-point.
+    If graph_ns ever leaked into the generation key, invalidation would miss
+    every entry a reader actually wrote."""
+    from backend.app.services.graph_cache import _gen_key
+
+    a = CacheScope("ws1", "ds1", branch_id="", graph_ns="physical-a")
+    b = CacheScope("ws1", "ds1", branch_id="", graph_ns="physical-b")
+    none = CacheScope("ws1", "ds1", branch_id="")
+
+    assert _gen_key(a) == _gen_key(b) == _gen_key(none), (
+        "the generation key must not vary by physical graph, or the "
+        "invalidation choke point (which builds the scope with graph_ns='') "
+        "cannot reach entries written by a reader that resolved a real one"
+    )
+
+
+def test_the_structural_endpoints_are_cached_for_an_hour() -> None:
+    """States the intent so a future edit has to be deliberate. These are the
+    endpoints that describe what a view IS — they change when the graph
+    changes, which is an event, not a moment on a clock."""
+    import backend.app.services.graph_cache as gc
+
+    for name in (
+        "_DEFAULT_CHILDREN_TTL", "_DEFAULT_AGGREGATED_TTL", "_DEFAULT_TOP_LEVEL_TTL",
+        "_DEFAULT_CANVAS_BOOTSTRAP_TTL", "_DEFAULT_CANVAS_EXPAND_TTL",
+        "_DEFAULT_LAYER_ASSIGNMENT_TTL",
+    ):
+        assert getattr(gc, name) >= 3600, f"{name} fell back below an hour"
+    # And the negative window stays short: a failed or empty read must be
+    # retried soon, never pinned for an hour.
+    assert gc._NEGATIVE_TTL <= 300
