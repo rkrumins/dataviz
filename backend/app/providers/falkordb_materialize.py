@@ -80,6 +80,7 @@ is the ``latestUpdate`` guard that protects edges written during the run
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import random
@@ -89,8 +90,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from backend.app.providers.process_memory import MemoryGauge
 from backend.app.providers.shard_capacity import (
     ShardMemory, WriteBudget, bytes_per_edge_default, calibrate_bytes_per_edge,
-    compute_write_budget, estimate_margin_pct_default, format_refusal,
-    human_bytes, read_shard_memory, shard_reserve_pct_default,
+    compute_write_budget, container_limit_bytes, estimate_margin_pct_default,
+    format_refusal, hold_reason, human_bytes, read_shard_memory,
+    shard_reserve_pct_default,
 )
 from backend.common.providers.identity import (
     node_identity_expr as _shared_identity_expr,
@@ -206,6 +208,27 @@ def _store_outage_hold_s() -> int:
     is minutes), the run reconnects to it or to the replica promoted in its
     place, and carries on from where it was."""
     return _env_int("AGGREGATION_STORE_OUTAGE_HOLD_S", 900, 30, 7_200)
+
+
+def _store_hold_max_s() -> int:
+    """How long ONE hold may last before the run stops and keeps its
+    checkpoint — a hold being the pipeline waiting, before a write batch,
+    for the node to come back inside the envelope a rebuild may write
+    inside: a fork to finish, the replicas the run started with to reattach
+    and catch up, RSS to drop back under the container's line.
+
+    Per hold, not per run: a rebuild running for hours meets several AOF
+    rewrites, each a few minutes. A hold that outlives this is a node that
+    is not recovering on its own — a fork that never finished, a replica
+    that never came back — and writing into that is exactly what the hold
+    exists to prevent, so the run stops for a person instead."""
+    return _env_int("AGGREGATION_HOLD_MAX_SECS", 1800, 60, 21_600)
+
+
+#: How long one governor reading of the node serves consecutive write
+#: batches. A sub-batch takes about a second, so this is close to one
+#: ``INFO`` per batch without ever being two for the same batch.
+_GOVERNOR_READ_INTERVAL_S = 1.0
 
 
 def _delete_chunk() -> int:
@@ -619,6 +642,18 @@ class MaterializationStoreUnreachable(TerminalStoreFailure, ConnectionError):
     that named the node."""
 
 
+class MaterializationStoreUnstable(MaterializationStoreUnreachable):
+    """The node the run writes to stayed outside the envelope a rebuild may
+    write inside — forked, missing the replicas the run started with, a
+    replica too far behind, or past the memory line — for longer than one
+    hold may last (``AGGREGATION_HOLD_MAX_SECS``).
+
+    A kind of unreachable, and handled like one: the run keeps its
+    checkpoint and stops for a person, because a node that is not
+    recovering on its own is not one to write into. The message says what
+    the node was doing and what to check."""
+
+
 # ---------------------------------------------------------------------------
 # Pressure ladder primitives — pure, so they are unit-testable without a
 # provider. The pipeline reacts to two kinds of per-query pressure the same
@@ -998,6 +1033,27 @@ class AggregationPipeline:
         self._outage_holds_now = 0
         self._node_restarts: List[Dict[str, Any]] = []
         self._node_identity: Dict[str, Tuple[Optional[str], Optional[int]]] = {}
+        # The write governor: one reading of the node before each write
+        # batch, and a hold — never a failure — while the node is outside
+        # the envelope a rebuild may write inside (a fork in flight, the
+        # replicas the run started with gone or too far behind, RSS past
+        # what the container could survive a fork at). Bounded per hold by
+        # AGGREGATION_HOLD_MAX_SECS, after which the run keeps its
+        # checkpoint and stops for a person. The drop limits and the
+        # container limit are read once per run and carried onto every
+        # per-batch reading; ``_expected_replicas`` is what the run started
+        # with, so fewer attached later reads as a replica the rebuild lost.
+        from backend.app.services.aggregation.capacity import container_memory_bytes_env
+
+        self._hold_max_s = _store_hold_max_s()
+        self._expected_replicas: Optional[int] = None
+        self._node_config: Optional[Dict[str, Optional[int]]] = None
+        self._container_env_bytes = container_memory_bytes_env()
+        self._gov_reading: Optional[ShardMemory] = None
+        self._gov_read_at = 0.0
+        self._store_holds: Dict[str, int] = {}
+        self._store_hold_s: Dict[str, float] = {}
+        self._store_hold_last: Optional[Dict[str, Any]] = None
         self._rss_high_water_mb: Optional[float] = None
         self._mem_limit_mb: Optional[float] = None
         # Values an operator may raise on a RUNNING job (stall/wall windows
@@ -1247,8 +1303,17 @@ class AggregationPipeline:
         return waited + await self._hold_for_replicas(target)
 
     async def _hold_for_replicas(self, target: int) -> float:
-        """Wait out replicas that are behind, saying why, until they catch
-        up or the operator lowers the bar."""
+        """Wait out replicas that are behind — or gone — saying why, until
+        they catch up, the operator lowers the bar, or the hold budget is
+        spent.
+
+        Gone is the case that matters. A replica that vanishes during a
+        rebuild almost always vanished BECAUSE of it (dropped for an
+        overflowing output buffer), and its return is a full resync: the
+        master forks under the very write load that lost it. Writing on
+        was how one shard's rebuild became that fork. So a run that started
+        with replicas holds for them; only a run that started with none has
+        nothing to wait for."""
         self._replica_holds += 1
         started = time.monotonic()
         attempt = 0
@@ -1264,21 +1329,45 @@ class AggregationPipeline:
             state = await self._replication_state(max_age_s=0.0)
             lag = self._note_replica_lag(state)
             attached = int(state.get("connectedReplicas") or 0)
-            if attached <= 0:
-                # The replicas went away entirely: that is the topology's
-                # problem, not this batch's — the Graph store page says so.
+            if attached <= 0 and not self._expected_replicas:
+                # The run started against a node with no replicas: nothing
+                # to wait for, and nothing this batch could have dropped.
                 break
-            waiting_on = min(target, attached)
-            if attempt == 0 or attempt % 4 == 0:
-                logger.warning(
-                    "aggregation pipeline on %s: waiting for %d replica(s) of the "
-                    "write node to catch up%s — the rebuild is going at the "
-                    "replicas' pace.",
-                    self.p._graph_name, waiting_on,
-                    f" (up to {lag:,} bytes behind)" if lag else "",
+            held = time.monotonic() - started
+            if held >= self._hold_max_s:
+                what = (
+                    f"its replicas gone (the run started with {self._expected_replicas})"
+                    if attached <= 0 else
+                    f"{attached} replica(s) still behind"
+                    + (f" by up to {lag:,} bytes" if lag else "")
                 )
+                raise MaterializationStoreUnstable(
+                    f"the graph store node {self._store_endpoint()} spent "
+                    f"{held / 60:.0f} minute(s) with {what}. The run keeps its "
+                    f"checkpoint — check the replicas from Admin → Graph store "
+                    f"and Resume the job once they are attached and in sync."
+                )
+            if attempt == 0 or attempt % 4 == 0:
+                if attached <= 0:
+                    logger.warning(
+                        "aggregation pipeline on %s: the write node's replicas are "
+                        "gone (the run started with %d) — holding until they are "
+                        "back and in sync rather than writing into their resync.",
+                        self.p._graph_name, self._expected_replicas,
+                    )
+                else:
+                    logger.warning(
+                        "aggregation pipeline on %s: waiting for %d replica(s) of the "
+                        "write node to catch up%s — the rebuild is going at the "
+                        "replicas' pace.",
+                        self.p._graph_name, min(target, attached),
+                        f" (up to {lag:,} bytes behind)" if lag else "",
+                    )
             await asyncio.sleep(_backoff_s(min(attempt, 4)))
             attempt += 1
+            if attached <= 0:
+                continue                      # nothing to WAIT on yet; re-read
+            waiting_on = min(target, attached)
             acked = await self.p.wait_for_replicas(
                 min_replicas=waiting_on,
                 timeout_ms=self._live_replica_ack_timeout_ms(),
@@ -1295,6 +1384,121 @@ class AggregationPipeline:
             if len(self._pressure_log) > 8:
                 del self._pressure_log[0]
         return held
+
+    # -- the write governor ---------------------------------------------------
+
+    async def _governor_reading(self, *, fresh: bool = False) -> ShardMemory:
+        """The node as the governor sees it: one ``INFO`` per write batch,
+        never two for the same one, and fresh on every turn of a hold."""
+        now = time.monotonic()
+        if (
+            not fresh and self._gov_reading is not None
+            and now - self._gov_read_at < _GOVERNOR_READ_INTERVAL_S
+        ):
+            return self._gov_reading
+        # The drop limits are read once per run; a per-batch reading skips
+        # the CONFIG round trips and the slot-map refresh.
+        self._gov_reading = await self._read_shard(include_config=self._node_config is None)
+        self._gov_read_at = time.monotonic()
+        return self._gov_reading
+
+    def _write_hold_reason(self, shard: ShardMemory) -> Optional[Tuple[str, str]]:
+        """Why the next batch must wait, if it must. ``replicaAckMin`` 0 —
+        the operator's escape hatch, live on the running job — turns the
+        replica reasons off; a fork and the memory line are about the
+        master's own survival and no knob waves them through."""
+        return hold_reason(
+            shard, expected_replicas=self._expected_replicas,
+            watch_replicas=self._live_replica_ack_min() > 0,
+        )
+
+    async def _govern_write(self) -> float:
+        """Hold the next write batch while the node is outside the envelope.
+
+        Read the node; while :func:`hold_reason` names something — a fork
+        in flight, the replicas the run started with gone or too far
+        behind, RSS past what the container could survive a fork at —
+        heartbeat, back off, and read again. Every reason is true of the
+        node now and false a little later, which is why this is a wait and
+        not a refusal; a wait that outlives ``AGGREGATION_HOLD_MAX_SECS``
+        is a node that is not recovering on its own, and the run stops for
+        a person with its checkpoint intact.
+
+        An unmeasured reading never holds: the store not answering is the
+        outage path's business. Returns the seconds held.
+        """
+        started: Optional[float] = None
+        kind: Optional[str] = None
+        detail = ""
+        attempt = 0
+        while True:
+            shard = await self._governor_reading(fresh=attempt > 0)
+            reason = self._write_hold_reason(shard)
+            if reason is None:
+                break
+            new_kind, detail = reason
+            if started is None:
+                started = time.monotonic()
+            if new_kind != kind:
+                kind = new_kind
+                self._store_holds[kind] = self._store_holds.get(kind, 0) + 1
+                logger.warning(
+                    "aggregation pipeline on %s: holding the next write batch — %s. "
+                    "Writing through this is how a rebuild takes a node down; the "
+                    "run waits (up to %d min per hold) and carries on from where it is.",
+                    self.p._graph_name, detail, self._hold_max_s // 60,
+                )
+            held = time.monotonic() - started
+            if held >= self._hold_max_s:
+                self._record_hold(kind, held, detail)
+                raise MaterializationStoreUnstable(
+                    f"the graph store node {shard.endpoint} stayed outside the "
+                    f"envelope a rebuild may write inside for {held / 60:.0f} "
+                    f"minute(s) — {detail}. The run keeps its checkpoint. Check "
+                    f"the node (a fork that never finished, a replica that never "
+                    f"came back, memory past the container's line) and Resume "
+                    f"the job once it is steady."
+                )
+            if attempt and attempt % 8 == 0:
+                logger.warning(
+                    "aggregation pipeline on %s: still holding after %.0fs — %s",
+                    self.p._graph_name, held, detail,
+                )
+            self._cancel_check()
+            await self._ladder_heartbeat()
+            await asyncio.sleep(_backoff_s(min(attempt, 3)))
+            attempt += 1
+        if started is None or kind is None:
+            return 0.0
+        held = time.monotonic() - started
+        self._record_hold(kind, held, detail)
+        # Re-enter gently: the pages the next batches touch are the ones a
+        # fork just finished copying, and the replicas have a stream to
+        # catch up on. Half the sub-batch; the AIMD sizer re-grows it
+        # additively as the writes come back fast.
+        p = self.p
+        size = getattr(p, "_aggregation_sub_batch_size", None)
+        if size is not None:
+            p._aggregation_sub_batch_size = max(
+                getattr(p, "_MERGE_SUB_BATCH_MIN", 50), int(size) // 2,
+            )
+        logger.info(
+            "aggregation pipeline on %s: %s hold released after %.0fs — carrying on.",
+            self.p._graph_name, kind, held,
+        )
+        return held
+
+    def _record_hold(self, kind: str, held: float, detail: str) -> None:
+        """The run's record of a hold: how long by reason, the last one in
+        full, and — when it was long enough to matter — a pressure event."""
+        self._store_hold_s[kind] = self._store_hold_s.get(kind, 0.0) + held
+        self._store_hold_last = {"kind": kind, "held_s": round(held, 1), "detail": detail}
+        if held >= 60.0:
+            self._pressure_log.append({
+                "scan": "apply", "kind": f"hold:{kind}", "held_s": round(held, 1),
+            })
+            if len(self._pressure_log) > 8:
+                del self._pressure_log[0]
 
     async def _through_outage(
         self, attempt: Callable[[], Awaitable[Any]], *, op: str,
@@ -1790,6 +1994,7 @@ class AggregationPipeline:
                         or self._memory_flushes or self._memory_rollups
                         or self._replica_waits or self._replica_holds
                         or self._outage_holds or self._node_restarts
+                        or self._store_holds
                     ) else {}
                 ),
                 # The per-query ceiling the ladder narrows against, when the
@@ -1872,6 +2077,10 @@ class AggregationPipeline:
         reads starving on this endpoint. Interactive reads come first: a
         rebuild finishing later costs nobody a page; a canvas queued behind
         a MERGE batch costs every user of that graph."""
+        # The governor first: nothing is sent while the node is outside the
+        # envelope, and the wait holds no write slot — another rebuild on
+        # the same node decides for itself from its own reading.
+        await self._govern_write()
         admission = getattr(self.p, "_admission_controller", None)
         t0 = time.monotonic()
         if admission is not None:
@@ -2312,6 +2521,13 @@ class AggregationPipeline:
                 out["replica_holds"] = self._replica_holds
             if self._replica_max_lag_bytes:
                 out["replica_max_lag_bytes"] = self._replica_max_lag_bytes
+        if self._store_holds:
+            # Why the write side waited, how often and for how long — the
+            # node's side of the story, by reason.
+            out["store_holds"] = dict(self._store_holds)
+            out["store_hold_s"] = {k: round(v, 1) for k, v in self._store_hold_s.items()}
+            if self._store_hold_last is not None:
+                out["store_hold_last"] = dict(self._store_hold_last)
         if self._memory_flushes or self._memory_rollups:
             out["memory_flushes"] = self._memory_flushes
             out["memory_rollups"] = self._memory_rollups
@@ -2816,21 +3032,55 @@ class AggregationPipeline:
             return int(b.allowed_growth_edges or 0)
         return self._static_cap()
 
-    async def _read_shard(self) -> ShardMemory:
+    async def _read_shard(self, *, include_config: bool = True) -> ShardMemory:
         """The shard that owns the graph the rollups land on — the
         projection graph in dedicated mode, which may live on a different
         shard from the source graph. Read through the client the provider
         holds NOW and never cached: a failover rebuilds that client, and
-        re-reading is what follows it."""
+        re-reading is what follows it.
+
+        ``include_config`` is the full reading — the node's drop limits and
+        a slot-map refresh — which the budget wants; the governor's
+        per-batch reading passes False and carries the run's once-per-run
+        facts onto it instead."""
         p = self.p
         dedicated = getattr(p, "_projection_mode", None) == "dedicated"
         db = (getattr(p, "_proj_db", None) if dedicated else None) or getattr(p, "_db", None)
         key = f"{p._graph_name}_proj" if dedicated else p._graph_name
         cfg = getattr(p, "_conn_cfg", None)
-        return await read_shard_memory(
+        shard = await read_shard_memory(
             db, mode=getattr(cfg, "mode", None), graph_key=key,
             timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            include_config=include_config, refresh=include_config,
         )
+        return self._complete_reading(shard, include_config=include_config)
+
+    def _complete_reading(self, shard: ShardMemory, *, include_config: bool) -> ShardMemory:
+        """Carry the run's once-per-run facts onto a reading: the node's
+        drop limits (read with the first full reading, reused after), the
+        container limit the pod is killed at, and how many replicas the
+        run started with."""
+        if shard.source != "measured":
+            return shard
+        if include_config:
+            self._node_config = {
+                "repl_backlog_bytes": shard.repl_backlog_bytes,
+                "replica_outbuf_hard_bytes": shard.replica_outbuf_hard_bytes,
+            }
+        elif self._node_config:
+            carried = {
+                name: value for name, value in self._node_config.items()
+                if value is not None and getattr(shard, name) is None
+            }
+            if carried:
+                shard = dataclasses.replace(shard, **carried)
+        if shard.container_limit_bytes is None:
+            limit = container_limit_bytes(shard, env_bytes=self._container_env_bytes)
+            if limit is not None:
+                shard = dataclasses.replace(shard, container_limit_bytes=limit)
+        if self._expected_replicas is None and shard.connected_replicas is not None:
+            self._expected_replicas = int(shard.connected_replicas)
+        return shard
 
     async def _budget(self) -> WriteBudget:
         """A fresh reading plus the operator's limits. Bytes per edge:
@@ -2949,6 +3199,10 @@ class AggregationPipeline:
         """
         state = await self._replication_state()
         attached = int(state.get("connectedReplicas") or 0)
+        if self._expected_replicas is None:
+            # What the run started with: fewer attached later is a replica
+            # the rebuild lost, and the governor holds for its return.
+            self._expected_replicas = attached
         if attached <= 0:
             return
         self._note_replica_lag(state)

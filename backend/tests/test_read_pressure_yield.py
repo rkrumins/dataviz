@@ -260,6 +260,19 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     # new one appears, this is where it goes.
     p._live = {}
     p._replica_ack_min = 0
+    # `_paced_write` also runs the write governor first. It reads the node
+    # through the provider's client — none here — so the reading is
+    # unmeasured and the governor never holds; these are the attributes the
+    # governor's reading and record touch on that path.
+    p._hold_max_s = 1800
+    p._expected_replicas = None
+    p._node_config = None
+    p._container_env_bytes = None
+    p._gov_reading = None
+    p._gov_read_at = 0.0
+    p._store_holds = {}
+    p._store_hold_s = {}
+    p._store_hold_last = None
     return p
 
 

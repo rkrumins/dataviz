@@ -399,17 +399,43 @@ the **first checkpoint**, before any graph work. Resume rules:
 
 ### Replication backpressure, outage holds, and failing-over reads
 
-Three behaviours keep a rebuild from taking a shard down, and keep users from
+Four behaviours keep a rebuild from taking a shard down, and keep users from
 seeing it as an outage when a node is replaced anyway.
 
+- **The write governor.** Before every write batch the pipeline reads the node
+  it writes to — `INFO memory server persistence replication`, one round trip,
+  no config — and holds while the node is outside the envelope a rebuild may
+  write inside: a fork in flight (`BGSAVE`, an AOF rewrite running or
+  scheduled, a replica receiving a full resync), fewer replicas attached than
+  the run started with, a replica further behind than a fraction of the limit
+  the master drops it at (`AGGREGATION_REPLICA_LAG_HOLD_BYTES`, derived from
+  the node's own `client-output-buffer-limit` and `repl-backlog-size`), or RSS
+  past what the container could survive a fork at (`FALKORDB_CONTAINER_MEMORY_BYTES`
+  less `AGGREGATION_FORK_COW_PCT` × RSS, what replication holds and the
+  overhead). Every one of those is true of the node now and false a little
+  later, which is why it is a hold — heartbeating, backing off, re-reading —
+  and not a refusal. Writing through a fork is what turns the dataset's size
+  into twice the dataset's size: the rebuild dirties nearly every page the
+  child holds a copy of, the container limit is reached, the master is killed,
+  and its replica flushes the whole dataset to follow the promotion — the
+  incident in full. A hold ends when the node recovers, or after
+  `AGGREGATION_HOLD_MAX_SECS` with `MaterializationStoreUnstable` (a kind of
+  unreachable: checkpoint kept, a person looks). `replicaAckMin` 0 on the
+  running job waves the two replica reasons through; a fork and the memory
+  line are about the master's own survival and no knob waves them through.
+  The run records `store_holds`, `store_hold_s` and `store_hold_last` by
+  reason, and the run settings panel says so. After a hold the next batch is
+  half the size and re-grows additively.
 - **The replica gate.** After every apply/delete batch the pipeline asks the
   master how many replicas have acknowledged (`WAIT replicaAckMin
   replicaAckTimeoutMs`). Acknowledged: the wait time joins the write's latency,
   so a replica-bound shard shrinks batches and paces itself exactly like a slow
   master. Not acknowledged: the run HOLDS — heartbeating, re-reading
   replication state, retrying — bounded only by the job's stall window, and
-  releasable live by setting `replicaAckMin` to 0. A master with no replicas
-  attached never waits. The run records `replica_waits`, `replica_wait_s`,
+  releasable live by setting `replicaAckMin` to 0, and bounded like every
+  hold by `AGGREGATION_HOLD_MAX_SECS`. A run that starts against a master
+  with no replicas never waits; one that LOSES a replica mid-run holds for
+  its return rather than writing into its resync. The run records `replica_waits`, `replica_wait_s`,
   `replica_holds` and `replica_max_lag_bytes`, and warns at the start when a
   master has replicas and an `EFFECTS_THRESHOLD` above 0 (see
   `FALKORDB_DEPLOYMENT.md` §5aa — that is the setting that decides whether a
@@ -516,6 +542,9 @@ pipeline).
 | `AGGREGATION_REPLICA_ACK_MIN` | 1 | Replicas of the write node that must acknowledge each rollup batch before the next is sent (0-5). 0 disables the gate. Per-job / Defaults as `replicaAckMin`, and raisable or clearable on a RUNNING job |
 | `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
 | `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |
+| `AGGREGATION_HOLD_MAX_SECS` | 1800 | The write governor: how long ONE hold may last — the run waiting, before a write batch, for the node to come back inside the envelope (a fork to finish, the replicas it started with to reattach and catch up, RSS to drop under the container's line) — before it stops for a person with its checkpoint intact (60-21600). Per hold, not per run |
+| `AGGREGATION_FORK_COW_PCT` | 125 | Copy-on-write allowance over RSS that a fork is budgeted at, for the container-aware write budget and the memory hold line (100-200). 125 is the deployment guide's figure, and is valid only because the pipeline holds its writes through a fork |
+| `AGGREGATION_REPLICA_LAG_HOLD_BYTES` | derived | How far behind a replica may fall before the governor holds. Unset: a quarter of the replica output-buffer hard limit or half the backlog, whichever is smaller — both read from the node — so the master never drops a replica because of a rebuild |
 | `FALKORDB_READ_FROM_REPLICAS` | auto | Whether read-only Cypher may be served by a shard's in-sync replicas. `never` pins every read to the master; per provider as `readFromReplicas` in the connection settings |
 | `FALKORDB_REPLICA_READ_MAX_LAG_BYTES` | 8388608 | How much of the replication stream a replica may still owe and answer a read anyway. Bytes, not the `lag` seconds `INFO` reports, which stay near 0 however far behind it is |
 | `FALKORDB_REPLICA_READ_SETTLE_S` | 30 | How long this process's own write to a graph pins that graph's reads to its master |

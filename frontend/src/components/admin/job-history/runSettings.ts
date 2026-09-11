@@ -226,6 +226,24 @@ export function adaptationSentences(
         else if (restarts.length) parts.push('— it restarted and the run resumed from its checkpoint')
         out.push(parts.join(' '))
     }
+    if (adapted?.store_holds && Object.keys(adapted.store_holds).length) {
+        // The write governor: batches held while the node was outside the
+        // envelope a rebuild may write inside — each reason true of the node
+        // then and false a little later, so a wait rather than a failure.
+        const reasonText: Record<string, string> = {
+            fork: 'a fork in flight',
+            replica_lost: 'replicas gone',
+            replica_lag: 'replicas behind',
+            memory: 'memory past the fork line',
+            loading: 'the node loading',
+        }
+        const reasons = Object.entries(adapted.store_holds)
+            .map(([kind, n]) => `${reasonText[kind] ?? kind} ${n}×`)
+        const count = Object.values(adapted.store_holds).reduce((a, b) => a + b, 0)
+        const total = Object.values(adapted.store_hold_s ?? {}).reduce((a, b) => a + b, 0)
+        const lead = `Held the next write batch ${plural(count, 'time', 'times')} for the graph store node (${reasons.join(', ')}`
+        out.push(total >= 1 ? `${lead}; ${formatDuration(total)} in total)` : `${lead})`)
+    }
     if (adapted?.memory_flushes || adapted?.memory_rollups) {
         const parts: string[] = []
         if (adapted.memory_flushes) parts.push(`Flushed ${adapted.memory_flushes}× on worker memory`)

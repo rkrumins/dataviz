@@ -2325,7 +2325,7 @@ def test_run_stats_always_carry_the_query_ceiling_when_the_shard_says(monkeypatc
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
 
-    async def shard_with_cap(db, *, mode, graph_key, timeout):
+    async def shard_with_cap(db, *, mode, graph_key, timeout, **kw):
         return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured",
                             None, 512 * 2**20)
 
@@ -2334,7 +2334,7 @@ def test_run_stats_always_carry_the_query_ceiling_when_the_shard_says(monkeypatc
     assert result["run_stats"]["query_mem_capacity"] == 512 * 2**20
     assert result["run_stats"]["write_budget"]["shard"]["query_mem_capacity"] == 512 * 2**20
 
-    async def shard_without_cap(db, *, mode, graph_key, timeout):
+    async def shard_without_cap(db, *, mode, graph_key, timeout, **kw):
         return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured")
 
     monkeypatch.setattr(mat, "read_shard_memory", shard_without_cap)
@@ -2354,7 +2354,7 @@ def test_the_budget_read_teaches_the_provider_its_nodes_cap(monkeypatch):
     p = _make_provider(fake, levels)
     assert p._db_timeout_ms(600) == 180_000
 
-    async def shard_with_limits(db, *, mode, graph_key, timeout):
+    async def shard_with_limits(db, *, mode, graph_key, timeout, **kw):
         return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured",
                             None, 512 * 2**20, 300_000, 30_000, 4)
 
@@ -2522,7 +2522,7 @@ class _ShardFake:
         self.fake, self.base, self.maxmemory, self.bpe = fake, base_used, maxmemory, bpe
         self.reads = 0
 
-    async def __call__(self, db, *, mode, graph_key, timeout):
+    async def __call__(self, db, *, mode, graph_key, timeout, **kw):
         self.reads += 1
         used = self.base + len(self.fake.agg) * self.bpe
         return _ShardMemory("10.0.0.1:6379", used, self.maxmemory, "noeviction", 0.0, "measured")
@@ -2870,7 +2870,7 @@ class _FillingShard(_ShardFake):
     """A shard another graph is filling while this apply lands: it reads
     roomy until anything of ours has landed, then full."""
 
-    async def __call__(self, db, *, mode, graph_key, timeout):
+    async def __call__(self, db, *, mode, graph_key, timeout, **kw):
         m = await super().__call__(db, mode=mode, graph_key=graph_key, timeout=timeout)
         if self.fake.agg:
             return _ShardMemory(m.endpoint, self.maxmemory, self.maxmemory, m.policy, 0.0, "measured")

@@ -543,21 +543,33 @@ def replication_reserve_bytes(shard: ShardMemory) -> int:
 
 def container_headroom_bytes(
     shard: ShardMemory, *, held: int = 0, fork_factor: Optional[float] = None,
+    planning: bool = True,
 ) -> Optional[int]:
     """Bytes of fork-exposed room left inside the container: the limit less
-    ``fork_factor × RSS``, the query reserve, the replication reserve, the
-    server overhead and what other rebuilds hold. Negative means the node is
-    already past the line a fork could be survived at. None when the limit
-    or RSS is unknown."""
+    ``fork_factor × RSS``, the server overhead, what other rebuilds hold,
+    and either the RESERVES or what is held NOW.
+
+    ``planning`` (the write budget) charges the reserves — every thread at
+    the per-query ceiling, every replica at its drop limit: the room a node
+    must keep to survive its worst case, which is what a growth budget is
+    for. Not planning (the hold line) charges what replication holds at
+    this moment and nothing speculative: a hold has to be something the
+    node's own recovery can release, and a line drawn with room for the
+    worst case is a sizing rule — a node under it is the deployment's to
+    fix, and the budget's container rule already says so.
+
+    Negative means the node is already past the line a fork could be
+    survived at. None when the limit or RSS is unknown."""
     limit = shard.container_limit_bytes
     if limit is None or shard.rss is None:
         return None
     f = fork_factor if fork_factor is not None else fork_cow_factor()
     overhead = GIB if int(shard.maxmemory or 0) >= 32 * GIB else 256 * MIB
-    return int(
-        limit - f * shard.rss - query_reserve_bytes(shard)
-        - replication_reserve_bytes(shard) - overhead - max(0, int(held or 0))
+    reserves = (
+        query_reserve_bytes(shard) + replication_reserve_bytes(shard) if planning
+        else int(shard.mem_repl_buffers or 0)
     )
+    return int(limit - f * shard.rss - reserves - overhead - max(0, int(held or 0)))
 
 
 def replica_lag_hold_bytes(shard: ShardMemory) -> int:
@@ -585,6 +597,7 @@ def replica_lag_hold_bytes(shard: ShardMemory) -> int:
 def hold_reason(
     shard: ShardMemory, *, expected_replicas: Optional[int],
     fork_factor: Optional[float] = None, held: int = 0,
+    watch_replicas: bool = True,
 ) -> Optional[Tuple[str, str]]:
     """Why a write batch must wait, as ``(kind, detail)`` — or None.
 
@@ -604,7 +617,15 @@ def hold_reason(
     * ``replica_lag`` — a replica owes the stream more than a fraction of
       the limit the master drops it at.
     * ``memory`` — RSS is already past what the container could survive a
-      fork at; something has to drain before more lands.
+      fork at (the measured line: the limit less ``fork_factor × RSS``,
+      what replication holds now and the overhead — not the planning
+      reserves, see :func:`container_headroom_bytes`); something has to
+      drain before more lands.
+
+    ``watch_replicas`` False turns the two replica reasons off — the
+    operator's ``replicaAckMin`` 0 escape hatch, live on a running job. A
+    fork and the memory line are about the master's own survival, and no
+    knob waves them through.
 
     An unmeasured reading never holds: the store not answering is the
     outage path's business, and ignorance is not a reason to wait.
@@ -623,17 +644,22 @@ def hold_reason(
         }[fork]
         return "fork", f"{what} on {shard.endpoint}"
     attached = shard.connected_replicas
-    if expected_replicas and attached is not None and attached < expected_replicas:
+    if (
+        watch_replicas and expected_replicas
+        and attached is not None and attached < expected_replicas
+    ):
         return "replica_lost", (
             f"{attached} of {expected_replicas} replica(s) attached to {shard.endpoint}"
         )
     lag = shard.replica_max_lag_bytes
-    if lag is not None and lag >= replica_lag_hold_bytes(shard):
+    if watch_replicas and lag is not None and lag >= replica_lag_hold_bytes(shard):
         return "replica_lag", (
             f"a replica of {shard.endpoint} is {human_bytes(lag)} behind "
             f"(hold threshold {human_bytes(replica_lag_hold_bytes(shard))})"
         )
-    headroom = container_headroom_bytes(shard, held=held, fork_factor=fork_factor)
+    headroom = container_headroom_bytes(
+        shard, held=held, fork_factor=fork_factor, planning=False,
+    )
     if headroom is not None and headroom < 0:
         return "memory", (
             f"{shard.endpoint} holds {human_bytes(shard.rss)} RSS against a "
@@ -759,7 +785,7 @@ def _node_picture(info: Dict[str, Any]) -> Dict[str, Any]:
 
 async def read_shard_memory(
     db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
-    include_config: bool = True,
+    include_config: bool = True, refresh: bool = True,
 ) -> ShardMemory:
     """``INFO memory server persistence replication`` from the shard that
     owns ``graph_key`` — through the client the pipeline already holds
@@ -770,8 +796,10 @@ async def read_shard_memory(
     process it was a minute ago, whether it is forked or about to be, and
     how its replicas are keeping up — everything the write governor holds
     on. ``include_config`` adds the two ``CONFIG GET`` round trips for the
-    replica drop limits; a per-batch reading passes False and reuses the
-    values the run read at its start.
+    replica drop limits, and ``refresh`` the cluster slot-map fetch that
+    follows a failover; a per-batch reading passes False for both and
+    reuses the values the run read at its start (the client keeps its own
+    map fresh on any ``MOVED``).
 
     * standalone / sentinel: one node; the sentinel client follows failover
       inside its pool.
@@ -792,7 +820,7 @@ async def read_shard_memory(
     limits: Dict[str, Optional[int]] = {}
     try:
         async with asyncio.timeout(timeout):
-            endpoint, node = await _owner(conn, mode, graph_key)
+            endpoint, node = await _owner(conn, mode, graph_key, refresh=refresh)
             # "memory" plus "server": the same round trip that says how full
             # the node is says whether it is the same process it was a
             # minute ago. INFO with two sections is one command.

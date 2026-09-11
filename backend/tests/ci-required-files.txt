@@ -61,5 +61,6 @@ tests/test_reconcile_sweeper.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
+tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_top_level_provider_kwargs.py

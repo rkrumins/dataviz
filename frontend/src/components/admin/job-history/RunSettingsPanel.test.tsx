@@ -145,6 +145,17 @@ describe('adaptationSentences — replicas and a node that went away', () => {
     })
 })
 
+describe('adaptationSentences — the write governor', () => {
+    it('says how often the run held a batch for the node, why, and for how long', () => {
+        expect(adaptationSentences({ store_holds: { fork: 2, replica_lost: 1 }, store_hold_s: { fork: 190, replica_lost: 70 } }))
+            .toContain('Held the next write batch 3 times for the graph store node (a fork in flight 2×, replicas gone 1×; 4m 20s in total)')
+        // A reason the panel does not know yet is still named, never dropped.
+        expect(adaptationSentences({ store_holds: { loading: 1, eclipse: 1 } }))
+            .toContain('Held the next write batch 2 times for the graph store node (the node loading 1×, eclipse 1×)')
+        expect(adaptationSentences({ store_holds: {} })).toEqual([])
+    })
+})
+
 describe('adaptationSentences — worker memory', () => {
     it('says how often the run flushed on memory, with the peak against the limit', () => {
         expect(adaptationSentences({ memory_flushes: 3, rss_high_water_mb: 2_970, mem_limit_mb: 4_096 }))

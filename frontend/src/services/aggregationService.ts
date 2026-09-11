@@ -290,6 +290,12 @@ export interface AdaptedRunState {
   store_outage_holds?: number;
   store_outage_s?: number;
   node_restarts?: { endpoint: string; at: string; uptime_s?: number | null }[];
+  /** The write governor: batches held while the node was outside the envelope
+   *  a rebuild may write inside — by reason (fork, replica_lost, replica_lag,
+   *  memory, loading), seconds held per reason, and the last hold in full. */
+  store_holds?: Record<string, number>;
+  store_hold_s?: Record<string, number>;
+  store_hold_last?: { kind: string; held_s: number; detail: string };
   pressure?: PressureEvent[];
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */

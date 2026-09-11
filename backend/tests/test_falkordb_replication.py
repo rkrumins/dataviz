@@ -316,7 +316,7 @@ def test_a_run_whose_replicas_re_run_every_write_says_so(monkeypatch):
     p.replication_state = _state
     p.wait_for_replicas = _wait
 
-    async def _shard(db, *, mode, graph_key, timeout):
+    async def _shard(db, *, mode, graph_key, timeout, **kw):
         # A node that replicates writes by RE-RUNNING them on its replicas.
         return base._ShardMemory(
             "10.0.0.1:6379", 2 ** 30, 40 * 2 ** 30, "noeviction", 0.0, "measured",
@@ -334,3 +334,92 @@ def test_a_run_whose_replicas_re_run_every_write_says_so(monkeypatch):
     assert effects[0]["replicas"] == 2
     assert "change log" in effects[0]["detail"]
     assert "Graph store" in effects[0]["detail"]
+
+
+# ── replicas that are gone, and the bound on every hold ──────────────────
+
+
+class _Clock:
+    def __init__(self, step):
+        self.now, self.step = 0.0, step
+
+    def monotonic(self):
+        self.now += self.step
+        return self.now
+
+
+def test_the_gate_holds_when_the_replicas_the_run_started_with_are_gone(monkeypatch):
+    """A replica that vanishes mid-run vanished BECAUSE of the run — dropped
+    for an output buffer the rebuild overflowed — and its return is a full
+    resync: the master forks under the very write load that lost it. The
+    gate used to read "no replicas attached" as the topology's problem and
+    write on; that is the incident. Now it waits for them."""
+    provider = _GateProvider(acks=[0, 0])
+    steps = iter([
+        lambda: setattr(provider, "replicas", 0),          # dropped while we slept
+        lambda: None,                                      # still gone
+        lambda: (setattr(provider, "replicas", 2), provider.acks.append(2)),
+    ])
+
+    async def _sleep(s):
+        step = next(steps, None)
+        if step is not None:
+            step()
+
+    monkeypatch.setattr(mat.asyncio, "sleep", _sleep)
+    pipe = _pipeline(provider)
+    pipe._heartbeat = _noop_write
+    pipe._expected_replicas = 2
+
+    _run(pipe._paced_write(_noop_write))
+
+    assert provider.waits == [(1, 5000)] * 3            # the gate, before the drop, after the return
+    assert pipe._replica_holds == 1
+    assert provider.state_reads >= 4                    # re-read every turn of the hold
+
+
+def test_a_run_that_started_with_no_replicas_has_nothing_to_wait_for(monkeypatch):
+    """The other half of the same rule: nothing the run started without can
+    be something it lost."""
+    provider = _GateProvider(acks=[0, 0, 0])
+
+    async def _sleep(s):
+        provider.replicas = 0
+
+    monkeypatch.setattr(mat.asyncio, "sleep", _sleep)
+    pipe = _pipeline(provider)
+    pipe._heartbeat = _noop_write
+    pipe._expected_replicas = 0
+    _run(pipe._paced_write(_noop_write))
+    assert provider.waits == [(1, 5000)] * 2            # released once the node had none
+
+
+def test_a_replica_hold_that_outlives_its_budget_stops_the_run(monkeypatch):
+    """Bounded by AGGREGATION_HOLD_MAX_SECS like every hold: replicas that
+    never catch up are not something waiting cures."""
+    async def _sleep(s):
+        pass
+
+    monkeypatch.setattr(mat.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    provider = _GateProvider(acks=[0] * 20, lag=3 * 1024 ** 3)
+    pipe = _pipeline(provider)
+    pipe._heartbeat = _noop_write
+    pipe._expected_replicas = 2
+    pipe._hold_max_s = 1000
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        _run(pipe._paced_write(_noop_write))
+    text = str(info.value)
+    assert "replica(s) still behind" in text and "checkpoint" in text
+    assert isinstance(info.value, mat.MaterializationStoreUnreachable)
+
+
+def test_the_run_remembers_how_many_replicas_it_started_with():
+    pipe = base._make_pipeline()
+    pipe.p = _GateProvider(replicas=2)
+    _run(pipe._check_replication_shape())
+    assert pipe._expected_replicas == 2
+    pipe = base._make_pipeline()
+    pipe.p = _GateProvider(replicas=0)
+    _run(pipe._check_replication_shape())
+    assert pipe._expected_replicas == 0

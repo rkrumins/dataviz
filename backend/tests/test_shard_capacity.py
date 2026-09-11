@@ -18,6 +18,7 @@ import pytest
 from backend.app.providers import shard_capacity as sc
 
 GB = 1024 ** 3
+MIB = 1024 ** 2
 
 
 def _shard(used, maxmemory, *, source="measured", policy="noeviction", endpoint="10.0.0.1:6379"):
@@ -737,16 +738,52 @@ def test_the_lag_threshold_comes_from_the_nodes_own_drop_limits(monkeypatch):
 def test_the_node_is_held_for_memory_once_past_the_fork_line():
     """RSS already past what the container could survive a fork at: nothing
     more may land until something drains — a fork's child exiting, usually."""
-    node = _node(container_limit_bytes=40 * GB, rss=30 * GB)
-    headroom = sc.container_headroom_bytes(node, fork_factor=1.25)
-    # 40 − 1.25×30 − 6×1.3×1 − (1 + 2×2) − 1 = −11.3 GiB
-    assert headroom < 0
+    node = _node(container_limit_bytes=40 * GB, rss=32 * GB, mem_repl_buffers=256 * MIB)
+    # The hold line is MEASURED: 40 − 1.25×32 − 0.25 (held by replication
+    # now) − 1 = −1.25 GiB. Nothing speculative in it.
+    assert sc.container_headroom_bytes(node, fork_factor=1.25, planning=False) < 0
     kind, detail = sc.hold_reason(node, expected_replicas=2, fork_factor=1.25)
     assert kind == "memory" and "past what a fork could be survived at" in detail
     # Order: a fork is the more specific reason, reported first.
-    kind, _ = sc.hold_reason(_node(container_limit_bytes=40 * GB, rss=30 * GB, bgsave_in_progress=True),
+    kind, _ = sc.hold_reason(_node(container_limit_bytes=40 * GB, rss=32 * GB, bgsave_in_progress=True),
                              expected_replicas=2, fork_factor=1.25)
     assert kind == "fork"
+
+
+def test_the_memory_hold_line_is_measured_not_planned():
+    """A node under the SIZING rule is not a node that has to stop.
+
+    Planning charges every thread at the ceiling and every replica at its
+    drop limit — the room a growth budget must keep. A hold drawn on that
+    line could never be released by anything the node does on its own; it
+    would fail every rebuild on a container the rule calls small, which is
+    the deployment's problem and the budget's refusal already names it. The
+    hold line charges what is held NOW."""
+    node = _node(container_limit_bytes=40 * GB, rss=24 * GB, mem_repl_buffers=256 * MIB)
+    # 40 − 30 − 7.8 − 5 − 1 < 0: the container rule refuses growth …
+    assert sc.container_headroom_bytes(node, fork_factor=1.25) < 0
+    b = sc.compute_write_budget(
+        node, reserve_pct=20, bytes_per_edge=512, bpe_source="default",
+        explicit_ceiling=None, static_cap=25_000_000, fork_factor=1.25,
+    )
+    assert b.governed_by == "container" and b.allowed_growth_by_container == 0
+    # … but 40 − 30 − 0.25 − 1 > 0: the node is not held.
+    assert sc.container_headroom_bytes(node, fork_factor=1.25, planning=False) > 0
+    assert sc.hold_reason(node, expected_replicas=2, fork_factor=1.25) is None
+
+
+def test_the_replica_reasons_can_be_waved_through_but_a_fork_cannot():
+    """``replicaAckMin`` 0 is the operator's escape hatch from replication
+    backpressure — and only from that. A fork and the memory line are about
+    the master's own survival."""
+    lost = _node(connected_replicas=1)
+    assert sc.hold_reason(lost, expected_replicas=2)[0] == "replica_lost"
+    assert sc.hold_reason(lost, expected_replicas=2, watch_replicas=False) is None
+    behind = _node(replica_max_lag_bytes=GB)
+    assert sc.hold_reason(behind, expected_replicas=2)[0] == "replica_lag"
+    assert sc.hold_reason(behind, expected_replicas=2, watch_replicas=False) is None
+    forked = _node(connected_replicas=1, bgsave_in_progress=True)
+    assert sc.hold_reason(forked, expected_replicas=2, watch_replicas=False)[0] == "fork"
 
 
 def test_the_sizing_rule_counts_replication_when_told():
