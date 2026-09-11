@@ -1746,3 +1746,66 @@ async def test_a_provider_that_genuinely_cannot_answer_still_serves_the_snapshot
         model_cls=_Result,
     )
     assert result.value == 123
+
+
+# ── a shed leader must not strand its followers ──────────────────────────
+#
+# Followers attach to an in-flight compute with `await asyncio.shield(existing)`.
+# Shield means the follower's OWN cancellation does not end that await, so a
+# future nobody resolves leaves it hanging until its request tier fires —
+# 45 or 60 seconds later.
+#
+# Every exception path in get_or_compute resolves the future before raising.
+# The re-raise clause added for ProviderBusy/ProviderLoading did not, and the
+# `finally` only pops the key. Shedding is precisely when a key HAS followers
+# (a cold-cache stampede is what the gate sheds), so the miss turned one shed
+# request into a pile of hung ones.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shed", ["ProviderBusy", "ProviderLoading"])
+async def test_a_shed_leader_does_not_strand_its_followers(shed) -> None:
+    import backend.common.adapters as adapters
+
+    exc_cls = getattr(adapters, shed)
+    redis = _make_redis()
+    redis.get = AsyncMock(return_value=None)          # always a miss
+    cache = GraphCache(redis)
+
+    leader_entered = asyncio.Event()
+    release_leader = asyncio.Event()
+
+    async def compute():
+        leader_entered.set()
+        await release_leader.wait()
+        raise exc_cls("falkordb", "shed")
+
+    async def call():
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"},
+            compute=compute,
+            model_cls=_Result,
+        )
+
+    leader = asyncio.create_task(call())
+    await asyncio.wait_for(leader_entered.wait(), timeout=2)
+    follower = asyncio.create_task(call())
+    await asyncio.sleep(0)                             # let it attach
+    release_leader.set()
+
+    # Both must finish promptly. Before the fix the follower awaited a future
+    # nobody resolved and this timed out.
+    done, pending = await asyncio.wait(
+        {leader, follower}, timeout=5, return_when=asyncio.ALL_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    assert not pending, (
+        f"{shed} leader stranded its follower — the singleflight future was "
+        "never resolved, so the follower hangs until its request tier fires"
+    )
+    for task in done:
+        with pytest.raises(exc_cls):
+            task.result()

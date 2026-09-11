@@ -405,7 +405,7 @@ class GraphCache:
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             return result
-        except (ProviderBusy, ProviderLoading):
+        except (ProviderBusy, ProviderLoading) as exc:
             # NOT an inability to answer, and both subclass ProviderUnavailable
             # so the clause below would otherwise swallow them.
             #
@@ -417,6 +417,16 @@ class GraphCache:
             # hides the one fact the client needs to act on, and makes the
             # shed-early path unreachable on every cached endpoint: the canvas
             # never retries, because as far as it can tell it got an answer.
+            #
+            # The future MUST be resolved before re-raising. Followers attach
+            # with ``await asyncio.shield(existing)``, and shield means their
+            # own cancellation does not end that await — a future nobody
+            # completes strands every one of them until its request tier
+            # fires. Shedding is exactly when a cache key has followers (a
+            # cold-cache stampede is what the gate sheds), so leaving this out
+            # turns one shed request into a pile of hung ones.
+            if not fut.done():
+                fut.set_exception(exc)
             raise
         except (ProviderUnavailable, asyncio.TimeoutError) as exc:
             # Provider genuinely can't answer right now (unreachable, failing
