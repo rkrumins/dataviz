@@ -50,6 +50,17 @@ jobs:
       - name: Every revision id fits the 32-char version_num column
         run: python -m pytest backend/tests/test_alembic_revision_lengths.py -q --noconftest
 
+      # 3. THE ADDITIVE MIRROR. `init_aggregation_db` and the alembic chain are
+      #    two halves of one contract, and the comments in each said "mirrored"
+      #    while nothing checked it. `observed_cell_ratio` shipped with a
+      #    db_init statement that had lost its `ALTER TABLE` prefix — invalid
+      #    SQL, swallowed by the per-statement try/except that keeps start-up
+      #    alive — and no migration at all. The baseline create_all()s the
+      #    current ORM, so fresh installs had the column and every existing
+      #    database did not, while the write path named it in an UPDATE.
+      - name: db_init's additive list and the migrations still mirror
+        run: python -m pytest backend/tests/test_additive_migrations_mirror.py -q --noconftest
+
   feature-wiring:
     name: Every feature flag is really wired
     runs-on: ubuntu-latest

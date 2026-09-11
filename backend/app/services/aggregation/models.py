@@ -13,8 +13,9 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, Float, Index, Integer, Text, text,
+    Boolean, CheckConstraint, Column, Index, Integer, Text, text,
 )
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from backend.app.db.engine import Base
 
 
@@ -248,7 +249,11 @@ class AggregationDataSourceStateORM(Base):
     # graph compressing 50:1. Stable per source, because it is a property of
     # the graph's SHAPE. NULL until a complete run has measured both numbers,
     # and while it is NULL the estimate may not refuse anything.
-    observed_cell_ratio = Column(Float, nullable=True)
+    # DOUBLE_PRECISION, not Float: `Float` compiles to `FLOAT`, Postgres
+    # stores that AS double precision, and reflection reads it back as
+    # `DOUBLE PRECISION` — so a `Float` here can never match the live column
+    # and `upgrade verify-schema` calls it a structural mismatch forever.
+    observed_cell_ratio = Column(DOUBLE_PRECISION, nullable=True)
     # Per-source Rollup storage override: 'auto' | 'true' (full detail) |
     # 'false' (depth-diagonal). NULL = inherit the fleet default (the stored
     # Defaults row, then the env). Resolved at trigger time into the job's

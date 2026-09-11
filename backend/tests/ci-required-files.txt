@@ -13,6 +13,7 @@
 # Read by `.github/workflows/backend-tests.yml` and by
 # `tests/test_ci_required_list.py`, which fails if an entry stops existing or
 # if the workflow stops reading this file.
+tests/test_additive_migrations_mirror.py
 tests/test_aggregated_read_budget.py
 tests/test_aggregation_admission.py
 tests/test_aggregation_capacity.py
