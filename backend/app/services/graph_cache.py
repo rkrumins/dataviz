@@ -49,7 +49,9 @@ from redis import asyncio as aioredis
 from redis.exceptions import RedisError
 
 from backend.app.services.aggregation.redis_client import get_redis
-from backend.common.adapters import ProviderUnavailable
+from backend.common.adapters import (
+    ProviderBusy, ProviderLoading, ProviderUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -403,8 +405,22 @@ class GraphCache:
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             return result
+        except (ProviderBusy, ProviderLoading):
+            # NOT an inability to answer, and both subclass ProviderUnavailable
+            # so the clause below would otherwise swallow them.
+            #
+            # ProviderBusy is flow control: the request was SHED so the store
+            # could serve someone else, and the client is expected to retry in
+            # place after Retry-After. ProviderLoading is a store still reading
+            # its dataset in — seconds to minutes, and it will answer.
+            # Converting either into a 200 carrying a snapshot up to a day old
+            # hides the one fact the client needs to act on, and makes the
+            # shed-early path unreachable on every cached endpoint: the canvas
+            # never retries, because as far as it can tell it got an answer.
+            raise
         except (ProviderUnavailable, asyncio.TimeoutError) as exc:
-            # Provider can't answer right now. Fall through to the
+            # Provider genuinely can't answer right now (unreachable, failing
+            # over, or one operation past its deadline). Fall through to the
             # last-known-good snapshot if we have one — better to show
             # users slightly stale data with a banner than a hard error.
             stale = await self._get_lkg(scope, endpoint, params, model_cls)

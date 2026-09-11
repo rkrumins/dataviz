@@ -1665,3 +1665,84 @@ def test_get_graph_cache_falls_back_when_cache_role_unresolved(monkeypatch) -> N
     assert cache._coord_redis is shared
     assert cache._cache_redis is shared
     graph_cache.reset_graph_cache_for_tests()
+
+
+# ── shed and warming are not outages ─────────────────────────────────────
+#
+# ProviderBusy and ProviderLoading both subclass ProviderUnavailable, so the
+# stale-fallback clause caught them along with everything else. The effect was
+# that the two signals a client is supposed to ACT on — retry after
+# Retry-After, the store is warming and will answer — arrived as a 200
+# carrying a snapshot up to a day old. The canvas never retried, because as
+# far as it could tell the request had succeeded, which made shedding
+# unreachable on every cached endpoint.
+
+
+@pytest.mark.asyncio
+async def test_a_shed_request_is_not_answered_from_a_day_old_snapshot() -> None:
+    """ProviderBusy means "I chose not to serve you so I could serve someone
+    else; come back". Answering it from the LKG tells the client the opposite."""
+    from backend.common.adapters import ProviderBusy
+
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0", None, _Result(value=123).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ProviderBusy("falkordb", "all slots busy"))
+
+    with pytest.raises(ProviderBusy):
+        await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"},
+            compute=compute,
+            model_cls=_Result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_warming_store_is_not_answered_from_a_day_old_snapshot() -> None:
+    """ProviderLoading is a store reading its dataset in. It will answer in
+    seconds; the client shows "starting up" and polls. A stale 200 replaces
+    that with silence and stale data."""
+    from backend.common.adapters import ProviderLoading
+
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0", None, _Result(value=123).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ProviderLoading("falkordb", "loading the dataset"))
+
+    with pytest.raises(ProviderLoading):
+        await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"},
+            compute=compute,
+            model_cls=_Result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_genuinely_cannot_answer_still_serves_the_snapshot() -> None:
+    """The other side of the same line: narrowing the catch must not cost the
+    fallback its actual job. A bare ProviderUnavailable still serves stale."""
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0", None, _Result(value=123).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=compute,
+        model_cls=_Result,
+    )
+    assert result.value == 123
