@@ -563,6 +563,37 @@ async def test_an_unstamped_mirror_is_never_promoted_but_still_saves_an_outage()
 
 
 @pytest.mark.asyncio
+async def test_a_cache_client_that_throws_on_the_mirror_read_does_not_fail_the_request() -> None:
+    """This read sits on the happy path now. Before the promotion, the mirror
+    was only read after compute had already failed — anything the client
+    raised could only make a failing request fail differently. It runs before
+    every compute now, so anything it raises that is not a RedisError would
+    turn a working request into a 500. The cache must never become a hard
+    dependency."""
+    redis = _make_redis()
+    calls: list[str] = []
+
+    async def _get(key):
+        calls.append(key)
+        if key.startswith(graph_cache._LKG_PREFIX):
+            raise RuntimeError("connection pool exploded")   # NOT a RedisError
+        return None
+
+    redis.get = AsyncMock(side_effect=_get)
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_Result(value=4, children=[1]))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"}, compute=compute, model_cls=_Result,
+    )
+
+    assert result.value == 4
+    compute.assert_awaited_once()
+    assert any(k.startswith(graph_cache._LKG_PREFIX) for k in calls)
+
+
+@pytest.mark.asyncio
 async def test_the_promotion_kill_switch_restores_recompute_on_every_expiry(
     monkeypatch,
 ) -> None:

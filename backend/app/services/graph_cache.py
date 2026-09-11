@@ -963,13 +963,21 @@ class GraphCache:
         ``GRAPH_CACHE_LKG_TTL_S`` from when it was actually computed, however
         many times it is promoted. That is the bound on un-notified drift.
         """
-        body = await self._read_lkg(scope, endpoint, params, at_generation=gen)
-        if body is None:
-            return None
         try:
+            body = await self._read_lkg(scope, endpoint, params, at_generation=gen)
+            if body is None:
+                return None
             warm = model_cls.model_validate_json(body)
-        except Exception as exc:
-            logger.warning("graph_cache: mirror deserialize failed (%s)", exc)
+        except Exception as exc:                    # noqa: BLE001 — see below
+            # This read sits on the HAPPY path: before the promotion existed,
+            # the mirror was only ever read after compute had already failed,
+            # so anything the cache client raised could only make a failing
+            # request fail differently. Now it runs before every compute, and
+            # the cache must never become a hard dependency — the rule this
+            # method's own module states and the whole design rests on. Any
+            # failure here means no promotion and the compute below, which is
+            # exactly the behaviour without it.
+            logger.warning("graph_cache: mirror read failed (%s)", exc)
             return None
         await self._set(cache_key, warm, ttl_seconds, endpoint, payload=body)
         return warm
