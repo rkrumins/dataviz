@@ -439,6 +439,12 @@ rollback). Sizing, tuning knobs and provider-protection parameters live in
 
 ## Sizing & protection parameters
 
+> These are the graph store's own ceilings. The ceilings ABOVE it — the DB pool, the
+> per-source admission gate, the provider semaphore — and the rule that orders every
+> deadline in the chain are in
+> [`CONCURRENCY_TUNING.md`](CONCURRENCY_TUNING.md). `THREAD_COUNT` is the binding
+> constraint on read capacity for the whole platform, so read both before changing it.
+
 How the deployed `FALKORDB_ARGS` values are derived:
 
 - **`THREAD_COUNT`** = ceil(pod CPU limit). **`OMP_THREAD_COUNT` = 1** — per-query
