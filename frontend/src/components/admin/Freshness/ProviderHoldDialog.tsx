@@ -61,7 +61,7 @@ export function ProviderHoldDialog({ providerId, providerName, current, isOpen, 
                             source by hand still works.
                         </p>
 
-                        <div className="border-t border-glass-border/50">
+                        <div className="border-t border-glass-border">
                             <SnoozeRow
                                 scope="provider"
                                 idPrefix={`provider-hold-${providerId}`}
