@@ -28,6 +28,8 @@ from backend.app.services.graph_store.schemas import (
     ProviderTopologyResponse,
     ReadRouting,
 )
+from backend.app.services.graph_cache import CacheScope, get_graph_cache
+
 from .aggregation import _require_ingestion_read
 
 logger = logging.getLogger(__name__)
@@ -120,6 +122,59 @@ async def get_cache_stats(
         "windowSeconds": stats.get("window_seconds"),
         "totals": stats.get("totals", {}),
         "endpoints": stats.get("endpoints", {}),
+    }
+
+
+@router.post(
+    "/cache/refresh",
+    summary="Drop a data source's cached reads so the next open rebuilds them",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
+async def refresh_cache(
+    workspaceId: str = Query(..., description="Workspace the source belongs to"),
+    dataSourceId: str = Query(..., description="Data source to refresh"),
+    keepFallback: bool = Query(
+        True,
+        description=(
+            "Keep the last-known-good snapshots. Leave this on unless you are "
+            "clearing genuinely wrong data — the LKG is what answers a read "
+            "while the provider cannot, and dropping it converts the next "
+            "outage from a stale answer into an error."
+        ),
+    ),
+) -> dict:
+    """Make the next read of every view on this source rebuild from the store.
+
+    This is a generation bump, not a delete: existing entries become
+    unreachable immediately and expire on their own, so there is no SCAN over
+    the keyspace and no window where some pods serve the old answer and others
+    the new one. Every process sees the new generation on its next read.
+
+    Use it when something changed the graph WITHOUT going through the app —
+    a direct GRAPH.QUERY, an external loader, a restore. Changes the app makes
+    already bump the generation, and a completed aggregation run already
+    invalidates through the event listener; neither needs this.
+
+    The cost lands on whoever opens a view next: one cold rebuild per view, on
+    the shard replicas serving that source. Refreshing a busy source during
+    peak hours moves that cost onto users.
+    """
+    cache = get_graph_cache()
+    scope = CacheScope(workspace_id=workspaceId, data_source_id=dataSourceId, branch_id="")
+    await cache.bump_generation(scope)
+    purged = 0
+    if not keepFallback:
+        purged = await cache.purge_lkg_scope(scope)
+    logger.info(
+        "graph cache refreshed for %s/%s by operator request (lkg purged: %d)",
+        workspaceId, dataSourceId, purged,
+    )
+    return {
+        "workspaceId": workspaceId,
+        "dataSourceId": dataSourceId,
+        "invalidated": True,
+        "fallbackKept": keepFallback,
+        "fallbackEntriesPurged": purged,
     }
 
 
