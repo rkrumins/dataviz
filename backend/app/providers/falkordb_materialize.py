@@ -2296,7 +2296,17 @@ class AggregationPipeline:
         Interactive reads come first: a rebuild finishing later costs
         nobody a page; a canvas queued behind a MERGE batch costs every
         user of that graph. ``rows`` is what the batch carried, for the
-        meter."""
+        meter.
+
+        Returns ``(signal, result)``: the seconds the sizer should judge the
+        batch by — the master's own time or the replicas' acknowledgement,
+        whichever was longer. Not the sum: a replica that is merely behind
+        already paces the run through the wait itself, and shrinking the
+        batch on top of that does not help the replica (it applies the same
+        rows) while it starves the run — 50-row batches behind a 5 s wait
+        is how a rebuild takes a day. The pause after the batch is drawn on
+        the master's time alone, for the same reason: the wait was idle
+        time on the master already."""
         # The governor first: nothing is sent while the node is outside the
         # envelope, and the wait holds no write slot — another rebuild on
         # the same node decides for itself from its own reading.
@@ -2342,20 +2352,22 @@ class AggregationPipeline:
                 )
         # Eased — the node nearing a hold line — doubles the pause on top of
         # whatever the readers asked for. The pause is a share of the batch's
-        # own duration (a duty cycle, so a slow node gets more room), never
-        # less than the minimum gap (so fast small batches never run back to
-        # back), never more than 30 s.
+        # own duration on the master (a duty cycle, so a slow node gets more
+        # room; the replicas' wait was idle time on the master already),
+        # never less than the minimum gap (so fast small batches never run
+        # back to back), never more than 30 s.
         if self._eased:
             ratio = max(ratio * 2.0, 2.0)
-        pace = min(max(elapsed * ratio, self._write_min_gap_ms / 1000.0), 30.0)
+        batch_s = max(0.0, elapsed - ack)
+        pace = min(max(batch_s * ratio, self._write_min_gap_ms / 1000.0), 30.0)
         if pace > 0:
             await asyncio.sleep(pace)
         self._pace.note(
-            rows=rows, batch_s=max(0.0, elapsed - ack), ack_s=ack, sleep_s=pace,
+            rows=rows, batch_s=batch_s, ack_s=ack, sleep_s=pace,
             batch_max=self._batch_ceiling(), target_s=self._live_write_batch_target_s(),
             ratio=ratio,
         )
-        return elapsed, result
+        return max(batch_s, ack), result
 
     # -- type resolution -----------------------------------------------------
 

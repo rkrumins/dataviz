@@ -445,9 +445,12 @@ seeing it as an outage when a node is replaced anyway.
   half the size and re-grows additively.
 - **The replica gate.** After every apply/delete batch the pipeline asks the
   master how many replicas have acknowledged (`WAIT replicaAckMin
-  replicaAckTimeoutMs`). Acknowledged: the wait time joins the write's latency,
-  so a replica-bound shard shrinks batches and paces itself exactly like a slow
-  master. Not acknowledged: the run HOLDS — heartbeating, re-reading
+  replicaAckTimeoutMs`). Acknowledged: the batch is settled, and the sizer
+  judges it by the master's time or the wait, whichever was longer — a replica
+  that re-runs every batch on its main thread gets shorter batches, but a
+  replica that is merely behind is paced by the wait itself, never by a
+  shrunken batch on top of it (which helps no replica and starves the run).
+  Not acknowledged: the run HOLDS — heartbeating, re-reading
   replication state, retrying — bounded only by the job's stall window, and
   releasable live by setting `replicaAckMin` to 0, and bounded like every
   hold by `AGGREGATION_HOLD_MAX_SECS`. A run that starts against a master

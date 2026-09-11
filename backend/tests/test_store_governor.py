@@ -409,12 +409,13 @@ def test_the_run_eases_off_before_it_has_to_hold(sleeps, monkeypatch):
     _run(pipe._paced_write(_write, rows=500))
     assert pipe._eased == "replica_lag" and pipe._eases == {"replica_lag": 1}
     assert pipe._sub_batch_size() == 250
-    # Under this clock the write took 0.5 s and the acknowledgement another
-    # 0.5 s, and the wait counts as the batch's own time: 1.0 s × (1.0 × 2).
-    assert sleeps[-1] == pytest.approx(2.0)
+    # Under this clock the write took 0.5 s on the master (the
+    # acknowledgement another 0.5 s, which is idle time on the master and
+    # not paused for again): 0.5 s × (1.0 × 2).
+    assert sleeps[-1] == pytest.approx(1.0)
     _run(pipe._paced_write(_write, rows=250))            # the replicas caught up
     assert pipe._eased is None and pipe._sub_batch_size() == 500
-    assert sleeps[-1] == pytest.approx(1.0)
+    assert sleeps[-1] == pytest.approx(0.5)
     assert pipe._adapted_snapshot()["eases"] == {"replica_lag": 1}
     # The pace is a record, not an adaptation: it sits beside `adapted`.
     stats = pipe._result(0)["run_stats"]
@@ -480,3 +481,33 @@ def test_the_worker_flattens_the_pace_for_the_live_overlay():
     assert "pace: Optional[dict] = None" in src and "_pace_scalars(pace)" in src
     assert "write_batch_max" in w._LIVE_PIPELINE_KEYS
     assert "write_batch_target_s" in w._LIVE_PIPELINE_KEYS
+
+
+def test_a_slow_acknowledgement_paces_the_run_but_does_not_shrink_the_batch_on_top(monkeypatch):
+    """The replicas being behind is a rate, and the wait already imposes it.
+    Shrinking the batch as well does not help a replica (it applies the
+    same rows) and starves the run: 50-row batches behind a 5 s wait is how
+    a rebuild takes a day. The sizer judges a batch by the master's time or
+    the wait, whichever was longer; the pause is drawn on the master's time."""
+    async def _sleep(s):
+        sleeps.append(s)
+
+    sleeps: list = []
+    monkeypatch.setattr(mat.asyncio, "sleep", _sleep)
+    pipe = _pipeline(_Conn(_picture()))
+
+    async def _slow_ack(**kw):
+        return kw.get("min_replicas", 1)
+
+    waited = {"n": 0}
+
+    async def _gate():
+        waited["n"] += 1
+        return 4.0                                   # the replicas took 4 s to acknowledge
+
+    pipe._replica_gate = _gate
+    signal, _ = _run(pipe._paced_write(_write, rows=500))
+    assert signal == pytest.approx(4.0, abs=0.05)    # the sizer sees the wait, not the sum
+    assert sleeps[-1] == pytest.approx(0.1, abs=0.02)  # the pause: the master's ~0 s × ratio, floored at the gap
+    last = pipe._pace.snapshot()
+    assert last["ack_s"] == pytest.approx(4.0, abs=0.05) and last["batch_s"] < 0.05

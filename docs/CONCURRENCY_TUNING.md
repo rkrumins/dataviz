@@ -468,7 +468,7 @@ the rebuild and much cheaper for readers.** That is the whole argument for
 | 1 | **Hold** | `AGGREGATION_HOLD_MAX_SECS`, `replicaAckMin` (0 waves the replica reasons through) | Nothing is written while the node is forked, missing the replicas the run started with, running a replica too far behind, or past the memory line. Bounded per hold; the run then stops for a person with its checkpoint. |
 | 2 | **Ease** | derived from the same reading | Replicas half way to the drop limit, or the container's fork line within an eighth of the limit: half the batch ceiling, twice the pause, until the reading is back. The graded response that keeps 1 from being needed. |
 | 3 | **Size** | `writeBatchMax` (500), `writeBatchTargetS` (1.0 s) | AIMD against the target: a batch that ran longer halves the next; five in a row under two fifths of it grow it by 100, never past the ceiling. After any hold, the next batch is half. |
-| 4 | **Settle** | `replicaAckMin`, `replicaAckTimeoutMs` | The batch is done only when the query has returned AND the replicas have acknowledged it. The wait counts as the batch's own duration, so a replica-bound shard also shrinks batches and paces longer. |
+| 4 | **Settle** | `replicaAckMin`, `replicaAckTimeoutMs` | The batch is done only when the query has returned AND the replicas have acknowledged it. The sizer judges the batch by the master's time or the wait, whichever was longer — never the sum, which would shrink batches behind a replica that is merely behind and starve the run; the pause is drawn on the master's time alone. |
 | 5 | **Pause** | `writePacingRatio` (1.0), `writeMinGapMs` (100), `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0) | `duration × ratio`, never below the minimum gap, never above 30 s; stretched to the read-pressure ratio while the web tier reports readers starving, doubled while eased. |
 
 Across jobs: the per-endpoint write slots (`FALKORDB_ENDPOINT_WRITE_SLOTS`, 2)
@@ -486,6 +486,24 @@ measured headroom. Job History shows it as a *Steady load* line on a running
 job and keeps the batch record (`run_stats.pace`) and the easing count
 (`run_stats.adapted.eases`) on the finished run. "Smaller batches" on a running
 job halves `writeBatchMax` live; the sizer re-grows only toward the new ceiling.
+
+### How long a rebuild takes, and why "too gentle" never finishes
+
+On a healthy node the sizer sits at the ceiling and throughput is
+`writeBatchMax ÷ (batch_s × (1 + writePacingRatio))` rows per second — 500 rows
+taking 0.3 s at ratio 1.0 is ~830 rows/s, so a two-million-edge cube lands in
+about forty minutes; at ratio 0.25 (Performance) in about twenty. What turns
+that into a day is a batch that stays SMALL while it stays SLOW: the sizer
+halving on a signal that smaller batches cannot improve. Three such signals
+used to reach it and no longer do — the replicas' acknowledgement wait (now a
+rate, imposed by the wait itself, never a reason to shrink), a governor hold
+(a pause, after which the batch is halved once and re-grows), and read pressure
+(a longer pause, not a smaller batch). What still shrinks a batch is the
+master's own time past the target, which is the one thing a smaller batch
+does improve. If a run is crawling, the *Steady load* line says which: a
+long `batch_s` is the master (dense hubs, a full node, a starved CPU), a long
+`ack_s` is the replicas (`EFFECTS_THRESHOLD`, a slow replica), a long pause is
+the ratio or an easing, and a hold names itself.
 
 ### Tuning it
 

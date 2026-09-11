@@ -178,9 +178,11 @@ async def _noop_write():
 
 
 def test_a_write_waits_for_the_replicas_and_the_wait_counts_as_its_duration(monkeypatch):
-    """The wait folds into the write's own time, so the batch sizer and the
-    pacing sleep both treat a replica-bound shard as the slow write path it
-    is — smaller batches, more room between them."""
+    """The wait is the batch's own settling time: the sizer judges the batch
+    by the master's time or the wait, whichever was longer, so a replica
+    that re-runs every batch on its main thread still gets shorter batches
+    — while the pause after the batch is drawn on the master's time alone,
+    because the wait was idle time on the master already."""
     provider = _GateProvider(acks=[1])
     pipe = _pipeline(provider)
     elapsed, result = _run(pipe._paced_write(_noop_write))
