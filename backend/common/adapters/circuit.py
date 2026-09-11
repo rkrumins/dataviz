@@ -37,6 +37,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from enum import Enum
@@ -809,6 +810,19 @@ class CircuitBreakerProxy:
                 await proxy._breaker._record_success()
                 return result
 
+        # Signature transparency is not cosmetic. Callers introspect the
+        # method they were handed to decide what to pass it — the drift probe
+        # asks whether get_schema_stats accepts ``budget_s`` before handing
+        # down its 5s deadline — and every provider reaches them through this
+        # proxy. A bare ``(*args, **kwargs)`` closure answered "no" to every
+        # such question, so the probe silently dropped its deadline and the
+        # node kept scanning for 30s per query, three per source, every 60s:
+        # precisely the abandoned-scan load the deadline exists to prevent.
+        # ``wraps`` sets ``__wrapped__``, which ``inspect.signature`` follows.
+        breaker_guarded = functools.wraps(attr)(breaker_guarded)
+        # ...but keep the proxy visible in logs and tracebacks, which is what
+        # the explicit name was for. Renaming after ``wraps`` is safe:
+        # ``signature`` reads ``__wrapped__``, not ``__name__``.
         breaker_guarded.__name__ = f"breaker_guarded_{name}"
         breaker_guarded.__qualname__ = breaker_guarded.__name__
         return breaker_guarded

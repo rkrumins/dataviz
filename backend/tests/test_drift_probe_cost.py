@@ -185,3 +185,88 @@ def test_a_graph_that_cannot_be_measured_is_still_reported_as_unknown():
             raise ConnectionError("no route to host")
 
     assert _run(compute_graph_fingerprint(_Down(), budget_s=1.0)) == ""
+
+
+# ── the budget has to survive the breaker proxy ──────────────────────────
+#
+# Every caller gets its provider from ProviderManager, which hands back a
+# CircuitBreakerProxy — never the provider itself. So the only question that
+# matters about the deadline is whether it survives THAT, and the tests above
+# answer a question nobody asks: they hand `compute_graph_fingerprint` a bare
+# provider.
+#
+# It did not survive. `__getattr__` returned an unwrapped
+# `async def breaker_guarded(*args, **kwargs)` closure, so the signature check
+# in `_schema_stats` saw no `budget_s`, called `get_schema_stats()` with no
+# deadline, and every scan ran to its full 30s server-side budget — three per
+# source, every 60s, exactly the load this module exists to remove. Nothing
+# failed; the fix was simply inert in every deployment.
+
+
+class _RecordingProvider:
+    """Records the budget it was actually handed."""
+
+    def __init__(self):
+        self.budgets = []
+
+    async def get_schema_stats(self, *, budget_s=None, bypass_cache=False):
+        self.budgets.append(budget_s)
+        return _stats({"dataset": 2}, {"DERIVES_FROM": 1})
+
+    async def get_counts_fast(self):
+        return None
+
+
+def _proxied(provider):
+    from backend.common.adapters.circuit import CircuitBreakerProxy
+
+    return CircuitBreakerProxy(provider, "p:g", fail_max=3, reset_timeout=30)
+
+
+def test_the_proxy_does_not_hide_that_the_provider_takes_a_budget():
+    """The regression, stated as the property that was false. A proxied
+    method must introspect as the method it proxies, or every caller that
+    asks what it accepts gets the wrong answer."""
+    import inspect
+
+    from backend.app.services.aggregation.fingerprint import _takes_budget
+
+    fn = _proxied(_RecordingProvider()).get_schema_stats
+    assert "budget_s" in inspect.signature(fn).parameters
+    assert _takes_budget(fn) is True
+
+
+def test_the_deadline_reaches_a_provider_behind_the_breaker():
+    """The one that would have caught it: the budget is handed down, through
+    the proxy, to the provider that will spend it."""
+    provider = _RecordingProvider()
+    digest = asyncio.run(compute_graph_fingerprint(_proxied(provider), budget_s=5.0))
+
+    assert provider.budgets == [5.0], (
+        "the drift sweep's deadline was dropped crossing the breaker proxy — "
+        "the scans then run to their full server-side budget"
+    )
+    assert digest, "a fingerprint that fails reads as drift and signals a rebuild"
+
+
+def test_the_proxy_still_names_itself_in_logs():
+    """`wraps` copies `__name__` from the target, which would make every
+    breaker log line read as if the provider logged it. The proxy renames
+    itself afterwards; signature transparency comes from `__wrapped__`."""
+    fn = _proxied(_RecordingProvider()).get_schema_stats
+    assert fn.__name__ == "breaker_guarded_get_schema_stats"
+
+
+def test_a_provider_without_the_argument_is_still_fingerprinted_through_the_proxy():
+    """The other direction: an older provider whose method takes no budget
+    must not raise TypeError, because `compute_graph_fingerprint` turns any
+    exception into "" and "" is read as drift."""
+
+    class _Old:
+        async def get_schema_stats(self):
+            return _stats({"dataset": 2}, {"DERIVES_FROM": 1})
+
+        async def get_counts_fast(self):
+            return None
+
+    assert asyncio.run(compute_graph_fingerprint(_proxied(_Old()), budget_s=5.0))
