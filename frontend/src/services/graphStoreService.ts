@@ -219,6 +219,37 @@ export interface FleetSummary {
     findings: number
 }
 
+/** Counts for one cached endpoint over the reporting window. */
+export interface CacheEndpointStats {
+    hit: number
+    miss: number
+    /** Served from the last-known-good snapshot because the provider could
+     *  not answer. Reported, but never counted as a hit. */
+    stale: number
+    /** The cache was not consulted — endpoint disabled, or Redis unreachable.
+     *  Kept out of the ratio so a switched-off cache cannot look like a
+     *  missing one. */
+    bypass: number
+    /** hit / (hit + miss + stale); null when nothing was served. */
+    hit_ratio: number | null
+}
+
+export interface CacheStatsResponse {
+    workspaceId: string
+    dataSourceId: string | null
+    windowSeconds: number | null
+    totals: CacheEndpointStats
+    endpoints: Record<string, CacheEndpointStats>
+}
+
+export interface CacheRefreshResponse {
+    workspaceId: string
+    dataSourceId: string
+    invalidated: boolean
+    fallbackKept: boolean
+    fallbackEntriesPurged: number
+}
+
 export interface GraphStoreTopologyResponse {
     instances: GraphStoreInstance[]
     summary: FleetSummary
@@ -317,6 +348,39 @@ export const graphStoreService = {
         return authFetch<ProviderTopologyResponse>(
             `${BASE}/providers/${encodeURIComponent(providerId)}${fresh ? '?fresh=true' : ''}`,
         )
+    },
+
+    /** How much of this source's read load the response cache is absorbing.
+     *
+     *  A hit costs one Redis round trip; a miss costs a canvas open's worth
+     *  of Cypher on the shard replicas serving the source. `hitRatio` counts
+     *  real hits only — a stale-fallback is reported beside it but never
+     *  folded in, because it means the provider could not answer. */
+    async getCacheStats(
+        workspaceId: string, dataSourceId?: string, windowMinutes = 120,
+    ): Promise<CacheStatsResponse> {
+        const params = new URLSearchParams({
+            workspaceId, windowMinutes: String(windowMinutes),
+        })
+        if (dataSourceId) params.set('dataSourceId', dataSourceId)
+        return authFetch<CacheStatsResponse>(`${BASE}/cache-stats?${params}`)
+    },
+
+    /** Make the next read of every view on this source rebuild from the store.
+     *
+     *  A generation bump, not a delete — every process sees it on its next
+     *  read. `keepFallback` leaves the last-known-good snapshots in place;
+     *  turning it off is only for data that is genuinely wrong and must not
+     *  be served again from any path. */
+    async refreshCache(
+        workspaceId: string, dataSourceId: string, keepFallback = true,
+    ): Promise<CacheRefreshResponse> {
+        const params = new URLSearchParams({
+            workspaceId, dataSourceId, keepFallback: String(keepFallback),
+        })
+        return authFetch<CacheRefreshResponse>(`${BASE}/cache/refresh?${params}`, {
+            method: 'POST',
+        })
     },
 
     /** Where one data source's graphs live, and what shares their shards. */

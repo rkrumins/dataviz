@@ -20,6 +20,7 @@ import { useSearchParams } from 'react-router-dom'
 import { ChevronDown, ChevronLeft, ChevronRight, HardDrive, Loader2, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { DocsLink } from '@/components/help/DocsLink'
 import { GraphStoreLimitsDialog } from '../AdminInfrastructure/GraphStoreLimitsDialog'
@@ -29,6 +30,7 @@ import type { FleetSummary } from '@/services/graphStoreService'
 import { InstanceSection } from './InstanceSection'
 import { UnreachableNodes } from './NodesTable'
 import { StoresOverview } from './StoresOverview'
+import { CacheHealthCard } from './CacheHealthCard'
 import { GLOSSARY } from './meta'
 
 function OverviewStrip({ summary }: { summary: FleetSummary }) {
@@ -101,6 +103,8 @@ function HowToRead() {
 
 export function AdminGraphStore() {
     const isSystemAdmin = usePermission('system:admin')
+    const activeWorkspaceId = useWorkspacesStore(st => st.activeWorkspaceId)
+    const activeDataSourceId = useWorkspacesStore(st => st.activeDataSourceId)
     const [searchParams, setSearchParams] = useSearchParams()
     const topology = useGraphStoreTopology(true)
     const remeasure = useRemeasureGraphStore()
@@ -223,6 +227,19 @@ export function AdminGraphStore() {
                     <OverviewStrip summary={data.summary} />
                     <HowToRead />
                     <UnreachableNodes instances={data.instances} />
+
+                    {/* Before the shards: how much read load never reaches
+                        them. A cache hit costs a Redis round trip; a miss
+                        costs ~55 Cypher on the six query threads of one
+                        shard replica. This number moves view-open time more
+                        than anything else on the page. */}
+                    {activeWorkspaceId && (
+                        <CacheHealthCard
+                            workspaceId={activeWorkspaceId}
+                            dataSourceId={activeDataSourceId ?? undefined}
+                            canRefresh={isSystemAdmin}
+                        />
+                    )}
 
                     {!openStore ? (
                         <StoresOverview
