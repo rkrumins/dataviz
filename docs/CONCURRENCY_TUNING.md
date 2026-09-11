@@ -14,9 +14,9 @@ Two companions, both still authoritative for what they cover:
 * [`FALKORDB_DEPLOYMENT.md`](FALKORDB_DEPLOYMENT.md) — the graph store itself: pod
   topology, the memory sizing formula, AOF, DR. **Do not re-derive memory sizing here**;
   §"Sizing: the ceilings share ONE budget" is the source of truth.
-* [`UPGRADE_2026-09-10_graph-availability.md`](UPGRADE_2026-09-10_graph-availability.md)
-  — the overrides an existing deployment must *remove* to get current defaults. An
-  explicit override in a ConfigMap beats a new default silently, with no warning.
+* `docs/UPGRADE_2026-09-10_graph-availability.md` (in the repository, not in-app) — the
+  overrides an existing deployment must *remove* to get current defaults. An explicit
+  override in a ConfigMap beats a new default silently, with no warning.
 
 ---
 

@@ -252,6 +252,14 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     p._read_pressure_pacing_ratio = 4.0
     p._yielding_to_reads = False
     p._read_pressure_yields = 0
+    # `_paced_write` also gates on replica acknowledgement. These tests are
+    # about the READ-pressure yield, so the replica gate is off: no live
+    # override, and a fleet minimum of 0 replicas, which returns before the
+    # gate touches anything else. Building the object with `__new__` means
+    # every attribute the write path reaches has to be named here — when a
+    # new one appears, this is where it goes.
+    p._live = {}
+    p._replica_ack_min = 0
     return p
 
 

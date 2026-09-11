@@ -39,6 +39,7 @@ export const filenameMap: Record<string, string> = {
   'DEPLOYMENT.md': 'deployment',
   'MIGRATIONS.md': 'migrations',
   'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',
+  'CONCURRENCY_TUNING.md': 'concurrency-tuning',
   'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
   'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',
   'INFRASTRUCTURE_SCALING_250M.md': 'infra-scaling-250m',

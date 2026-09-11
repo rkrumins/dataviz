@@ -617,8 +617,15 @@ async def test_trace_closure_provider_not_implemented_returns_501_through_cache_
     assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
     # Reached (and raised inside) the real cache flow, not the bypass: the
     # generation/cache-lookup GET fired; no result ever reached the SET side.
+    # Count PAYLOAD writes, not every SET — the cross-process election takes
+    # out a lock on a key of its own, and that is bookkeeping about who is
+    # computing rather than anything the cache stored.
+    from backend.app.services import graph_cache as _gc
     assert redis.get.await_count >= 1
-    assert redis.set.await_count == 0
+    assert [
+        c for c in redis.set.await_args_list
+        if not str(c.args[0]).startswith(_gc._LEADER_PREFIX)
+    ] == []
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────

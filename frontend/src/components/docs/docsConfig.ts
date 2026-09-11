@@ -415,6 +415,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/FALKORDB_DEPLOYMENT.md?raw'),
   },
   {
+    slug: 'concurrency-tuning',
+    section: 'operations',
+    title: 'Concurrency and Timeout Tuning',
+    description: 'The eight ceilings a graph request passes, what users see when one is wrong, and the order to raise them in',
+    importFn: () => import('@docs/CONCURRENCY_TUNING.md?raw'),
+  },
+  {
     slug: 'falkordb-dr',
     section: 'operations',
     title: 'FalkorDB Disaster Recovery',

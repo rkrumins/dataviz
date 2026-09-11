@@ -24,6 +24,7 @@ tests/test_aggregation_overrides.py
 tests/test_aggregation_run_record.py
 tests/test_aggregation_scan_shrink.py
 tests/test_aggregation_settings.py
+tests/test_api_graph.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
 tests/test_cache_refresh_route.py
@@ -53,6 +54,7 @@ tests/test_process_memory.py
 tests/test_projection_stalled_reconcile.py
 tests/test_provider_failover_pause.py
 tests/test_provider_refresh_batch.py
+tests/test_read_pressure_yield.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
 tests/test_seed_memory.py

@@ -760,9 +760,9 @@ that cannot fail proves nothing.
 
 ### Upgrading
 
-**Full detail:** [`docs/RELEASE_NOTES_2026-09-11_serving-views-at-scale.md`](docs/RELEASE_NOTES_2026-09-11_serving-views-at-scale.md)
-— what was wrong at each layer, the value table, rollout order, what to look at to verify it,
-and the knob that turns each piece off.
+**Full detail:** `docs/RELEASE_NOTES_2026-09-11_serving-views-at-scale.md` — what was wrong at
+each layer, the value table, rollout order, what to look at to verify it, and the knob that
+turns each piece off.
 
 **Clear stale view-cache TTL overrides.** A ConfigMap value beats a new default silently.
 `GRAPH_CACHE_CHILDREN_TTL_S`, `GRAPH_CACHE_AGGREGATED_TTL_S`, `GRAPH_CACHE_TOP_LEVEL_TTL_S`,
