@@ -22,7 +22,7 @@ Two companions, both still authoritative for what they cover:
 
 ## 1. The ladder, and the one rule that governs it
 
-A graph request passes through six ceilings. Each is a separate queue.
+A graph request passes through eight ceilings. Each is a separate queue.
 
 | # | Ceiling | Code default | **As deployed** | Scope |
 |---|---|---|---|---|
@@ -30,8 +30,21 @@ A graph request passes through six ceilings. Each is a separate queue.
 | 2 | Per-source admission gate | `hard = GRAPH_READ pool − 4` = 16 | **12** | per **process**, per data source |
 | 3 | `GRAPH_READ` DB session | `pool_size 10 + overflow 10` = 20 | **8 + 8 = 16** | per **process** |
 | 4 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` = **8** (+16 waiters, 2s wait) | same | per **process**, per (provider, graph) |
-| 5 | FalkorDB query threads | `THREAD_COUNT` **6** per node (cluster overlay) | same | per node |
-| 6 | FalkorDB queue | `MAX_QUEUED_QUERIES` **150** per node | same | per node |
+| 5 | Provider query semaphore | `FALKORDB_QUERY_CONCURRENCY` = **20** | same (unset) | per **process** |
+| 6 | Outbound socket pool | `FALKORDB_GRAPH_POOL_SIZE` = **24** | same (unset) | per **process**, **per node** |
+| 7 | FalkorDB query threads | `THREAD_COUNT` **6** per node (cluster overlay) | same | per node |
+| 8 | FalkorDB queue | `MAX_QUEUED_QUERIES` **150** per node | same | per node |
+
+Two things this table does not show, both of which matter:
+
+* **There is no ceiling above row 2.** Uvicorn is started without
+  `--limit-concurrency` (`backend/Dockerfile.viz`), so the ASGI layer accepts
+  everything and the first real gate a graph request meets is the admission gate.
+  Non-graph endpoints meet no gate at all.
+* **A cache hit bypasses rows 4–8 entirely.** The provider slot is taken only by the
+  singleflight *leader* that actually computes, so all 144 admitted requests can be in
+  flight holding zero provider slots. Cache hit rate is therefore the single largest
+  lever on this page.
 
 **Read that table's two value columns before anything else.** `viz-config.yaml` sets
 `DB_GRAPH_READ_POOL_SIZE: "8"` and `DB_GRAPH_READ_POOL_MAX_OVERFLOW: "8"`, so the pool is
@@ -69,20 +82,35 @@ admitted graph requests   12 × 12                    = 144 in flight
 concurrent FalkorDB calls 12 ×  8                    =  96 per provider
 ```
 
-Against that, the store executes:
+Against that, the store executes **far less than the whole cluster suggests**, and this
+is the most important number on the page:
 
 ```
-3 masters        × THREAD_COUNT 6                    =  18 threads
-+ 6 replicas (9-pod rule) × 6, for read-only queries =  54 threads at best
-queue depth      9 nodes × MAX_QUEUED_QUERIES 150    = 1350 queries
+one data source → one graph key → ONE hash slot → ONE shard
+read-only Cypher is routed to that shard's in-sync replicas (_replica_for,
+falkordb_provider.py:2326) and round-robined across them — that shard's only
+
+  today  (replicas: 2 = 1 master + 1 replica)   1 replica  × THREAD_COUNT 6 =  6 threads
+  at nine pods (replicas: 3 = 1 master + 2)     2 replicas × THREAD_COUNT 6 = 12 threads
+
+queue behind them: MAX_QUEUED_QUERIES 150 per node
 ```
 
-**The application tier can present roughly two to five times more concurrent work than
-the graph store can execute.** That is not automatically wrong — the queue exists for
-exactly this — but it does mean:
+**Three shards spread data SOURCES across hardware. They do not widen a single source.**
+Everyone looking at the same data source is served by the query threads of that source's
+shard — six of them on the shape shipped today.
 
-> **The binding constraint is FalkorDB query threads, not the web tier.**
-> Adding viz-service replicas does not add graph capacity. It adds queue depth.
+> **The binding constraint is the six (soon twelve) query threads on one shard's
+> replicas.** Adding viz-service replicas does not add graph capacity — it adds queue
+> depth. Adding *shards* only helps if your load is spread across several data sources.
+> Going from `replicas: 2` to `replicas: 3` on the cluster StatefulSets **doubles read
+> capacity per source**, which makes the 9-pod move a throughput change, not only a
+> resilience one.
+
+Against 6–12 threads the fleet can present 96 provider slots, and each HTTP request
+issues one Cypher per label bucket. Once `slots_in_use × buckets ≥ 150` the store starts
+answering `Max pending queries exceeded` — which the app now surfaces as a retryable 429
+rather than a 500. With two label buckets that threshold is 75 slots; with three, 50.
 
 How many users that supports depends entirely on **mean query service time**, which is a
 property of your data, not of this configuration:
@@ -91,15 +119,21 @@ property of your data, not of this configuration:
 users ≈ (threads ÷ mean_service_time) ÷ queries_per_user_per_second
 ```
 
-A canvas open costs roughly ten queries, fanned out four at a time
-(`VITE_HYDRATION_CONCURRENCY`). At one canvas open per user per 30s:
+A cold canvas open of a 500-entity view with 5 entity types costs **~9 HTTP requests and
+~55 Cypher queries** — `/nodes/query` ×5, `/edges/between`, `/nodes/degree` ×2 (each ×2
+directions), `/edges/aggregated`, every one of them fanned out per label bucket. A warm
+graph cache costs 0 Cypher but still holds 9 admission slots and 9 DB sessions.
 
-| Mean service time | Throughput (54 threads) | Users supported |
-|---|---|---|
-| 50 ms | ~1080 q/s | ~3200 |
-| 250 ms | ~215 q/s | ~650 |
-| 500 ms | ~108 q/s | ~320 |
-| 2 s | ~27 q/s | ~80 |
+At one cold open per user per 60s, against **6 threads** (today's shape):
+
+| Mean Cypher time | Throughput | Cold opens/s | Users supported |
+|---|---|---|---|
+| 20 ms | 300 q/s | 5.5 | ~330 |
+| 50 ms | 120 q/s | 2.2 | ~130 |
+| 100 ms | 60 q/s | 1.1 | ~65 |
+
+Double each row for the 9-pod shape. Cache hit rate moves it more than anything else on
+this page — a warm open costs no Cypher at all.
 
 **Measure your service time before trusting any row of that table.** It is the one input
 that decides the answer and the one nobody can derive from the manifests.
@@ -251,8 +285,8 @@ matters — most performance work fails because someone pulls lever 6 while leve
 still the constraint.
 
 **The governing fact, from §1:** the application tier can present ~96 concurrent queries
-per provider against 18–54 FalkorDB threads. **The store is the constraint, and adding
-web capacity does not change that.** Every step below is either "make the store do less",
+per provider against **6 query threads** on the one shard replica serving that data
+source. **The store is the constraint, and adding web capacity does not change that.** Every step below is either "make the store do less",
 "make the store do it faster", or "make the app ask for less". In that order.
 
 ### Step 0 — Measure, or everything below is guesswork
@@ -275,7 +309,7 @@ curl -s localhost:8080/health/deps | jq '.resilience'
 
 Record: `usec_per_call`, the p99 from SLOWLOG, `breaker.deadline_timeouts_not_counted`,
 `provider_manager.slots_shed_wait_timeout`, `provider_manager.graph_shed_over_share`.
-Those five tell you which of the six ceilings is actually binding.
+Those five tell you which of the eight ceilings is actually binding.
 
 ### Step 1 — Stop doing avoidable work (free, biggest wins)
 
@@ -293,11 +327,17 @@ Nothing here costs capacity; it removes load.
 
 The 9-pod layout exists so reads do not all land on three masters.
 
-* Confirm read routing is actually offloading: read-only queries should reach replicas.
-  If `GRAPH.INFO` shows masters busy and replicas idle, routing is not working and you
-  are running at **18** threads, not 54. That is a 3× difference for zero cost.
-* Check placement skew. One shard holding most of the data means one shard doing most of
-  the work regardless of how many nodes exist. Admin → Graph store shows per-shard memory.
+* **Add the second replica.** The cluster StatefulSets ship `replicas: 2` (1 master +
+  1 replica); `FALKORDB_DEPLOYMENT.md` §3 specifies `replicas: 3` (the 9-pod rule), and
+  the 56Gi sizing budget already assumes two replicas per master. Reads round-robin
+  across a shard's in-sync replicas, so this is a **2× read-throughput change per data
+  source**, not only a resilience one. It is the single largest safe win available.
+* Confirm read routing is actually offloading. If `GRAPH.INFO` shows the master busy and
+  the replica idle, `_replica_for` is returning None — usually the settle window after a
+  write, or a replica judged out of step — and every read is hitting the master.
+* Check placement skew. One shard holding the busy data source means one shard doing the
+  work regardless of how many nodes exist. Admin → Graph store shows per-shard memory.
+  Sharding helps only when load is spread across *several* data sources.
 * `cluster-require-full-coverage no` keeps two shards serving when one is down — verify it
   is still set.
 
