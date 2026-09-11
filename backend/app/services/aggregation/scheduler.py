@@ -87,6 +87,52 @@ async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool
     return elapsed < interval_secs
 
 
+async def _converging(session: Any, state: Any) -> bool:
+    """True when the source's most recent attempt FAILED but wrote rollup
+    edges — it was converging, not stuck.
+
+    The breaker exists for a source that fails the same way forever. A
+    rebuild of a graph too large for one wall clock fails in exactly the
+    same SHAPE every time and is the opposite case: every attempt writes
+    what the previous one did not, because APPLY writes only the cells the
+    reconcile scan did not find, and the writes are durable. Counting those
+    attempts against the breaker suspends a source for making progress, and
+    the bigger the graph the more certainly it happens — which is what "with
+    too low values it will never complete" means in practice.
+
+    ``run_stats.writes`` is committed at every checkpoint, so a run killed
+    by the watchdog leaves an honest count behind. Never raises: unreadable
+    reads as "not converging", the conservative direction (the breaker still
+    bounds the retries).
+    """
+    if state is None:
+        return False
+    from .models import AggregationJobORM
+
+    try:
+        row = (await session.execute(
+            select(AggregationJobORM.status, AggregationJobORM.run_stats)
+            .where(AggregationJobORM.data_source_id == state.data_source_id)
+            .order_by(AggregationJobORM.updated_at.desc().nullslast())
+            .limit(1)
+        )).first()
+    except Exception:
+        logger.warning(
+            "stale-marker reconcile: progress lookup failed for %s",
+            state.data_source_id, exc_info=True,
+        )
+        return False
+    if row is None or row[0] not in _RETRY_AFTER or not row[1]:
+        return False
+    try:
+        import json
+
+        writes = int((json.loads(row[1]) or {}).get("writes") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return writes > 0
+
+
 async def _suspend(session: Any, state: Any, ds: str) -> None:
     """Trip the breaker for a marked source whose automatic retries are used
     up: stamp the sweeper's own ``suspended`` verdict — so the "Needs a
@@ -397,8 +443,27 @@ class AggregationScheduler:
                         state is not None
                         and state.aggregation_status in _RETRY_AFTER
                     )
+                    # A retry that WROTE is converging: the previous
+                    # attempt landed rollup cells the one before it had
+                    # not, and the next one writes strictly less. Clear
+                    # the breaker rather than count it — otherwise a graph
+                    # too large for one wall clock is suspended precisely
+                    # for making progress.
+                    converging = retrying and await _converging(s2, state)
+                    if converging and (
+                        getattr(state, "reconcile_consecutive_actions", 0) or 0
+                    ):
+                        logger.info(
+                            "stale-marker reconcile: %s failed but wrote rollup "
+                            "edges — converging, not stuck; clearing the retry "
+                            "count so the breaker cannot suspend it for making "
+                            "progress.", ds,
+                        )
+                        state.reconcile_consecutive_actions = 0
+                        await s2.commit()
                     if (
                         retrying
+                        and not converging
                         and (getattr(state, "reconcile_consecutive_actions", 0) or 0)
                         >= breaker_cap
                         and getattr(state, "drift_state", None) != "suspended"
@@ -450,7 +515,10 @@ class AggregationScheduler:
                     resp = await svc.signal_source_changed(
                         ds, s2, reason="reconcile", origin="reconcile",
                     )
-                    if retrying and getattr(resp, "job_id", None) is not None:
+                    if (
+                        retrying and not converging
+                        and getattr(resp, "job_id", None) is not None
+                    ):
                         # Count the retry the way the sweeper counts an
                         # action: only once a job was actually queued. The
                         # row is re-read because trigger() rolled this

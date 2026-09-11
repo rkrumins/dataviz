@@ -536,6 +536,12 @@ graph store at all.
   this job's wall clock can finish writing it. A fixed cell count answers
   neither for any particular graph: 8M cells is half an hour on a roomy node
   and a refusal on a full one.
+* **A retry that wrote is not a failure to count.** A cube too large for one
+  wall clock fails in the same shape every time, and the reconciliation breaker
+  used to suspend the source after a handful of those — for converging. The
+  marker reconciler now reads the last attempt's write count and clears the
+  retry count when it is non-zero, so only attempts that achieved nothing count
+  against the breaker.
 * **Full detail is never truncated.** Only Auto degrades, and only to the
   depth-diagonal with the rest served on demand. Forced full detail stores
   every ancestor combination at any depth and any size; what stops it is the

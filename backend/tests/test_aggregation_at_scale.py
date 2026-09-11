@@ -266,3 +266,72 @@ def test_the_appetite_ceiling_defaults_to_its_bound_so_it_does_not_decide(monkey
     assert mat._max_cube_edges() == 50_000_000
     monkeypatch.setenv("AGGREGATION_MAX_CUBE_EDGES", "1000000")
     assert mat._max_cube_edges() == 1_000_000     # an operator's ceiling still binds
+
+
+# ── a retry that wrote is converging, not stuck ──────────────────────────
+
+
+class _Rows:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class _Session:
+    """A session that answers one SELECT with a fixed row."""
+
+    def __init__(self, row=None, raises=False):
+        self._row, self._raises = row, raises
+
+    async def execute(self, _stmt):
+        if self._raises:
+            raise RuntimeError("the jobs table is not answering")
+        return _Rows(self._row)
+
+
+def _state(ds="ds_1"):
+    return types.SimpleNamespace(data_source_id=ds)
+
+
+def test_a_failed_run_that_wrote_rollup_edges_reads_as_converging():
+    """The distinction the breaker needs. A rebuild of a graph too large for
+    one wall clock fails in exactly the same SHAPE every time and is the
+    opposite of stuck: APPLY writes only the cells the reconcile scan did
+    not find, and the writes are durable, so every attempt writes strictly
+    less than the last."""
+    from backend.app.services.aggregation.scheduler import _converging
+
+    assert _run(_converging(_Session(("failed", '{"writes": 41000}')), _state())) is True
+    assert _run(_converging(_Session(("cancelled", '{"writes": 7}')), _state())) is True
+    # Wrote nothing: the attempt achieved nothing, and the breaker counts it.
+    assert _run(_converging(_Session(("failed", '{"writes": 0}')), _state())) is False
+    assert _run(_converging(_Session(("failed", "{}")), _state())) is False
+    assert _run(_converging(_Session(("failed", None)), _state())) is False
+    # A run that SUCCEEDED is not a retry at all.
+    assert _run(_converging(_Session(("completed", '{"writes": 9}')), _state())) is False
+
+
+def test_the_progress_lookup_never_breaks_the_tick():
+    """Unreadable reads as "not converging" — the conservative direction,
+    where the breaker still bounds the retries."""
+    from backend.app.services.aggregation.scheduler import _converging
+
+    assert _run(_converging(_Session(raises=True), _state())) is False
+    assert _run(_converging(_Session(("failed", "not json")), _state())) is False
+    assert _run(_converging(_Session(None), _state())) is False
+    assert _run(_converging(_Session(("failed", '{"writes": 1}')), None)) is False
+
+
+def test_the_breaker_asks_whether_the_source_is_converging_first():
+    """Structural: the suspend branch and the retry count both sit behind
+    it, so a source cannot be suspended for making progress."""
+    import inspect
+
+    from backend.app.services.aggregation import scheduler
+
+    src = inspect.getsource(scheduler.AggregationScheduler._reconcile_stale_markers)
+    assert "converging = retrying and await _converging(s2, state)" in src
+    assert "and not converging" in src
+    assert src.index("converging = retrying") < src.index(">= breaker_cap")

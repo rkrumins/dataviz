@@ -468,6 +468,16 @@ seeing it as an outage when a node is replaced anyway.
   fails with `MaterializationStoreUnreachable`, whose message names the node,
   how long it waited and what to check; the worker reports it as
   `reason: "connection"` and the job resumes from its checkpoint.
+- **A retry that wrote is converging, not stuck.** A rebuild of a graph too
+  large for one wall clock fails in the same SHAPE every time, and the
+  reconciliation breaker used to read that as a poison source and suspend it —
+  for making progress. It is the opposite case: APPLY writes only the cells the
+  reconcile scan did not find, and the writes are durable, so each attempt
+  writes strictly less than the last and the source converges across runs. The
+  marker reconciler now reads the last attempt's `run_stats.writes` (committed
+  at every checkpoint, so a watchdog kill leaves an honest count) and, when it
+  is non-zero, clears the retry count instead of counting it. The breaker still
+  bounds attempts that achieve nothing, which is what it is for.
 - **Reads from in-sync replicas.** A shard's master took every write AND
   answered every read, so on a cluster with two replicas per shard two thirds
   of the hardware sat idle while the master's query threads were the
