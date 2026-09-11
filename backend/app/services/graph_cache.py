@@ -900,20 +900,43 @@ def _has_unprobed_frontier(result: BaseModel) -> bool:
     return bool(entries) and all(getattr(e, "total_count", None) is None for e in entries)
 
 
-def _is_incomplete_result(result: BaseModel) -> bool:
-    """Truncated/degraded/stale results must not be pinned for the full
-    TTL as if they were complete — cache them only for the negative
-    window. Checks the result itself and its nested AggregatedEdgeResult
-    payloads: ``aggregated`` (canvas bootstrap) and ``aggregated_delta``
-    (canvas expand).
+#: Cut reasons that make a result a PURE FUNCTION of (graph, request): the
+#: same request returns the same rows and the same cursor, so the answer is
+#: complete for what was asked and keeps the full TTL. Every other reason the
+#: walk reports — timeout, seed/nodes/ancestors/descendants failed — means the
+#: read gave up, and a retry may do better.
+_DETERMINISTIC_CUTS = frozenset({"max_nodes", "degree_cap", "orphan", "truncated"})
 
-    ONE EXCEPTION: a closure PAGE cut by ``max_nodes``. The degree-exact
-    walk makes such a page a pure function of (graph, request) — every
-    anchor it ships is whole and the cursor names exactly where the next
-    page starts — so it IS the complete answer to that request and keeps the
-    full TTL. A page whose reason is a FAILURE (timeout, seed/nodes/ancestors
-    failed) is still degraded; the walk reports failures ahead of
-    ``max_nodes`` for exactly this reason.
+
+def _is_incomplete_result(result: BaseModel) -> bool:
+    """True only when the answer might be DIFFERENT if computed again.
+
+    This decides between the full TTL and ``_NEGATIVE_TTL`` (5s), and the
+    distinction that matters is determinism, not perfection:
+
+    * A DEGRADED answer is one the provider gave up on — the read ladder
+      returned the prefix it had, a degree probe was dropped for the
+      deadline. Recomputing may well produce more. Pinning it for an hour
+      makes one slow moment the workspace's answer for an hour, and writing
+      it to last-known-good makes it the answer for an outage. Negative TTL.
+
+    * A STALE answer is complete and correct for the graph as it stands; only
+      the rollup is behind. Recomputing returns the identical bytes. The
+      client is already told (``aggstale`` marker, ``CanvasFreshness``), and
+      the rebuild's completion bumps the generation, which invalidates it for
+      real. Caching it briefly buys nothing and costs a recompute.
+
+    * A TRUNCATED answer hit a cap. It is a pure function of (graph,
+      request): the same request returns the same rows and the same cursor.
+      Full TTL for the same reason a closure page cut by ``max_nodes`` always
+      kept it.
+
+    Treating stale and truncated as degraded created a feedback loop with no
+    hysteresis: saturation produces truncation, truncation dropped that
+    scope's TTL 720-fold and stopped writing its fallback, and the resulting
+    misses produced more saturation. On a large graph — where truncation is
+    the normal case, not the exception — it meant the cache could never hold
+    at all.
     """
     for obj in (
         result,
@@ -922,11 +945,14 @@ def _is_incomplete_result(result: BaseModel) -> bool:
     ):
         if obj is None:
             continue
-        if getattr(obj, "stale", False):
+        # The read ladder gave up part way and said so.
+        if getattr(obj, "degraded_detail", None):
             return True
+        # A cut whose REASON is a failure, not a cap. The closure walk reports
+        # failures ahead of max_nodes precisely so this is distinguishable.
         if getattr(obj, "truncated", False):
-            is_closure_page = getattr(obj, "frontier_up", None) is not None
-            if not (is_closure_page and getattr(obj, "truncation_reason", None) == "max_nodes"):
+            reason = getattr(obj, "truncation_reason", None)
+            if reason is not None and reason not in _DETERMINISTIC_CUTS:
                 return True
     return _has_unprobed_frontier(result)
 

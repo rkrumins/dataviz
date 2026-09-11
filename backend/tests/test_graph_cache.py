@@ -13,6 +13,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from typing import Optional
+
 from pydantic import BaseModel
 from redis.exceptions import RedisError
 
@@ -58,6 +60,9 @@ class _NestedAggregated(BaseModel):
     ``.aggregated`` on canvas bootstrap/expand results."""
     truncated: bool = False
     stale: bool = False
+    # What separates a deterministic cut from a read that gave up part way.
+    degraded_detail: Optional[str] = None
+    truncation_reason: Optional[str] = None
 
 
 class _CanvasBootstrapLike(BaseModel):
@@ -455,7 +460,16 @@ async def test_oversized_payload_is_not_cached(monkeypatch, caplog) -> None:
 # ─── incomplete-result short TTL (R2) ──────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_truncated_result_caches_with_negative_ttl_and_no_lkg() -> None:
+async def test_a_capped_result_is_cached_for_the_full_ttl() -> None:
+    """A result cut by a CAP is a pure function of (graph, request) — the same
+    request returns the same rows and the same cursor — so it is the complete
+    answer to what was asked and keeps the full TTL.
+
+    This used to take the 5s negative window. On a large graph truncation is
+    the normal case, not the exception, which meant the cache could never hold
+    for the views that need it most, and saturation (which produces
+    truncation) dropped the TTL 720-fold and so produced more saturation. The
+    loop had no hysteresis."""
     redis = _make_redis()
     cache = GraphCache(redis)
     compute = AsyncMock(return_value=_AggregatedLike(
@@ -470,16 +484,22 @@ async def test_truncated_result_caches_with_negative_ttl_and_no_lkg() -> None:
         model_cls=_AggregatedLike,
     )
 
-    # Primary SET only, at the negative TTL — no LKG mirror for a
-    # truncated snapshot.
-    assert redis.set.await_count == 1
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    assert graph_cache._NEGATIVE_TTL not in ttls, "a capped result is not degraded"
+    assert all(t >= 3600 for t in ttls), ttls
+    # And it IS worth keeping as the outage fallback.
     keys = [call.args[0] for call in redis.set.await_args_list]
-    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+    assert any(graph_cache._LKG_PREFIX in k for k in keys)
 
 
 @pytest.mark.asyncio
-async def test_stale_result_caches_with_negative_ttl_and_no_lkg() -> None:
+async def test_a_stale_result_is_cached_for_the_full_ttl() -> None:
+    """Stale means the ROLLUP is behind, not that the answer is wrong: the
+    bytes are complete and correct for the graph as it stands, and recomputing
+    returns the identical bytes. The client is already told (the aggstale
+    marker and CanvasFreshness), and the rebuild completing bumps the
+    generation, which invalidates this for real. Caching it for 5 seconds
+    bought nothing and cost a recompute of the same stale answer."""
     redis = _make_redis()
     cache = GraphCache(redis)
     compute = AsyncMock(return_value=_AggregatedLike(
@@ -494,10 +514,9 @@ async def test_stale_result_caches_with_negative_ttl_and_no_lkg() -> None:
         model_cls=_AggregatedLike,
     )
 
-    assert redis.set.await_count == 1
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
-    keys = [call.args[0] for call in redis.set.await_args_list]
-    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    assert graph_cache._NEGATIVE_TTL not in ttls
+    assert all(t >= 3600 for t in ttls), ttls
 
 
 def _closure(frontier: list, **overrides: Any) -> Any:
@@ -635,10 +654,12 @@ async def test_a_drained_walk_is_complete_not_degraded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nested_aggregated_truncated_forces_negative_ttl() -> None:
+async def test_nested_aggregated_truncated_keeps_the_full_ttl() -> None:
     """Canvas bootstrap/expand results embed an AggregatedEdgeResult under
-    ``.aggregated``; a truncated nested payload must still force the
-    negative TTL on the outer result."""
+    ``.aggregated``. A nested payload cut by a CAP is still a deterministic
+    answer to the request, so the outer result keeps the full TTL — the nested
+    check exists to catch nested DEGRADATION, which is a different thing and
+    is covered by the degraded_detail test below."""
     redis = _make_redis()
     cache = GraphCache(redis)
     compute = AsyncMock(return_value=_CanvasBootstrapLike(
@@ -653,15 +674,12 @@ async def test_nested_aggregated_truncated_forces_negative_ttl() -> None:
         model_cls=_CanvasBootstrapLike,
     )
 
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
-    # T1-3: an incomplete nested payload must also skip the LKG mirror — a
-    # degraded snapshot must never become the outage fallback.
-    keys = [call.args[0] for call in redis.set.await_args_list]
-    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    assert graph_cache._NEGATIVE_TTL not in ttls, ttls
 
 
 @pytest.mark.asyncio
-async def test_nested_aggregated_delta_truncated_forces_negative_ttl_and_no_lkg() -> None:
+async def test_nested_aggregated_delta_truncated_keeps_the_full_ttl() -> None:
     """Canvas EXPAND embeds its AggregatedEdgeResult under
     ``.aggregated_delta`` (not ``.aggregated``); a truncated delta must
     still force the negative TTL on the outer result AND skip the LKG
@@ -681,9 +699,8 @@ async def test_nested_aggregated_delta_truncated_forces_negative_ttl_and_no_lkg(
         model_cls=_CanvasExpandLike,
     )
 
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
-    keys = [call.args[0] for call in redis.set.await_args_list]
-    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    assert graph_cache._NEGATIVE_TTL not in ttls, ttls
 
 
 # ─── hierarchy invalidation w/ aggregated-LKG carve-out (R4) ───────────
@@ -2088,3 +2105,26 @@ async def test_a_genuine_failure_still_lets_followers_try() -> None:
     gate.set()
     await asyncio.gather(*tasks, return_exceptions=True)
     assert calls > 1, "followers must still be free to retry a transient failure"
+
+
+@pytest.mark.asyncio
+async def test_a_nested_degraded_payload_still_forces_the_negative_ttl() -> None:
+    """The nested check earns its keep here. `degraded_detail` on the embedded
+    aggregated payload means the read ladder gave up part way — not
+    reproducible, so it must not be pinned for an hour and must never become
+    the outage fallback."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_CanvasBootstrapLike(
+        nodes=[1],
+        aggregated=_NestedAggregated(truncated=True, degraded_detail="page floor reached"),
+    ))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN, params={},
+        compute=compute, model_cls=_CanvasBootstrapLike,
+    )
+
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
