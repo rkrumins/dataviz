@@ -478,6 +478,18 @@ seeing it as an outage when a node is replaced anyway.
   at every checkpoint, so a watchdog kill leaves an honest count) and, when it
   is non-zero, clears the retry count instead of counting it. The breaker still
   bounds attempts that achieve nothing, which is what it is for.
+- **One dead shard is not a dead cluster.** The circuit breaker is per
+  PROVIDER, and on a cluster a provider is every shard — so an error counted
+  against it while one shard is being replaced refuses every graph on every
+  other shard too. A refused connection to a cluster node was already reported
+  as `ProviderFailingOver` (logical, uncounted) for exactly that reason, but the
+  branch where the RECONNECT itself failed raised the raw error and counted it.
+  It now reports a failover as well, unless the reconnect failed on credentials
+  — a real provider fault, which the breaker is the right place for. The test
+  narrows on the reconnect error itself rather than its cause chain: the code
+  runs inside an `except`, so every reconnect failure carries the original
+  refused connection as its context and a chain-walking classifier calls all of
+  them transient, the password included.
 - **Reads from in-sync replicas.** A shard's master took every write AND
   answered every read, so on a cluster with two replicas per shard two thirds
   of the hardware sat idle while the master's query threads were the

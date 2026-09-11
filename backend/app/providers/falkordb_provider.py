@@ -2655,9 +2655,53 @@ class FalkorDBProvider(GraphDataProvider):
                                 ) from reconnect_exc
                             # Reconnect failed → the host is unreachable, not a
                             # transient blip. Stop retrying and surface the
-                            # failure now so the breaker opens fast instead of
-                            # burning the remaining retries (each a fresh ~2-3s
-                            # connect attempt) against a dead host.
+                            # failure now instead of burning the remaining
+                            # retries (each a fresh ~2-3s connect attempt)
+                            # against a dead host.
+                            #
+                            # WHAT it is surfaced AS decides how far the damage
+                            # spreads. The breaker is per PROVIDER, and on a
+                            # cluster a provider is every shard: raising the raw
+                            # error here counted one dead shard against a breaker
+                            # that, once open, refuses every graph on every OTHER
+                            # shard too — the healthy two thirds of the fleet
+                            # stopped answering because a third was being
+                            # replaced. The two branches either side of this one
+                            # already report a refused cluster node as a failover
+                            # for exactly that reason; a reconnect that could not
+                            # reach the node is the same fact, learned one step
+                            # later.
+                            #
+                            # Only for a CONNECTIVITY failure, though. A
+                            # reconnect that fails on credentials or config is a
+                            # real provider fault, the breaker is the right place
+                            # for it, and dressing it as a failover would have
+                            # every caller politely retrying a password.
+                            #
+                            # Asked of the reconnect error ITSELF, never of its
+                            # cause chain: this runs inside an `except` block, so
+                            # whatever the reconnect raised carries the original
+                            # refused connection as its `__context__` and the
+                            # chain-walking classifiers say "transient" about
+                            # every one of them — including the password.
+                            from backend.app.providers.falkordb_connection import (
+                                is_auth_error,
+                            )
+
+                            unreachable = isinstance(
+                                reconnect_exc,
+                                tuple(_TRANSIENT_REDIS_EXC or ())
+                                + (ConnectionError, OSError, TimeoutError),
+                            ) and not is_auth_error(reconnect_exc)
+                            if cluster and unreachable:
+                                logger.warning(
+                                    "FalkorDB %s: reconnect during retry failed "
+                                    "(%s) — one shard of this cluster is not "
+                                    "answering; reporting a failover so the "
+                                    "breaker leaves the other shards alone.",
+                                    self._graph_name, reconnect_exc,
+                                )
+                                raise self._failing_over(reconnect_exc) from exc
                             logger.warning(
                                 "FalkorDB %s: reconnect during retry failed (%s) — "
                                 "treating as unreachable, not retrying.",

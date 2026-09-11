@@ -362,3 +362,89 @@ def test_the_worker_waits_out_a_failover_without_spending_an_attempt():
     assert park < counting                       # matched before the counting clause
     assert "failover_parks += 1" in src
     assert _FAILOVER_PARKS_MAX >= 5              # and bounded: forever is a failure
+
+
+# ── one dead shard is not a dead cluster ─────────────────────────────────
+
+
+def test_a_shard_whose_reconnect_fails_does_not_open_the_breaker_for_the_others():
+    """The breaker is per PROVIDER, and on a cluster a provider is every
+    shard. Raising the raw reconnect error counted one shard being replaced
+    against a breaker that, once open, refuses every graph on every OTHER
+    shard — the healthy two thirds of a fleet stopped answering because a
+    third was gone. The two branches either side already report a refused
+    cluster node as a failover; a reconnect that could not reach it is the
+    same fact, learned one step later."""
+    p = _provider(mode="cluster")
+
+    async def _rebuild_fails(_gen):
+        raise REFUSED
+
+    p._rebuild_graph_client_for_failover = _rebuild_fails
+    p._ensure_connected = _rebuild_fails
+
+    async def _call():
+        raise REFUSED
+
+    original = asyncio.sleep
+    asyncio.sleep = lambda s: _noop()
+    try:
+        with pytest.raises(ProviderFailingOver) as exc:
+            _run(p._run_guarded(_call))
+    finally:
+        asyncio.sleep = original
+    assert exc.value.endpoint == "10.0.0.3:6379"
+
+
+async def _noop():
+    return None
+
+
+def test_a_reconnect_that_fails_on_credentials_still_opens_it():
+    """The narrowing that keeps the change honest: a reconnect refused for a
+    password is a real provider fault, the breaker is the right place for
+    it, and dressing it as a failover would have every caller politely
+    retrying a credential."""
+    p = _provider(mode="cluster")
+
+    import redis.exceptions as _redis_exc
+
+    async def _rebuild_fails(_gen):
+        raise _redis_exc.AuthenticationError("NOAUTH Authentication required")
+
+    p._rebuild_graph_client_for_failover = _rebuild_fails
+    p._ensure_connected = _rebuild_fails
+
+    async def _call():
+        raise REFUSED
+
+    original = asyncio.sleep
+    asyncio.sleep = lambda s: _noop()
+    try:
+        with pytest.raises(_redis_exc.AuthenticationError):
+            _run(p._run_guarded(_call))
+    finally:
+        asyncio.sleep = original
+
+
+def test_a_standalone_store_that_cannot_be_reconnected_still_opens_it():
+    """Outside a cluster the provider IS the one node, so a host that cannot
+    be reached is a dead provider and the breaker is exactly right."""
+    p = _provider(mode="standalone")
+
+    async def _ensure_fails():
+        raise ConnectionError("Connection reset by peer")
+
+    p._ensure_connected = _ensure_fails
+
+    async def _call():
+        raise ConnectionError("Connection reset by peer")
+
+    original = asyncio.sleep
+    asyncio.sleep = lambda s: _noop()
+    try:
+        with pytest.raises(ConnectionError) as exc:
+            _run(p._run_guarded(_call))
+    finally:
+        asyncio.sleep = original
+    assert not isinstance(exc.value, ProviderFailingOver)

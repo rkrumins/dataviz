@@ -26,6 +26,15 @@ budget counts the container too, and the deployment guide's sizing rule now coun
 replication buffers. The run record keeps every hold by reason, and the run settings panel
 says so.
 
+**One dead shard no longer opens the circuit breaker for every other shard.**
+The breaker is per provider, and on a cluster a provider is every shard, so an
+error counted while one shard was being replaced refused every graph on the
+healthy ones too. A refused connection to a cluster node was already reported as
+a logical failover for that reason; the branch where the reconnect itself failed
+still raised the raw error and counted it. It reports a failover now — unless
+the reconnect failed on credentials, which is a real provider fault and belongs
+to the breaker.
+
 **The graph store stops forking on its own schedule, and a replica frees in
 the background.** Three of the four steps in the incident were settings the
 pipeline's governor cannot reach. The hourly `save 3600 1` forked every master
