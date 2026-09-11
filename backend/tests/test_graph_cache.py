@@ -2003,3 +2003,88 @@ async def test_reading_stats_when_the_bus_is_down_is_empty_not_an_error() -> Non
     stats = await read_cache_stats("")          # no workspace -> empty, no bus call
     assert stats["totals"]["hit"] == 0
     assert stats["endpoints"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shed", ["ProviderBusy", "ProviderLoading"])
+async def test_a_shed_leader_does_not_become_a_stampede(shed) -> None:
+    """The other half of the stranding bug, and the more dangerous half.
+
+    Resolving the leader's future with an exception stopped followers hanging
+    — but the follower's `except Exception: pass` then fell through to
+    RECOMPUTE. So one shed request became N concurrent computes on the same
+    key, which is exactly the load the shed refused, at exactly the moment the
+    store asked for less. Measured before the fix: 9 callers, 9 computes.
+
+    Flow control is not a failure to retry. Followers take the leader's answer
+    and retry on their own Retry-After, as the client already does.
+    """
+    import backend.common.adapters as adapters
+
+    exc_cls = getattr(adapters, shed)
+    redis = _make_redis()
+    redis.hincrby = AsyncMock(return_value=1)
+    redis.expire = AsyncMock(return_value=True)
+    cache = GraphCache(redis)
+
+    calls = 0
+    gate = asyncio.Event()
+
+    async def compute():
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        raise exc_cls("falkordb", "shed")
+
+    async def call():
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"}, compute=compute, model_cls=_Result,
+        )
+
+    tasks = [asyncio.create_task(call()) for _ in range(9)]
+    await asyncio.sleep(0.05)                  # let all nine attach
+    gate.set()
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert calls == 1, (
+        f"a shed key is a key WITH followers — {calls} computes ran where one "
+        "refusal should have served all nine"
+    )
+    assert all(isinstance(o, exc_cls) for o in outcomes), (
+        "every follower must receive the leader's flow-control answer"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_failure_still_lets_followers_try() -> None:
+    """The distinction the fix rests on. A leader that failed for a reason a
+    retry might survive must NOT pin its followers to that failure — only
+    flow control does, because only flow control means 'ask for less'."""
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    redis.hincrby = AsyncMock(return_value=1)
+    redis.expire = AsyncMock(return_value=True)
+    cache = GraphCache(redis)
+
+    calls = 0
+    gate = asyncio.Event()
+
+    async def compute():
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        raise ProviderUnavailable("falkordb", "down")
+
+    async def call():
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"}, compute=compute, model_cls=_Result,
+        )
+
+    tasks = [asyncio.create_task(call()) for _ in range(3)]
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    assert calls > 1, "followers must still be free to retry a transient failure"

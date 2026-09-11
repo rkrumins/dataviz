@@ -294,6 +294,21 @@ class CacheScope:
     graph_ns: str = ""
 
 
+def _swallow_if_unobserved(fut: "asyncio.Future") -> None:
+    """Mark a failed singleflight future retrieved if nobody attached to it.
+
+    Setting an exception on a future no follower awaits makes asyncio log
+    "Future exception was never retrieved" when it is collected — noise that
+    looks like a leak during exactly the incident someone is reading logs for.
+    Calling ``exception()`` on the done future counts as retrieval.
+    """
+    def _retrieve(f: "asyncio.Future") -> None:
+        if not f.cancelled():
+            f.exception()
+
+    fut.add_done_callback(_retrieve)
+
+
 class GraphCache:
     """Singleton cache wrapper. Get the instance via `get_graph_cache()`."""
 
@@ -407,8 +422,18 @@ class GraphCache:
                     "stale" if outcome.served_stale else "hit",
                 )
                 return outcome.value
+            except (ProviderBusy, ProviderLoading):
+                # FLOW CONTROL, not a failure to retry. The leader was shed so
+                # the store could serve someone else, or it is still warming.
+                # Recomputing here is precisely the load the shed refused —
+                # and a shed key is a key WITH followers, so falling through
+                # turns one refusal into N concurrent computes on the same
+                # key. Every follower gets the leader's answer and retries on
+                # its own Retry-After, as the client already knows how to do.
+                raise
             except Exception:
-                # Leader failed — fall through to recompute below.
+                # The leader failed for a reason a retry might survive — fall
+                # through and compute below.
                 pass
 
         loop = asyncio.get_running_loop()
@@ -450,6 +475,7 @@ class GraphCache:
             # turns one shed request into a pile of hung ones.
             if not fut.done():
                 fut.set_exception(exc)
+                _swallow_if_unobserved(fut)
             raise
         except (ProviderUnavailable, asyncio.TimeoutError) as exc:
             # Provider genuinely can't answer right now (unreachable, failing
@@ -476,10 +502,12 @@ class GraphCache:
             # No fallback available — propagate.
             if not fut.done():
                 fut.set_exception(exc)
+                _swallow_if_unobserved(fut)
             raise
         except Exception as exc:
             if not fut.done():
                 fut.set_exception(exc)
+                _swallow_if_unobserved(fut)
             raise
         finally:
             self._inflight.pop(cache_key, None)
