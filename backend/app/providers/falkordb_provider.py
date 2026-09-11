@@ -315,6 +315,14 @@ _REPLICA_READ_MAX_LAG_BYTES = int(
 )
 #: How long this process's own writes pin a graph's reads to its master.
 _REPLICA_READ_SETTLE_S = float(os.getenv("FALKORDB_REPLICA_READ_SETTLE_S", "30"))
+
+#: How long before a provider that warmed (or tried to warm) its urn->label
+#: cache will try again. Long enough that a graph whose URNs are genuinely
+#: label-less does not re-scan on every read; short enough that a graph which
+#: gained labels picks them up without a restart.
+_LABEL_WARMUP_COOLDOWN_S = float(os.getenv("FALKORDB_LABEL_WARMUP_COOLDOWN_S", "900"))
+#: Strong refs to in-flight warmups so the loop cannot collect them mid-run.
+_LABEL_WARMUP_TASKS: set = set()
 #: How often one shard's replication state is sampled for the router.
 _REPLICA_SAMPLE_S = 5.0
 #: How long a replica that failed a read is skipped.
@@ -3921,11 +3929,58 @@ class FalkorDBProvider(GraphDataProvider):
             pass  # best-effort
 
     async def _get_cached_label(self, urn: str) -> Optional[str]:
-        """Look up the label for a URN from Redis cache."""
+        """Look up the label for a URN from Redis cache.
+
+        A miss is expensive downstream, not here: every caller that fails to
+        find a label falls back to a bare ``(p)`` anchor, which on a graph
+        with no label-less URN index is an All-Node-Scan — the shape this
+        module's own comments price at 5-11 seconds for a children read.
+
+        So a miss schedules the label warmup in the background. THIS read
+        still takes the slow path (waiting would make the first reader pay
+        twice), but every read after it finds the hash populated. Without
+        this the cache only ever filled from the write side, and on a store
+        that is read far more than written it stayed empty.
+        """
         try:
-            return await self._redis.hget(self._urn_label_key(), urn)
+            label = await self._redis.hget(self._urn_label_key(), urn)
         except Exception:
             return None
+        if label is None:
+            self._schedule_label_warmup()
+        return label
+
+    def _schedule_label_warmup(self) -> None:
+        """Run the urn->label warmup once per provider, off the request path.
+
+        Bounded three ways: once per provider instance (the flag is set
+        BEFORE the task is created, so a burst of misses schedules one warm),
+        a cooldown so a graph whose URNs genuinely have no labels does not
+        re-scan every time, and the warmup's own per-label caps and timeouts.
+        Never raises into the read that triggered it.
+        """
+        now = time.monotonic()
+        if now < getattr(self, "_label_warmup_until", 0.0):
+            return
+        self._label_warmup_until = now + _LABEL_WARMUP_COOLDOWN_S
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                         # pragma: no cover
+            return
+
+        async def _run() -> None:
+            try:
+                await self._warmup_urn_label_cache_for_aggregation()
+            except Exception as exc:                 # noqa: BLE001 — best effort
+                logger.debug(
+                    "urn->label warmup on %s failed (%s); reads keep the "
+                    "unlabeled anchor until the next attempt",
+                    self._graph_name, exc,
+                )
+
+        task = loop.create_task(_run())
+        _LABEL_WARMUP_TASKS.add(task)
+        task.add_done_callback(_LABEL_WARMUP_TASKS.discard)
 
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
