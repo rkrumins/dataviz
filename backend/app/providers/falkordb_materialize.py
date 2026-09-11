@@ -2442,13 +2442,14 @@ class AggregationPipeline:
                 result = await coro_factory()
         else:
             result = await coro_factory()
-        elapsed = time.monotonic() - t0
-        # Wait for the replicas before the next batch. Their wait counts as
-        # part of THIS write's duration, so the AIMD sizer and the pacing
-        # sleep both see a replica-bound shard for what it is: a slow write
-        # path that wants smaller batches and more room between them.
+        # The master's own time, which is the number the pause is a share of
+        # and half of the number the sizer judges the batch by.
+        batch_s = time.monotonic() - t0
+        # Then wait for the replicas: the batch is not settled until they
+        # have it. Their wait is the OTHER half of the sizer's signal (it is
+        # the batch's cost when a replica re-runs it on its main thread) and
+        # none of the pause's (it was idle time on the master already).
         ack = await self._replica_gate()
-        elapsed += ack
 
         # The ratio in force is the LIVE one (an operator can set
         # write_pacing_ratio on a running job; 0 means no pacing) — but read
@@ -2492,7 +2493,6 @@ class AggregationPipeline:
         # back to back), never more than 30 s.
         if self._eased:
             ratio = max(ratio * 2.0, 2.0)
-        batch_s = max(0.0, elapsed - ack)
         pace = min(max(batch_s * ratio, self._write_min_gap_ms / 1000.0), 30.0)
         if pace > 0:
             await asyncio.sleep(pace)
