@@ -288,6 +288,15 @@ days (`PRODUCT_EVENT_RETENTION_DAYS`, clamped to ≥ 365 so a year-long chart ca
 to lie). The table had no horizon because its contents used to be rare; it now takes a row
 per view open, lineage trace and graph search.
 
+**The cache tells you what it is absorbing, per view and per source.** Admin → Graph store
+now shows the hit ratio for each cached endpoint over the last two hours, named by what the
+user did rather than by its route, with a control to rebuild a source's cached views — one
+view or all of them. The ratio is `hit / (hit + miss + stale)`: a stale serve kept someone
+moving but the provider could not answer, so folding it in would make an outage read as a
+cache win, and a bypass (endpoint disabled, or Redis unreachable) is not a cache outcome at
+all and must not dilute the denominator. Counters are five-minute buckets written
+fire-and-forget on the coordination role — telemetry may never delay or fail a request.
+
 ### Changed
 
 **Graph indexes are declared in one place, with the query that justifies each one.**
@@ -415,7 +424,76 @@ exist, because the table has to keep agreeing with the totals above it.
 **The default Overview window is 14 days** rather than 30 — long enough that a quiet Tuesday
 does not swing the trend, short enough that "what changed" is still about now.
 
+**A view is cached for an hour, because freshness here is an event and not a clock.**
+`children`, `aggregated`, `top-level`, `layer-assignment` and both canvas endpoints move from
+900 s to 3600 s. Every write bumps the scope's generation, which changes the cache key, which
+invalidates instantly — so the TTL was never the freshness mechanism, only the backstop
+against drift the platform cannot see. Fifteen minutes made an unchanged graph re-pay the
+full provider cost four times an hour for identical bytes. The trace endpoints stay at 300 s:
+they are cursor-shaped and cheap to recompute.
+
+**One process in the fleet computes a cold key.** The in-process singleflight coalesced
+callers inside one worker; the fleet runs twelve, so a cold view still meant twelve identical
+computes arriving at one shard at the same moment — the moment it is least able to absorb
+them. The pod-leaders now elect one of themselves through the bus with a single `SET NX` on
+the cache role; the winner computes and the losers take its answer. Every part fails OPEN — no
+bus, a dead leader, an expired wait all end in "compute it yourself", which is exactly the
+prior behaviour. Deliberately on the cache role and not the coordination role: losing this key
+costs one duplicate compute, which is the definition of cache-role state.
+(`GRAPH_CACHE_CROSS_PROCESS_SINGLEFLIGHT`, `GRAPH_CACHE_LEADER_TTL_S`,
+`GRAPH_CACHE_LEADER_WAIT_S`.)
+
+**An expiry with no write since it is served from the mirror, not recomputed.** The
+last-known-good snapshot is now stamped with the generation it was taken at, and a miss asks
+for it at the *current* generation. A match means nothing has been written since, so a
+recompute would return identical bytes — it is promoted back under the primary key and served
+with no provider work at all. No match means a rebuild has landed, and it declines: serving it
+there would show users the pre-rebuild graph at exactly the moment they asked for the new one.
+Promoting never rewrites the mirror, so no answer can outlive `GRAPH_CACHE_LKG_TTL_S` from
+when it was actually computed, however many times it is promoted — that is the bound on drift
+nobody signalled. Mirrors written before the stamp existed have no generation to compare and
+are never promoted; they remain the outage fallback, where an out-of-date snapshot still beats
+an error. (`GRAPH_CACHE_PROMOTE_UNCHANGED`.)
+
+**The replica read-settle window is 10 seconds, down from 30.** It is a backstop behind
+`_replicas_in_step`, which measures the bytes a replica still owes the stream — a real
+freshness check. What the window has to cover is that check's own staleness, and the verdict
+is cached for five seconds, so the floor is one sample period and ten is two. Thirty was six,
+chosen before the in-step check existed to back it up, and this is the gate that decides
+whether the replicas do any work at all: every process that wrote to a graph sent ALL its
+reads of that graph to the master for the window's duration, so on an edit-heavy workload it
+quietly erased most of the read capacity the replicas exist to provide.
+
 ### Fixed
+
+- **The bigger the graph, the more completely it switched its own cache off.** A result was
+  read as degraded — and so given the 5-second negative TTL instead of the full one — whenever
+  it carried a `truncated` flag. But a cut the REQUEST determines (`max_nodes`, `degree_cap`,
+  `orphan`) is a pure function of graph and request: every anchor it ships is whole and the
+  cursor names exactly where the next page starts. That is THE answer to that request. So page
+  one of every wide focus and every capped aggregate was re-read on a five-second cycle, on
+  precisely the graphs where a read costs the most. Only a probe that gave up part way
+  (`degraded_detail`, an unprobed frontier) is degraded now.
+
+- **The urn→label cache was filled by a path that no longer ran.** It was populated only at
+  warmup; the read side, where the misses actually happen, never wrote to it. Every read
+  re-derived the label. Misses now schedule a warmup, and the cooldown is stamped BEFORE the
+  task is created so a burst of misses coalesces into one warm rather than one per miss.
+  (`FALKORDB_LABEL_WARMUP_COOLDOWN_S`.)
+
+- **A shed leader stranded every request waiting on it.** Followers attach to an in-flight
+  compute with `await asyncio.shield(existing)`, and shield means their own cancellation does
+  not end that await — so a future nobody resolves leaves every one of them hanging until its
+  request tier fires, 45 to 60 seconds later. Shedding is precisely when a key HAS followers,
+  because a cold-cache stampede is what the gate sheds. The future is now resolved on every
+  exception path before the raise.
+
+- **...and then the fix for that became a stampede.** Resolving the future let followers fall
+  through and compute their own copy — measured at nine computes for nine callers on one key.
+  `ProviderBusy` and `ProviderLoading` are flow control, not a failure to retry: recomputing
+  is exactly the load the shed refused. Followers now re-raise them and retry on their own
+  `Retry-After`, as the client already knows how to do, while a leader that failed for a
+  reason a retry might survive still lets them through.
 
 - **The drift check scanned every graph three times a minute, and the scans outlived the
   caller.** The aggregation scheduler fingerprints every scheduled source on a 60-second sweep,
@@ -681,6 +759,26 @@ and a fourth that requires the identifiers to be *present* in a privileged docum
 that cannot fail proves nothing.
 
 ### Upgrading
+
+**Full detail:** [`docs/RELEASE_NOTES_2026-09-11_serving-views-at-scale.md`](docs/RELEASE_NOTES_2026-09-11_serving-views-at-scale.md)
+— what was wrong at each layer, the value table, rollout order, what to look at to verify it,
+and the knob that turns each piece off.
+
+**Clear stale view-cache TTL overrides.** A ConfigMap value beats a new default silently.
+`GRAPH_CACHE_CHILDREN_TTL_S`, `GRAPH_CACHE_AGGREGATED_TTL_S`, `GRAPH_CACHE_TOP_LEVEL_TTL_S`,
+`GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S`, `GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S` and
+`GRAPH_CACHE_CANVAS_EXPAND_TTL_S` pinned at 900 keep the old behaviour with no log line
+saying so. Same for `FALKORDB_REPLICA_READ_SETTLE_S` pinned at 30.
+
+**An answer can now live up to `GRAPH_CACHE_LKG_TTL_S` (24 h) when nothing bumps the
+generation.** For a graph this platform owns that is exact — every write bumps it. For a graph
+written to from outside, the generation moves when the change is *noticed*: a
+`source-changed` signal from the loader, or the next drift check. Because the drift check now
+honours the schedule, on a daily source that window is up to a day, where a 15-minute TTL used
+to re-read within fifteen minutes regardless. Loaders that write FalkorDB directly should call
+`POST /aggregation/data-sources/{id}/source-changed` — that is what it is for. Where they
+cannot, lower `GRAPH_CACHE_LKG_TTL_S` rather than setting `GRAPH_CACHE_PROMOTE_UNCHANGED=0`,
+which also gives up the promotion on graphs we do own.
 
 - Migrations `20260909_1000_observed_tuning` (`data_source_state.observed_tuning`, what the
   last rebuild of a source learned under pressure) and `20260909_1100_job_live_overrides`
