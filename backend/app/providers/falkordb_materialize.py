@@ -268,6 +268,25 @@ def _write_batch_target_s() -> float:
     return _env_float("AGGREGATION_WRITE_BATCH_TARGET_S", 1.0, 0.1, 10.0)
 
 
+def _write_pacing_min_ratio() -> float:
+    """The pause after a write batch on a node with room to spare, as a
+    share of the batch's own duration.
+
+    ``AGGREGATION_WRITE_PACING_RATIO`` is what a rebuild pauses for when
+    the node is working; it is a CEILING on that pause, not a fixed cost.
+    A node with no fork in flight, every replica attached and in sync, and
+    a quarter of its container still free is not being protected by a
+    rebuild that idles half the time — it is just being made slow, and a
+    rebuild that never finishes protects nobody. So the governor's own
+    reading picks where in ``[this, writePacingRatio]`` the run sits, and
+    interactive reads still override both (they take the LARGER ratio).
+
+    0 means a roomy node is written to as fast as the batches come back —
+    the minimum gap is then the only spacing. Per job / Defaults as
+    ``writePacingMinRatio``."""
+    return _env_float("AGGREGATION_WRITE_PACING_MIN_RATIO", 0.25, 0.0, 10.0)
+
+
 def _write_min_gap_ms() -> int:
     """The floor under the pause between write batches. The pause is a share
     of the batch's own duration (``AGGREGATION_WRITE_PACING_RATIO``), so
@@ -279,6 +298,32 @@ def _write_min_gap_ms() -> int:
 #: The share of the batch target under which a batch counts as "healthy"
 #: for re-growing the batch — the old 0.8 s of a 2.0 s target.
 _GROW_BELOW_SHARE = 0.4
+
+#: Rows a rebuild writes per second when nothing has measured this source
+#: yet: the shipped shape (500-row batches, ~0.6 s each, paced 1:1) with a
+#: wide margin under it. Only ever used for the FIRST run's projection —
+#: every run measures its own rate and hands it to the next.
+_APPLY_ROWS_PER_S_DEFAULT = 300.0
+
+#: The share of a job's wall clock the apply phase may be projected to
+#: need before Auto stops choosing the full cube. The rest is extract,
+#: compute and reconcile, plus the room a projection from a single rate
+#: deserves.
+_APPLY_WALL_SHARE = 0.6
+
+#: How many ancestor closures one run keeps.
+#:
+#: A leaf's closure used to be evicted the moment it was computed, so that
+#: the memo could not grow with the LEAF count. On a sparse graph that costs
+#: nothing. On a densely connected one it is the run's dominant cost: a node
+#: that is an endpoint of ten thousand lineage edges has its ancestry walked
+#: ten thousand times, because the raw pairs are distinct even though the
+#: endpoints repeat. Keeping them bounded is the compromise — the first
+#: ``N`` nodes are remembered and everything past it behaves as before, so
+#: memory is capped whatever the graph looks like. At four ancestors a
+#: closure is a few hundred bytes; 400k of them is well inside the worker's
+#: own flush guard, which samples RSS and would flush before this mattered.
+_CLOSURE_MEMO_MAX = 400_000
 
 
 def _read_pressure_pacing_ratio() -> float:
@@ -450,21 +495,29 @@ def _max_materialized_edges() -> int:
 
 
 def _max_cube_edges() -> int:
-    """Ceiling on the AUTO-mode full-cube estimate — deliberately separate
-    from ``_max_materialized_edges``.
+    """An OPTIONAL appetite ceiling on the Auto-mode full cube.
 
-    Auto mode stores the full cube when its estimate fits, and the cube
-    scales as edges × depth² (observed: 1.17M edges → 5.6M pairs → OOM).
-    Sharing the write budget would mean raising that backstop silently
-    flipped auto into full-cube for nearly every real graph — turning
-    "Auto" into "Always full detail". This knob keeps the cube decision
-    pinned to what the owning SHARD can actually hold (~8M edges ≈ 4GB at
-    0.5KB/edge) while the write budget stays a runaway backstop. Keep it
-    strictly below ``_max_materialized_edges`` — a cube the write budget
-    would reject should never be selected in the first place (the run
-    warns when a Defaults value sits above an explicit ceiling). Fleet-wide
-    from the Defaults dialog as ``maxCubeEdges``; this is the env default."""
-    return _env_int("AGGREGATION_MAX_CUBE_EDGES", 8_000_000, 10_000, 50_000_000)
+    It used to default to 8M and was the thing that actually decided
+    whether a graph got full detail, because when it was written there was
+    nothing better: the cube scales as edges × depth² (observed: 1.17M
+    edges → 5.6M pairs → OOM) and no measurement stood between a large
+    graph and an OOM-killed node.
+
+    Two measurements do now. The WRITE BUDGET reads the owning shard —
+    used memory against maxmemory, RSS against the container, minus what
+    other rebuilds hold — so "will this cube fit" is answered by the node
+    rather than by a number chosen in advance; and the APPLY PROJECTION
+    (``_projected_apply_secs``) answers "will it land inside this job's
+    wall clock" from the rate this source actually writes at. A fixed cell
+    count answers neither question for any particular graph: 8M cells is
+    half an hour on a roomy node and a refusal on a full one.
+
+    So it defaults to its bound, which is to say it does not bind, and the
+    two measurements govern. An operator who wants a deliberate appetite
+    limit — "never store more than N cells for this fleet however much
+    room there is" — sets one, and Auto honours it. Fleet-wide from the
+    Defaults dialog as ``maxCubeEdges``."""
+    return _env_int("AGGREGATION_MAX_CUBE_EDGES", 50_000_000, 10_000, 50_000_000)
 
 
 def _budget_recheck_edges() -> int:
@@ -518,6 +571,7 @@ def env_tuning_defaults() -> Dict[str, Any]:
         "write_batch_max": _write_batch_max(),
         "write_batch_target_s": _write_batch_target_s(),
         "write_min_gap_ms": _write_min_gap_ms(),
+        "write_pacing_min_ratio": _write_pacing_min_ratio(),
     }
 
 
@@ -563,6 +617,7 @@ def resolve_effective_tuning(
     _num("write_batch_max", _write_batch_max, 10, 2_000, int)
     _num("write_batch_target_s", _write_batch_target_s, 0.1, 10.0, float)
     _num("write_min_gap_ms", _write_min_gap_ms, 0, 10_000, int)
+    _num("write_pacing_min_ratio", _write_pacing_min_ratio, 0.0, 10.0, float)
     _num("estimate_margin_pct", estimate_margin_pct_default, 0, 100, int)
     values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
 
@@ -960,6 +1015,15 @@ class AggregationPipeline:
         self._used_before: Optional[int] = None
         self._edges_before: int = 0
         self._calibration: Optional[Dict[str, Any]] = None
+        #: What the cube would cost in time, and why Auto stepped off it.
+        self._cube_projection: Optional[Dict[str, Any]] = None
+        #: The mode was settled without a counting pass, so the extract scan
+        #: counts the cube's upper bound as it goes (see the forced branch
+        #: of ``_decide_materialization_mode``).
+        self._estimate_in_extract = False
+        self._anc_memo: Dict[int, int] = {}
+        self._degraded_reason: str = ""
+        self._slow_cube_advisory: Optional[Dict[str, Any]] = None
         self._fresh_run: bool = True
         self._budget_rechecks: int = 0       # mid-apply shard re-reads this run
         # Per-job tuning overrides (frozen on the job row at trigger time)
@@ -1012,6 +1076,10 @@ class AggregationPipeline:
         # from their parents' cached closures and never stored. Reset
         # when the parent map reloads.
         self._closure_memo: Dict[int, Dict[int, int]] = {}
+        #: Each endpoint's CONTAINER ancestry, the input the boundary rule
+        #: actually consumes. Derived from the closure and far smaller, and
+        #: the one a dense graph asks for over and over.
+        self._rep_memo: Dict[int, Dict[int, int]] = {}
         # Containment depth per node (roots 0, child = 1 + max over
         # parents) — one int per touched node; feeds ranks, the
         # sourceDepth/targetDepth stamps and the auto-mode estimate.
@@ -1059,12 +1127,17 @@ class AggregationPipeline:
         self._write_batch_target_s = self._knob_float(
             "write_batch_target_s", _write_batch_target_s, 0.1, 10.0)
         self._write_min_gap_ms = self._knob_int("write_min_gap_ms", _write_min_gap_ms, 0, 10_000)
+        self._pacing_min_ratio = self._knob_float(
+            "write_pacing_min_ratio", _write_pacing_min_ratio, 0.0, 10.0)
+        self._roomy = False                  # the node had room at the last batch
+        self._full_speed_batches = 0         # batches written at the floor ratio
         self._pace = _PaceMeter()
         self._eased: Optional[str] = None
         self._eases: Dict[str, int] = {}
         self._holding: Optional[str] = None
         self._hb_accepts_pace: Optional[bool] = None
         self._phase_started = time.monotonic()
+        self._started_mono = time.monotonic()
         self._phase_timings: Dict[str, float] = {}
         # Shrink-on-pressure scan state (see _fetch_range): a per-query
         # timeout OR a per-query memory-ceiling refusal halves the effective
@@ -1640,9 +1713,50 @@ class AggregationPipeline:
             return "memory"
         return None
 
+    def _is_roomy(self, shard: ShardMemory) -> bool:
+        """True when the node has room to spare: measured, no fork, every
+        replica the run started with attached and barely behind, and a
+        quarter of the container still free.
+
+        This is the band the configured pacing ratio is NOT for. That ratio
+        is a ceiling on the pause — what a rebuild owes a node that is
+        working — and a node in this state is not being protected by a
+        rebuild that idles half the time, only slowed down. Interactive
+        reads are a separate signal and still override this: the read
+        pressure ratio is taken as the LARGER of the two."""
+        if shard.source != "measured" or shard.loading:
+            return False
+        if shard.fork_in_progress:
+            return False
+        attached = shard.connected_replicas
+        if (
+            self._expected_replicas
+            and attached is not None and attached < self._expected_replicas
+        ):
+            return False
+        lag = shard.replica_max_lag_bytes
+        if lag is not None and lag > replica_lag_hold_bytes(shard) // 8:
+            return False
+        headroom = container_headroom_bytes(shard, planning=False)
+        limit = shard.container_limit_bytes
+        if headroom is None or not limit:
+            return False
+        return headroom > limit // 4
+
     def _note_easing(self, shard: ShardMemory) -> None:
         """Halve the batch ceiling and double the pause while the node is
         nearing a hold line; back to the settings once the reading is."""
+        roomy = self._is_roomy(shard)
+        if roomy != self._roomy:
+            self._roomy = roomy
+            logger.info(
+                "aggregation pipeline on %s: %s",
+                self.p._graph_name,
+                f"{shard.endpoint} has room to spare — writing at the pacing "
+                f"floor ({self._pacing_min_ratio:g}x) until it does not"
+                if roomy else
+                "the node is working again — back to the configured pacing",
+            )
         reason = self._ease_reason(shard)
         if reason == self._eased:
             return
@@ -1670,6 +1784,7 @@ class AggregationPipeline:
         out = self._pace.snapshot()
         out["holding"] = self._holding or ""
         out["eased"] = self._eased or ""
+        out["roomy"] = 1 if self._roomy else 0
         shard = self._gov_reading
         if shard is not None and shard.source == "measured":
             if shard.replica_max_lag_bytes is not None:
@@ -2089,6 +2204,8 @@ class AggregationPipeline:
         advisories = self._conformance_advisories()
         if self._replication_advisory is not None:
             advisories = [*advisories, self._replication_advisory]
+        if self._slow_cube_advisory is not None:
+            advisories = [*advisories, self._slow_cube_advisory]
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -2188,12 +2305,19 @@ class AggregationPipeline:
                         or self._replica_waits or self._replica_holds
                         or self._outage_holds or self._node_restarts
                         or self._store_holds or self._eases
+                        or self._full_speed_batches
                     ) else {}
                 ),
                 # How the run wrote: batches, rows, the last batch's shape,
                 # the rolling duty cycle and rate. A record, not an
                 # adaptation — present on every run that wrote anything.
                 **({"pace": self._pace.snapshot()} if self._pace.batches else {}),
+                # What the full cube would have cost in time, and — when Auto
+                # stepped off it — which of the three gates said no.
+                **({"cube_projection": dict(self._cube_projection)}
+                   if self._cube_projection else {}),
+                **({"degraded_reason": self._degraded_reason}
+                   if self._degraded_reason else {}),
                 # The per-query ceiling the ladder narrows against, when the
                 # shard could say — always present, None when unknown.
                 "query_mem_capacity": self._query_mem_capacity,
@@ -2331,7 +2455,17 @@ class AggregationPipeline:
         # pressure raises the floor regardless. Interactive reads starving is
         # a fact about the shard, not a preference about this job, so a job
         # told not to pace itself still yields while users are being starved.
+        #
+        # The configured ratio is a CEILING on the pause, and the governor's
+        # own reading picks where in [floor, ratio] this batch sits: a node
+        # with no fork, its replicas in sync and a quarter of its container
+        # free is written to at the floor. A rebuild that never finishes
+        # protects nobody, and the three signals that mean "slow down" —
+        # the node, the replicas, the readers — all still apply below.
         ratio = self._live_pacing_ratio()
+        if self._roomy and self._pacing_min_ratio < ratio:
+            ratio = self._pacing_min_ratio
+            self._full_speed_batches += 1
         check = getattr(admission, "read_pressure", None)
         pressure = await check(self.p) if check is not None else None
         if pressure:
@@ -2769,6 +2903,9 @@ class AggregationPipeline:
         if self._eases:
             # How often the run eased off short of a hold, by reason.
             out["eases"] = dict(self._eases)
+        if self._full_speed_batches:
+            # Batches written at the pacing floor because the node had room.
+            out["full_speed_batches"] = self._full_speed_batches
         if self._store_holds:
             # Why the write side waited, how often and for how long — the
             # node's side of the story, by reason.
@@ -2979,6 +3116,7 @@ class AggregationPipeline:
         self._parents = parents
         # Closures/depths derive from the fresh parent map.
         self._closure_memo = {}
+        self._rep_memo = {}
         self._depth_memo = {}
         logger.info(
             "aggregation pipeline on %s: containment loaded — %d child→parent "
@@ -3001,6 +3139,12 @@ class AggregationPipeline:
         cap = self._pair_cap()
         base: Dict[int, int] = {}
 
+        # Counting the cube's upper bound HERE, when the mode was decided
+        # without a pre-compute pass, is what keeps a forced-cube source
+        # calibratable without reading every lineage edge twice.
+        counting = bool(self._estimate_in_extract)
+        anc_count = self._anc_count
+        estimate = 0
         for etype in self._effective_types:
             type_bit = self._type_bit[etype]
             safe = _sanitize_label(etype)
@@ -3008,6 +3152,8 @@ class AggregationPipeline:
                 for sid, tid in rows:
                     if sid is None or tid is None:
                         continue
+                    if counting:
+                        estimate += anc_count(int(sid)) * anc_count(int(tid))
                     key = _pack(int(sid), int(tid))
                     cur = base.get(key)
                     base[key] = (
@@ -3035,6 +3181,10 @@ class AggregationPipeline:
                     await self._rollup_base(base)
                     base = {}
 
+        if counting:
+            self._cube_estimate_upper = estimate
+            self._cube_estimate = self._corrected_estimate(estimate, self._cell_ratio())
+            self._note_cube_projection(self._cube_estimate, forced=True)
         self._progress_pct = 45
         self._mark_phase("compute_s")
         await self._checkpoint(
@@ -3148,15 +3298,51 @@ class AggregationPipeline:
         await self._maybe_overflow_flush()
 
     def _closure(self, node: int) -> Dict[int, int]:
-        """Ancestors-or-self → containment depth for ``node``. Container
-        closures are memoized (every strict ancestor is a containment
-        parent, so the memo is bounded by container count); a leaf's own
-        entry is evicted after the call so leaf-count never inflates it."""
-        struct = self._struct_parents or set()
+        """Ancestors-or-self → containment depth for ``node``.
+
+        Container closures are always memoized (every strict ancestor is a
+        containment parent, so that part is bounded by container count).
+        A LEAF's entry used to be evicted the moment it was computed, which
+        keeps the memo free of leaf count and makes a densely connected
+        graph quadratic in walks: an endpoint shared by ten thousand
+        lineage edges was walked ten thousand times. Leaves are now kept
+        too, up to :data:`_CLOSURE_MEMO_MAX`; past the bound the old
+        eviction resumes, so memory is capped on any graph."""
         closure = ancestor_closure(self._parents, node, memo=self._closure_memo)
-        if node not in struct:
-            self._closure_memo.pop(node, None)
+        if len(self._closure_memo) > _CLOSURE_MEMO_MAX:
+            struct = self._struct_parents or set()
+            if node not in struct:
+                self._closure_memo.pop(node, None)
         return closure
+
+    def _anc_count(self, node: int) -> int:
+        """Upper bound on |ancestors-or-self| over the containment DAG:
+        1 + Σ over parents. Exact on single-parent chains; diamonds
+        overcount shared ancestors, which only PUSHES the estimate up —
+        auto can still never pick a cube that exceeds the budget, and an
+        int-per-node memo keeps the counting linear wherever it happens."""
+        memo = self._anc_memo
+        hit = memo.get(node)
+        if hit is not None:
+            return hit
+        parents = self._parents
+        stack: List[int] = [node]
+        while stack:
+            cur = stack[-1]
+            if cur in memo:
+                stack.pop()
+                continue
+            pending = [
+                p for p in parents.get(cur, ()) if p != cur and p not in memo
+            ]
+            if pending:
+                stack.extend(pending)
+                continue
+            memo[cur] = 1 + sum(
+                memo[p] for p in parents.get(cur, ()) if p != cur
+            )
+            stack.pop()
+        return memo[node]
 
     def _depth_of(self, node: int) -> int:
         """Containment depth of ANY node (roots and uncontained nodes 0,
@@ -3191,11 +3377,21 @@ class AggregationPipeline:
         """Non-leaf ancestors-or-self of ``node`` with containment depths
         — one side's input to the shared ``boundary_pairs`` rule. Leaf
         endpoints contribute their full container ancestry (the closure
-        walks through leaf-only gaps); isolated leaves yield {}."""
+        walks through leaf-only gaps); isolated leaves yield {}.
+
+        Memoized per node, bounded like the closure memo: this is what a
+        dense graph asks for once per raw pair, and it is the same answer
+        every time. The returned mapping is READ-ONLY — the rule only ever
+        reads it, and handing out the memo's own dict is what makes the
+        repeat lookups free."""
+        hit = self._rep_memo.get(node)
+        if hit is not None:
+            return hit
         struct = self._struct_parents or set()
-        return {
-            a: d for a, d in self._closure(node).items() if a in struct
-        }
+        reps = {a: d for a, d in self._closure(node).items() if a in struct}
+        if len(self._rep_memo) <= _CLOSURE_MEMO_MAX:
+            self._rep_memo[node] = reps
+        return reps
 
     async def _merge_canonical_pairs(self, base: Dict[int, int]) -> None:
         """Boundary-mode rollup: canonical depth-bridged pairs per raw
@@ -3251,6 +3447,40 @@ class AggregationPipeline:
                 self.p._graph_name, exc,
             )
         return int(time.time() * 1000)
+
+    def _apply_rate(self) -> Tuple[float, str]:
+        """Rows per second this run's apply lands at, and where the figure
+        came from: what THIS run has measured so far, else what the last
+        run of this source measured, else the shipped default."""
+        pace = self._pace.snapshot()
+        measured = pace.get("rows_per_s")
+        if isinstance(measured, (int, float)) and measured > 0:
+            return float(measured), "measured"
+        hint = self._capacity_hints.get("apply_rows_per_s_observed")
+        try:
+            if hint and float(hint) > 0:
+                return float(hint), "last run"
+        except (TypeError, ValueError):
+            pass
+        return _APPLY_ROWS_PER_S_DEFAULT, "default"
+
+    def _projected_apply_secs(self, cells: int) -> Tuple[float, str]:
+        """How long writing ``cells`` rows would take at the rate above.
+
+        This is the question a cell COUNT cannot answer and the one that
+        decides whether a rebuild is useful: a cube that fits the shard
+        perfectly well and needs nine hours to land is a job that gets
+        cancelled, retried, and cancelled again. Every batch of it is safe;
+        the run is still a failure."""
+        rate, source = self._apply_rate()
+        return max(0.0, cells) / max(1.0, rate), source
+
+    def _apply_wall_budget_s(self) -> float:
+        """Seconds of this job's wall clock the apply may be projected to
+        use: the share of the window that is not already spent."""
+        wall = float(self._knob_int("max_wall_secs", _max_wall_secs, 3_600, 604_800))
+        spent = max(0.0, time.monotonic() - self._started_mono)
+        return max(60.0, (wall - spent) * _APPLY_WALL_SHARE)
 
     def _pair_cap(self) -> int:
         return self._knob_int("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000)
@@ -3499,6 +3729,12 @@ class AggregationPipeline:
             {"bytes_per_edge_observed": observed, "calibration": "measured"}
             if observed is not None else {"calibration": "skipped_small_growth"}
         )
+        # The rate this run actually wrote at, for the next run's projection.
+        # Measured on every run that wrote anything — unlike the pressure
+        # lessons, which are only meaningful when there WAS pressure.
+        rate = self._pace.snapshot().get("rows_per_s")
+        if isinstance(rate, (int, float)) and rate > 0:
+            self._calibration["apply_rows_per_s_observed"] = round(float(rate), 1)
 
     def _memory_pressure(self) -> bool:
         """True when the worker's RSS is at or over the flush share of its
@@ -3609,6 +3845,46 @@ class AggregationPipeline:
             return None
         return value
 
+    def _note_cube_projection(self, cells: int, *, forced: bool) -> None:
+        """Record what writing ``cells`` would cost in time, and — on a
+        FORCED cube that cannot land inside the job's wall clock — say so.
+
+        Never a refusal: an operator asked for the full cube and the shard
+        may well hold it. But a run that cannot finish inside its own wall
+        clock is a run that gets killed part-way and retried from its
+        checkpoint forever, and nothing downstream said so."""
+        needed_s, rate_src = self._projected_apply_secs(cells)
+        wall_budget = self._apply_wall_budget_s()
+        self._cube_projection = {
+            "cells": int(cells), "seconds": round(needed_s),
+            "wall_budget_s": round(wall_budget), "rate": rate_src,
+        }
+        if not forced or needed_s <= wall_budget:
+            return
+        self._slow_cube_advisory = {
+            "kind": "cube_slower_than_wall_clock",
+            "severity": "warning",
+            "estimated_cells": int(cells),
+            "projected_apply_secs": round(needed_s),
+            "wall_budget_secs": round(wall_budget),
+            "rate_source": rate_src,
+            "message": (
+                f"The full cube for this source is ~{cells:,} cells, which at the "
+                f"{rate_src} write rate needs about {needed_s / 3600:.1f} hours to "
+                f"land — more than the ~{wall_budget / 3600:.1f} hours this job's "
+                f"wall clock leaves for the apply. The run keeps its checkpoint and "
+                f"resumes, so it will finish eventually, but to finish in ONE run "
+                f"either raise Max wall clock, lower Write pacing ratio (or its "
+                f"floor) so the node is written to faster, or set Rollup storage to "
+                f"Auto, which stores the depth-diagonal at this size and serves the "
+                f"rest on demand."
+            ),
+        }
+        logger.warning(
+            "aggregation pipeline on %s: %s",
+            self.p._graph_name, self._slow_cube_advisory["message"],
+        )
+
     def _corrected_estimate(self, upper: int, ratio: Optional[float]) -> int:
         """The upper bound scaled by what this source actually stores.
 
@@ -3651,6 +3927,7 @@ class AggregationPipeline:
         self._struct_parents = {
             p for ps in self._parents.values() for p in ps
         }
+        self._rep_memo = {}        # rep sets are defined against this set
         if not self._struct_parents and self._containment:
             # Containment types are DECLARED but matched zero edges. If
             # the graph holds rollup cells, EITHER mode would recompute a
@@ -3669,6 +3946,8 @@ class AggregationPipeline:
                     "stored container cell as stale. Check the ontology's "
                     "containment types / source aliases / casing."
                 )
+        self._anc_memo = {}
+        anc_count = self._anc_count
         mode = self._fine_mode()
         if not self._struct_parents:
             # No containment at all: the lattice degenerates to the leaf
@@ -3683,36 +3962,32 @@ class AggregationPipeline:
         # now pays the same counting scan Auto does, so a cube the owning
         # shard cannot take is refused BEFORE compute and before any write.
         forced = mode == "true"
-        parents = self._parents
-        cnt_memo: Dict[int, int] = {}
 
-        def anc_count(node: int) -> int:
-            """Upper bound on |ancestors-or-self| over the containment DAG:
-            1 + Σ over parents. Exact on single-parent chains; diamonds
-            overcount shared ancestors, which only PUSHES the estimate up —
-            auto can still never pick a cube that exceeds the budget, and
-            an int-per-node memo keeps the counting scan linear."""
-            hit = cnt_memo.get(node)
-            if hit is not None:
-                return hit
-            stack: List[int] = [node]
-            while stack:
-                cur = stack[-1]
-                if cur in cnt_memo:
-                    stack.pop()
-                    continue
-                pending = [
-                    p for p in parents.get(cur, ())
-                    if p != cur and p not in cnt_memo
-                ]
-                if pending:
-                    stack.extend(pending)
-                    continue
-                cnt_memo[cur] = 1 + sum(
-                    cnt_memo[p] for p in parents.get(cur, ()) if p != cur
-                )
-                stack.pop()
-            return cnt_memo[node]
+        if forced and self._cell_ratio() is None:
+            # The estimate has two jobs: refuse before the compute, and
+            # MEASURE the cell ratio this source stores per cell counted, so
+            # that every later run can refuse on it. Forced full detail with
+            # no ratio yet cannot do the first — an upper bound that may be
+            # fifty times too high proves nothing by failing — but it must
+            # still do the second, or the source stays uncalibrated forever
+            # and no run ever refuses early.
+            #
+            # So the counting pass is not skipped, it is MOVED: the real
+            # extract scan already visits every lineage edge, and counting
+            # there costs two memoized dict lookups per edge instead of a
+            # second full read of the store. On a 500k-edge graph that is
+            # the difference between one pass and two.
+            self._cube_mode = True
+            self._estimate_in_extract = True
+            logger.info(
+                "aggregation pipeline on %s: forced full cube and no measured "
+                "cell ratio yet — the pre-compute counting scan cannot refuse, "
+                "so the estimate is counted during the extract scan instead of "
+                "in a second pass over the same edges. The exact check after "
+                "compute still refuses before any write if it must.",
+                self.p._graph_name,
+            )
+            return
 
         from backend.app.providers.falkordb_provider import _sanitize_label
         estimate = 0
@@ -3743,14 +4018,14 @@ class AggregationPipeline:
         )
         if forced:
             self._cube_mode = True
-            # An UNCALIBRATED estimate may not refuse. The upper bound only
-            # ever supports one conclusion — if it fits, the real thing fits —
-            # and "it does not fit" proves nothing at all about a number that
-            # can be fifty times too high. Proceed and let the exact
-            # post-compute check refuse, which it does before a single write
-            # reaches the shard. Under-estimating is the safe direction
-            # precisely because that gate is there and is exact.
-            if not verdict.ok and ratio is not None:
+            self._note_cube_projection(estimate, forced=True)
+            # Reachable only with a measured cell ratio: an UNCALIBRATED
+            # estimate may not refuse (the upper bound supports one
+            # conclusion only — if it fits, the real thing fits — and "it
+            # does not fit" proves nothing about a number that can be fifty
+            # times too high), and that case returned above without paying
+            # for the scan at all.
+            if not verdict.ok:
                 raise MaterializationBudgetExceeded(format_refusal(
                     budget, verdict, graph=self.p._graph_name,
                     composition=(
@@ -3760,16 +4035,6 @@ class AggregationPipeline:
                     ),
                     from_estimate=True, margin_pct=margin,
                 ))
-            if not verdict.ok:
-                logger.info(
-                    "aggregation pipeline on %s: forced full cube — the upper "
-                    "bound (~%d cells) does not fit, but this source has no "
-                    "measured cell ratio yet, and the bound counts cells "
-                    "PRODUCED rather than STORED. Proceeding; the exact check "
-                    "after compute refuses before any write if it must.",
-                    self.p._graph_name, self._cube_estimate_upper,
-                )
-                return
             logger.info(
                 "aggregation pipeline on %s: forced full cube — estimate ~%d "
                 "cells (upper bound %d%s); the %s rule allows it.",
@@ -3791,20 +4056,45 @@ class AggregationPipeline:
                 "pick could be refused by the budget; keep maxCubeEdges below it.",
                 self.p._graph_name, cap, ceiling,
             )
-        # Uncalibrated, an over-large upper bound must not push Auto off the
-        # cube either: that trades a graph's full detail for the degraded
-        # depth-diagonal on the same inflated arithmetic.
-        self._cube_mode = estimate <= cap and (verdict.ok or ratio is None)
-        logger.info(
-            "aggregation pipeline on %s: auto mode — full-cube estimate "
-            "~%d cells vs cube ceiling %d (%s rule: %s) → %s.",
-            self.p._graph_name, estimate, cap, budget.governed_by,
-            "fits" if verdict.ok else "does not fit",
-            "FULL CUBE (every ancestor combination stored)"
-            if self._cube_mode else
-            "structural depth-diagonal (cube exceeds ceiling or budget; mixed "
-            "granularities served on demand)",
+        # Three gates, and only the first two are measurements of anything.
+        #
+        #  * the shard: can it hold the cube (the write budget's verdict).
+        #    Uncalibrated, an over-large upper bound must not push Auto off
+        #    the cube — that trades a graph's full detail for the degraded
+        #    depth-diagonal on arithmetic that can be fifty times too high.
+        #  * the clock: can the apply land inside this job's wall clock at
+        #    the rate this source writes at. A cube the shard can hold and
+        #    the job cannot finish is a rebuild that gets cancelled and
+        #    retried forever, which serves nobody the full detail either.
+        #  * the operator's appetite ceiling, which by default does not bind.
+        needed_s, rate_src = self._projected_apply_secs(estimate)
+        wall_budget = self._apply_wall_budget_s()
+        fits_clock = needed_s <= wall_budget
+        self._cube_projection = {
+            "cells": int(estimate), "seconds": round(needed_s),
+            "wall_budget_s": round(wall_budget), "rate": rate_src,
+        }
+        self._cube_mode = (
+            (verdict.ok or ratio is None) and fits_clock and estimate <= cap
         )
+        why = (
+            "the shard cannot hold it" if not (verdict.ok or ratio is None)
+            else f"it needs ~{needed_s / 3600:.1f}h to write and the job allows "
+                 f"~{wall_budget / 3600:.1f}h" if not fits_clock
+            else f"it exceeds the appetite ceiling {cap:,}" if estimate > cap
+            else ""
+        )
+        logger.info(
+            "aggregation pipeline on %s: auto mode — full-cube estimate ~%d "
+            "cells, ~%.0f min to write at the %s rate (%s rule: %s) → %s%s.",
+            self.p._graph_name, estimate, needed_s / 60, rate_src,
+            budget.governed_by, "fits" if verdict.ok else "does not fit",
+            "FULL CUBE (every ancestor combination stored)"
+            if self._cube_mode else "structural depth-diagonal",
+            "" if self._cube_mode else f" — {why}; mixed granularities served on demand",
+        )
+        if not self._cube_mode:
+            self._degraded_reason = why
 
     async def _load_nonleaf_ids(self) -> None:
         """Build the structural boundary from the containment parent map:

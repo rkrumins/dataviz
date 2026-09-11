@@ -22,6 +22,7 @@ recovering on its own, and the run stops for a person with its checkpoint.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import types
 
@@ -511,3 +512,79 @@ def test_a_slow_acknowledgement_paces_the_run_but_does_not_shrink_the_batch_on_t
     assert sleeps[-1] == pytest.approx(0.1, abs=0.02)  # the pause: the master's ~0 s × ratio, floored at the gap
     last = pipe._pace.snapshot()
     assert last["ack_s"] == pytest.approx(4.0, abs=0.05) and last["batch_s"] < 0.05
+
+
+# ── the node with room to spare ──────────────────────────────────────────
+
+
+def test_a_node_with_room_to_spare_is_written_to_at_the_pacing_floor(sleeps, monkeypatch):
+    """The configured ratio is a CEILING on the pause, not a fixed cost. A
+    node with no fork, its replicas in sync and a quarter of its container
+    free is not being protected by a rebuild that idles half the time — it
+    is only being made slow, and a rebuild that never finishes protects
+    nobody."""
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(56 * GB))
+    monkeypatch.setattr(mat, "time", _Clock(step=0.5))
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._pacing_ratio = 1.0
+    pipe._pacing_min_ratio = 0.25
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._roomy is True and pipe._full_speed_batches == 1
+    assert sleeps[-1] == pytest.approx(0.125)          # 0.5 s batch x 0.25
+    assert pipe._pace.snapshot()["ratio"] == 0.25
+    assert pipe._adapted_snapshot()["full_speed_batches"] == 1
+
+
+def test_a_node_that_is_working_gets_the_configured_pause(sleeps, monkeypatch):
+    """Two thirds of the container held: not a hold, not an easing, but not
+    room to spare either — the configured ratio applies."""
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(56 * GB))
+    monkeypatch.setattr(mat, "time", _Clock(step=0.5))
+    pipe = _pipeline(_Conn(_picture(used_memory_rss=str(37 * GB))))
+    pipe._pacing_ratio = 1.0
+    pipe._pacing_min_ratio = 0.25
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._roomy is False and pipe._full_speed_batches == 0
+    assert sleeps[-1] == pytest.approx(0.5)
+
+
+def test_replicas_behind_or_a_fork_take_the_node_out_of_the_roomy_band(monkeypatch):
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(56 * GB))
+    pipe = _pipeline(_Conn(_picture()))
+    roomy = _run(pipe._governor_reading())
+    assert pipe._is_roomy(roomy) is True
+    assert pipe._is_roomy(dataclasses.replace(roomy, bgsave_in_progress=True)) is False
+    assert pipe._is_roomy(dataclasses.replace(roomy, replica_max_lag_bytes=200 * 1024 ** 2)) is False
+    pipe._expected_replicas = 2
+    assert pipe._is_roomy(dataclasses.replace(roomy, connected_replicas=1)) is False
+    assert pipe._is_roomy(dataclasses.replace(roomy, source="unavailable")) is False
+
+
+def test_starving_readers_still_override_the_floor(sleeps, monkeypatch):
+    """The one signal that is about the users rather than the node: it takes
+    the LARGER ratio, so a roomy node still yields while reads starve."""
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(56 * GB))
+    monkeypatch.setattr(mat, "time", _Clock(step=0.5))
+
+    class _Admission:
+        def write_slot(self, provider):
+            class _Slot:
+                async def __aenter__(self_):
+                    return self_
+
+                async def __aexit__(self_, *exc):
+                    return False
+
+            return _Slot()
+
+        async def read_pressure(self, provider):
+            return "queue_full"
+
+    pipe = _pipeline(_Conn(_picture()))
+    pipe.p._admission_controller = _Admission()
+    pipe._pacing_ratio = 1.0
+    pipe._pacing_min_ratio = 0.25
+    pipe._read_pressure_pacing_ratio = 4.0
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._roomy is True                     # the node is fine …
+    assert sleeps[-1] == pytest.approx(2.0)        # … and the readers are not

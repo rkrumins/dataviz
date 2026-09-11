@@ -26,6 +26,37 @@ budget counts the container too, and the deployment guide's sizing rule now coun
 replication buffers. The run record keeps every hold by reason, and the run settings panel
 says so.
 
+**Densely connected graphs aggregate, and full detail is never truncated.**
+Half a million lineage edges over a few thousand containers used to be the
+pathological case, for three reasons that were not about the graph store. A
+leaf's ancestor closure was evicted from the memo the moment it was computed,
+so an endpoint shared by ten thousand edges had its ancestry walked ten thousand
+times; closures and container rep-sets are now kept, bounded, and the walk is
+paid once per node. Forced full detail with no measured cell ratio read every
+lineage edge a second time for an estimate it was not allowed to act on; the
+count now happens during the real extract scan, so the source still calibrates
+and the store is read once. And `maxCubeEdges` — an 8M cell count chosen before
+any of the measurement existed — was what actually decided whether a graph got
+full detail; it now defaults to its bound and does not bind, while Auto stores
+the full cube for as long as the write budget says the shard can hold it and the
+apply projection (estimated cells over the rate this source measured last run)
+says the job can finish writing it. Only Auto ever degrades, and only to the
+depth-diagonal with the rest served on demand: forced full detail stores every
+ancestor combination at any depth and any size, and a cube too large for one
+wall clock converges across runs from its checkpoint rather than being
+truncated. The run says so up front, with the projected hours and the three ways
+to make it one run.
+
+**The pacing ratio became a ceiling, not a fixed cost.** A rebuild that idles
+half the time on a node with no fork in flight, every replica attached and in
+sync, and a quarter of its container free is not protecting anyone — it is
+just slow, and a rebuild that never finishes protects nobody. The governor now
+reads the node before every batch anyway, so that reading picks where between
+`writePacingMinRatio` (0.25) and `writePacingRatio` (1.0) the pause sits.
+Starving readers still override both, the batch size — the stall a reader
+actually waits for — is unchanged, and a node that is working still gets the
+full configured pause.
+
 **Steady load: smaller, settled write batches, tunable and visible.** A write batch holds
 the graph's write lock from its first change to its end, so one batch is the longest stall
 every reader of that graph sees. The batch ceiling (`writeBatchMax`, 500 rows) and the batch

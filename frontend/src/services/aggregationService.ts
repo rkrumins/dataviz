@@ -20,6 +20,8 @@ export interface AggregationTuning {
   writeBatchMax?: number | null;
   writeBatchTargetS?: number | null;
   writeMinGapMs?: number | null;
+  /** The pause on a node with room to spare; writePacingRatio is the ceiling. 0 .. 10 */
+  writePacingMinRatio?: number | null;
   extractConcurrency?: number | null;  // 1 .. 4
   /** Share of the worker's memory limit at which the pipeline flushes early (fleet-wide). 30 .. 90 */
   flushMemPct?: number | null;
@@ -241,6 +243,7 @@ export interface EffectiveTuningSnapshot {
   write_batch_max?: number;
   write_batch_target_s?: number;
   write_min_gap_ms?: number;
+  write_pacing_min_ratio?: number;
   materialize_leaf_pairs?: boolean;
   materialize_fine_pairs?: 'auto' | 'true' | 'false' | string;
   max_materialized_edges?: number | null;
@@ -313,6 +316,8 @@ export interface AdaptedRunState {
   store_hold_last?: { kind: string; held_s: number; detail: string };
   /** How often the run eased off short of a hold, by reason (replica_lag, memory). */
   eases?: Record<string, number>;
+  /** Batches written at the pacing floor because the node had room to spare. */
+  full_speed_batches?: number;
   pressure?: PressureEvent[];
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */
@@ -344,6 +349,19 @@ export interface PaceRecord {
   rows_per_s?: number;
 }
 
+/**
+ * What the full cube would have cost this run in TIME, and — when Auto
+ * chose the depth-diagonal instead — which gate said no. `rate` says where
+ * the figure came from: this run's own measurement, the last run's, or the
+ * shipped default on a source nothing has measured yet.
+ */
+export interface CubeProjection {
+  cells?: number;
+  seconds?: number;
+  wall_budget_s?: number;
+  rate?: 'measured' | 'last run' | 'default' | string;
+}
+
 export interface AggregationRunStats {
   extract_s?: number;
   compute_s?: number;
@@ -367,6 +385,8 @@ export interface AggregationRunStats {
   effective_tuning?: EffectiveTuningSnapshot;
   adapted?: AdaptedRunState;
   pace?: PaceRecord;
+  cube_projection?: CubeProjection;
+  degraded_reason?: string;
   advisories?: Array<{ kind: string; severity?: string; message: string }>;
   pairs_by_level?: Record<string, number>;
   [key: string]: unknown;
@@ -507,6 +527,7 @@ export interface EnvTuningDefaults {
   writeBatchMax?: number | null;
   writeBatchTargetS?: number | null;
   writeMinGapMs?: number | null;
+  writePacingMinRatio?: number | null;
   /** Information only: pairs the accumulator must hold before a memory-aware flush fires. */
   flushMinPairs?: number | null;
 }

@@ -16,6 +16,7 @@
 tests/test_additive_migrations_mirror.py
 tests/test_aggregated_read_budget.py
 tests/test_aggregation_admission.py
+tests/test_aggregation_at_scale.py
 tests/test_aggregation_capacity.py
 tests/test_aggregation_capacity_hints.py
 tests/test_aggregation_exec_lock.py

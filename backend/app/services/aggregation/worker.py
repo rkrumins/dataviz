@@ -169,7 +169,7 @@ def _merge_run_doc(existing: Any, incoming: Any) -> dict:
 _FINGERPRINT_BUDGET_S = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
 
 _LEARNED_KEYS = ("scan_width", "extract_concurrency", "reconcile_strategy",
-                 "write_batch", "delete_chunk")
+                 "write_batch", "delete_chunk", "apply_rows_per_s")
 
 
 def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
@@ -183,10 +183,21 @@ def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     raise)."""
     if not isinstance(run_stats, dict):
         return {}
+    out: dict = {}
+    # The rate this run wrote at is a MEASUREMENT, not a lesson learned
+    # under pressure: it is carried on every run that wrote anything, and
+    # it is what the next run projects the cube's apply time from. The
+    # pressure keys below keep their clear-on-a-clean-run contract.
+    rate = run_stats.get("apply_rows_per_s_observed")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
+        out["apply_rows_per_s"] = float(rate)
     adapted = run_stats.get("adapted")
     if not isinstance(adapted, dict) or not adapted.get("pressure"):
-        return {}
-    out: dict = {}
+        if out:
+            out["observed_at"] = _now()
+            if job_id:
+                out["job_id"] = job_id
+        return out
     if adapted.get("scan_width_min"):
         out["scan_width"] = int(adapted["scan_width_min"])
     if adapted.get("extract_concurrency") == 1:

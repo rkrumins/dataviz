@@ -281,6 +281,9 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     p._pace = mat._PaceMeter()
     p._eased = None
     p._eases = {}
+    p._pacing_min_ratio = 0.25
+    p._roomy = False
+    p._full_speed_batches = 0
     return p
 
 

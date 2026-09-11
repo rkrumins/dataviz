@@ -144,6 +144,14 @@ class AggregationTuning(BaseModel):
         description="Floor under the pause between write batches, ms (default "
                     "100), so fast small batches never run back to back.",
     )
+    write_pacing_min_ratio: Optional[float] = Field(
+        None, alias="writePacingMinRatio", ge=0.0, le=10.0,
+        description="Sleep-after-write ratio on a node with room to spare "
+                    "(default 0.25): no fork, replicas in sync, a quarter of "
+                    "the container free. The pacing ratio is the ceiling; the "
+                    "governor's reading picks between the two, and starving "
+                    "readers still override both.",
+    )
     extract_concurrency: Optional[int] = Field(
         None, alias="extractConcurrency", ge=1, le=4,
         description="Concurrent read-only range scans during extract/reconcile.",
@@ -1243,6 +1251,7 @@ class EnvTuningDefaults(BaseModel):
     write_batch_max: Optional[int] = Field(None, alias="writeBatchMax")
     write_batch_target_s: Optional[float] = Field(None, alias="writeBatchTargetS")
     write_min_gap_ms: Optional[int] = Field(None, alias="writeMinGapMs")
+    write_pacing_min_ratio: Optional[float] = Field(None, alias="writePacingMinRatio")
     budget_recheck_edges: Optional[int] = Field(None, alias="budgetRecheckEdges")
     # Information only (env-only): how many backoff retries a narrowest
     # scan gets before an outage is declared, the width at which RECONCILE

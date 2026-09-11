@@ -241,7 +241,7 @@ def test_settings_report_the_live_env_default_of_every_knob(monkeypatch):
         env = res.env_tuning_defaults
         assert env is not None
         assert env.shard_reserve_pct == 35 and env.scan_range_width == 123456
-        assert env.bytes_per_edge == 512 and env.max_cube_edges == 8_000_000
+        assert env.bytes_per_edge == 512 and env.max_cube_edges == 50_000_000
         assert env.materialize_fine_pairs in ("auto", "true", "false")
         # Every settable knob has its default on the wire, under its own name.
         for key in AggregationTuning.model_fields:
@@ -310,11 +310,16 @@ def test_pipeline_defaults_clear_the_large_graph_target(monkeypatch):
     # ~70% of the reference cluster's ~18GB per-shard headroom — covering a
     # graph 6-8x the 1M/2M floor, which is a minimum rather than a ceiling.
     assert mat._max_materialized_edges() == 25_000_000
-    # Separate from the write budget on purpose — see
-    # test_auto_mode_cube_ceiling_is_independent_of_write_budget.
-    assert mat._max_cube_edges() == 8_000_000
-    # A cube the write budget would reject must never be selected.
-    assert mat._max_cube_edges() < mat._max_materialized_edges()
+    # An OPTIONAL appetite ceiling, defaulting to its bound so it does not
+    # bind. It used to default to 8M and was the thing that actually decided
+    # whether a graph got full detail, because when it was written nothing
+    # measured anything. Two measurements do that now: the write budget (can
+    # the owning shard hold the cube) and the apply projection (can this
+    # job's wall clock finish writing it, at the rate the source measured
+    # last run). A fixed cell count answers neither question for any
+    # particular graph — 8M cells is half an hour on a roomy node and a
+    # refusal on a full one.
+    assert mat._max_cube_edges() == 50_000_000
     # Rollup storage ships as FULL DETAIL: every ancestor combination is
     # pre-created, so no canvas granularity can come back thin — including on
     # self-nesting types, where boundary mode's on-demand reader still reasons

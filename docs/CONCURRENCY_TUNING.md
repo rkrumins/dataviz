@@ -469,7 +469,7 @@ the rebuild and much cheaper for readers.** That is the whole argument for
 | 2 | **Ease** | derived from the same reading | Replicas half way to the drop limit, or the container's fork line within an eighth of the limit: half the batch ceiling, twice the pause, until the reading is back. The graded response that keeps 1 from being needed. |
 | 3 | **Size** | `writeBatchMax` (500), `writeBatchTargetS` (1.0 s) | AIMD against the target: a batch that ran longer halves the next; five in a row under two fifths of it grow it by 100, never past the ceiling. After any hold, the next batch is half. |
 | 4 | **Settle** | `replicaAckMin`, `replicaAckTimeoutMs` | The batch is done only when the query has returned AND the replicas have acknowledged it. The sizer judges the batch by the master's time or the wait, whichever was longer — never the sum, which would shrink batches behind a replica that is merely behind and starve the run; the pause is drawn on the master's time alone. |
-| 5 | **Pause** | `writePacingRatio` (1.0), `writeMinGapMs` (100), `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0) | `duration × ratio`, never below the minimum gap, never above 30 s; stretched to the read-pressure ratio while the web tier reports readers starving, doubled while eased. |
+| 5 | **Pause** | `writePacingRatio` (1.0) as a CEILING, `writePacingMinRatio` (0.25) as the floor, `writeMinGapMs` (100), `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0) | `duration × ratio`, never below the minimum gap, never above 30 s. The governor's own reading picks where between floor and ceiling: a node with no fork, its replicas in sync and a quarter of its container free is written to at the floor. Stretched to the read-pressure ratio while the web tier reports readers starving (it takes the LARGER, so readers always win), doubled while eased. |
 
 Across jobs: the per-endpoint write slots (`FALKORDB_ENDPOINT_WRITE_SLOTS`, 2)
 bound how many rebuilds write to one node at once, and the per-node reservation
@@ -489,21 +489,61 @@ job halves `writeBatchMax` live; the sizer re-grows only toward the new ceiling.
 
 ### How long a rebuild takes, and why "too gentle" never finishes
 
-On a healthy node the sizer sits at the ceiling and throughput is
-`writeBatchMax ÷ (batch_s × (1 + writePacingRatio))` rows per second — 500 rows
-taking 0.3 s at ratio 1.0 is ~830 rows/s, so a two-million-edge cube lands in
-about forty minutes; at ratio 0.25 (Performance) in about twenty. What turns
-that into a day is a batch that stays SMALL while it stays SLOW: the sizer
-halving on a signal that smaller batches cannot improve. Three such signals
-used to reach it and no longer do — the replicas' acknowledgement wait (now a
-rate, imposed by the wait itself, never a reason to shrink), a governor hold
+Throughput is `batch_rows ÷ (batch_s × (1 + ratio))`. On a node with room to
+spare the sizer sits at `writeBatchMax` and the ratio is the FLOOR, so 500 rows
+taking 0.3 s at 0.25 is ~1,300 rows/s: a two-million-cell cube lands in about
+twenty-five minutes, an eight-million-cell one in about an hour and forty. On a
+node that is working, the ratio is the configured 1.0 and the same batches give
+~830 rows/s. Both are the pipeline going as fast as the node's own reading says
+is safe, which is the point: the ceiling applies when the node needs it.
+
+What turns that into a day is a batch that stays SMALL while it stays SLOW —
+the sizer halving on a signal a smaller batch cannot improve. Three such
+signals used to reach it and no longer do: the replicas' acknowledgement wait
+(a rate, imposed by the wait itself, never a reason to shrink), a governor hold
 (a pause, after which the batch is halved once and re-grows), and read pressure
 (a longer pause, not a smaller batch). What still shrinks a batch is the
 master's own time past the target, which is the one thing a smaller batch
-does improve. If a run is crawling, the *Steady load* line says which: a
-long `batch_s` is the master (dense hubs, a full node, a starved CPU), a long
+improves. If a run is crawling, the *Steady load* line says which: a long
+`batch_s` is the master (dense hubs, a full node, a starved CPU), a long
 `ack_s` is the replicas (`EFFECTS_THRESHOLD`, a slow replica), a long pause is
 the ratio or an easing, and a hold names itself.
+
+### Dense graphs, and the two ceilings that are not ceilings
+
+A densely connected graph — half a million lineage edges over a few thousand
+containers — is the case every arbitrary number gets wrong, because its cube
+scales as edges × depth² and its cost is dominated by things that are not the
+graph store at all.
+
+* **The same ancestry, walked once.** A leaf's ancestor closure used to be
+  evicted from the memo the moment it was computed, so the memo could never
+  grow with leaf count. On a dense graph an endpoint shared by ten thousand
+  lineage edges had its ancestry walked ten thousand times — the raw PAIRS are
+  distinct even though the endpoints repeat. Closures and container rep-sets
+  are now kept, bounded, so the walk is paid per node.
+* **One pass over the edges, not two.** Forced full detail with no measured
+  cell ratio cannot refuse on the estimate, so the pre-compute counting scan
+  was a second full read of every lineage edge for a verdict nobody was allowed
+  to act on. It is not dropped — the count is what MEASURES the ratio, and
+  without it a source can never be calibrated — it is counted during the real
+  extract scan instead, at two memoized lookups per edge.
+* **The cube decision is two measurements, not a number.** `maxCubeEdges`
+  defaulted to 8M and was what actually decided whether a graph got full
+  detail. It now defaults to its bound and does not bind. Auto stores the full
+  cube while the WRITE BUDGET says the owning shard can hold it and the APPLY
+  PROJECTION (estimated cells ÷ the rate this source measured last run) says
+  this job's wall clock can finish writing it. A fixed cell count answers
+  neither for any particular graph: 8M cells is half an hour on a roomy node
+  and a refusal on a full one.
+* **Full detail is never truncated.** Only Auto degrades, and only to the
+  depth-diagonal with the rest served on demand. Forced full detail stores
+  every ancestor combination at any depth and any size; what stops it is the
+  shard having no room, which is a refusal with the numbers, never a silent
+  drop. A cube too large for one wall clock still converges: the run keeps its
+  checkpoint, the reconcile pass rebuilds what exists, and the apply writes
+  only what is still missing. The run says so up front — the advisory names the
+  projected hours and the three ways to make it one run.
 
 ### Tuning it
 

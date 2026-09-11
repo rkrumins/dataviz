@@ -46,7 +46,9 @@ def test_limits_prefer_the_stored_defaults_and_label_where_each_came_from(monkey
     assert (limits.max_materialized_edges.value, limits.max_materialized_edges.source) == (None, "default")
     assert (limits.rollup_storage.value, limits.rollup_storage.source) == ("true", "global")
     assert limits.static_cap == 25_000_000          # env default: no ceiling set
-    assert limits.max_cube_edges == 8_000_000 and limits.budget_recheck_edges == 1_000_000
+    # The appetite ceiling defaults to its BOUND: it no longer decides whether
+    # a graph gets full detail — the write budget and the apply projection do.
+    assert limits.max_cube_edges == 50_000_000 and limits.budget_recheck_edges == 1_000_000
     assert (limits.max_cube_edges_source, limits.estimate_margin_pct_source) == ("default", "default")
 
 
@@ -138,7 +140,11 @@ def test_full_detail_preflight_charges_growth_over_what_the_graph_holds():
     )
     assert pf.verdict == "fits" and pf.growth_edges == 8_000_000
     assert pf.needed_bytes == 8_000_000 * 512
-    assert cap.auto_preflight(limits, pf).would_store_cube is False   # over Auto's 8M ceiling
+    # 10M cells is under the appetite ceiling now, and the shard can hold it:
+    # Auto stores the cube. What could still take it off the cube is the
+    # apply projection, which the preflight (a capacity view, not a run)
+    # does not model — the run does.
+    assert cap.auto_preflight(limits, pf).would_store_cube is True
 
 
 def test_full_detail_preflight_names_the_shortfall():
