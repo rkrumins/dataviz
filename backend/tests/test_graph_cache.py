@@ -88,6 +88,34 @@ def _make_redis() -> AsyncMock:
     return redis
 
 
+def _routed_get(*, gen: str = "0", primary: Any = None, lkg: Any = None):
+    """A GET side-effect that dispatches on the KEY rather than on call
+    order. An order-based fake breaks the moment the read path gains a
+    lookup, and it never said which key was being read anyway.
+    """
+    async def _get(key: str):
+        if key.startswith(graph_cache._GEN_PREFIX):
+            return gen
+        if key.startswith(graph_cache._LKG_PREFIX):
+            return lkg
+        return primary
+    return _get
+
+
+def _payload_sets(redis: AsyncMock) -> list:
+    """The SET calls that wrote an ANSWER — the primary entry or its LKG
+    mirror.
+
+    The cross-process election SETs too, on a key of its own. It is
+    bookkeeping about who is computing, not something the cache stored, and
+    no assertion about what was cached should have to know it happened.
+    """
+    return [
+        c for c in redis.set.await_args_list
+        if not str(c.args[0]).startswith(graph_cache._LEADER_PREFIX)
+    ]
+
+
 @pytest.fixture(autouse=True)
 def _enable_children_endpoint(monkeypatch):
     """Force every cached endpoint on for the tests that exercise them."""
@@ -126,9 +154,9 @@ async def test_miss_calls_compute_and_caches() -> None:
 
     assert result.value == 42
     compute.assert_awaited_once()
-    redis.set.assert_awaited_once()
+    assert len(_payload_sets(redis)) == 1
     # The value was serialized as JSON
-    set_args = redis.set.call_args
+    set_args = _payload_sets(redis)[-1]
     payload = set_args.args[1] if len(set_args.args) > 1 else set_args.kwargs.get("value")
     assert "42" in payload
 
@@ -213,6 +241,343 @@ async def test_in_process_singleflight_coalesces_concurrent_calls() -> None:
     assert result_a.value == 7
     assert result_b.value == 7
     assert call_count == 1
+
+
+# ─── cross-process singleflight (the election) ─────────────────────────
+#
+# In-process singleflight coalesces the callers inside ONE worker. The fleet
+# runs 12 of them, so a cold view still meant 12 identical computes hitting
+# one shard at once — the moment the store is least able to absorb them.
+# These cover the election that reduces that to one, and every way it is
+# allowed to fail: failing open always means "compute it yourself", which is
+# exactly the behaviour that existed before it.
+
+
+def _shared_bus() -> AsyncMock:
+    """A Redis stand-in two GraphCache instances can share — two pods, one
+    bus. Stateful across the three operations the election uses: SET NX,
+    GET, and the compare-and-delete EVAL."""
+    store: dict[str, Any] = {}
+    redis = AsyncMock()
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _set(key, value, ex=None, px=None, nx=False):
+        if nx and key in store:
+            return None
+        store[key] = value
+        return True
+
+    async def _eval(script, numkeys, *args):
+        key, token = args[0], args[1]
+        if store.get(key) == token:
+            del store[key]
+            return 1
+        return 0
+
+    async def _incr(key):
+        store[key] = str(int(store.get(key, 0)) + 1)
+        return int(store[key])
+
+    redis.get = AsyncMock(side_effect=_get)
+    redis.set = AsyncMock(side_effect=_set)
+    redis.eval = AsyncMock(side_effect=_eval)
+    redis.incr = AsyncMock(side_effect=_incr)
+    redis.store = store
+    return redis
+
+
+@pytest.fixture
+def _fast_election(monkeypatch):
+    """Poll the leader every millisecond instead of every 50ms, so a test
+    that waits for a follower to pick up an answer finishes in a tick."""
+    monkeypatch.setattr(graph_cache, "_LEADER_POLL_S", 0.001)
+
+
+@pytest.mark.asyncio
+async def test_two_pods_on_one_key_compute_it_once(_fast_election) -> None:
+    """The whole point. Two processes miss the same key at the same moment;
+    one computes and the other takes its answer."""
+    redis = _shared_bus()
+    pod_a, pod_b = GraphCache(redis), GraphCache(redis)
+    computes = 0
+
+    async def compute() -> _Result:
+        nonlocal computes
+        computes += 1
+        await asyncio.sleep(0.01)       # long enough for the loser to wait
+        return _Result(value=99)
+
+    async def trigger(pod: GraphCache) -> _Result:
+        return await pod.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "cold"},
+            compute=compute,
+            model_cls=_Result,
+        )
+
+    a, b = await asyncio.gather(trigger(pod_a), trigger(pod_b))
+
+    assert a.value == 99 and b.value == 99
+    assert computes == 1, "the fleet computed the same key twice"
+    # And the election released itself — the next caller must not have to
+    # wait out the TTL to compute.
+    assert not any(
+        k.startswith(graph_cache._LEADER_PREFIX) for k in redis.store
+    ), redis.store
+
+
+@pytest.mark.asyncio
+async def test_a_leader_that_sheds_does_not_strand_its_followers(
+    monkeypatch, _fast_election,
+) -> None:
+    """ProviderBusy is a refusal to serve, not an answer: the leader
+    re-raises it and steps down without writing anything. The follower must
+    notice the election is over rather than sitting out its full wait for an
+    answer that is never coming — that would turn one shed request into a
+    pile of slow ones, which is the opposite of what shedding is for."""
+    from backend.common.adapters.circuit import ProviderBusy
+
+    monkeypatch.setattr(graph_cache, "_LEADER_WAIT_S", 30.0)
+    redis = _shared_bus()
+    pod_a, pod_b = GraphCache(redis), GraphCache(redis)
+    leading = asyncio.Event()
+    computes = 0
+
+    async def shed() -> _Result:
+        nonlocal computes
+        computes += 1
+        leading.set()               # we are the leader, and we are about to fail
+        await asyncio.sleep(0.01)
+        raise ProviderBusy("falkordb", "shed")
+
+    async def follow() -> _Result:
+        await leading.wait()        # only stand for election once A holds it
+        return await pod_b.get_or_compute(
+            scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"}, compute=AsyncMock(return_value=_Result(value=3)),
+            model_cls=_Result,
+        )
+
+    started = asyncio.get_running_loop().time()
+    a, b = await asyncio.gather(
+        pod_a.get_or_compute(
+            scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "x"}, compute=shed, model_cls=_Result,
+        ),
+        follow(),
+        return_exceptions=True,
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert isinstance(a, ProviderBusy)          # the leader still sheds
+    assert getattr(b, "value", None) == 3       # the follower computed its own
+    assert computes == 1
+    assert elapsed < 5.0, f"the follower waited {elapsed:.1f}s on a leader that had gone"
+
+
+@pytest.mark.asyncio
+async def test_a_follower_keeps_waiting_while_the_leader_still_holds(
+    _fast_election,
+) -> None:
+    """The converse: a held election means someone IS working, so the
+    follower waits rather than racing them to the same compute."""
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    key = _build_key(CacheScope("ws1", "ds1"), 0, ENDPOINT_CHILDREN, {"urn": "y"})
+    redis.store[f"{graph_cache._LEADER_PREFIX}:{key}"] = "someone-elses-token"
+
+    peer = await cache._await_leader(key, _Result, deadline_s=0.05)
+
+    assert peer is None                 # it never answered, so we compute
+    # ...but we waited for it: more than one poll went by.
+    assert redis.get.await_count > 2
+
+
+@pytest.mark.asyncio
+async def test_a_bus_that_cannot_hold_an_election_lets_everyone_compute() -> None:
+    """Fail open. A cache-role Redis that is down must not stop the fleet
+    answering — it costs duplicate computes, which is the behaviour before
+    any of this existed."""
+    redis = _make_redis()
+    redis.set = AsyncMock(side_effect=RedisError("bus down"))
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_Result(value=5))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    assert result.value == 5
+    compute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_removes_the_election_entirely(monkeypatch) -> None:
+    """One env var puts every process back to computing its own."""
+    monkeypatch.setattr(graph_cache, "_LEADER_ENABLED", False)
+    redis = _make_redis()
+    cache = GraphCache(redis)
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"},
+        compute=AsyncMock(return_value=_Result(value=1)),
+        model_cls=_Result,
+    )
+
+    assert not any(
+        str(c.args[0]).startswith(graph_cache._LEADER_PREFIX)
+        for c in redis.set.await_args_list
+    )
+    redis.eval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stepping_down_never_releases_a_successors_election() -> None:
+    """A leader slower than the TTL loses its lock while still working. When
+    it finally finishes it must not delete the NEW leader's election — that
+    would let a third process start the same work again."""
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    lock = f"{graph_cache._LEADER_PREFIX}:some-key"
+    redis.store[lock] = "the-successors-token"
+
+    await cache._step_down("some-key", "our-expired-token")
+
+    assert redis.store[lock] == "the-successors-token"
+
+
+# ─── promoting the mirror when nothing changed ─────────────────────────
+#
+# A TTL expiry is not evidence that the answer moved. Every write bumps the
+# generation, so a generation that has NOT moved means a recompute returns
+# the identical bytes — and the gen-less mirror already holds them. Before
+# this, every expiry made one user pay the full provider cost to be told the
+# same thing; on a million-node graph that is ten seconds, per view, per TTL.
+
+
+async def _fill(cache: GraphCache, compute, *, params=None, endpoint=ENDPOINT_CHILDREN):
+    """Run one compute through the cache so the primary entry and the mirror
+    both exist, then expire the primary the way a TTL would."""
+    scope = CacheScope("ws1", "ds1")
+    params = params if params is not None else {"urn": "a"}
+    await cache.get_or_compute(
+        scope=scope, endpoint=endpoint, params=params,
+        compute=compute, model_cls=_Result,
+    )
+    gen = await cache._get_generation(scope)
+    cache._cache_redis.store.pop(_build_key(scope, gen, endpoint, params), None)
+
+
+@pytest.mark.asyncio
+async def test_an_expiry_with_no_write_since_is_served_from_the_mirror() -> None:
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_Result(value=42, children=[1]))
+    await _fill(cache, compute)
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"}, compute=compute, model_cls=_Result,
+    )
+
+    assert result.value == 42
+    assert compute.await_count == 1, "an expiry recomputed an unchanged answer"
+    # And it is back under the primary key, so the NEXT reader is a plain hit.
+    assert _build_key(CacheScope("ws1", "ds1"), 0, ENDPOINT_CHILDREN, {"urn": "a"}) in redis.store
+
+
+@pytest.mark.asyncio
+async def test_a_promotion_does_not_extend_the_mirrors_own_expiry() -> None:
+    """The bound on drift the platform cannot see. However many times an
+    answer is promoted, it can never outlive GRAPH_CACHE_LKG_TTL_S from when
+    it was actually computed — because promoting never rewrites the mirror."""
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    await _fill(cache, AsyncMock(return_value=_Result(value=42, children=[1])))
+    redis.set.reset_mock()
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"}, compute=AsyncMock(return_value=_Result(value=9)),
+        model_cls=_Result,
+    )
+
+    written = [c.args[0] for c in redis.set.await_args_list]
+    assert any(graph_cache._KEY_PREFIX in k for k in written)
+    assert not any(graph_cache._LKG_PREFIX in k for k in written)
+
+
+@pytest.mark.asyncio
+async def test_a_write_since_the_mirror_was_taken_forces_a_recompute() -> None:
+    """The safety property. A rebuild bumps the generation; the mirror is
+    stamped with the generation it was computed at, so it no longer matches
+    and the promotion declines. Serving it here would show users the
+    PRE-rebuild graph at exactly the moment they asked for the new one."""
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_Result(value=42, children=[1]))
+    await _fill(cache, compute)
+
+    await cache.bump_generation(CacheScope("ws1", "ds1"))
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"},
+        compute=AsyncMock(return_value=_Result(value=99, children=[1])),
+        model_cls=_Result,
+    )
+
+    assert result.value == 99, "served the pre-rebuild answer after a rebuild"
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_mirror_is_never_promoted_but_still_saves_an_outage() -> None:
+    """Mirrors written before the stamp existed carry no generation, so there
+    is nothing to compare and the promotion declines — the next real compute
+    rewrites them stamped. They remain the outage fallback, where an
+    out-of-date snapshot still beats an error."""
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_Result(value=7).model_dump_json(by_alias=True),   # no stamp
+    ))
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"}, compute=compute, model_cls=_Result,
+    )
+
+    compute.assert_awaited_once()       # not promoted: it went to the provider
+    assert result.value == 7            # but it did save the request
+
+
+@pytest.mark.asyncio
+async def test_the_promotion_kill_switch_restores_recompute_on_every_expiry(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(graph_cache, "_PROMOTE_UNCHANGED", False)
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_Result(value=42, children=[1]))
+    await _fill(cache, compute)
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"}, compute=compute, model_cls=_Result,
+    )
+
+    assert compute.await_count == 2
 
 
 # ─── invalidation via generation bump ──────────────────────────────────
@@ -398,7 +763,7 @@ async def test_empty_result_caches_with_negative_ttl() -> None:
         model_cls=_Result,
     )
 
-    set_kwargs = redis.set.call_args.kwargs
+    set_kwargs = _payload_sets(redis)[-1].kwargs
     # ex (expiry in seconds) should equal the negative-cache value
     assert set_kwargs["ex"] == graph_cache._NEGATIVE_TTL
 
@@ -445,7 +810,7 @@ async def test_oversized_payload_is_not_cached(monkeypatch, caplog) -> None:
     # Caller still gets the answer.
     assert result.value == 1
     # No SET fired — neither primary nor LKG.
-    assert redis.set.await_count == 0
+    assert _payload_sets(redis) == []
     # The existing stale entry was DELETEd at both the primary key and
     # the LKG mirror.
     assert redis.delete.await_count == 2
@@ -484,11 +849,11 @@ async def test_a_capped_result_is_cached_for_the_full_ttl() -> None:
         model_cls=_AggregatedLike,
     )
 
-    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    ttls = [c.kwargs["ex"] for c in _payload_sets(redis)]
     assert graph_cache._NEGATIVE_TTL not in ttls, "a capped result is not degraded"
     assert all(t >= 3600 for t in ttls), ttls
     # And it IS worth keeping as the outage fallback.
-    keys = [call.args[0] for call in redis.set.await_args_list]
+    keys = [call.args[0] for call in _payload_sets(redis)]
     assert any(graph_cache._LKG_PREFIX in k for k in keys)
 
 
@@ -514,7 +879,7 @@ async def test_a_stale_result_is_cached_for_the_full_ttl() -> None:
         model_cls=_AggregatedLike,
     )
 
-    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    ttls = [c.kwargs["ex"] for c in _payload_sets(redis)]
     assert graph_cache._NEGATIVE_TTL not in ttls
     assert all(t >= 3600 for t in ttls), ttls
 
@@ -566,9 +931,9 @@ async def test_a_closure_whose_probe_never_ran_is_not_pinned_for_the_full_ttl() 
         TraceFrontierNode(urn="a"), TraceFrontierNode(urn="b", nextCursor="e:0"),
     ]))
 
-    assert redis.set.await_count == 1                       # no LKG mirror
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
-    assert not any(graph_cache._LKG_PREFIX in c.args[0] for c in redis.set.await_args_list)
+    assert len(_payload_sets(redis)) == 1                   # no LKG mirror
+    assert _payload_sets(redis)[-1].kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    assert not any(graph_cache._LKG_PREFIX in c.args[0] for c in _payload_sets(redis))
 
 
 @pytest.mark.asyncio
@@ -586,7 +951,7 @@ async def test_a_max_nodes_page_is_complete_by_contract_and_cached_for_the_full_
         truncated=True, truncationReason="max_nodes", seedTruncated=True, seedCursor="s:b",
     ))
 
-    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    assert _payload_sets(redis)[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
 
 
 @pytest.mark.asyncio
@@ -595,9 +960,9 @@ async def test_a_coarse_page_is_complete_and_cached_for_the_full_ttl() -> None:
     answer to its request — and a cap cut is `max_nodes` like the fine
     walk's. Both keep the full TTL."""
     redis = await _cache_closure(_closure([], grain="coarse"))
-    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    assert _payload_sets(redis)[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
     redis = await _cache_closure(_closure([], grain="coarse", truncated=True, truncationReason="max_nodes"))
-    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    assert _payload_sets(redis)[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
 
 
 def test_grain_separates_the_cache_key() -> None:
@@ -622,7 +987,7 @@ async def test_a_failed_page_is_not_pinned(reason: str) -> None:
         truncated=True, truncationReason=reason,
     ))
 
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    assert _payload_sets(redis)[-1].kwargs["ex"] == graph_cache._NEGATIVE_TTL
 
 
 @pytest.mark.asyncio
@@ -637,9 +1002,9 @@ async def test_a_probed_frontier_is_a_complete_answer() -> None:
         TraceFrontierNode(urn="a"), TraceFrontierNode(urn="b", totalCount=8),
     ]))
 
-    assert redis.set.await_count == 2                       # primary + LKG
-    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
-    assert any(graph_cache._LKG_PREFIX in c.args[0] for c in redis.set.await_args_list)
+    assert len(_payload_sets(redis)) == 2                   # primary + LKG
+    assert _payload_sets(redis)[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    assert any(graph_cache._LKG_PREFIX in c.args[0] for c in _payload_sets(redis))
 
 
 @pytest.mark.asyncio
@@ -649,8 +1014,8 @@ async def test_a_drained_walk_is_complete_not_degraded() -> None:
     countless" would give the most cacheable result the shortest TTL."""
     redis = await _cache_closure(_closure([]))
 
-    assert redis.set.await_count == 2
-    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    assert len(_payload_sets(redis)) == 2
+    assert _payload_sets(redis)[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
 
 
 @pytest.mark.asyncio
@@ -674,7 +1039,7 @@ async def test_nested_aggregated_truncated_keeps_the_full_ttl() -> None:
         model_cls=_CanvasBootstrapLike,
     )
 
-    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    ttls = [c.kwargs["ex"] for c in _payload_sets(redis)]
     assert graph_cache._NEGATIVE_TTL not in ttls, ttls
 
 
@@ -699,7 +1064,7 @@ async def test_nested_aggregated_delta_truncated_keeps_the_full_ttl() -> None:
         model_cls=_CanvasExpandLike,
     )
 
-    ttls = [c.kwargs["ex"] for c in redis.set.await_args_list]
+    ttls = [c.kwargs["ex"] for c in _payload_sets(redis)]
     assert graph_cache._NEGATIVE_TTL not in ttls, ttls
 
 
@@ -860,13 +1225,9 @@ async def test_stale_fallback_serves_lkg_when_compute_raises_provider_unavailabl
     from backend.common.adapters import ProviderUnavailable
 
     redis = _make_redis()
-    # First GET = generation (returns "0"); second GET = primary key (miss);
-    # third GET = LKG key (hit with last-known-good payload).
-    redis.get = AsyncMock(side_effect=[
-        "0",
-        None,
-        _Result(value=123).model_dump_json(by_alias=True),
-    ])
+    redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_Result(value=123).model_dump_json(by_alias=True),
+    ))
     cache = GraphCache(redis)
     compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
     flagged: list[bool] = []
@@ -888,11 +1249,9 @@ async def test_stale_fallback_serves_lkg_when_compute_raises_provider_unavailabl
 @pytest.mark.asyncio
 async def test_stale_fallback_serves_lkg_on_compute_timeout() -> None:
     redis = _make_redis()
-    redis.get = AsyncMock(side_effect=[
-        "0",
-        None,
-        _Result(value=77).model_dump_json(by_alias=True),
-    ])
+    redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_Result(value=77).model_dump_json(by_alias=True),
+    ))
     cache = GraphCache(redis)
     compute = AsyncMock(side_effect=asyncio.TimeoutError())
 
@@ -912,8 +1271,7 @@ async def test_stale_fallback_propagates_when_no_lkg_available() -> None:
     from backend.common.adapters import ProviderUnavailable
 
     redis = _make_redis()
-    # generation miss, primary miss, LKG miss
-    redis.get = AsyncMock(side_effect=["0", None, None])
+    redis.get = AsyncMock(side_effect=_routed_get())   # gen 0, no primary, no LKG
     cache = GraphCache(redis)
     compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
 
@@ -1036,8 +1394,8 @@ async def test_successful_compute_writes_both_primary_and_lkg() -> None:
     )
 
     # One SET for primary, one for LKG (in either order).
-    assert redis.set.await_count == 2
-    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert len(_payload_sets(redis)) == 2
+    keys = [call.args[0] for call in _payload_sets(redis)]
     assert any(graph_cache._KEY_PREFIX in k for k in keys)
     assert any(graph_cache._LKG_PREFIX in k for k in keys)
 
@@ -1048,13 +1406,9 @@ async def test_successful_compute_writes_both_primary_and_lkg() -> None:
 async def test_trace_endpoint_cache_miss_then_hit() -> None:
     """Two identical /trace/v2 calls — first computes + caches,
     second returns the cached payload without invoking compute."""
-    redis = _make_redis()
-    # First call: gen=0, primary miss → compute runs and SETs primary + LKG
-    # Second call: gen=0, primary hit → no compute, no SET
-    redis.get = AsyncMock(side_effect=[
-        "0", None,                                                              # call 1: gen, miss
-        "0", _TraceLike(nodes=[1, 2], label="ok").model_dump_json(by_alias=True),  # call 2: gen, hit
-    ])
+    # A store-backed bus: call 1 misses and fills it, call 2 finds what
+    # call 1 wrote. The two calls read the same keys they write.
+    redis = _shared_bus()
     cache = GraphCache(redis)
     compute = AsyncMock(return_value=_TraceLike(nodes=[1, 2], label="ok"))
     params = {"urn": "urn:x", "level": 0, "depth": 3}
@@ -1118,11 +1472,9 @@ async def test_trace_expand_uses_separate_namespace() -> None:
 async def test_trace_stale_fallback_on_provider_timeout() -> None:
     """A timed-out trace falls back to LKG and fires the on_stale flag."""
     redis = _make_redis()
-    redis.get = AsyncMock(side_effect=[
-        "0",
-        None,
-        _TraceLike(nodes=[1], label="stale").model_dump_json(by_alias=True),
-    ])
+    redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_TraceLike(nodes=[1], label="stale").model_dump_json(by_alias=True),
+    ))
     cache = GraphCache(redis)
     compute = AsyncMock(side_effect=asyncio.TimeoutError())
     flagged: list[bool] = []
@@ -1157,7 +1509,7 @@ async def test_empty_result_does_not_pin_lkg() -> None:
     )
 
     # Only the primary (negative-cache) SET should fire; LKG is skipped.
-    keys = [call.args[0] for call in redis.set.await_args_list]
+    keys = [call.args[0] for call in _payload_sets(redis)]
     assert any(graph_cache._KEY_PREFIX in k for k in keys)
     assert not any(graph_cache._LKG_PREFIX in k for k in keys)
 
@@ -1508,10 +1860,11 @@ async def test_cache_configured_payload_and_lkg_use_cache_client() -> None:
     coord.get.assert_awaited_once()
     coord.set.assert_not_awaited()
     coord.incr.assert_not_awaited()
-    # Primary GET (miss) + primary SET + LKG SET all land on the cache
-    # client, never the coordination client.
-    cache_redis.get.assert_awaited_once()
-    assert cache_redis.set.await_count == 2
+    # Primary GET (miss) + mirror probe + primary SET + LKG SET all land on
+    # the cache client, never the coordination client.
+    assert cache_redis.get.await_count == 2
+    coord.get.assert_awaited_once()
+    assert len(_payload_sets(cache_redis)) == 2
 
 
 @pytest.mark.asyncio
@@ -1524,10 +1877,9 @@ async def test_stale_fallback_lkg_read_uses_cache_client_not_coord() -> None:
     coord = _make_redis()
     coord.get = AsyncMock(return_value="0")  # generation only
     cache_redis = _make_redis()
-    cache_redis.get = AsyncMock(side_effect=[
-        None,  # primary miss
-        _Result(value=55).model_dump_json(by_alias=True),  # LKG hit
-    ])
+    cache_redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_Result(value=55).model_dump_json(by_alias=True),
+    ))
     cache = GraphCache(coord, cache_redis)
     compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
 
@@ -1540,7 +1892,10 @@ async def test_stale_fallback_lkg_read_uses_cache_client_not_coord() -> None:
     )
 
     assert result.value == 55
-    assert cache_redis.get.await_count == 2
+    assert any(
+        graph_cache._LKG_PREFIX in c.args[0]
+        for c in cache_redis.get.await_args_list
+    ), "the LKG read went somewhere other than the cache client"
     coord.get.assert_awaited_once()
 
 
@@ -1762,9 +2117,9 @@ async def test_a_provider_that_genuinely_cannot_answer_still_serves_the_snapshot
     from backend.common.adapters import ProviderUnavailable
 
     redis = _make_redis()
-    redis.get = AsyncMock(side_effect=[
-        "0", None, _Result(value=123).model_dump_json(by_alias=True),
-    ])
+    redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_Result(value=123).model_dump_json(by_alias=True),
+    ))
     cache = GraphCache(redis)
     compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
 
@@ -1964,9 +2319,9 @@ async def test_a_stale_fallback_is_not_counted_as_a_hit() -> None:
     from backend.common.adapters import ProviderUnavailable
 
     redis = _stats_redis()
-    redis.get = AsyncMock(side_effect=[
-        "0", None, _Result(value=123).model_dump_json(by_alias=True),
-    ])
+    redis.get = AsyncMock(side_effect=_routed_get(
+        lkg=_Result(value=123).model_dump_json(by_alias=True),
+    ))
     cache = GraphCache(redis)
     await cache.get_or_compute(
         scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
@@ -2125,6 +2480,6 @@ async def test_a_nested_degraded_payload_still_forces_the_negative_ttl() -> None
         compute=compute, model_cls=_CanvasBootstrapLike,
     )
 
-    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
-    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert _payload_sets(redis)[-1].kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    keys = [call.args[0] for call in _payload_sets(redis)]
     assert not any(graph_cache._LKG_PREFIX in k for k in keys)

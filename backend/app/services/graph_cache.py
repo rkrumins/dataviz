@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
@@ -189,6 +190,16 @@ _LKG_TTL_RAW = _clamped_int_env("GRAPH_CACHE_LKG_TTL_S", 86400, lo=0, hi=2_592_0
 # 0 means "disabled" — keep it as 0; otherwise clamp the lower bound up
 # so a tiny value doesn't make LKG functionally useless.
 _LKG_TTL = _LKG_TTL_RAW if _LKG_TTL_RAW == 0 else max(_LKG_TTL_RAW, 60)
+
+#: Separates an LKG entry's generation stamp from its payload.
+#: ``model_dump_json`` never emits a raw newline — one inside a string value
+#: is escaped — so splitting on the first cannot cut into the payload.
+_LKG_STAMP_SEP = "\n"
+
+#: On a miss, promote a generation-matched mirror back to the primary key
+#: instead of recomputing an answer the generation says has not changed.
+#: Off restores "every expiry is a full recompute".
+_PROMOTE_UNCHANGED = os.getenv("GRAPH_CACHE_PROMOTE_UNCHANGED", "1") != "0"
 
 # Per-payload size cap. A single response larger than this is logged
 # and dropped rather than cached — one huge dump shouldn't crowd out a
@@ -439,7 +450,51 @@ class GraphCache:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[_SingleflightOutcome] = loop.create_future()
         self._inflight[cache_key] = fut
+        leader_token: Optional[str] = None
         try:
+            # ── 3. Nothing has changed: promote the mirror ────────────
+            # An expiry is not evidence that the answer moved. Every write
+            # bumps the generation, so a generation that has not moved means
+            # a recompute would return the same bytes — and the mirror
+            # already holds them. Reading one small key beats spending ten
+            # seconds of a shard's threads to be told the same thing.
+            if _PROMOTE_UNCHANGED:
+                warm = await self._promote_mirror(
+                    scope, endpoint, params, model_cls,
+                    gen=gen, cache_key=cache_key, ttl_seconds=ttl_seconds,
+                )
+                if warm is not None:
+                    if not fut.done():
+                        fut.set_result(
+                            _SingleflightOutcome(value=warm, served_stale=False),
+                        )
+                    # A hit: no provider work, no wait, and the generation
+                    # says it is the current answer.
+                    _stats_recorder.record(self, scope, endpoint, "hit")
+                    return warm
+
+            # ── 4. Cross-process singleflight ─────────────────────────
+            # We are this pod's leader for the key. Twelve pod-leaders on a
+            # cold view means twelve identical computes unless they agree on
+            # one, so stand for election through the bus. Losing is the good
+            # case: watch for the winner's answer instead of repeating its
+            # work. Every failure here — no bus, a dead leader, a wait that
+            # expires — ends in computing it ourselves, which is the
+            # behaviour that existed before any of this.
+            leader_token = await self._stand_for_election(cache_key)
+            if leader_token is None:
+                peer = await self._await_leader(
+                    cache_key, model_cls, deadline_s=_LEADER_WAIT_S,
+                )
+                if peer is not None:
+                    if not fut.done():
+                        fut.set_result(
+                            _SingleflightOutcome(value=peer, served_stale=False),
+                        )
+                    # Work the fleet did not have to do twice.
+                    _stats_recorder.record(self, scope, endpoint, "hit")
+                    return peer
+
             result = await compute()
             # Serialize ONCE, and off the loop. These two writes each used to
             # call ``model_dump_json`` on the full payload inline, so every
@@ -448,7 +503,7 @@ class GraphCache:
             # to the biggest response any one of them returned.
             payload = await asyncio.to_thread(result.model_dump_json, by_alias=True)
             await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
-            await self._set_lkg(scope, endpoint, params, result, payload=payload)
+            await self._set_lkg(scope, endpoint, params, result, gen, payload=payload)
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             _stats_recorder.record(self, scope, endpoint, "miss")
@@ -511,6 +566,10 @@ class GraphCache:
             raise
         finally:
             self._inflight.pop(cache_key, None)
+            # Hand leadership back at once rather than making the next caller
+            # wait out the TTL — including when we failed, so the retry is
+            # free to try instead of watching a leader that has gone.
+            await self._step_down(cache_key, leader_token)
 
     async def get_top_level_count(
         self, scope: CacheScope, params: dict[str, Any],
@@ -652,6 +711,83 @@ class GraphCache:
             )
         return removed
 
+    async def _stand_for_election(self, cache_key: str) -> Optional[str]:
+        """Try to become the one process in the fleet that computes this key.
+
+        Returns our token when we won, or None when someone else holds it.
+        A bus that cannot answer returns a token too: failing open means
+        everyone computes, which is exactly the behaviour without this.
+
+        Deliberately on the CACHE role, not the coordination role. Losing this
+        key costs one duplicate compute and nothing else, which is the
+        definition of cache-role state — the coordination client is reserved
+        for the generation counter and the markers, whose loss corrupts
+        rather than merely wastes.
+        """
+        if not _LEADER_ENABLED:
+            return "disabled"
+        token = uuid.uuid4().hex
+        try:
+            won = await self._cache_redis.set(
+                f"{_LEADER_PREFIX}:{cache_key}", token, nx=True, px=_LEADER_TTL_MS,
+            )
+        except Exception as exc:                    # noqa: BLE001 — never a hard dep
+            logger.debug("graph_cache: leader election unavailable (%s)", exc)
+            return token
+        return token if won else None
+
+    async def _step_down(self, cache_key: str, token: Optional[str]) -> None:
+        """Release our election so the next caller computes immediately rather
+        than waiting out the TTL. Only ever releases OUR token: the TTL may
+        have expired and passed leadership on while we were still working."""
+        if not token or token == "disabled":
+            return
+        try:
+            await self._cache_redis.eval(
+                _RELEASE_LEADER_LUA, 1, f"{_LEADER_PREFIX}:{cache_key}", token,
+            )
+        except Exception as exc:                    # noqa: BLE001 — the TTL cleans up
+            logger.debug("graph_cache: leader release failed (%s)", exc)
+
+    async def _await_leader(
+        self, cache_key: str, model_cls: type[T], *, deadline_s: float,
+    ) -> Optional[T]:
+        """Watch for the leader's answer. The value if it lands in time, else
+        None and the caller computes its own.
+
+        Polling, not pub/sub, on purpose: one GET on one small key is cheap
+        and has no subscription to leak, no reconnect to handle, and no
+        ordering to get wrong. The cost of the simpler mechanism is ~200 GETs
+        across a full wait, which is nothing next to the compute it replaces.
+        """
+        lock_key = f"{_LEADER_PREFIX}:{cache_key}"
+        started = time.monotonic()
+        while time.monotonic() - started < deadline_s:
+            await asyncio.sleep(_LEADER_POLL_S)
+            try:
+                cached = await self._cache_redis.get(cache_key)
+                if cached is None:
+                    # Nothing yet. Either the leader is still working, or it
+                    # finished without an answer — shed, failed, died. The
+                    # leader releases its election in a ``finally``, so a
+                    # missing lock means there is no longer anyone to wait
+                    # for, and sitting out the rest of the deadline would
+                    # turn ONE refusal into a wait for every follower. Read
+                    # the key once more before giving up: the leader may have
+                    # written and stepped down between our two reads.
+                    if await self._cache_redis.get(lock_key) is not None:
+                        continue
+                    cached = await self._cache_redis.get(cache_key)
+                    if cached is None:
+                        return None
+            except Exception:                       # noqa: BLE001 — go compute
+                return None
+            try:
+                return model_cls.model_validate_json(cached)
+            except Exception:                       # noqa: BLE001 — treat as a miss
+                return None
+        return None
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(self, scope: CacheScope) -> int:
@@ -704,9 +840,16 @@ class GraphCache:
         endpoint: str,
         params: dict[str, Any],
         result: BaseModel,
+        gen: int,
         payload: Optional[str] = None,
     ) -> None:
         """Mirror a successful compute into the gen-less LKG snapshot.
+
+        Stamped with the generation it was computed at. The key has to stay
+        gen-less so the mirror survives an invalidation and can still be the
+        outage fallback — but a reader that cares whether the mirror is
+        CURRENT needs to know, and the stamp is how it asks. See
+        ``_promote_mirror``.
 
         Skipped for empty results — a transient empty answer must not
         pin "empty" as the stale fallback during a future outage. Skipped
@@ -731,9 +874,48 @@ class GraphCache:
                 # longer matches reality is worse than none.
                 await self._cache_redis.delete(_build_lkg_key(scope, endpoint, params))
                 return
-            await self._cache_redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
+            await self._cache_redis.set(
+                _build_lkg_key(scope, endpoint, params),
+                f"{gen}{_LKG_STAMP_SEP}{payload}",
+                ex=_LKG_TTL,
+            )
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: LKG SET failed (%s)", exc)
+
+    async def _read_lkg(
+        self,
+        scope: CacheScope,
+        endpoint: str,
+        params: dict[str, Any],
+        *,
+        at_generation: Optional[int] = None,
+    ) -> Optional[str]:
+        """The raw mirrored payload, or ``None``.
+
+        ``at_generation`` asks for it ONLY if it was computed at that
+        generation — i.e. nothing has written to the source since. An entry
+        written before the stamp existed has no generation to compare, so it
+        answers no; the next real compute rewrites it stamped.
+        """
+        if _LKG_TTL <= 0:
+            return None
+        try:
+            raw = await self._cache_redis.get(_build_lkg_key(scope, endpoint, params))
+        except RedisError as exc:
+            logger.warning("graph_cache: LKG GET failed (%s)", exc)
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        stamp, sep, body = raw.partition(_LKG_STAMP_SEP)
+        try:
+            written_at = int(stamp) if sep else None
+        except ValueError:                          # not a stamp — legacy entry
+            written_at, body = None, raw
+        if at_generation is not None and written_at != at_generation:
+            return None
+        return body if sep and written_at is not None else raw
 
     async def _get_lkg(
         self,
@@ -745,21 +927,52 @@ class GraphCache:
         """Read the gen-less LKG snapshot. Returns ``None`` on miss,
         bad payload, disabled LKG, or Redis error — the caller treats
         ``None`` as "no fallback available" and re-raises the original
-        provider exception."""
-        if _LKG_TTL <= 0:
+        provider exception. Deliberately ignores the generation stamp: when
+        the provider cannot answer at all, an out-of-date snapshot still
+        beats an error."""
+        body = await self._read_lkg(scope, endpoint, params)
+        if body is None:
             return None
         try:
-            raw = await self._cache_redis.get(_build_lkg_key(scope, endpoint, params))
-        except RedisError as exc:
-            logger.warning("graph_cache: LKG GET failed (%s)", exc)
-            return None
-        if raw is None:
-            return None
-        try:
-            return model_cls.model_validate_json(raw)
+            return model_cls.model_validate_json(body)
         except Exception as exc:
             logger.warning("graph_cache: LKG deserialize failed (%s)", exc)
             return None
+
+    async def _promote_mirror(
+        self,
+        scope: CacheScope,
+        endpoint: str,
+        params: dict[str, Any],
+        model_cls: type[T],
+        *,
+        gen: int,
+        cache_key: str,
+        ttl_seconds: Optional[int],
+    ) -> Optional[T]:
+        """Serve an expired entry's mirror when the generation says the
+        answer has not changed, and put it back under the primary key.
+
+        The generation is the platform's own record that something was
+        written; the TTL is a backstop against drift it cannot see. When the
+        generation has not moved, a recompute returns the identical bytes —
+        so the expiry costs a user ten seconds to be told the same thing.
+        The mirror already holds those bytes.
+
+        The mirror's OWN expiry is not extended, so no answer can outlive
+        ``GRAPH_CACHE_LKG_TTL_S`` from when it was actually computed, however
+        many times it is promoted. That is the bound on un-notified drift.
+        """
+        body = await self._read_lkg(scope, endpoint, params, at_generation=gen)
+        if body is None:
+            return None
+        try:
+            warm = model_cls.model_validate_json(body)
+        except Exception as exc:
+            logger.warning("graph_cache: mirror deserialize failed (%s)", exc)
+            return None
+        await self._set(cache_key, warm, ttl_seconds, endpoint, payload=body)
+        return warm
 
 
 # ─── Module-level helpers ──────────────────────────────────────────────
@@ -1051,6 +1264,56 @@ async def invalidate_hierarchy_reads(
 # "{endpoint}:{outcome}". Bucketed so the answer is a RATE over a window
 # rather than a lifetime total that flattens every incident into noise, and
 # TTL'd so a deleted source stops costing memory on its own.
+
+# ─── Cross-process singleflight ────────────────────────────────────────
+#
+# The in-process singleflight collapses concurrent callers within ONE worker.
+# The fleet runs 3 pods x 4 gunicorn workers = 12 processes, so a cold view
+# opened by twelve people produced twelve identical computes — and on a
+# million-node graph each of those is ~55 Cypher against the six query threads
+# of one shard replica. Eleven of the twelve were pure waste, and they were
+# the load that made the twelfth slow.
+#
+# So the pod-leaders elect a fleet-leader through the bus: one SET NX. The
+# winner computes; the losers watch the cache key for its answer and take it.
+# Every part of this fails OPEN — a bus that is down, a leader that dies, a
+# wait that expires all end in "compute it yourself", which is exactly the
+# behaviour that existed before.
+
+_LEADER_PREFIX = "graphcache:lead:v1"
+
+def _leader_ttl_ms() -> int:
+    """How long one leader may hold the election before another may take it.
+
+    Must exceed the slowest legitimate compute, or a slow leader loses its
+    lock while still working and a second one starts the same work. Bounded
+    below so a crashed leader cannot strand followers for long.
+    """
+    raw = _clamped_int_env("GRAPH_CACHE_LEADER_TTL_S", 60, lo=5, hi=600)
+    return raw * 1000
+
+
+_LEADER_TTL_MS = _leader_ttl_ms()
+#: How long a follower watches for the leader's answer before computing its
+#: own. Shorter than every ASGI tier, so waiting here can never be the thing
+#: that times a request out — if the leader is slower than this the follower
+#: does the work, which is no worse than the old behaviour.
+_LEADER_WAIT_S = float(_clamped_int_env("GRAPH_CACHE_LEADER_WAIT_S", 10, lo=1, hi=60))
+#: Poll interval while watching. A GET on one small key; 50ms costs a follower
+#: at most ~200 of them across the full wait.
+_LEADER_POLL_S = 0.05
+#: Kill switch. Off falls straight back to per-process computes.
+_LEADER_ENABLED = os.getenv("GRAPH_CACHE_CROSS_PROCESS_SINGLEFLIGHT", "1") != "0"
+
+#: Release only our own election, never a successor's — the TTL may have
+#: expired and handed leadership on while we were still working.
+_RELEASE_LEADER_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
 
 _STATS_PREFIX = "graphcache:stats:v1"
 #: Width of one counter bucket. Five minutes is fine enough to see a cache go

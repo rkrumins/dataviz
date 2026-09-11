@@ -314,7 +314,26 @@ _REPLICA_READ_MAX_LAG_BYTES = int(
     os.getenv("FALKORDB_REPLICA_READ_MAX_LAG_BYTES", str(8 * 1024 * 1024))
 )
 #: How long this process's own writes pin a graph's reads to its master.
-_REPLICA_READ_SETTLE_S = float(os.getenv("FALKORDB_REPLICA_READ_SETTLE_S", "30"))
+#:
+#: Read-your-own-writes, and it is a BACKSTOP rather than the primary guard.
+#: The primary guard is ``_replicas_in_step``, which measures the bytes a
+#: replica still owes the stream — a real freshness check, not a guess. What
+#: the settle window has to cover is that check's own staleness: the verdict
+#: is cached for ``_REPLICA_SAMPLE_S`` (5s), so a replica that was in step
+#: when last sampled may not be in step for a write made since.
+#:
+#: So the floor is one sample period, and this is two: five seconds of
+#: possible sample age plus five of slack, against a replication lag that is
+#: milliseconds on this deployment (EFFECTS_THRESHOLD 0 and appendfsync
+#: everysec).
+#:
+#: It was 30 — six sample periods, chosen before the in-step check existed to
+#: back it up. That mattered because it is the gate that decides whether the
+#: replicas do any work at all: every process that writes to a graph sends
+#: ALL its reads of that graph to the master for the window's duration, so on
+#: an edit-heavy workload a 30s window quietly erased most of the read
+#: capacity the replicas exist to provide.
+_REPLICA_READ_SETTLE_S = float(os.getenv("FALKORDB_REPLICA_READ_SETTLE_S", "10"))
 
 #: How long before a provider that warmed (or tried to warm) its urn->label
 #: cache will try again. Long enough that a graph whose URNs are genuinely
