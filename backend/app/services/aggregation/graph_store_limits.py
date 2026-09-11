@@ -48,9 +48,20 @@ from .schemas import GraphStoreLimitsPatch, GraphStoreLimitsResponse
 
 logger = logging.getLogger(__name__)
 
-#: The planning figure when the node does not report its THREAD_COUNT —
-#: the shipped FALKORDB_ARGS value.
-THREAD_COUNT_ASSUMED = 4
+#: The planning figure when the node does not report its THREAD_COUNT.
+#:
+#: This sizes ``container_memory_needed``: how much container memory the node
+#: needs for ``threads`` concurrent queries each allowed QUERY_MEM_CAPACITY.
+#: The two directions are NOT symmetric. Guess too HIGH and the guard refuses
+#: a config that would in fact have fitted — conservative, and the operator
+#: sees the numbers. Guess too LOW and it approves a config that OOM-kills the
+#: node under exactly the concurrency it was raised to serve.
+#:
+#: So this is the LARGEST THREAD_COUNT across the shipped manifests, not a
+#: typical one. It was 4 while the manifests shipped 8, which under-booked
+#: every unreporting node by half. ``test_thread_count_assumption.py`` derives
+#: the shipped values and fails if this drops below them again.
+THREAD_COUNT_ASSUMED = 8
 
 
 class GraphStoreLimitsError(ValueError):
@@ -134,7 +145,7 @@ def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> Valid
                     f"{human_bytes(needed)}: 1.25 × {human_bytes(maxmemory)} maxmemory + "
                     f"{concurrent} concurrent {'query' if concurrent == 1 else 'queries'} × 1.3 × "
                     f"{human_bytes(new_cap)} + overhead"
-                    f"{' (THREAD_COUNT not reported; assumed 4)' if assumed else ''}. The "
+                    f"{f' (THREAD_COUNT not reported; assumed {threads})' if assumed else ''}. The "
                     f"container has {human_bytes(container)} — short by "
                     f"{human_bytes(needed - container)}. Raise the container limit first, "
                     f"lower maxmemory on a fresh node, or choose a smaller ceiling."

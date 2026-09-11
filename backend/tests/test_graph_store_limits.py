@@ -231,8 +231,10 @@ def test_concurrency_is_capped_at_the_thread_count_and_an_unreported_thread_coun
     _wire(monkeypatch, {ENDPOINT: conn})
     out = _apply(ENDPOINT, _patch(queryMemCapacity=512 * MB, containerMemoryBytes=64 * GB, concurrentQueries=16))
     assert out.thread_count_assumed is True and out.concurrent_queries == gsl.THREAD_COUNT_ASSUMED
-    assert out.container_needed_bytes == sc.container_memory_needed(6 * GB, 4, 512 * MB)
-    with pytest.raises(gsl.GraphStoreLimitsError, match="assumed 4"):
+    assert out.container_needed_bytes == sc.container_memory_needed(
+        6 * GB, gsl.THREAD_COUNT_ASSUMED, 512 * MB)
+    with pytest.raises(gsl.GraphStoreLimitsError,
+                       match=f"assumed {gsl.THREAD_COUNT_ASSUMED}"):
         _apply(ENDPOINT, _patch(queryMemCapacity=8 * GB, containerMemoryBytes=10 * GB))
 
 
