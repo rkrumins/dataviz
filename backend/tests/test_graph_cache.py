@@ -1898,3 +1898,108 @@ def test_the_structural_endpoints_are_cached_for_an_hour() -> None:
     # And the negative window stays short: a failed or empty read must be
     # retried soon, never pinned for an hour.
     assert gc._NEGATIVE_TTL <= 300
+
+
+# ── hit-rate telemetry ───────────────────────────────────────────────────
+#
+# The cache is the largest lever on read capacity and was the only one nobody
+# could see. These pin that every outcome is counted, that a stale-fallback
+# never flatters the ratio, and that telemetry can never fail a request.
+
+
+def _stats_redis():
+    redis = _make_redis()
+    redis.hincrby = AsyncMock(return_value=1)
+    redis.expire = AsyncMock(return_value=True)
+    return redis
+
+
+@pytest.mark.asyncio
+async def test_a_cache_hit_and_a_miss_are_both_counted() -> None:
+    redis = _stats_redis()
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+
+    compute = AsyncMock(return_value=_Result(value=1))
+    await cache.get_or_compute(
+        scope=scope, endpoint=ENDPOINT_CHILDREN, params={"urn": "x"},
+        compute=compute, model_cls=_Result,
+    )
+    # Now serve the same key from cache.
+    redis.get = AsyncMock(side_effect=["0", _Result(value=1).model_dump_json(by_alias=True)])
+    await cache.get_or_compute(
+        scope=scope, endpoint=ENDPOINT_CHILDREN, params={"urn": "x"},
+        compute=compute, model_cls=_Result,
+    )
+    await asyncio.sleep(0)                      # let the fire-and-forget tasks run
+    await asyncio.sleep(0)
+
+    fields = [c.args[1] for c in redis.hincrby.await_args_list]
+    assert f"{ENDPOINT_CHILDREN}:miss" in fields
+    assert f"{ENDPOINT_CHILDREN}:hit" in fields
+
+
+@pytest.mark.asyncio
+async def test_a_stale_fallback_is_not_counted_as_a_hit() -> None:
+    """It kept the user moving, but the provider could not answer. Folding it
+    into the hit ratio would make an outage read as a cache win — which is
+    exactly the wrong signal when someone is looking at this during one."""
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _stats_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0", None, _Result(value=123).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=AsyncMock(side_effect=ProviderUnavailable("falkordb", "down")),
+        model_cls=_Result,
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    fields = [c.args[1] for c in redis.hincrby.await_args_list]
+    assert f"{ENDPOINT_CHILDREN}:stale" in fields
+    assert f"{ENDPOINT_CHILDREN}:hit" not in fields
+
+
+def test_the_ratio_excludes_stale_and_bypass() -> None:
+    """hit / (hit + miss + stale). A bypass is not a cache outcome at all —
+    the endpoint was off or Redis was unreachable — so it must not dilute the
+    denominator and make a disabled cache look like a missing one."""
+    import backend.app.services.graph_cache as gc
+
+    assert gc.CACHE_OUTCOMES == ("hit", "miss", "stale", "bypass")
+    # 3 hits, 1 miss, 1 stale, 10 bypass -> 3/5, not 3/15 and not 4/5.
+    row = {"hit": 3, "miss": 1, "stale": 1, "bypass": 10}
+    served = row["hit"] + row["miss"] + row["stale"]
+    assert round(row["hit"] / served, 4) == 0.6
+
+
+@pytest.mark.asyncio
+async def test_telemetry_never_fails_a_request() -> None:
+    """A counter write that raises must not reach the caller — the request
+    already succeeded, and the cache must never become a hard dependency."""
+    redis = _stats_redis()
+    redis.hincrby = AsyncMock(side_effect=RuntimeError("bus down"))
+    cache = GraphCache(redis)
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=AsyncMock(return_value=_Result(value=7)), model_cls=_Result,
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert result.value == 7
+
+
+@pytest.mark.asyncio
+async def test_reading_stats_when_the_bus_is_down_is_empty_not_an_error() -> None:
+    from backend.app.services.graph_cache import read_cache_stats
+
+    stats = await read_cache_stats("")          # no workspace -> empty, no bus call
+    assert stats["totals"]["hit"] == 0
+    assert stats["endpoints"] == {}

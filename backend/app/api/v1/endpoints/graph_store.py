@@ -84,6 +84,46 @@ async def get_topology(fresh: bool = Query(False)) -> GraphStoreTopologyResponse
 
 
 @router.get(
+    "/cache-stats",
+    summary="Graph response-cache hit ratio, per data source and per endpoint",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
+async def get_cache_stats(
+    workspaceId: str = Query(..., description="Workspace to report on"),
+    dataSourceId: Optional[str] = Query(
+        None, description="One data source; omitted reports the workspace",
+    ),
+    windowMinutes: int = Query(
+        120, ge=5, le=120, description="How far back to aggregate",
+    ),
+) -> dict:
+    """How much of the read load the cache is actually absorbing.
+
+    The graph response cache is the largest single lever on read capacity —
+    a hit costs one Redis round trip, a miss costs a canvas open's worth of
+    Cypher on the shard replicas that serve that source. Until this existed
+    the only way to answer "is it hitting?" was to read TTL constants and
+    infer, which is how an endpoint caching for five seconds instead of an
+    hour went unnoticed.
+
+    ``hitRatio`` counts real hits only. A stale-fallback is reported beside
+    it but never folded in: it kept the user moving while the provider could
+    not answer, and counting it would make an outage read as a cache win.
+    """
+    from backend.app.services.graph_cache import read_cache_stats
+
+    buckets = max(1, windowMinutes * 60 // 300)
+    stats = await read_cache_stats(workspaceId, dataSourceId, buckets=buckets)
+    return {
+        "workspaceId": workspaceId,
+        "dataSourceId": dataSourceId,
+        "windowSeconds": stats.get("window_seconds"),
+        "totals": stats.get("totals", {}),
+        "endpoints": stats.get("endpoints", {}),
+    }
+
+
+@router.get(
     "/providers/{provider_id}",
     response_model=ProviderTopologyResponse,
     response_model_by_alias=True,

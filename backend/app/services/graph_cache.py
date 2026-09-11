@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
@@ -351,6 +352,7 @@ class GraphCache:
         unavailability.
         """
         if not self.is_enabled(endpoint):
+            _stats_recorder.record(self, scope, endpoint, "bypass")
             return await compute()
 
         try:
@@ -358,6 +360,7 @@ class GraphCache:
             cache_key = _build_key(scope, gen, endpoint, params)
         except RedisError as exc:
             logger.warning("graph_cache: gen read failed (%s); bypassing cache", exc)
+            _stats_recorder.record(self, scope, endpoint, "bypass")
             return await compute()
 
         # ── 1. Redis cache lookup ─────────────────────────────────────
@@ -365,11 +368,14 @@ class GraphCache:
             cached = await self._cache_redis.get(cache_key)
         except RedisError as exc:
             logger.warning("graph_cache: GET failed (%s); bypassing cache", exc)
+            _stats_recorder.record(self, scope, endpoint, "bypass")
             return await compute()
 
         if cached is not None:
             try:
-                return model_cls.model_validate_json(cached)
+                value = model_cls.model_validate_json(cached)
+                _stats_recorder.record(self, scope, endpoint, "hit")
+                return value
             except Exception as exc:
                 # Bad payload (schema drift?) — log and treat as miss. The
                 # offending key will be overwritten by the compute below.
@@ -393,6 +399,13 @@ class GraphCache:
                         on_stale()
                     except Exception as cb_exc:  # pragma: no cover
                         logger.warning("graph_cache: on_stale callback raised: %s", cb_exc)
+                # A follower rode the leader's compute rather than issuing its
+                # own — from the store's point of view that is work avoided,
+                # which is what the ratio is measuring.
+                _stats_recorder.record(
+                    self, scope, endpoint,
+                    "stale" if outcome.served_stale else "hit",
+                )
                 return outcome.value
             except Exception:
                 # Leader failed — fall through to recompute below.
@@ -413,6 +426,7 @@ class GraphCache:
             await self._set_lkg(scope, endpoint, params, result, payload=payload)
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
+            _stats_recorder.record(self, scope, endpoint, "miss")
             return result
         except (ProviderBusy, ProviderLoading) as exc:
             # NOT an inability to answer, and both subclass ProviderUnavailable
@@ -457,6 +471,7 @@ class GraphCache:
                     # served_stale=True so followers awaiting via
                     # ``shield(existing)`` invoke their own on_stale.
                     fut.set_result(_SingleflightOutcome(value=stale, served_stale=True))
+                _stats_recorder.record(self, scope, endpoint, "stale")
                 return stale
             # No fallback available — propagate.
             if not fut.done():
@@ -968,6 +983,125 @@ async def invalidate_hierarchy_reads(
             workspace_id, data_source_id, exc,
         )
         return None
+
+
+# ─── Hit-rate telemetry ────────────────────────────────────────────────
+#
+# The cache was the largest lever on read capacity and the only thing nobody
+# could see. "Is it hitting?" was answered by reading TTL constants and
+# inferring — which is how a view that cached for 5 seconds instead of an hour
+# went unnoticed. These counters make the answer observable per data source
+# and per endpoint.
+#
+# Shape: one HASH per (workspace, data source) per time bucket, fields
+# "{endpoint}:{outcome}". Bucketed so the answer is a RATE over a window
+# rather than a lifetime total that flattens every incident into noise, and
+# TTL'd so a deleted source stops costing memory on its own.
+
+_STATS_PREFIX = "graphcache:stats:v1"
+#: Width of one counter bucket. Five minutes is fine enough to see a cache go
+#: cold during an incident and coarse enough that a busy fleet writes few keys.
+_STATS_BUCKET_S = 300
+#: How many buckets are kept. Two hours of history at the width above.
+_STATS_BUCKETS_KEPT = 24
+_STATS_TTL_S = _STATS_BUCKET_S * _STATS_BUCKETS_KEPT
+
+#: The outcomes worth telling apart. ``stale`` is a hit that served the
+#: last-known-good snapshot — it kept the user moving but it is NOT the cache
+#: working as intended, so it never counts toward the hit ratio.
+CACHE_OUTCOMES = ("hit", "miss", "stale", "bypass")
+
+
+def _stats_key(workspace_id: str, data_source_id: str, bucket: int) -> str:
+    return f"{_STATS_PREFIX}:{workspace_id}:{data_source_id or '-'}:{bucket}"
+
+
+def _current_bucket() -> int:
+    return int(time.time()) // _STATS_BUCKET_S
+
+
+class _CacheStatsRecorder:
+    """Fire-and-forget counter writes. Never delays or fails a request."""
+
+    def __init__(self) -> None:
+        self._tasks: set = set()
+
+    def record(self, cache: "GraphCache", scope: CacheScope,
+               endpoint: str, outcome: str) -> None:
+        if outcome not in CACHE_OUTCOMES or not scope.workspace_id:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                       # pragma: no cover — no loop
+            return
+        task = loop.create_task(self._write(cache, scope, endpoint, outcome))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    @staticmethod
+    async def _write(cache: "GraphCache", scope: CacheScope,
+                     endpoint: str, outcome: str) -> None:
+        key = _stats_key(scope.workspace_id, scope.data_source_id, _current_bucket())
+        try:
+            await cache._coord_redis.hincrby(key, f"{endpoint}:{outcome}", 1)
+            await cache._coord_redis.expire(key, _STATS_TTL_S)
+        except Exception:                          # noqa: BLE001 — telemetry
+            pass
+
+
+_stats_recorder = _CacheStatsRecorder()
+
+
+async def read_cache_stats(
+    workspace_id: str,
+    data_source_id: Optional[str] = None,
+    *,
+    buckets: int = _STATS_BUCKETS_KEPT,
+) -> dict[str, Any]:
+    """Hit ratio for a workspace (or one data source) over the recent window.
+
+    Returns per-endpoint counts plus a total. ``hit_ratio`` counts only real
+    hits: a stale-fallback kept the user moving but the provider still could
+    not answer, and folding it in would make an outage look like a cache win.
+    Empty rather than raising when the bus is unavailable — this is telemetry.
+    """
+    out: dict[str, Any] = {"endpoints": {}, "totals": {o: 0 for o in CACHE_OUTCOMES}}
+    if not workspace_id:
+        return out
+    try:
+        cache = get_graph_cache()
+        now = _current_bucket()
+        keys = [
+            _stats_key(workspace_id, data_source_id or "", now - i)
+            for i in range(max(1, min(buckets, _STATS_BUCKETS_KEPT)))
+        ]
+        pipe = cache._coord_redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.hgetall(key)
+        for entry in await pipe.execute():
+            for field, count in (entry or {}).items():
+                field = field.decode() if isinstance(field, bytes) else str(field)
+                endpoint, _, outcome = field.rpartition(":")
+                if outcome not in CACHE_OUTCOMES:
+                    continue
+                row = out["endpoints"].setdefault(
+                    endpoint, {o: 0 for o in CACHE_OUTCOMES},
+                )
+                row[outcome] += int(count)
+                out["totals"][outcome] += int(count)
+    except Exception as exc:                       # noqa: BLE001 — telemetry
+        logger.debug("graph_cache: stats read failed: %s", exc)
+        return out
+
+    def _ratio(row: dict[str, int]) -> Optional[float]:
+        served = row["hit"] + row["miss"] + row["stale"]
+        return round(row["hit"] / served, 4) if served else None
+
+    for row in out["endpoints"].values():
+        row["hit_ratio"] = _ratio(row)
+    out["totals"]["hit_ratio"] = _ratio(out["totals"])
+    out["window_seconds"] = _STATS_BUCKET_S * min(buckets, _STATS_BUCKETS_KEPT)
+    return out
 
 
 # ─── Stale-source marker (stale-while-revalidate flag) ─────────────────
