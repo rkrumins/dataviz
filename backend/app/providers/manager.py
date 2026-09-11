@@ -47,7 +47,12 @@ from backend.common.interfaces.preflight import (
     is_reachable_config_reason,
 )
 
-from .state import ProbeOutcome, ProviderState
+from .state import (
+    _READ_GATE_PERSISTENCE,
+    ProbeOutcome,
+    ProviderState,
+    is_ambiguous_probe_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +92,93 @@ _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "3
 # default 8 absorbs typical bursts while bounding fan-out.
 _MAX_PROVIDER_CONCURRENCY = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
 # Acquire-budget — how long a request waits for a semaphore slot before
-# fast-failing. Keep tight: if all 8 slots are busy, the provider is in
-# trouble and we'd rather shed load than queue.
-_SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.25"))
+# fast-failing with ProviderBusy (429). 2s, not the old 0.25s: the cap on
+# in-flight work is the semaphore SIZE, and that is unchanged — this only
+# decides whether a request that finds every slot busy waits briefly or is
+# bounced immediately. A single canvas open fans out ~10 short queries;
+# at 0.25s the tail of that burst was shed even though each slot frees in
+# ~100ms, so the client paid a 429 + backoff round trip (and, if every
+# batch was shed, rendered "graph service unavailable"). A provider that
+# is genuinely wedged still sheds — its slots never free within 2s.
+_SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "2.0"))
+# How many requests may WAIT for a slot on one provider (per process) before
+# further arrivals are shed immediately. A waiting request still holds its
+# GRAPH_READ DB session (checked out by the data-source lookup before the
+# slot is requested), so an unbounded queue at a 2s wait would let a burst
+# drain that pool and turn a busy provider into 503s for everyone. Twice the
+# slot count absorbs a canvas open's burst; beyond it, shedding at once is
+# cheaper for the client than waiting 2s to be shed anyway.
+_SLOT_MAX_WAITERS = int(os.getenv("PROVIDER_SLOT_MAX_WAITERS", "16"))
+
+
+# ── Per-data-source admission, ahead of the GRAPH_READ DB session ─────
+#
+# The bulkhead that was missing. Every graph request checks out a GRAPH_READ
+# session in ``get_context_engine`` BEFORE the data source is resolved, and
+# holds it across the whole outbound FalkorDB call. That pool is per process
+# and SHARED BY EVERY DATA SOURCE: with five sources configured and one of
+# them merely slow (not down — a slow provider is deliberately never gated,
+# so its requests keep arriving and each holds a session for up to its
+# 20s query budget), that one source fills all 20 sessions on a worker.
+# Requests for the four HEALTHY sources then wait ``DB_POOL_TIMEOUT_SECS``
+# (10s) for a session that never frees and fail with a generic 503. One
+# unhealthy data source took the graph down for all of them.
+#
+# So admission happens at the door, before a session is taken, and every
+# source keeps a reserved share it can always use:
+#
+#   * over the HARD ceiling    → shed. The pool invariant: it must stay below
+#     the pool so a checkout never waits on the 10s timeout.
+#   * under its RESERVED share  → admit, whatever else is in flight. This is
+#     the guarantee: a saturated neighbour can never take a source's reserved
+#     share, so N-1 healthy sources keep serving.
+#   * otherwise                 → admit while the process still has room for
+#     every OTHER source's reserve. "Other" means every source this process
+#     has served inside ``_GRAPH_SOURCE_RECENT_S``, not just the ones with a
+#     request in flight right now: a source whose users are between clicks
+#     must still find room when it comes back, and reserving only for
+#     in-flight work let a saturated neighbour take the last slot in the gap.
+#     Sized from what the deployment actually uses, so a single-source
+#     install holds nothing back and uses the whole ceiling, while five busy
+#     sources each keep a share. A fixed mid-ceiling would have throttled the
+#     single-source case to protect neighbours that do not exist.
+#
+# Both numbers come from _graph_inflight_limits() below, derived from the pool
+# and overridable as GRAPH_INFLIGHT_HARD_MAX / PROVIDER_SOURCE_RESERVED.
+# Shedding is ``ProviderBusy`` (429 + Retry-After), which the canvas retries in
+# place — the same treatment as a full slot queue, and far better than a 10s
+# stall followed by an unexplained 503.
+
+# How long a data source counts toward the reserve after its last graph
+# request. Long enough to span a user's think time between canvas gestures,
+# short enough that a source removed from the deployment stops holding
+# capacity within a minute.
+_GRAPH_SOURCE_RECENT_S = float(os.getenv("GRAPH_SOURCE_RECENT_SECS", "60"))
+
+# Ceiling on one provider's ``close()``. See _close_and_forget.
+_PROVIDER_CLOSE_TIMEOUT_S = float(os.getenv("PROVIDER_CLOSE_TIMEOUT_S", "2.0"))
+
+
+def _graph_inflight_limits() -> Tuple[int, int]:
+    """(hard, reserved), derived from the GRAPH_READ pool unless pinned.
+
+    Derived rather than hard-coded so resizing the pool moves the gate with it:
+
+        hard      = pool − headroom for the few endpoints that take a
+                    graph-read session without passing this gate
+        reserved  = what any one data source may always take
+
+    ``reserved`` is clamped below ``hard``: a per-source share at or above the
+    shared ceiling would admit past it, which is the one thing the pool
+    invariant forbids.
+    """
+    from backend.app.db.engine import graph_read_pool_capacity
+
+    pool = max(4, graph_read_pool_capacity())
+    hard = int(os.getenv("GRAPH_INFLIGHT_HARD_MAX", "0")) or max(4, pool - 4)
+    reserved = int(os.getenv("PROVIDER_SOURCE_RESERVED", "0")) or max(1, pool // 8)
+    return hard, max(1, min(reserved, hard))
+
 
 # Inline reachability preflight (WS0.1). Bounds the FIRST request to a
 # just-went-down provider: get_provider runs a fast, deadline-bounded
@@ -99,10 +188,23 @@ _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.
 # while pinning a WEB DB connection the whole time (which drains the pool and
 # stalls unrelated endpoints). The probe checks REACHABILITY, not query
 # speed — a healthy provider mid-trace answers PING instantly and passes, so
-# legitimate long-running reads are unaffected. Warmup-confirmed-healthy
-# providers skip the probe entirely (zero added latency on the hot path).
-_REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "1.5"))
+# legitimate long-running reads are unaffected. A provider that real traffic
+# reached within PROVIDER_PREFLIGHT_SKIP_AFTER_OK_S skips the probe entirely
+# (zero added latency on the hot path, and no PING that could false-negative
+# on a busy-but-healthy instance).
+_REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "2.5"))
 _REACHABLE_PROBE_CACHE_S = float(os.getenv("PROVIDER_PREFLIGHT_CACHE_S", "3"))
+# A guarded call succeeded this recently ⇒ the provider is reachable by
+# construction; don't PING it again. Bounds how long a just-died provider
+# can go un-probed: its next query fails (a network-class error the breaker
+# counts), and the request after that probes because the last success is
+# now older than this window.
+_REACHABLE_SKIP_AFTER_OK_S = float(os.getenv("PROVIDER_PREFLIGHT_SKIP_AFTER_OK_S", "10"))
+# Consecutive timeout-class preflight misses before the request path treats
+# the provider as unreachable. One slow PING under load is not an outage —
+# the request proceeds to its own (deadline-bounded) query instead. A dead
+# host misses every probe, so it is still gated after this many.
+_REACHABLE_AMBIGUOUS_PERSISTENCE = int(os.getenv("PROVIDER_PREFLIGHT_AMBIGUOUS_MISSES", "2"))
 
 # Breaker states that positively prove an outage (recovery-eviction check).
 _NON_CLOSED_BREAKER_STATES = (BreakerState.OPEN.value, BreakerState.HALF_OPEN.value)
@@ -217,12 +319,44 @@ class ProviderManager:
         # slots (default 8); on saturation, raises ProviderUnavailable
         # immediately rather than queueing.
         self._provider_semaphores: Dict[Tuple[str, str], asyncio.Semaphore] = {}
+        # Requests currently waiting for a slot, per cache_key — bounded by
+        # _SLOT_MAX_WAITERS so a burst cannot pin the DB pool while queueing.
+        self._slot_waiters: Dict[Tuple[str, str], int] = {}
+
+        # Process-wide counters (monotonic since boot) for the request-path
+        # decisions that used to be invisible: surfaced on /health/deps so a
+        # release can be verified — "preflight skipped because traffic just
+        # succeeded", "slow miss let the request through", "gated", and
+        # "shed" — without grepping logs.
+        self.stats: Dict[str, int] = {
+            "preflight_skipped_recent_ok": 0,
+            "preflight_slow_misses": 0,
+            "preflight_gated": 0,
+            "slots_shed_queue_full": 0,
+            "slots_shed_wait_timeout": 0,
+            "graph_shed_process_full": 0,
+            "graph_shed_over_share": 0,
+            "graph_inflight_peak": 0,
+            "provider_close_timeouts": 0,
+        }
+
+        # Graph requests currently holding a GRAPH_READ session, per data
+        # source, and the process total. Plain ints: every mutation happens
+        # between awaits on one event loop, so no lock is needed.
+        self._graph_inflight: Dict[str, int] = {}
+        self._graph_inflight_total: int = 0
+        # source key -> monotonic time of its last graph request. Sizes the
+        # reserve (see admit_graph_request); pruned there on the same pass.
+        self._graph_recent: Dict[str, float] = {}
 
         # Short-lived inline reachability verdicts (WS0.1). See the
         # _REACHABLE_PROBE_* constants + _ensure_reachable below.
         # (provider_id, graph_name) -> (verdict, monotonic_ts) where verdict is
-        # "ok" | "loading" | "down".
+        # "ok" | "loading" | "auth" | "config" | "slow" | "down".
         self._reachable_probe: Dict[Tuple[str, str], Tuple[str, float]] = {}
+        # Consecutive timeout-class ("slow") preflight misses per cache_key.
+        # Reset by any "ok" verdict. See _REACHABLE_AMBIGUOUS_PERSISTENCE.
+        self._reachable_misses: Dict[Tuple[str, str], int] = {}
         # Single-flight the inline preflight so a herd of concurrent callers on
         # a just-downed provider triggers ONE probe, not N.
         self._reachable_inflight: Dict[Tuple[str, str], "asyncio.Future[str]"] = {}
@@ -424,8 +558,19 @@ class ProviderManager:
         - Single-flights the probe per (provider, graph): a herd of concurrent
           callers triggers ONE probe, not N.
         - Providers without a preflight() are never gated.
+        - Skipped entirely while real traffic has recently succeeded through
+          the provider's breaker: a guarded call that just returned is better
+          evidence of reachability than a PING, and a PING on a busy instance
+          can miss its deadline while queries are being served.
+        - A timeout-class miss ("slow") must PERSIST across consecutive probes
+          before it gates. One slow PING under load lets the request through
+          to its own deadline-bounded query; only refused/DNS/os_error gate
+          on a single observation.
         """
         now = time.monotonic()
+        if self._recently_served(provider, now):
+            self.stats["preflight_skipped_recent_ok"] += 1
+            return
         cached = self._reachable_probe.get(cache_key)
         if cached is not None and (now - cached[1]) < _REACHABLE_PROBE_CACHE_S:
             self._raise_for_verdict(cache_key, cached[0])
@@ -433,10 +578,36 @@ class ProviderManager:
         verdict = await self._probe_reachable_singleflight(cache_key, provider)
         self._raise_for_verdict(cache_key, verdict)
 
+    @staticmethod
+    def _recently_served(provider: GraphDataProvider, now: float) -> bool:
+        """True when the provider's operation breaker recorded a success within
+        ``_REACHABLE_SKIP_AFTER_OK_S`` — the hot-path proof of reachability."""
+        breaker = getattr(provider, "breaker", None)
+        last_ok = getattr(breaker, "last_success_at", None)
+        if not isinstance(last_ok, (int, float)):
+            return False
+        return (now - last_ok) < _REACHABLE_SKIP_AFTER_OK_S
+
     def _raise_for_verdict(self, cache_key: Tuple[str, str], verdict: str) -> None:
         if verdict == "ok":
             return
         cp = f"{cache_key[0]}:{cache_key[1]}"
+        if verdict == "slow":
+            # Timeout-class miss: gate only once it has persisted. Below the
+            # threshold the request proceeds — its own query deadline bounds
+            # the cost if the provider really is wedged.
+            misses = self._reachable_misses.get(cache_key, 0)
+            if misses < _REACHABLE_AMBIGUOUS_PERSISTENCE:
+                return
+            self.stats["preflight_gated"] += 1
+            raise ProviderUnavailable(
+                provider_name=cp,
+                reason=(
+                    f"provider unreachable (preflight timed out {misses} "
+                    f"consecutive times)"
+                ),
+                retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+            )
         if verdict == "loading":
             # Warming, not down — surface the retryable ProviderLoading signal
             # (the breaker ignores it) so the FE shows "graph is starting up".
@@ -493,7 +664,8 @@ class ProviderManager:
         self, cache_key: Tuple[str, str], provider: GraphDataProvider,
     ) -> str:
         """Run one bounded preflight against the UNWRAPPED provider and cache
-        the verdict ('ok' | 'loading' | 'down'). Never raises."""
+        the verdict ('ok' | 'loading' | 'auth' | 'config' | 'slow' | 'down').
+        Never raises."""
         # Unwrap the CircuitBreakerProxy so a non-raising ok=False result is not
         # recorded as a breaker success (which would reset an open breaker).
         target = getattr(provider, "target", provider)
@@ -525,8 +697,20 @@ class ProviderManager:
                     # cluster_mode_mismatch). Same non-outage semantics, distinct
                     # message at the raise site.
                     verdict = "config"
+                elif is_ambiguous_probe_reason(pf_reason):
+                    # connect_timeout / empty_reply: reachable-but-slow is as
+                    # likely as down. Gated only once it persists.
+                    verdict = "slow"
+            except asyncio.TimeoutError:
+                # The wall-clock backstop fired — same ambiguity as above.
+                verdict = "slow"
             except Exception:
                 verdict = "down"
+        if verdict == "slow":
+            self._reachable_misses[cache_key] = self._reachable_misses.get(cache_key, 0) + 1
+            self.stats["preflight_slow_misses"] += 1
+        elif verdict == "ok":
+            self._reachable_misses.pop(cache_key, None)
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
         return verdict
 
@@ -793,6 +977,17 @@ class ProviderManager:
         )
         pre_trip_targets: List[Tuple[Tuple[str, str], AsyncCircuitBreaker]] = []
 
+        # A timeout-class reason (connect_timeout, wall-clock exceeded, empty
+        # reply) is reachable-but-slow as often as it is down — a busy instance
+        # answers a fresh AUTH+PING late — so it must persist for the read
+        # gate's threshold before it pre-trips. Definitive reasons (refused,
+        # DNS, os_error) keep the shorter threshold.
+        pre_trip_after = (
+            max(self._PRE_TRIP_AFTER_N, _READ_GATE_PERSISTENCE)
+            if is_ambiguous_probe_reason(reason)
+            else self._PRE_TRIP_AFTER_N
+        )
+
         async with self._state_lock:
             for cache_key in cache_keys:
                 state = self._ensure_state(cache_key)
@@ -801,7 +996,7 @@ class ProviderManager:
                 if source == "warmup":
                     state.last_warmup_at = outcome.observed_at
 
-                if state.consecutive_failures >= self._PRE_TRIP_AFTER_N:
+                if state.consecutive_failures >= pre_trip_after:
                     ib = self._instantiation_breakers.get(cache_key)
                     if ib is None:
                         ib = self._get_instantiation_breaker(cache_key)
@@ -816,7 +1011,7 @@ class ProviderManager:
                 logger.info(
                     "Pre-tripped instantiation breaker for %r after %d consecutive "
                     "%s-observed failures (reason=%s)",
-                    cache_key, self._PRE_TRIP_AFTER_N, source, reason,
+                    cache_key, pre_trip_after, source, reason,
                 )
             except Exception as exc:
                 logger.warning(
@@ -858,6 +1053,70 @@ class ProviderManager:
             self._provider_semaphores[cache_key] = sem
         return sem
 
+    def admit_graph_request(self, source_key: str) -> None:
+        """Admit one graph request for ``source_key``, or raise ``ProviderBusy``.
+
+        Called BEFORE the GRAPH_READ session is checked out, so a shed request
+        never holds one. The caller MUST pair this with exactly one
+        :meth:`release_graph_request` (the FastAPI dependency in
+        ``endpoints/graph.py`` does it in a ``finally``).
+        """
+        hard, reserved = _graph_inflight_limits()
+        total = self._graph_inflight_total
+        current = self._graph_inflight.get(source_key, 0)
+
+        # Note this source as present (whether or not it is admitted — a shed
+        # source is still one this process serves) and forget the ones that
+        # have gone quiet. O(sources), and a process serves a handful.
+        now = time.monotonic()
+        self._graph_recent[source_key] = now
+        if len(self._graph_recent) > 1:
+            cutoff = now - _GRAPH_SOURCE_RECENT_S
+            for stale in [k for k, seen in self._graph_recent.items() if seen < cutoff]:
+                del self._graph_recent[stale]
+
+        if total >= hard:
+            self.stats["graph_shed_process_full"] += 1
+            raise ProviderBusy(
+                provider_name=source_key,
+                reason=(
+                    "this server is already serving its maximum number of graph "
+                    "reads; retry shortly"
+                ),
+                retry_after_seconds=1,
+            )
+        others = len(self._graph_recent) - 1
+        if current >= reserved and total >= hard - others * reserved:
+            # Over its reserved share, and the room left is spoken for by the
+            # reserves of the other sources this process serves. Their share is
+            # never refused, so they keep serving — including a source arriving
+            # cold, which is the case that matters when a neighbour has been
+            # saturated for a while. With no other source seen this never fires
+            # and one source uses the whole ceiling.
+            self.stats["graph_shed_over_share"] += 1
+            raise ProviderBusy(
+                provider_name=source_key,
+                reason=(
+                    "this data source is using its share of this server's graph "
+                    "reads; retry shortly"
+                ),
+                retry_after_seconds=1,
+            )
+
+        self._graph_inflight[source_key] = current + 1
+        self._graph_inflight_total = total + 1
+        if self._graph_inflight_total > self.stats["graph_inflight_peak"]:
+            self.stats["graph_inflight_peak"] = self._graph_inflight_total
+
+    def release_graph_request(self, source_key: str) -> None:
+        """Release an admission taken by :meth:`admit_graph_request`."""
+        current = self._graph_inflight.get(source_key, 0)
+        if current <= 1:
+            self._graph_inflight.pop(source_key, None)
+        else:
+            self._graph_inflight[source_key] = current - 1
+        self._graph_inflight_total = max(0, self._graph_inflight_total - 1)
+
     async def acquire_provider_slot(
         self, provider_id: str, graph_name: str = "",
     ) -> asyncio.Semaphore:
@@ -875,6 +1134,18 @@ class ProviderManager:
         """
         cache_key = (provider_id, graph_name or "")
         sem = self._get_provider_semaphore(cache_key)
+        waiting = self._slot_waiters.get(cache_key, 0)
+        if sem.locked() and waiting >= _SLOT_MAX_WAITERS:
+            # Every slot busy AND the queue already full: shed now rather
+            # than hold a DB session for the full wait budget only to be
+            # shed then. Same 429 + Retry-After contract as below.
+            self.stats["slots_shed_queue_full"] += 1
+            raise ProviderBusy(
+                provider_name=f"{cache_key[0]}:{cache_key[1]}",
+                reason="provider queue full; shed load",
+                retry_after_seconds=1,
+            )
+        self._slot_waiters[cache_key] = waiting + 1
         try:
             await asyncio.wait_for(
                 sem.acquire(), timeout=_SEMAPHORE_ACQUIRE_BUDGET_S,
@@ -884,11 +1155,14 @@ class ProviderManager:
             # not a broken one. ProviderBusy maps to HTTP 429 with
             # Retry-After so the client backs off and retries, instead of
             # 503 which clients (rightly) treat as "provider is down".
+            self.stats["slots_shed_wait_timeout"] += 1
             raise ProviderBusy(
                 provider_name=f"{cache_key[0]}:{cache_key[1]}",
                 reason="provider concurrency saturated; shed load",
                 retry_after_seconds=1,
             )
+        finally:
+            self._slot_waiters[cache_key] = max(0, self._slot_waiters.get(cache_key, 1) - 1)
         return sem
 
     # ------------------------------------------------------------------ #
@@ -942,6 +1216,7 @@ class ProviderManager:
         # Also reset the instantiation breaker so re-instantiation is attempted
         self._instantiation_breakers.pop(cache_key, None)
         self._reachable_probe.pop(cache_key, None)
+        self._reachable_misses.pop(cache_key, None)
         if provider is None:
             return
         inflight = 0
@@ -956,8 +1231,25 @@ class ProviderManager:
             )
             asyncio.create_task(self._close_when_idle(cache_key, provider))
         else:
+            # Bounded, like the warmup probe's own close. This runs on two
+            # process-wide serial paths — the warmup cycle's idle reap and the
+            # cross-process invalidation listener — and both handle providers
+            # one at a time. An unbounded close against a blackholed host hung
+            # BOTH: the warmup cycle stopped, so every provider's verdict went
+            # stale and /health/deps reported the loop degraded, and no other
+            # provider's invalidation was applied. One wedged provider froze
+            # the fleet's control plane. The socket leak from abandoning a
+            # close is bounded by the pool; a frozen cycle is not.
             try:
-                await provider.close()
+                await asyncio.wait_for(provider.close(), timeout=_PROVIDER_CLOSE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                self.stats["provider_close_timeouts"] += 1
+                logger.warning(
+                    "Timed out closing provider %s after %.1fs — abandoning the "
+                    "handle so the caller (warmup reap / invalidation listener) "
+                    "keeps serving the other providers.",
+                    cache_key, _PROVIDER_CLOSE_TIMEOUT_S,
+                )
             except Exception as exc:
                 logger.warning("Error closing provider %s: %s", cache_key, exc)
 

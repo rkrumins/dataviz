@@ -352,6 +352,21 @@ the **first checkpoint**, before any graph work. Resume rules:
   per-process write semaphore and latency-quiesce circuit. The ratio is a
   sleep multiplier, so RAISING it slows the job down and LOWERING it
   speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → no sleep at all.
+* **Interactive reads first**
+  (`backend/app/services/aggregation/read_pressure.py`): the writers'
+  only feedback used to be their OWN write latency, so a job issuing
+  small, fast MERGEs while the canvas's reads queued behind them looked
+  healthy and never yielded. Now the web tier stamps
+  `agg:readpressure:{endpoint}` on the job-bus Redis (TTL
+  `AGGREGATION_READ_PRESSURE_TTL_S`, default 30 s, refreshed by every
+  signal) whenever FalkorDB starves an interactive read — its queue-full
+  rejection, its server-side query kill, or a client deadline — and every
+  write batch on that endpoint is then paced at
+  `AGGREGATION_READ_PRESSURE_PACING_RATIO` (default 4.0 → ≤ ~20% write
+  duty cycle) instead of the base ratio until the key expires. Jobs finish
+  later; users never queue behind a background rebuild. Fails **open**
+  both ways (no Redis → no signal → no slowdown). Counted under
+  `/api/v1/health/deps` → `resilience.read_pressure`.
 * **Progress-aware watchdog** (worker): a job is killed only when it
   makes no forward progress for `AGGREGATION_STALL_TIMEOUT_SECS`
   (default 10800 — 3h, the same window every UI trigger path sends
@@ -478,6 +493,10 @@ pipeline).
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing. Changeable live on a running job (Pace ×2 / ×4), from the next write |
+| `AGGREGATION_READ_PRESSURE_PACING_RATIO` | 4.0 | Sleep-after-write ratio used while the web tier reports interactive reads starving on the endpoint (≤ ~20% duty cycle). The LARGER of this and the live pacing ratio wins, so a job told not to pace itself still yields while users are being starved. Env-only |
+| `AGGREGATION_READ_PRESSURE_TTL_S` | 30 | How long one starved-read signal keeps the writers yielding (5–600; every new signal refreshes it) |
+| `AGGREGATION_READ_PRESSURE_POLL_SECS` | 2 | How long a worker reuses its last read-pressure verdict before asking Redis again |
+| `PROVIDER_CLOSE_TIMEOUT_S` | 2.0 | Ceiling on one provider's `close()`. The warmup cycle's idle reap and the cross-process invalidation listener both walk providers serially, so an unbounded close against a blackholed host froze both for every provider |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query budget (s). Per-job / Defaults as `scanTimeoutS` (5-600); the server caps any query at its `TIMEOUT_MAX`, read from the node (`FALKORDB_SERVER_TIMEOUT_MAX_MS` is the fallback until then; raisable at runtime from Infrastructure → Memory headroom). Raisable on a running job |
 | `FALKORDB_BULK_CREATE_TIMEOUT_S` | 60 | Per-query budget for the pipeline's write and delete batches (s). Per-job / Defaults as `writeTimeoutS` (5-600), capped by the server like the scan budget. Raisable on a running job |
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 1 | Narrowest range width the pressure ladder descends to. Per-job / Defaults as `scanShrinkFloor`. At 1 the only terminal outcome is a single row larger than `QUERY_MEM_CAPACITY`; a floor-width timeout is retried with backoff and then reported as an outage (resumable) |

@@ -224,6 +224,15 @@ def _pacing_ratio() -> float:
     return _env_float("AGGREGATION_WRITE_PACING_RATIO", 1.0, 0.0, 10.0)
 
 
+def _read_pressure_pacing_ratio() -> float:
+    """Pacing ratio used INSTEAD of ``AGGREGATION_WRITE_PACING_RATIO`` while
+    the web tier reports interactive reads starving on this endpoint (see
+    ``services/aggregation/read_pressure.py``): 4.0 → ≤ ~20% write duty
+    cycle, leaving the server's query threads to readers. The larger of the
+    two ratios wins, so this can only make a job gentler."""
+    return _env_float("AGGREGATION_READ_PRESSURE_PACING_RATIO", 4.0, 0.0, 20.0)
+
+
 def _scan_timeout_s() -> float:
     return _env_float("FALKORDB_SCAN_RANGE_TIMEOUT", 30.0, 5.0, 600.0)
 
@@ -913,6 +922,11 @@ class AggregationPipeline:
         self._max_applied_key = 0
 
         self._pacing_ratio = self._knob_float("write_pacing_ratio", _pacing_ratio, 0.0, 10.0)
+        self._read_pressure_pacing_ratio = self._knob_float(
+            "read_pressure_pacing_ratio", _read_pressure_pacing_ratio, 0.0, 20.0,
+        )
+        self._yielding_to_reads = False      # last write batch was paced for readers
+        self._read_pressure_yields = 0       # write batches paced at the read-pressure ratio
         self._phase_started = time.monotonic()
         self._phase_timings: Dict[str, float] = {}
         # Shrink-on-pressure scan state (see _fetch_range): a per-query
@@ -1853,7 +1867,11 @@ class AggregationPipeline:
     async def _paced_write(self, coro_factory: Callable[[], Awaitable[Any]]) -> Any:
         """Run one write query under distributed admission control, then
         sleep ``duration × pacing_ratio`` so this job never saturates the
-        provider's write path."""
+        provider's write path — stretched to ``duration ×
+        read_pressure_pacing_ratio`` while the web tier reports interactive
+        reads starving on this endpoint. Interactive reads come first: a
+        rebuild finishing later costs nobody a page; a canvas queued behind
+        a MERGE batch costs every user of that graph."""
         admission = getattr(self.p, "_admission_controller", None)
         t0 = time.monotonic()
         if admission is not None:
@@ -1867,7 +1885,32 @@ class AggregationPipeline:
         # sleep both see a replica-bound shard for what it is: a slow write
         # path that wants smaller batches and more room between them.
         elapsed += await self._replica_gate()
-        pace = elapsed * self._live_pacing_ratio()
+
+        # The ratio in force is the LIVE one (an operator can set
+        # write_pacing_ratio on a running job; 0 means no pacing) — but read
+        # pressure raises the floor regardless. Interactive reads starving is
+        # a fact about the shard, not a preference about this job, so a job
+        # told not to pace itself still yields while users are being starved.
+        ratio = self._live_pacing_ratio()
+        check = getattr(admission, "read_pressure", None)
+        pressure = await check(self.p) if check is not None else None
+        if pressure:
+            ratio = max(ratio, self._read_pressure_pacing_ratio)
+            self._read_pressure_yields += 1
+        if bool(pressure) != self._yielding_to_reads:
+            self._yielding_to_reads = bool(pressure)
+            if pressure:
+                logger.info(
+                    "aggregation on %s yielding to interactive reads (%s): "
+                    "write pacing ratio %g",
+                    getattr(self.p, "_graph_name", "?"), pressure, ratio,
+                )
+            else:
+                logger.info(
+                    "aggregation on %s: read pressure cleared, write pacing ratio back to %g",
+                    getattr(self.p, "_graph_name", "?"), ratio,
+                )
+        pace = elapsed * ratio
         if pace > 0:
             await asyncio.sleep(min(pace, 30.0))
         return elapsed, result

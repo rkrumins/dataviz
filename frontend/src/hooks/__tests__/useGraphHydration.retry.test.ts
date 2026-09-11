@@ -114,7 +114,9 @@ describe('useGraphHydration auto-retry (node-rotation outage)', () => {
   it('unavailable: degrades to the slow cadence instead of stopping, then recovers', async () => {
     let down = true
     mockProvider.getNodes.mockImplementation(async () => {
-      if (down) throw new Error('ECONNREFUSED')
+      // No backend at all — the browser's fetch rejection. (A plain error
+      // with no status is a transient 'slow' now, not an outage.)
+      if (down) throw new TypeError('Failed to fetch')
       return []
     })
 

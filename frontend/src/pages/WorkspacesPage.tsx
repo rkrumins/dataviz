@@ -332,8 +332,18 @@ export function WorkspacesPage() {
                 edgeCount?: number
                 entityTypeCounts?: Record<string, number>
             }>>('/api/v1/admin/workspaces/datasources/cached-stats').catch(() => null)
+            // A failed bulk read means "we don't know", not "there are none" —
+            // the same rule the provider/catalog/ontology probes above follow.
+            // One unhealthy data source can fail this ONE request for every
+            // workspace, and asserting zeros then showed "0 entities" across a
+            // fleet whose other four sources were fine.
+            if (bulk === null) {
+                setProbeFailed(true)
+                console.warn('[workspaces] cached-stats refresh failed; keeping the last known counts')
+                return
+            }
             const agg: Record<string, { nodes: number; edges: number; types: Set<string> }> = {}
-            for (const [key, entry] of Object.entries(bulk ?? {})) {
+            for (const [key, entry] of Object.entries(bulk)) {
                 if (entry.status === 'computing') continue
                 const wsId = key.slice(0, key.indexOf('/'))
                 const a = (agg[wsId] ??= { nodes: 0, edges: 0, types: new Set<string>() })

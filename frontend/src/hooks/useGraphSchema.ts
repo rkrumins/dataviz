@@ -23,6 +23,7 @@ import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { unwrapEnvelopeWithMeta } from '@/services/cacheEnvelope'
 import type { CacheMeta } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { httpStatusOf, toApiStatusError } from '@/services/graphRequestFailure'
 import { useSchemaStore } from '@/store/schema'
 import { useEffect } from 'react'
 
@@ -44,6 +45,37 @@ interface SchemaFetchResult {
 }
 
 /**
+ * A non-OK cache read. A 404 (no such data source, or no cache row yet) is a
+ * legitimate miss the caller degrades from; anything else — a session the
+ * fetch layer could not repair (401/403), a slow or restarting backend
+ * (5xx, 504) — is thrown WITH its status. These endpoints read Postgres,
+ * never the graph provider, so their failures used to be swallowed into
+ * `null` and rendered as "Provider Offline"; carrying the status lets React
+ * Query retry the transient ones and the layout say what actually happened.
+ */
+async function rejectUnlessMiss(res: Response): Promise<null> {
+  if (res.status === 404) return null
+  throw toApiStatusError(res, await res.text())
+}
+
+/** True when a schema failure should be retried by React Query: a slow or
+ *  restarting backend (5xx), load shedding (429), or no HTTP answer at all
+ *  (network error, client timeout). A 4xx — including a session problem,
+ *  which the fetch layer has already replayed once — is not. */
+export function isRetryableSchemaError(error: unknown): boolean {
+  const status = httpStatusOf(error)
+  if (status === null) return true
+  return status >= 500 || status === 429
+}
+
+/** 401/403: the session, not the schema. The session-lost and access-denied
+ *  flows own the messaging, so the schema surfaces stay quiet. */
+export function isSchemaAuthError(error: unknown): boolean {
+  const status = httpStatusOf(error)
+  return status === 401 || status === 403
+}
+
+/**
  * Fetch schema from the management DB cache (zero provider dependency).
  * Returns both the unwrapped schema and the envelope `meta` so the hook
  * can drive a refetch interval while the worker is still computing.
@@ -53,18 +85,17 @@ async function fetchCachedSchema(
   dataSourceId: string,
   viewId?: string,
 ): Promise<SchemaFetchResult> {
-  try {
-    const viewParam = viewId ? `?viewId=${encodeURIComponent(viewId)}` : ''
-    const res = await fetchWithTimeout(
-      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-schema${viewParam}`,
-    )
-    if (!res.ok) return { schema: null, meta: null }
-    const json = await res.json()
-    const { data, meta } = unwrapEnvelopeWithMeta<GraphSchema>(json)
-    return { schema: data, meta }
-  } catch {
+  const viewParam = viewId ? `?viewId=${encodeURIComponent(viewId)}` : ''
+  const res = await fetchWithTimeout(
+    `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-schema${viewParam}`,
+  )
+  if (!res.ok) {
+    await rejectUnlessMiss(res)
     return { schema: null, meta: null }
   }
+  const json = await res.json()
+  const { data, meta } = unwrapEnvelopeWithMeta<GraphSchema>(json)
+  return { schema: data, meta }
 }
 
 /**
@@ -78,24 +109,20 @@ async function fetchCachedOntologyAsSchema(
   dataSourceId: string,
   viewId?: string,
 ): Promise<GraphSchema | null> {
-  try {
-    const viewParam = viewId ? `?viewId=${encodeURIComponent(viewId)}` : ''
-    const res = await fetchWithTimeout(
-      `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology${viewParam}`,
-    )
-    if (!res.ok) return null
-    const json = await res.json()
-    const { data: ontology } = unwrapEnvelopeWithMeta<Record<string, unknown>>(json)
-    if (!ontology) return null
-    return {
-      entityTypes: (ontology as { entityTypes?: unknown[] }).entityTypes ?? [],
-      relationshipTypes:
-        (ontology as { relationshipTypes?: unknown[] }).relationshipTypes ?? [],
-      ontology,
-    } as unknown as GraphSchema
-  } catch {
-    return null
-  }
+  const viewParam = viewId ? `?viewId=${encodeURIComponent(viewId)}` : ''
+  const res = await fetchWithTimeout(
+    `/api/v1/admin/workspaces/${workspaceId}/datasources/${dataSourceId}/cached-ontology${viewParam}`,
+  )
+  if (!res.ok) return rejectUnlessMiss(res)
+  const json = await res.json()
+  const { data: ontology } = unwrapEnvelopeWithMeta<Record<string, unknown>>(json)
+  if (!ontology) return null
+  return {
+    entityTypes: (ontology as { entityTypes?: unknown[] }).entityTypes ?? [],
+    relationshipTypes:
+      (ontology as { relationshipTypes?: unknown[] }).relationshipTypes ?? [],
+    ontology,
+  } as unknown as GraphSchema
 }
 
 /**
@@ -185,13 +212,14 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
     },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
-    // One retry buys resilience against transient blips (network drop,
-    // 502 from a rolling deploy) without masking real failures: after
-    // one retry, <SchemaScope> still renders its error UI. The 800ms
-    // delay is short enough that a failed initial mount is invisible
-    // to users on a healthy backend.
-    retry: 1,
-    retryDelay: 800,
+    // Retries buy resilience against transient blips (network drop, a
+    // 502/504 from a rolling deploy or a slow backend) without masking
+    // real failures: a 4xx is final, and after the budget <SchemaScope>
+    // still renders its error UI. Backed off so a restarting backend gets
+    // a few seconds, while a failed initial mount on a healthy backend
+    // stays invisible.
+    retry: (failureCount, error) => failureCount < 3 && isRetryableSchemaError(error),
+    retryDelay: (attempt) => Math.min(800 * 2 ** attempt, 4_000),
     refetchOnWindowFocus: false,
     // While the backend cache is `computing` (worker has been kicked
     // but hasn't finished yet), poll every 2s. As soon as `meta.status`

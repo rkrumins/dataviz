@@ -12,7 +12,10 @@ spec:
     type: HTTP
     requestPath: /health
     port: 80
-  timeoutSec: 120
+  # Must exceed the backend's slowest ASGI tier (versioning, 120s) and
+  # match the pod nginx's proxy_read_timeout (180s): the app's structured
+  # JSON 504 has to win the race, never an opaque load-balancer 504.
+  timeoutSec: 180
   connectionDraining:
     drainingTimeoutSec: 15
   cdn:

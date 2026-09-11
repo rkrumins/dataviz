@@ -55,10 +55,12 @@ logger = logging.getLogger(__name__)
 
 try:
     from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import ResponseError as _RedisResponseError
     from redis.exceptions import TimeoutError as _RedisTimeoutError
 except Exception:  # pragma: no cover - redis is part of runtime deps
     _RedisConnectionError = ConnectionError
     _RedisTimeoutError = TimeoutError
+    _RedisResponseError = None
 
 
 # ------------------------------------------------------------------ #
@@ -431,6 +433,19 @@ async def lifespan(_app: FastAPI):
     """
     configure_json_logging()
     _log_auth_fingerprint()
+
+    # Interactive reads first: when the breaker proxy sees FalkorDB starve a
+    # read (queue full, server-side or client deadline), stamp the shared
+    # read-pressure key so aggregation writers in other pods yield their
+    # write duty cycle. Best-effort, and never on a request's critical path.
+    try:
+        from backend.app.services.aggregation.read_pressure import ReadPressureSignal
+        from backend.app.services.aggregation.redis_client import get_redis
+        from backend.common.adapters.circuit import register_capacity_listener
+
+        register_capacity_listener(ReadPressureSignal(get_redis).on_capacity)
+    except Exception as exc:  # noqa: BLE001 — a missing signal is not a failed start
+        logger.warning("read-pressure signal not registered: %s", exc)
 
     _app.state.degraded = False
     _app.state.degraded_reason = None
@@ -2011,6 +2026,7 @@ from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
     ProviderFailingOver as _ProviderFailingOver,
     ProviderLoading as _ProviderLoading,
+    ProviderTimeout as _ProviderTimeout,
     ProviderUnavailable as _ProviderUnavailable,
 )
 
@@ -2067,13 +2083,17 @@ async def _provider_loading_handler(request, exc: _ProviderLoading):
     )
 
 
-# ProviderFailingOver is a subclass of ProviderUnavailable but semantically
-# a PAUSE: the cluster node holding this graph is restarting or being
-# replaced, which takes seconds. Distinct code + a 3s Retry-After so the
-# frontend keeps the data on screen, says "reconnecting" and comes back —
-# instead of the 30s error wall every user of that graph used to get while
-# the breaker sat open. Registered BEFORE the parent handler so FastAPI's
-# MRO match picks this one.
+# ProviderFailingOver and ProviderTimeout are SIBLING subclasses of
+# ProviderUnavailable and both handlers are load-bearing — they came from two
+# different changes and mean different things. Keeping only one silently
+# reinstates the outage the other removed, so both stay, and both must precede
+# the ProviderUnavailable handler below (FastAPI matches by MRO).
+#
+# ProviderFailingOver is semantically a PAUSE: the cluster node holding this
+# graph is restarting or being replaced, which takes seconds. Distinct code +
+# a 3s Retry-After so the frontend keeps the data on screen, says
+# "reconnecting" and comes back — instead of the 30s error wall every user of
+# that graph used to get while the breaker sat open.
 @app.exception_handler(_ProviderFailingOver)
 async def _provider_failing_over_handler(request, exc: _ProviderFailingOver):
     logger.info(
@@ -2093,6 +2113,31 @@ async def _provider_failing_over_handler(request, exc: _ProviderFailingOver):
                     "failing over — retrying automatically"
                 ),
                 "technical": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderTimeout is semantically "one operation was too slow for its
+# deadline" — the provider is reachable and the breaker did NOT count it. Map
+# to 504 + Retry-After with a distinct PROVIDER_TIMEOUT code so the frontend
+# retries the request (the stale-fallback cache or a warm cache often answers
+# the retry) instead of declaring the graph provider offline.
+@app.exception_handler(_ProviderTimeout)
+async def _provider_timeout_handler(request, exc: _ProviderTimeout):
+    logger.info(
+        "Provider timeout on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=504,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_TIMEOUT",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },
@@ -2202,6 +2247,34 @@ app.add_exception_handler(OSError, _provider_error_handler)
 app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
 app.add_exception_handler(_RedisConnectionError, _provider_error_handler)
 app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
+
+
+# A graph server error REPLY (bad Cypher, a query over the per-query memory
+# ceiling, an ACL refusal). The breaker proxy no longer relabels these as
+# ProviderUnavailable — the server answered, so the provider is reachable —
+# which means they would otherwise fall to the generic 500 with no code. Keep
+# the 500 (the request failed) but say what happened so the frontend can tell
+# a rejected query apart from an outage and never feeds it to its breaker.
+async def _graph_response_error_handler(request, exc):
+    path = request.url.path
+    # Only a graph-bound path can attribute the reply to the graph store;
+    # elsewhere (the revocation store, the job bus) the same exception class
+    # means a Redis command was refused, and naming the graph would mislead.
+    code = "GRAPH_QUERY_ERROR" if _is_provider_bound_path(path) else "REDIS_COMMAND_ERROR"
+    logger.warning("%s on %s: %s", code, path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": code,
+                "reason": str(exc)[:200],
+            }
+        },
+    )
+
+
+if _RedisResponseError is not None:
+    app.add_exception_handler(_RedisResponseError, _graph_response_error_handler)
 
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
@@ -2540,10 +2613,24 @@ class _TimeoutMiddleware:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
             if not state["started"]:
-                # T-2 (clean case): we own the wire. Send a fresh 504.
+                # T-2 (clean case): we own the wire. Send a fresh 504. The
+                # body carries a code + Retry-After so the frontend treats
+                # it as "this request was too slow, retry" — a per-request
+                # signal — rather than as evidence the graph provider is
+                # down (reachability is reported by the 503 handlers).
                 response = JSONResponse(
-                    {"detail": f"Request timed out after {timeout:.0f}s — the graph provider may be unreachable."},
+                    {
+                        "detail": {
+                            "code": "REQUEST_TIMEOUT",
+                            "reason": (
+                                f"Request timed out after {timeout:.0f}s. "
+                                "The graph service is still available — retry shortly."
+                            ),
+                            "retryAfterSeconds": 2,
+                        }
+                    },
                     status_code=504,
+                    headers={"Retry-After": "2"},
                 )
                 await response(scope, receive, original_send)
                 state["terminal"] = True
@@ -2809,6 +2896,24 @@ async def dependency_health():
         }
     except Exception as exc:  # noqa: BLE001 — a report must not 500
         result["graph_store"] = {"_error": str(exc)[:200]}
+
+    # Resilience counters (per process, monotonic since boot). How often the
+    # breaker was asked to judge a slow or rejected query and correctly did
+    # NOT count it, how often it counted a real connection failure and
+    # opened, and how the request-path preflight and the provider slot
+    # queue decided. Read these to verify a release ("timeouts are rising
+    # but breaker_opens is flat" is the healthy shape), not to page on.
+    try:
+        from backend.app.services.aggregation.read_pressure import read_pressure_stats
+        from backend.common.adapters.circuit import breaker_stats
+
+        result["resilience"] = {
+            "breaker": breaker_stats(),
+            "provider_manager": dict(provider_manager.stats),
+            "read_pressure": read_pressure_stats(),
+        }
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["resilience"] = {"_error": str(exc)[:200]}
 
     # P3.1 — event-loop lag surface. p99 lag > 500ms implies the loop
     # is wedged; > 50ms implies coroutines are queueing.

@@ -82,11 +82,39 @@ require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation rou
 # Dependency: resolve ContextEngine for the active connection         #
 # ------------------------------------------------------------------ #
 
+async def _admit_graph_request(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, include_in_schema=False),
+    connectionId: Optional[str] = Query(None, include_in_schema=False),
+):
+    """Per-data-source admission, ahead of the GRAPH_READ session.
+
+    Declared BEFORE the session dependency below because dependencies resolve
+    in declaration order: a request shed here never checks out a session, so
+    one slow data source cannot occupy the pool every OTHER data source also
+    reads through. Each source keeps a reserved share it is never refused —
+    see ``providers/manager.py::admit_graph_request``.
+
+    Keyed on the scope the URL already carries, so nothing has to be looked up
+    before the gate: two data sources in one workspace count apart, and many
+    workspaces on one shared source count together (the direction that errs
+    safe — it can shed earlier, never later).
+    """
+    source_key = f"{ws_id or ''}/{dataSourceId or connectionId or ''}"
+    provider_manager.admit_graph_request(source_key)
+    try:
+        yield
+    finally:
+        provider_manager.release_graph_request(source_key)
+
+
 async def get_context_engine(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
     branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it."),
+    # Admission FIRST — before the session, deliberately. See above.
+    _admission: None = Depends(_admit_graph_request),
     # WS0.2 bulkhead: the ContextEngine holds this session for the whole
     # request, including the outbound FalkorDB call. Use the isolated
     # GRAPH_READ pool so a slow/down provider can't starve the WEB pool that
@@ -124,6 +152,23 @@ async def get_context_engine(
         status_code=400,
         detail="scope_required: workspace_id or connection_id is required",
     )
+
+
+async def get_engine_session(
+    engine: ContextEngine = Depends(get_context_engine),
+) -> AsyncSession:
+    """The GRAPH_READ session the engine already holds.
+
+    Endpoints that need a session of their own alongside the engine used to
+    ``Depends(get_graph_read_db_session)`` for it, which checked out a SECOND
+    connection from a pool of 20 for one request — halving the pool's depth
+    for exactly the hottest canvas calls, and breaking the accounting the
+    admission gate rests on (one admission is meant to mean one session).
+    FastAPI caches ``get_context_engine`` per request, so this hands back the
+    same session the engine is using. The two reads are always sequential, so
+    sharing it is safe; an AsyncSession is only unsafe under CONCURRENT use.
+    """
+    return engine._db_session
 
 
 @router.post("/bootstrap", status_code=202)
@@ -1271,7 +1316,8 @@ async def get_top_level_nodes(
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across the materialized-serve miss → FalkorDB read;
     # isolate from the WEB pool so a slow provider can't starve auth/nav.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout — see get_engine_session.
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Return instances that have no incoming containment edge.
 
@@ -1594,7 +1640,8 @@ async def search_advanced(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across svc.search() → FalkorDB; isolate from WEB.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout — see get_engine_session.
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Advanced server-side search, strictly scoped to ``scope.viewId``.
 
@@ -1661,7 +1708,8 @@ async def search_explain(
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across svc.explain() → FalkorDB; isolate from WEB.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout — see get_engine_session.
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Compile a SearchQuery without executing it.
 

@@ -150,6 +150,44 @@ describe('ViewSchemaGate — remount behaviour', () => {
     expect(mounts).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the canvas mounted when a refetch of the same scope FAILS', async () => {
+    const mounts = vi.fn()
+    const view = (
+      <ViewExecutionProvider workspaceId="ws-1" dataSourceId="ds-1" viewId="v-1">
+        <MountCounter onMount={mounts} />
+      </ViewExecutionProvider>
+    )
+
+    schemaState.data = SCHEMA
+    schemaState.isLoading = false
+    const { rerender } = render(view)
+    expect(await screen.findByTestId('canvas')).toBeInTheDocument()
+
+    // A background refetch errors (a 504 from a slow backend, a 502 mid-deploy).
+    // The ontology on screen is still good: no error card, no remount.
+    schemaState.data = undefined
+    schemaState.isLoading = false
+    schemaState.isError = true
+    rerender(view)
+
+    expect(screen.getByTestId('canvas')).toBeInTheDocument()
+    expect(screen.queryByText(/Unable to load view schema/i)).not.toBeInTheDocument()
+    expect(mounts).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the error card only when nothing is known for the scope', () => {
+    schemaState.data = undefined
+    schemaState.isLoading = false
+    schemaState.isError = true
+    render(
+      <ViewExecutionProvider workspaceId="ws-9" dataSourceId="ds-9" viewId="v-9">
+        <div data-testid="canvas">canvas</div>
+      </ViewExecutionProvider>,
+    )
+    expect(screen.queryByTestId('canvas')).not.toBeInTheDocument()
+    expect(screen.getByText(/Unable to load view schema/i)).toBeInTheDocument()
+  })
+
   it('still gates on a real scope change, so one workspace never shows another ontology', () => {
     const mounts = vi.fn()
     const view = (workspaceId: string) => (

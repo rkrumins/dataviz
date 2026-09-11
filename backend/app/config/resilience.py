@@ -29,6 +29,22 @@ PROVIDER_INSTANTIATION_TIMEOUT_SECS: float = float(
 BREAKER_FAIL_MAX: int = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 # Seconds the breaker stays open before allowing a single probe request.
 BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
+# What the breaker counts. Only connection-class failures (refused, reset,
+# DNS, socket timeout, cluster routing) open it. A query that merely exceeds
+# its per-operation deadline surfaces as ProviderTimeout (HTTP 504 +
+# Retry-After, code PROVIDER_TIMEOUT) and is NOT counted — a slow query is a
+# capacity signal, not evidence the provider is unreachable. Server error
+# replies (bad Cypher, per-query memory cap) are not counted either, and two
+# of them are relabelled as capacity signals: FalkorDB's "Max pending queries
+# exceeded" (MAX_QUEUED_QUERIES reached) surfaces as ProviderBusy (HTTP 429 +
+# Retry-After) and its "Query timed out" (the server killed the query at the
+# TIMEOUT sent with it) as ProviderTimeout — both retried in place by the
+# canvas, neither a 500.
+#
+# Per-provider request concurrency (ProviderManager): at most
+# PROVIDER_MAX_CONCURRENCY (8) outbound calls in flight per data source; a
+# request that finds every slot busy waits up to PROVIDER_SEMAPHORE_BUDGET_S
+# (2.0) for one before being shed with ProviderBusy (HTTP 429 + Retry-After).
 
 # ── FalkorDB-specific query timeouts ────────────────────────────────
 # Read-only Cypher queries (MATCH ... RETURN).
@@ -37,6 +53,14 @@ FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "
 # the generic 5s read default because wide containers with many lineage
 # cross-edges legitimately exceed it; aligns with HTTP_TIMEOUT_GRAPH_SECS.
 FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "15"))
+# /nodes/query — the canvas hydration hot path (assigned entities by URN, or
+# every entity of a type for an open view). The type-shaped query sorts a
+# whole label before paging, which on a large graph legitimately runs past
+# the generic 5s read budget; at 5s a big view timed out on every open, and
+# the timeout was then counted as a provider failure. Sits under the
+# frontend's 30s client deadline and the 60s HTTP tier so the provider's own
+# structured timeout always surfaces first.
+FALKORDB_NODES_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_NODES_QUERY_TIMEOUT", "20"))
 # get_top_level_or_orphan_nodes per-query timeout. Larger than the generic
 # 5s read default because the structural top-level predicate scans wide
 # adjacency lists on large graphs (2-3M+ nodes legitimately need tens of

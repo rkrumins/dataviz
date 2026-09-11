@@ -22,10 +22,10 @@ from backend.app.api.v1.endpoints.graph import (
     _enforce_fair_share,
     _provider_health_header,
     get_context_engine,
+    get_engine_session,
     label_failover,
     watch_for_failover,
 )
-from backend.app.db.engine import get_graph_read_db_session
 from backend.app.models.canvas import (
     CanvasBootstrapRequest,
     CanvasBootstrapResult,
@@ -115,9 +115,9 @@ async def canvas_bootstrap(
     response: Response,
     request: CanvasBootstrapRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
-    # WS0.2 bulkhead: held across the outbound FalkorDB call (materialized
-    # top-level serve + provider reads) — isolate from the WEB pool.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout from a pool of 20 — see
+    # get_engine_session. This endpoint held two connections per request.
+    session: AsyncSession = Depends(get_engine_session),
 ) -> CanvasBootstrapResult:
     """Everything needed to paint the initial canvas in one request: the
     root page, the edges among those roots, and the aggregated lineage

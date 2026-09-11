@@ -520,6 +520,115 @@ does not swing the trend, short enough that "what changed" is still about now.
   resumes from its checkpoint.
 - Job History's error hint for a per-query memory failure told operators to lower the scan
   range width, which the rebuild already does by itself.
+**Views opened onto "Graph service is unavailable" while FalkorDB was serving fine.**
+A slow query was being read as a dead provider, at every layer. On the backend, a query
+that ran past its per-operation deadline counted toward the provider's circuit breaker —
+three of them opened it for 30s, every read then 503'd, `/health/providers` reported the
+provider unhealthy and responses carried `X-Provider-Health: unreachable`. A server
+error *reply* (a query over the per-query memory ceiling) counted the same way. The
+request-path health PING (1.5s) and the background warmup probe (1.5s) each misread a
+busy instance answering late as unreachable, and two such misses gated reads. On the
+frontend, every failure that was not the literal warming signal — a 504, a 429 from the
+backend shedding the view's own 20-request burst, a 502 during a deploy, a 401 from an
+access token that had just expired, a client-side timeout on a slow link — became the
+outage overlay, and any three 5xx or timeouts opened the client breaker so later reads
+never left the browser. Only a page reload rebuilt it, which is why refreshing sometimes
+"fixed" it.
+
+Now a deadline miss is a `ProviderTimeout` (HTTP 504, code `PROVIDER_TIMEOUT`, with
+`Retry-After`) that the breaker never counts; only connection-class failures open it.
+Error replies are not counted either (a demoted-master `ReadOnlyError` still is). The
+request-path probe is skipped for a provider real traffic reached in the last 10s, and a
+timeout-class miss — there or in warmup — must persist before it gates. `/nodes/query`,
+the canvas hot path, gets its own 20s budget instead of the generic 5s, a deadline miss
+inside one URN bucket surfaces instead of silently dropping those entities, and a
+request that finds every provider slot busy waits up to 2s for one before being shed.
+The canvas has a third state, *slow* — "taking a little longer than usual", calm, still
+retrying — and reaches *unavailable* only when the backend confirms the provider is
+unreachable. Idempotent graph reads retry in place on 429/502/503/504 and timeouts
+(honouring `Retry-After`), the client breaker counts only confirmed outages, the initial
+load runs its node batches four at a time, and the schema pill says "Schema unavailable"
+(those endpoints read Postgres, never the graph) and stays quiet for a session that is
+merely being renewed.
+
+**One unhealthy data source no longer takes the graph down for the others.** Every graph
+request holds a database session across its outbound FalkorDB call, and that pool is per
+process and shared by every data source. A source that is merely slow is deliberately never
+gated — that is what stopped the false "graph is offline" — so its requests kept arriving
+and each pinned a session for up to its 20s query budget. With five sources configured and
+one slow, it filled every session on a worker, and requests for the four healthy sources
+waited ten seconds for a session that never freed and failed with a generic "database is
+temporarily unavailable". Admission now runs at the door, before a session is taken: each
+source keeps a reserved share it is never refused, one source may burst into the shared
+middle while the process is quiet, and nothing is admitted past a hard ceiling that sits
+under the pool. The gap between the burst ceiling and the hard one is sized to hold four
+neighbours' reserved shares, and all of it derives from the pool size rather than being
+hard-coded. A shed request is a 429 the canvas retries in place.
+
+Three more paths from one provider to the others are closed. A wedged `close()` used to
+run unbounded on two serial paths — the warmup cycle's idle reap and the cross-process
+invalidation listener — so one blackholed host stopped the warmup cycle, staled every
+provider's verdict, and blocked every other provider's invalidation; it is now bounded.
+Cache writes serialized whole payloads on the event loop twice per fill, once for the entry
+and once for the last-known-good mirror, stalling every other data source's requests in
+proportion to the largest response any one of them returned; they are now serialized once,
+on a thread. The v2 graph dependency took a session from the pool that serves auth and
+navigation, which would have been the worst version of the same bug the day that router was
+mounted. On the frontend, a failed bulk stats read asserted zero entities for every
+workspace — one unhealthy source could fail that single request for all of them — and every
+unscoped enveloped fetch shared one circuit breaker, so three failures on a bulk endpoint
+fast-failed unrelated ones. A failed refresh is now "we don't know", and unscoped calls are
+keyed by endpoint.
+
+Capacity for hundreds of concurrent users: FalkorDB runs eight query threads instead of
+four, on eight CPUs and 14Gi (sized for the extra concurrent query memory), with a queue of
+256 rather than 64; and the response cache now holds entries up to 4 MiB instead of 1 MiB,
+so the largest views — the ones whose queries cost the most — are cached rather than
+recomputed on every concurrent open.
+
+**The graph's own capacity replies, the last path to the outage card, and jobs that
+never yielded.** FalkorDB answers "Max pending queries exceeded" (its queue cap) and
+"Query timed out" (its kill of one query at the deadline the provider sent) as ordinary
+error replies; they surfaced as 500s that no client retries. The first is now a 429 with
+`Retry-After`, the second a 504 `PROVIDER_TIMEOUT`, and both are retried in place. The
+cache-envelope fetch path (data-source stats, the wizard's entity step, ontology helpers)
+counted *any* 5xx toward the breaker it shares with the canvas's reads, so three 504s on a
+slow afternoon fast-failed the view's next node query as "circuit open" — the one way the
+new frontend could still say "Graph service is unavailable" over a graph that was merely
+slow; it now counts only a confirmed outage. Aggregation writers paced themselves only on
+their own write latency: the web tier now stamps a short-lived read-pressure key on the
+job-bus Redis when FalkorDB starves an interactive read, and every write batch on that
+endpoint runs at the gentler `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0, about a fifth
+of the write duty cycle) until it expires. An engine error thrown while a view loads —
+`TypeError: Cannot read properties of undefined (reading 'startTime')` was the reported
+one — is a fourth canvas state, *error*, named as such and logged with its stack, never an
+outage. The children client budget rose to 45s (the server's worst case is 30s), the API
+load-balancer timeout to 180s, and the load harness gained the canvas view-open scenario it
+never had, with its URN discovery fixed (it sent a body the endpoint rejected).
+
+**A retry no longer takes the data away.** A refresh of a view the user was reading
+emptied the canvas and covered it with the state card until the retry succeeded; a load
+whose batches partly failed rendered silently incomplete; a schema refetch that failed
+unmounted a canvas whose ontology was fine. Now a canvas with data keeps it — interactive,
+under a small pill that says what is being retried and how many entities are missing —
+and the view schema gate keeps the last good schema mounted. See
+`docs/RELEASE_NOTES_2026-09-09_graph-availability.md` for the risk register, rollout
+order, the resilience counters on `/api/v1/health/deps`, and the rollback knobs.
+
+**A backend stall could take the whole site down.** The frontend pod's readiness probe
+proxied the backend's `/health` with a 3s timeout, so every frontend pod failed readiness
+at once when the backend's event loop stalled, and the load balancer pulled all of them —
+static shell included. `/readyz` is now nginx-local. The provider slot queue is capped
+(`PROVIDER_SLOT_MAX_WAITERS`, 16) so the longer wait for a slot cannot pin the graph-read
+DB pool under a burst.
+
+**Opaque edge 504s and sporadic 502s.** The ingress and load-balancer timeouts (120s)
+tied the backend's slowest tier, so the proxy's "upstream timed out" won the race
+against the app's structured 504; both now sit at 180s like the pod nginx. The
+middleware's 504 carries `code: REQUEST_TIMEOUT` and `Retry-After`. The backend's
+keep-alive (2s) was shorter than the nginx upstream pool kept connections warm, so nginx
+reused sockets the worker had closed; the worker now keeps them 75s and nginx expires
+its pool at 30s.
 
 **The Growth tab crashed against any server that had not deployed yet** —
 `series.previous.buckets is not iterable`, an unguarded spread of a field the running backend
@@ -627,6 +736,17 @@ workspace existence over a database hiccup.
 **Run the scheduler role somewhere** if you want warmed documents and event retention. Neither
 is required for correctness, but without it readers pay the aggregation on the read path and
 `product_events` grows with no horizon.
+
+**Graph availability: check what you already set.** No migration and no new required
+variable — but almost every value the graph-availability fix changed is an environment
+knob, and an explicit override beats the new default silently. A deployment that pinned
+`FALKORDB_NODES_QUERY_TIMEOUT=5`, or copied the old `.env.example` line
+`HTTP_TIMEOUT_GRAPH_SECS=15`, runs the new image and keeps producing the outage the
+release removes. The FalkorDB thread count and the client-side deadlines are baked into
+the pod args and the frontend bundle, so they need a restart and a rebuild respectively.
+`docs/UPGRADE_2026-09-10_graph-availability.md` is the checklist: what arrives on its own,
+which overrides to delete, what needs an image, a manifest, or the one restart with
+downtime, and how to confirm on `/api/v1/health/deps` that it landed.
 
 ### Known limitations
 
