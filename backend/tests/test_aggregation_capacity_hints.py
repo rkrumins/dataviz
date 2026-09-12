@@ -144,3 +144,62 @@ def test_a_clean_run_clears_the_lesson_with_an_empty_object_not_none():
     assert state.observed_tuning == "{}"
     src = inspect.getsource(AggregationWorker.run)
     assert "observed_tuning=json.dumps(" in src
+
+
+# ── a failed run teaches the next one too ───────────────────────────────
+#
+# The success path writes ``observed_tuning`` unconditionally, because a
+# clean run PROVES the narrowing is no longer needed (a hinted run re-grows
+# its width during the run). A failed run proves no such thing — and it is
+# the run with the most to teach: an hour spent halving the scan width down
+# to 500 before dying was thrown away, so the retry started wide and hit the
+# same wall. The lesson is written on failure, but only when there is one.
+
+
+def _pressured_run_stats():
+    return json.dumps({
+        "writes": 4000,
+        "adapted": {
+            "pressure": [{"scan": "extract:FLOWS", "kind": "memory"}],
+            "scan_width_min": 500, "scan_width": 25_000,
+            "extract_concurrency": 1,
+        },
+    })
+
+
+def test_the_worker_learns_from_a_run_that_did_not_complete():
+    src = inspect.getsource(AggregationWorker.run)
+    assert 'if job.status != "completed":' in src, (
+        "the lesson has to be written from the finally block every terminal "
+        "path passes through — a per-except copy misses the ones that do not "
+        "raise a handled exception"
+    )
+    # It reads the row's OWN run_stats, which the checkpoints have been
+    # writing all along: the pipeline's return value does not exist on a
+    # path that raised.
+    assert "_learned_from(\n                        self._job_run_stats(job)" in src
+
+
+def test_a_failed_run_that_hit_pressure_has_a_lesson():
+    from backend.app.services.aggregation.worker import _learned_from
+
+    learned = _learned_from(
+        json.loads(_pressured_run_stats()), job_id="agg_dead",
+    )
+    assert learned["scan_width"] == 500
+    assert learned["extract_concurrency"] == 1
+
+
+def test_a_failed_run_with_no_pressure_must_not_erase_the_last_lesson():
+    """A run that died of an ontology error, or on a dead node, learned
+    nothing about query pressure — clearing a valid narrowing because of it
+    would send the NEXT run straight back into the wall the run before last
+    already found."""
+    from backend.app.services.aggregation.worker import _learned_from
+
+    assert _learned_from({"writes": 0}) == {}
+    src = inspect.getsource(AggregationWorker.run)
+    assert "if learned:" in src, (
+        "an empty lesson must not be written on the failure path — on the "
+        "success path '{}' deliberately CLEARS, and that is the difference"
+    )

@@ -1151,6 +1151,25 @@ class AggregationWorker:
                 # asks of a failure.
                 ledger.seal(job.status)
                 _record_steps(job, ledger)
+                # What a run that did NOT complete learned under pressure.
+                # The success path writes ``observed_tuning`` unconditionally
+                # (``{}`` clears the previous lesson, because a hinted run
+                # re-grows its width and so proves it no longer needs the
+                # narrowing). A failed run proves no such thing, and it is the
+                # run with the most to teach: an hour spent halving the scan
+                # width down to 500 before dying was thrown away, so the retry
+                # started wide and hit the same wall. Written only when it is
+                # non-empty, so a run that failed for an unrelated reason — an
+                # ontology error, a dead node — cannot erase a valid lesson.
+                if job.status != "completed":
+                    learned = _learned_from(
+                        self._job_run_stats(job), job_id=job.id,
+                    )
+                    if learned:
+                        await self._update_ds_state(
+                            session, job.data_source_id,
+                            observed_tuning=json.dumps(learned),
+                        )
                 job.updated_at = _now()
                 await session.commit()
                 # Always unregister the cancel event, including on
