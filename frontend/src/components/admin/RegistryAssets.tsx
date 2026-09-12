@@ -37,7 +37,7 @@ import {
 import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
-import { aggregationService } from '@/services/aggregationService'
+import { aggregationService, type AggregationTuning, type EnvTuningDefaults } from '@/services/aggregationService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
@@ -837,6 +837,8 @@ export function RegistryAssets() {
         dataSources: Array<{ id: string; projectionMode?: string | null }>
         initialValue: AggregationOverridesValue
         defaultFinePairs?: 'auto' | 'true' | 'false'
+        envDefaults?: EnvTuningDefaults | null
+        storedGlobal?: AggregationTuning | null
     } | null>(null)
 
     // Eager, global per-provider counts for the sidebar badges + Catalog
@@ -981,6 +983,8 @@ export function RegistryAssets() {
                     tuning: settings?.tuning ?? undefined,
                 },
                 defaultFinePairs: settings?.envMaterializeFinePairs ?? undefined,
+                envDefaults: settings?.envTuningDefaults ?? null,
+                storedGlobal: settings?.tuning ?? null,
             })
         } catch (e: any) {
             hideLoading('reaggregate')
@@ -1715,6 +1719,11 @@ export function RegistryAssets() {
                     timeoutMinutes: PRESET_TIMEOUT_MINUTES,
                 }}
                 defaultFinePairs={reaggregateCtx?.defaultFinePairs}
+                envDefaults={reaggregateCtx?.envDefaults}
+                storedGlobal={reaggregateCtx?.storedGlobal ?? null}
+                // One source → one shard to check; an asset spanning several
+                // has no single fit to report.
+                dataSourceId={reaggregateCtx?.dataSources.length === 1 ? reaggregateCtx.dataSources[0].id : undefined}
                 onConfirmRetrigger={handleConfirmReaggregate}
             />
 

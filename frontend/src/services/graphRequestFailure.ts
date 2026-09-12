@@ -123,10 +123,25 @@ function parseRetryAfterMs(header: string | null): number | null {
   return null
 }
 
+/** A cluster node holding this graph is rotating or failing over. Classified
+ *  as `warming` (same fast retry cadence — it is seconds, not an outage), but
+ *  callers that show copy need to tell the two apart: a cold store is "starting
+ *  up", a rotating node is "reconnecting". */
+export function isFailoverFailure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '')
+  if (isApiStatusError(err) && err.code === 'PROVIDER_FAILING_OVER') return true
+  return message.includes('PROVIDER_FAILING_OVER')
+}
+
 export function classifyGraphFailure(err: unknown): GraphFailureKind {
   const message = err instanceof Error ? err.message : String(err ?? '')
   const code = isApiStatusError(err) ? err.code : undefined
   if (code === 'PROVIDER_LOADING' || message.includes('PROVIDER_LOADING')) return 'warming'
+  // A cluster node holding this graph is rotating or failing over: seconds,
+  // not an outage. Same treatment as a warming store — keep the data on
+  // screen, say "reconnecting", retry on the fast cadence. Without this it
+  // falls through to 'transient' and a 3s pod rotation reads as a slow view.
+  if (code === 'PROVIDER_FAILING_OVER' || message.includes('PROVIDER_FAILING_OVER')) return 'warming'
   if (code === 'PROVIDER_UNAVAILABLE') return 'unavailable'
   // The client breaker's own rejection: it only opens on confirmed signals.
   if (message.includes('circuit open')) return 'unavailable'

@@ -37,6 +37,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from enum import Enum
@@ -339,6 +340,41 @@ class ProviderLoading(ProviderUnavailable):
     """
 
 
+class ProviderFailingOver(ProviderUnavailable):
+    """Flow-control signal — the node holding this graph is restarting or
+    failing over, NOT a store that is gone.
+
+    In a Redis Cluster a node that stops answering is a routine, bounded
+    event: the pod is rotated, the cluster notices after
+    ``cluster-node-timeout``, a replica is promoted and the slots move. The
+    right client behaviour is to come back in a few seconds, which is what
+    ``retry_after_seconds`` (3) says.
+
+    What used to happen instead: the refusal counted toward ``fail_max``,
+    three of them opened the breaker for its whole reset window, and every
+    user of that graph — not just the three who were unlucky — got
+    "Circuit open; will probe downstream again in ~28s" for 30 s at a
+    time, long after the promotion had finished. So this is registered as
+    a *logical* exception like :class:`ProviderLoading`: the breaker never
+    opens because a node is failing over, and it still opens for a store
+    that is genuinely unreachable.
+
+    Carries ``endpoint`` — the node that stopped answering — because the
+    breaker's own text names none, and it is the first thing an operator
+    needs.
+    """
+
+    def __init__(
+        self,
+        provider_name: str,
+        reason: str,
+        retry_after_seconds: int = 3,
+        endpoint: str | None = None,
+    ) -> None:
+        super().__init__(provider_name, reason, retry_after_seconds)
+        self.endpoint = endpoint
+
+
 class ProviderTimeout(ProviderUnavailable, TimeoutError):
     """One operation exceeded its per-operation deadline — NOT an outage.
 
@@ -374,13 +410,17 @@ class ProviderTimeout(ProviderUnavailable, TimeoutError):
 # Register at import time (before any CircuitBreakerProxy is constructed) so
 # the ``except proxy._ignored`` clause in breaker_guarded catches ProviderLoading
 # ahead of the ``except ProviderUnavailable`` counting clause — a warming
-# instance is re-raised untouched and its breaker stays closed. Same for
-# ProviderTimeout: a nested proxy must not count a slow query either.
+# instance is re-raised untouched and its breaker stays closed. The same holds
+# for every other signal that means "healthy, just not right now": a node
+# rotating (ProviderFailingOver), one slow query (ProviderTimeout) and flow
+# control (ProviderBusy) must all pass through a nested proxy uncounted.
+#
+# All four are load-bearing and were added by two different changes. Dropping
+# any one of them re-opens an outage the other change removed, which is why
+# backend/tests/test_logical_exceptions_registered.py pins the whole set.
 register_logical_exception(ProviderLoading)
+register_logical_exception(ProviderFailingOver)
 register_logical_exception(ProviderTimeout)
-# ProviderBusy is flow control by definition ("healthy but overloaded right
-# now"): a write-side quiesce raised inside a proxied provider, or the
-# queue-full relabelling below, must pass through an outer proxy uncounted.
 register_logical_exception(ProviderBusy)
 
 
@@ -770,6 +810,19 @@ class CircuitBreakerProxy:
                 await proxy._breaker._record_success()
                 return result
 
+        # Signature transparency is not cosmetic. Callers introspect the
+        # method they were handed to decide what to pass it — the drift probe
+        # asks whether get_schema_stats accepts ``budget_s`` before handing
+        # down its 5s deadline — and every provider reaches them through this
+        # proxy. A bare ``(*args, **kwargs)`` closure answered "no" to every
+        # such question, so the probe silently dropped its deadline and the
+        # node kept scanning for 30s per query, three per source, every 60s:
+        # precisely the abandoned-scan load the deadline exists to prevent.
+        # ``wraps`` sets ``__wrapped__``, which ``inspect.signature`` follows.
+        breaker_guarded = functools.wraps(attr)(breaker_guarded)
+        # ...but keep the proxy visible in logs and tracebacks, which is what
+        # the explicit name was for. Renaming after ``wraps`` is safe:
+        # ``signature`` reads ``__wrapped__``, not ``__name__``.
         breaker_guarded.__name__ = f"breaker_guarded_{name}"
         breaker_guarded.__qualname__ = breaker_guarded.__name__
         return breaker_guarded

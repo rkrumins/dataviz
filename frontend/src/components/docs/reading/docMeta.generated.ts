@@ -4,209 +4,245 @@ export interface DocMeta { updated: string; path: string }
 export const GITHUB_REPO = 'rkrumins/dataviz'
 export const docMeta: Record<string, DocMeta> = {
   "versioning-overview": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/versioning/01-overview-and-architecture.md"
   },
   "architecture": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-23",
     "path": "docs/ARCHITECTURE.md"
   },
   "data-architecture": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/DATA_ARCHITECTURE.md"
   },
   "decisions": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-12",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-12",
     "path": "docs/architecture-when-scaling.md"
   },
   "aggregation-pipeline": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-12",
     "path": "docs/AGGREGATION_PIPELINE.md"
   },
   "technical-debt": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-25",
     "path": "docs/TECHNICAL_DEBT.md"
   },
   "setup": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-26",
     "path": "docs/SETUP.md"
   },
   "integration-testing": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/local-integration-testing.md"
   },
   "backend": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-23",
     "path": "docs/BACKEND.md"
   },
   "frontend": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-22",
     "path": "docs/FRONTEND.md"
   },
   "api-features": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/API_FEATURES.md"
   },
   "services-overview": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/services/OVERVIEW.md"
   },
   "services-insights": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-24",
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-22",
     "path": "docs/services/CONTEXT_ENGINE.md"
   },
   "services-assignments": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/services/ASSIGNMENTS.md"
   },
+  "feature-aggregation-reconciliation": {
+    "updated": "2026-09-12",
+    "path": "docs/features/aggregation-reconciliation.md"
+  },
+  "feature-external-change-notification": {
+    "updated": "2026-08-18",
+    "path": "docs/features/external-change-notification.md"
+  },
   "versioning-api-reference": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/versioning/06-api-reference.md"
   },
   "versioning-e2e": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/VERSIONING_E2E.md"
   },
   "versioning-deep-dives": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/versioning/README-index.md"
   },
   "rbac": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/RBAC.md"
   },
   "sso": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-03",
     "path": "docs/SSO.md"
   },
   "sso-integration": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-03",
     "path": "docs/SSO_INTEGRATION.md"
   },
+  "multi-environment-sessions": {
+    "updated": "2026-09-03",
+    "path": "docs/MULTI_ENVIRONMENT_SESSIONS.md"
+  },
   "signup-service": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/SIGNUP_USER_SERVICE_PLAN.md"
   },
   "deployment": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-11",
     "path": "docs/DEPLOYMENT.md"
   },
+  "migrations": {
+    "updated": "2026-08-18",
+    "path": "docs/MIGRATIONS.md"
+  },
   "falkordb-deployment": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-11",
     "path": "docs/FALKORDB_DEPLOYMENT.md"
   },
+  "concurrency-tuning": {
+    "updated": "2026-09-12",
+    "path": "docs/CONCURRENCY_TUNING.md"
+  },
   "falkordb-dr": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/FALKORDB_DR_RUNBOOK.md"
   },
   "infra-launch-scale": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-10",
     "path": "docs/INFRASTRUCTURE_LAUNCH_SCALE.md"
   },
   "infra-scaling-250m": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-08",
     "path": "docs/INFRASTRUCTURE_SCALING_250M.md"
   },
   "read-path-performance": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-09",
     "path": "docs/read-path-performance/README.md"
   }
 }
 export const guideMeta: Record<string, DocMeta> = {
   "welcome": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-29",
     "path": "docs/guide/QUICK_START.md"
   },
   "browsing-views": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/BROWSING_VIEWS.md"
   },
   "reading-lineage": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/READING_LINEAGE.md"
   },
   "exploring-graph": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-29",
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "lineage-lens": {
-    "updated": "2026-08-14",
+    "updated": "2026-08-22",
     "path": "docs/guide/LINEAGE_LENS.md"
   },
   "navigating-layers": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/NAVIGATING_LAYERS.md"
   },
   "creating-views": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/CREATING_VIEWS.md"
   },
   "managing-views": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "semantic-layer": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
   "versioning-change-control": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
   "import-export": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/IMPORT_EXPORT.md"
   },
   "admin-setup": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-27",
     "path": "docs/guide/USERS_ACCESS.md"
   },
+  "sso-setup": {
+    "updated": "2026-09-03",
+    "path": "docs/guide/SSO_SETUP.md"
+  },
+  "sso-operations": {
+    "updated": "2026-08-27",
+    "path": "docs/guide/SSO_OPERATIONS.md"
+  },
   "governance-ops": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/GOVERNANCE_OPS.md"
   },
+  "graph-store-topology": {
+    "updated": "2026-09-10",
+    "path": "docs/guide/GRAPH_STORE_TOPOLOGY.md"
+  },
+  "rollup-capacity": {
+    "updated": "2026-09-10",
+    "path": "docs/guide/ROLLUP_CAPACITY.md"
+  },
   "ways-of-working": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/WAYS_OF_WORKING.md"
   },
   "glossary": {
-    "updated": "2026-07-19",
+    "updated": "2026-08-18",
     "path": "docs/guide/GLOSSARY.md"
   },
   "troubleshooting": {
-    "updated": "2026-07-19",
+    "updated": "2026-09-10",
     "path": "docs/guide/TROUBLESHOOTING.md"
   }
 }

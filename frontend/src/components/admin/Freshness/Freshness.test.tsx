@@ -52,7 +52,23 @@ vi.mock('@/services/freshnessService', async () => {
 })
 vi.mock('@/services/providerService', () => ({ providerService: { list: listProviders } }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { list: listWorkspaces } }))
-vi.mock('@/services/aggregationService', () => ({ aggregationService: { listJobsGlobal } }))
+vi.mock('@/services/aggregationService', () => ({
+    aggregationService: {
+        listJobsGlobal,
+        // The capacity card reads the fleet sweep; an empty snapshot keeps the
+        // page quiet in these tests.
+        getFleetCapacity: vi.fn().mockResolvedValue({
+            limits: {
+                shardReservePct: { value: 20, source: 'default' }, bytesPerEdge: { value: 512, source: 'default' },
+                maxMaterializedEdges: { value: null, source: 'default' }, rollupStorage: { value: 'true', source: 'default' },
+                estimateMarginPct: 25, maxCubeEdges: 8_000_000, staticCap: 25_000_000, budgetRecheckEdges: 1_000_000,
+            },
+            shards: [], unresolved: [], sourcesTotal: 0, truncated: false, measuredAt: '2026-09-08T00:00:00Z', cacheAgeMs: 0,
+        }),
+        getSourceCapacity: vi.fn().mockRejectedValue(new Error('not in this test')),
+        getAggregationSettings: vi.fn().mockRejectedValue(new Error('not in this test')),
+    },
+}))
 
 // jsdom lacks the pointer-capture + scroll APIs Radix calls when a menu opens.
 beforeAll(() => {
@@ -680,6 +696,30 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText(/OutOfMemoryError/)).toBeInTheDocument()
     })
 
+    it('names the node that went away and offers a Resume, not a fresh attempt', async () => {
+        // What the operator used to get was the breaker's text — "Circuit
+        // open; will probe downstream again in ~28s" — which names no node
+        // and reads like the store is broken. The reason behind it does name
+        // one, and the run kept every byte it had written.
+        getSourceDoc.mockResolvedValue({
+            ...baseDoc,
+            aggregationStatus: 'failed',
+            lastFailureCategory: 'provider_unavailable',
+            lastFailureReason:
+                'the graph store node 10.0.0.7:6379 did not answer for 15 minute(s) during apply '
+                + '(ConnectionError: Error 111 connecting to 10.0.0.7:6379. Connection refused.). '
+                + 'The run keeps its checkpoint — Resume it once the node is back.',
+        })
+        renderDrawer()
+
+        expect(await screen.findByText(/stopped answering during the rebuild/i)).toBeInTheDocument()
+        expect(screen.getByText('10.0.0.7:6379')).toBeInTheDocument()
+        expect(screen.getByText(/carries on from its checkpoint/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /resume rebuild/i })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /retry rebuild/i })).not.toBeInTheDocument()
+        expect(screen.getByText(/work already done is not repeated/i)).toBeInTheDocument()
+    })
+
     it('fires the clear scope from the drawer Clear-cache CTA', async () => {
         const user = userEvent.setup()
         getSourceDoc.mockResolvedValue(oomDoc)
@@ -865,6 +905,22 @@ describe('live rebuild progress in the row', () => {
         )
         expect(screen.getByText('Recomputing')).toBeInTheDocument()
         expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    })
+
+    it('says when the rebuild is narrowing its scans to fit the graph store', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow
+                    row={rebuildingRow}
+                    job={{ id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                           currentPhase: 'reconciling', progress: 61,
+                           runStats: { adapted: { scan_width: 12_500, reconcile_strategy: 'keys_only' } } } as never}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6}
+                />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByText(/61% · narrowing/)).toBeInTheDocument()
     })
 
     it('never guesses at an unrecognized phase', () => {

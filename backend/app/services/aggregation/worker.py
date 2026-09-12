@@ -31,17 +31,26 @@ import logging
 import os
 import random
 import time
+import types
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.common.adapters import ProviderUnavailable, ProviderBusy
+from backend.common.adapters import (
+    ProviderBusy,
+    ProviderFailingOver,
+    ProviderUnavailable,
+)
+
+from .steps import StepLedger, archive_attempt
 from backend.app.providers.falkordb_materialize import (
     MaterializationBudgetExceeded,
     MaterializationPreconditionFailed,
     MaterializationQueryMemoryExceeded,
+    MaterializationScanTimedOut,
+    MaterializationStoreUnreachable,
 )
 
 from backend.app.jobs import (
@@ -88,6 +97,187 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: ``run_stats.adapted`` scalars the live overlay carries (HSET / SSE
+#: payload values must be str|int|float): what the ladder has changed so far.
+_ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
+                      "extract_concurrency", "reconcile_strategy", "write_batch",
+                      "delete_chunk", "timeout_retries", "memory_flushes",
+                      "rss_high_water_mb", "mem_limit_mb",
+                      "replica_waits", "replica_holds", "replica_max_lag_bytes")
+
+#: The pipeline knobs an operator may change on the RUNNING job (PATCH
+#: …/limits): the worker's watchdog re-reads them from the row and hands
+#: them to the pipeline through the shared ``live`` dict — per-query
+#: budgets read per query, pacing per write, concurrency per wave, the scan
+#: width cap on every read of the sticky width.
+_LIVE_PIPELINE_KEYS = ("scan_timeout_s", "write_timeout_s", "write_pacing_ratio",
+                       "extract_concurrency", "scan_width",
+                       "replica_ack_min", "replica_ack_timeout_ms",
+                       "write_batch_max", "write_batch_target_s")
+
+
+def _pace_scalars(pace: Any) -> dict:
+    """The write pace as flat ``pace_<key>`` scalars for ``live_state`` —
+    how the run is writing right now: rows per batch, seconds per batch,
+    the pause after it, the rolling duty cycle and rate, and whether it is
+    holding or eased, and why."""
+    if not isinstance(pace, dict):
+        return {}
+    return {
+        f"pace_{key}": value for key, value in pace.items()
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool)
+    }
+
+
+def _adapted_scalars(adapted: Any) -> dict:
+    """The scalar subset of an ``adapted`` record, for ``live_state`` —
+    the ladder's own state, plus the live changes in force flattened as
+    ``adapted_live_<key>``."""
+    if not isinstance(adapted, dict):
+        return {}
+    out = {}
+    for key in _ADAPTED_LIVE_KEYS:
+        value = adapted.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            out[f"adapted_{key}"] = value
+    live = adapted.get("live")
+    if isinstance(live, dict):
+        for key, value in live.items():
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                out[f"adapted_live_{key}"] = value
+    return out
+
+
+def _record_steps(job: Any, ledger: "StepLedger") -> None:
+    """Fold the step ledger into the row's ``run_stats``. Called wherever
+    the ledger moves outside the checkpoint callback (the two bookends and
+    the terminal seal), so the record on the row is never behind the run
+    it describes. Best-effort, like every other ``run_stats`` write: a
+    serialization failure must not fail a job."""
+    if not hasattr(job, "run_stats"):
+        return
+    try:
+        doc = json.loads(getattr(job, "run_stats", None) or "{}")
+        if not isinstance(doc, dict):
+            doc = {}
+        doc["steps"] = ledger.snapshot()
+        job.run_stats = json.dumps(doc)
+    except (TypeError, ValueError):
+        pass
+
+
+def _merge_run_doc(existing: Any, incoming: Any) -> dict:
+    """``run_stats`` is written progressively: the effective-tuning snapshot
+    and the live ``adapted`` record at checkpoints, the pipeline's full
+    stats on success. Later values win key by key, so the snapshot a
+    checkpoint wrote survives the success write and a failed run keeps
+    whatever it had recorded."""
+    out = dict(existing) if isinstance(existing, dict) else {}
+    if isinstance(incoming, dict):
+        out.update(incoming)
+    return out
+
+
+#: Learned-state keys the worker persists per source and hands back as
+#: capacity hints (``<key>_observed``). Every one only ever makes the next
+#: run STRICTER; the pipeline ignores a hint looser than the knob in force.
+#: One wall clock for the whole before/after fingerprint, not one per scan.
+#: The fingerprint is three full graph scans; each used to carry the 30s env
+#: ceiling on its own, so a job could spend a minute and a half measuring a
+#: graph it was about to measure again.
+_FINGERPRINT_BUDGET_S = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
+
+_LEARNED_KEYS = ("scan_width", "extract_concurrency", "reconcile_strategy",
+                 "write_batch", "delete_chunk", "apply_rows_per_s")
+
+
+def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
+    """What this run's ``adapted`` record teaches the next run of the same
+    source: the narrowest scan width it needed, whether it read serially,
+    the reconcile strategy it switched to, the write batch / delete chunk it
+    settled on. Learned from THIS run's pressure only — a run that hit no
+    pressure returns ``{}``, which CLEARS the previous lesson (a hinted run
+    re-grows its width during the run, so a graph that no longer needs the
+    narrowing is found out within that run, e.g. after a QUERY_MEM_CAPACITY
+    raise)."""
+    if not isinstance(run_stats, dict):
+        return {}
+    out: dict = {}
+    # The rate this run wrote at is a MEASUREMENT, not a lesson learned
+    # under pressure: it is carried on every run that wrote anything, and
+    # it is what the next run projects the cube's apply time from. The
+    # pressure keys below keep their clear-on-a-clean-run contract.
+    rate = run_stats.get("apply_rows_per_s_observed")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
+        out["apply_rows_per_s"] = float(rate)
+    adapted = run_stats.get("adapted")
+    if not isinstance(adapted, dict) or not adapted.get("pressure"):
+        if out:
+            out["observed_at"] = _now()
+            if job_id:
+                out["job_id"] = job_id
+        return out
+    if adapted.get("scan_width_min"):
+        out["scan_width"] = int(adapted["scan_width_min"])
+    if adapted.get("extract_concurrency") == 1:
+        out["extract_concurrency"] = 1
+    if adapted.get("reconcile_strategy") == "keys_only":
+        out["reconcile_strategy"] = "keys_only"
+    if adapted.get("write_batch_min"):
+        out["write_batch"] = int(adapted["write_batch_min"])
+    if adapted.get("delete_chunk_min"):
+        out["delete_chunk"] = int(adapted["delete_chunk_min"])
+    if out:
+        out["observed_at"] = _now()
+        if job_id:
+            out["job_id"] = job_id
+    return out
+
+
+def _merge_live_limits(stall_timeout: int, wall_base: int, fresh: dict) -> tuple:
+    """``(stall, wall)`` after a live re-read: the row's ``timeout_secs``
+    replaces the stall window when set; the raised wall clock (else the
+    job's base) is never below the stall window."""
+    stall = int(fresh.get("timeout_secs") or stall_timeout)
+    wall = int(fresh.get("max_wall_secs") or wall_base)
+    return stall, max(wall, stall)
+
+
+#: How many times one attempt waits out a node that is being replaced before
+#: calling it a failure. ~3 s apiece, so half a minute of moving slots.
+_FAILOVER_PARKS_MAX = 10
+
+
+def _tuning_int(tuning: dict, key: str) -> Optional[int]:
+    """A positive int from a tuning dict, or None (absent / unparsable)."""
+    try:
+        value = int(tuning.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _named_failure(
+    exc: ProviderUnavailable, first_failure: Optional[str]
+) -> Optional[ProviderUnavailable]:
+    """Re-word a breaker verdict so it still names the node that died.
+
+    Once the breaker is open its reason is "Circuit open; will probe
+    downstream again in ~28s" — true, and useless to an operator, because
+    the text that named the shard ("Error 111 connecting to 10.0.0.3:6379")
+    belonged to the failure three attempts ago. Returns ``None`` when the
+    reason already says everything.
+    """
+    first = (first_failure or "").strip()
+    if not first or first in (exc.reason or ""):
+        return None
+    return ProviderUnavailable(
+        exc.provider_name,
+        f"{exc.reason}. First failure: {first}",
+        exc.retry_after_seconds,
+    )
+
+
 class AggregationWorker:
     """Pure executor — no Dispatcher reference, no orchestration.
 
@@ -129,7 +319,11 @@ class AggregationWorker:
         7. On failure: update status='failed', preserve checkpoint for resume
         """
         async with self._session_factory() as session:
-            job = await session.get(AggregationJobORM, job_id)
+            # Row-locked (FOR UPDATE on Postgres, a no-op on SQLite) so the
+            # start below and ``service.cancel`` are mutually exclusive:
+            # whichever commits first, the other sees its status. The lock
+            # is held only until the running-transition commit below.
+            job = await session.get(AggregationJobORM, job_id, with_for_update=True)
             if not job:
                 logger.error("Aggregation job %s not found", job_id)
                 return
@@ -148,6 +342,19 @@ class AggregationWorker:
                 )
                 return
 
+            if job.status not in ("pending", "running"):
+                # A cancel (or another executor's completion) landed after
+                # this job was picked up. Never flip a terminal row back to
+                # running — the one guard the in-process dispatcher, which
+                # skips the consumer's status check, gets. ``running`` is
+                # accepted: the stuck-job reconciler re-dispatches a job
+                # whose executor died without resetting its row.
+                logger.info(
+                    "Aggregation job %s is %s — not starting it",
+                    job_id, job.status,
+                )
+                return
+
             # Transition to running
             job.status = "running"
             job.started_at = job.started_at or _now()
@@ -155,6 +362,25 @@ class AggregationWorker:
             # Which worker executed this job — fleet attribution for the UI.
             if self._worker_id and hasattr(job, "worker_id"):
                 job.worker_id = self._worker_id
+            # Open the run's step ledger on the SAME commit that flips the
+            # row to running. Everything between here and the pipeline's
+            # first checkpoint — the indexes, the identity stamp, the
+            # before-fingerprint — used to run with no phase at all: on a
+            # large graph, minutes of a running job with nothing on the
+            # page. It is a step of the run, so it is a step in the record.
+            # Whatever the PREVIOUS attempt left on this row goes into the
+            # attempt log before this one overwrites it. Here rather than at
+            # the previous attempt's terminal block, because a worker that
+            # died without reaching one still has to be captured — and
+            # ``archive_attempt`` removes what it archives, so the manual
+            # resume path having already done it is a no-op, not a duplicate.
+            from .service import classify_failure
+
+            archive_attempt(job, category=classify_failure(job.error_message))
+            job.error_message = None
+            ledger = StepLedger()
+            ledger.enter("preparing")
+            _record_steps(job, ledger)
             await session.commit()
 
             # Register a cooperative cancel event before any heavy work so
@@ -347,6 +573,35 @@ class AggregationWorker:
                             "(continuing with default depth): %s", job.id, exc,
                         )
 
+                # Distributed write-admission control FIRST: N workers × M pods
+                # share one write budget per FalkorDB endpoint (per-graph
+                # lease + per-endpoint slots) instead of each pod throttling
+                # only itself.
+                #
+                # It is attached BEFORE the preamble, not after it. The two
+                # steps below are the heaviest unpaced work the run does —
+                # ~131 index statements, and for a non-conforming source a
+                # write pass over the whole node ID space — and they ran
+                # outside every cross-pod gate precisely because this came
+                # last. Attaching earlier gates them and changes nothing
+                # else: nothing here reads the controller until it writes.
+                # Best-effort: without it the provider's per-process gates
+                # still apply.
+                if hasattr(provider, "set_admission_controller"):
+                    try:
+                        from .admission import AggregationAdmission
+                        from .redis_client import get_redis
+                        provider.set_admission_controller(
+                            AggregationAdmission(get_redis())
+                        )
+                        admission_attached = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: admission controller not "
+                            "attached (continuing with per-process limits): %s",
+                            job.id, exc,
+                        )
+
                 # Ensure per-label URN indexes for the ontology's entity
                 # types BEFORE the scan/flush so every MATCH/MERGE on
                 # (label {urn}) is an index seek. Driven by the frozen
@@ -369,36 +624,43 @@ class AggregationWorker:
                 # conforming (urn) sources and dedicated projections; best-effort
                 # (a failure degrades to the directory-only coalesce).
                 if hasattr(provider, "stamp_identity_urns"):
+                    async def _stamp_heartbeat(done: int, total: int) -> None:
+                        """The preamble's only progress signal.
+
+                        Nothing between the row flipping to ``running`` and the
+                        pipeline's first checkpoint touched
+                        ``last_checkpoint_at``, and the stuck-job reconciler
+                        reads 300s without one as a dead worker — so a stamp
+                        that now paces itself could be reaped mid-pass on
+                        exactly the large graphs it protects. It also gives
+                        ``preparing`` real numbers, where the stage used to sit
+                        at nothing for minutes on an onboarded graph.
+                        """
+                        job.last_checkpoint_at = _now()
+                        job.updated_at = job.last_checkpoint_at
+                        ledger.note(done=done, total=total, unit="nodes")
+                        _record_steps(job, ledger)
+                        await session.commit()
+
                     try:
-                        await provider.stamp_identity_urns()
+                        try:
+                            await provider.stamp_identity_urns(
+                                on_batch=_stamp_heartbeat,
+                            )
+                        except TypeError:
+                            # A provider that predates the heartbeat. It paces
+                            # nothing either, so it needs none.
+                            await provider.stamp_identity_urns()
                     except Exception as exc:
                         logger.warning(
                             "Aggregation job %s: identity-urn stamp failed "
                             "(continuing): %s", job.id, exc,
                         )
 
-                # Distributed write-admission control: N workers × M pods
-                # share one write budget per FalkorDB endpoint (per-graph
-                # lease + per-endpoint slots) instead of each pod throttling
-                # only itself. Best-effort: without it the provider's
-                # per-process gates still apply.
-                if hasattr(provider, "set_admission_controller"):
-                    try:
-                        from .admission import AggregationAdmission
-                        from .redis_client import get_redis
-                        provider.set_admission_controller(
-                            AggregationAdmission(get_redis())
-                        )
-                        admission_attached = True
-                    except Exception as exc:
-                        logger.warning(
-                            "Aggregation job %s: admission controller not "
-                            "attached (continuing with per-process limits): %s",
-                            job.id, exc,
-                        )
 
                 # Compute fingerprint before aggregation
-                job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
+                job.graph_fingerprint_before = await compute_graph_fingerprint(
+                    provider, budget_s=_FINGERPRINT_BUDGET_S)
                 await session.commit()
 
                 # Run materialization with retries under a progress-aware
@@ -407,9 +669,30 @@ class AggregationWorker:
                 # intra-batch heartbeats both count as progress), or when
                 # it exceeds the wall-clock safety net. A steadily
                 # progressing multi-hour job is never killed by a timer.
-                stall_timeout = job.timeout_secs or _STALL_TIMEOUT_SECS
+                # Stall window: the job's own value, else the fleet's
+                # ``stallTimeoutSecs`` default frozen in its tuning, else
+                # env. The wall clock likewise comes from tuning and is
+                # never lower than the stall window — an operator who
+                # allowed a job 48h of quiet meant it to run that long.
+                job_tuning = self._job_tuning(job)
+                stall_timeout = (
+                    job.timeout_secs
+                    or _tuning_int(job_tuning, "stall_timeout_secs")
+                    or _STALL_TIMEOUT_SECS
+                )
+                wall_limit = max(
+                    _tuning_int(job_tuning, "max_wall_secs") or _MAX_WALL_SECS,
+                    stall_timeout,
+                )
                 progress_marker = {"at": time.monotonic()}
 
+                # Per-query budgets an operator may raise on the running
+                # job: the pipeline reads this dict per query; the watchdog
+                # tick below refreshes it from the row.
+                live: dict = {}
+                limits = {"stall_timeout": stall_timeout, "wall_limit": wall_limit, "live": live}
+                wall_base = _tuning_int(job_tuning, "max_wall_secs") or _MAX_WALL_SECS
+                ticks = 0
                 materialize_task = asyncio.create_task(
                     self._materialize_with_retries(
                         session=session,
@@ -421,6 +704,8 @@ class AggregationWorker:
                         emitter=emitter,
                         scope=scope,
                         progress_marker=progress_marker,
+                        limits=limits,
+                        ledger=ledger,
                     )
                 )
                 wall_start = time.monotonic()
@@ -433,6 +718,67 @@ class AggregationWorker:
                         if done:
                             result = materialize_task.result()
                             break
+                        # Durable-cancel poll. The two cooperative checkpoints
+                        # inside the pipeline read only ``cancel_event``, which
+                        # is set by the Redis pub/sub CancelListener — and a
+                        # broadcast that arrives while that listener is backing
+                        # off through a Redis flap is simply lost, leaving this
+                        # job running to completion while the DB already says
+                        # ``cancelled``. The API also wrote a durable
+                        # ``agg:cancel:{job_id}`` flag (read today only at job
+                        # pickup); re-reading it on this existing 10s tick sets
+                        # the event within one tick of a lost delivery, and
+                        # both checkpoints then exit at the next boundary with
+                        # a resumable cursor. That cooperative exit is strictly
+                        # better than a hard task.cancel() mid-Cypher, which
+                        # is what leaves a partial cube — so no hard fallback
+                        # is added for the queue dispatchers. One GET per job
+                        # per 10s; a Redis error must never kill a healthy
+                        # job, so it is swallowed and retried next tick.
+                        if not cancel_event.is_set() and await self._durable_cancel_set(job.id):
+                            logger.info(
+                                "Aggregation job %s: durable cancel flag seen "
+                                "(pub/sub delivery missed) — stopping at the "
+                                "next checkpoint", job.id,
+                            )
+                            cancel_event.set()
+                        # Limits raised on the RUNNING job (PATCH …/limits):
+                        # one indexed read per 30s, through a fresh session —
+                        # never the job's own, which the materialize task is
+                        # using. Lowering is honoured too.
+                        ticks += 1
+                        if ticks % 3 == 0:
+                            fresh = await self._live_limits(job.id)
+                            # None = the row could not be read this tick: keep
+                            # every live value in force (a hiccup never clears
+                            # a cap) and try again next tick.
+                            if fresh is not None:
+                                new_stall, new_wall = _merge_live_limits(
+                                    stall_timeout, wall_base, fresh,
+                                )
+                                if (new_stall, new_wall) != (stall_timeout, wall_limit):
+                                    logger.info(
+                                        "Aggregation job %s: time limits changed while "
+                                        "running — stall window %ss → %ss, wall clock "
+                                        "%ss → %ss", job.id, stall_timeout, new_stall,
+                                        wall_limit, new_wall,
+                                    )
+                                    stall_timeout, wall_limit = new_stall, new_wall
+                                    limits["stall_timeout"], limits["wall_limit"] = new_stall, new_wall
+                                for key in _LIVE_PIPELINE_KEYS:
+                                    if key in fresh:
+                                        if live.get(key) != fresh[key]:
+                                            logger.info(
+                                                "Aggregation job %s: %s set to %s while running "
+                                                "— applies from the next query", job.id, key, fresh[key],
+                                            )
+                                            live[key] = fresh[key]
+                                    elif key in live:
+                                        logger.info(
+                                            "Aggregation job %s: live %s cleared — back to the "
+                                            "job's settings from the next query", job.id, key,
+                                        )
+                                        live.pop(key, None)
                         now = time.monotonic()
                         stalled_for = now - progress_marker["at"]
                         if stalled_for > stall_timeout:
@@ -440,9 +786,9 @@ class AggregationWorker:
                                 f"no forward progress for {int(stalled_for)}s "
                                 f"(stall timeout {stall_timeout}s)"
                             )
-                        elif now - wall_start > _MAX_WALL_SECS:
+                        elif now - wall_start > wall_limit:
                             timeout_reason = (
-                                f"exceeded wall-clock safety net {_MAX_WALL_SECS}s"
+                                f"exceeded wall-clock safety net {wall_limit}s"
                             )
                         if timeout_reason:
                             materialize_task.cancel()
@@ -470,7 +816,13 @@ class AggregationWorker:
                         pass
                     raise
 
-                # Success
+                # Success — but not finished. The after-fingerprint is
+                # three full graph scans and the state row, the workspace
+                # row, the audit row and the terminal events all follow.
+                # That stretch used to show as "Applying, 100%", which is
+                # why a run looked wedged at the end on a large graph.
+                ledger.enter("finalizing")
+                _record_steps(job, ledger)
                 job.status = "completed"
                 job.progress = 100
                 job.completed_at = _now()
@@ -481,12 +833,32 @@ class AggregationWorker:
                 job.created_edges = result.get("aggregated_edges_affected", 0)
                 # Durable per-phase timings + write/delete counters for the
                 # job detail UI (best-effort; NULL on legacy providers).
+                # Merged over what the checkpoints already recorded (the
+                # effective-tuning snapshot, the live adapted record): the
+                # pipeline's final values win key by key, the snapshot
+                # survives.
                 if hasattr(job, "run_stats") and isinstance(result.get("run_stats"), dict):
                     try:
-                        job.run_stats = json.dumps(result["run_stats"])
+                        job.run_stats = json.dumps(
+                            _merge_run_doc(self._job_run_stats(job), result["run_stats"])
+                        )
                     except (TypeError, ValueError):
                         pass
-                job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
+                    # The pipeline's document has no ``steps`` key, so a
+                    # key-by-key merge would leave the one the checkpoints
+                    # wrote — but it is now a step behind (``finalizing``
+                    # just opened). Re-stamp it.
+                    _record_steps(job, ledger)
+                # An EMPTY fingerprint means the probe could not answer, not
+                # that the graph has no shape. Storing it poisons the change
+                # gate forever: every later signal compares against "" and
+                # reads as changed, which bumps the read generation (no cached
+                # read of this source survives) and queues another rebuild.
+                # None leaves the previous figure standing — ``_update_ds_state``
+                # skips None — so the gate keeps the last fingerprint it could
+                # actually take.
+                job.graph_fingerprint_after = await compute_graph_fingerprint(
+                    provider, budget_s=_FINGERPRINT_BUDGET_S) or None
 
                 # Update aggregation-owned data source state
                 await self._update_ds_state(
@@ -496,6 +868,27 @@ class AggregationWorker:
                     last_aggregated_at=job.completed_at,
                     aggregation_edge_count=job.created_edges,
                     graph_fingerprint=job.graph_fingerprint_after,
+                    # What this run measured per new edge on its shard — the
+                    # next run's budget starts from it. None (no calibration
+                    # this run) leaves the previous figure standing.
+                    observed_bytes_per_edge=(
+                        (result.get("run_stats") or {}).get("bytes_per_edge_observed")
+                        if isinstance(result.get("run_stats"), dict) else None
+                    ),
+                    # Distinct cells stored per cell the pre-compute estimate
+                    # counted. None (this run measured only one of the two)
+                    # leaves the previous figure standing, exactly as above.
+                    observed_cell_ratio=(
+                        (result.get("run_stats") or {}).get("cell_ratio_observed")
+                        if isinstance(result.get("run_stats"), dict) else None
+                    ),
+                    # What this run learned under per-query pressure, for
+                    # the next run to start from. Always written: a clean
+                    # run stores "{}", which clears the previous lesson
+                    # (``_update_ds_state`` skips None, so a string it is).
+                    observed_tuning=json.dumps(
+                        _learned_from(result.get("run_stats"), job_id=job.id)
+                    ),
                 )
                 await self._sync_workspace_ds_row(
                     session, job,
@@ -575,6 +968,83 @@ class AggregationWorker:
                     job_id, job.processed_edges, job.created_edges,
                     _run_writes, _run_deletes,
                 )
+
+            except MaterializationStoreUnreachable as store_exc:
+                # A node went away mid-run and did not come back inside the
+                # run's outage budget. Everything computed so far is intact
+                # and the cursor is committed, so this is a Resume, not a
+                # re-run — and the message NAMES the node, which the
+                # breaker's "Circuit open" text used to overwrite.
+                job.status = "failed"
+                job.error_message = str(store_exc)[:2000]
+                logger.error(
+                    "Aggregation job %s: graph store node unreachable: %s",
+                    job_id, store_exc,
+                )
+
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                for send in (
+                    lambda payload: record_terminal(
+                        session, job_id=job_id, kind="aggregation", scope=scope,
+                        sequence=terminal_seq, status="failed", payload=payload,
+                    ),
+                    lambda payload: emitter.terminal(
+                        job_id=job_id, kind="aggregation", scope=scope,
+                        status="failed", payload=payload,
+                    ),
+                ):
+                    await send({"error_message": job.error_message, "reason": "connection"})
+
+                if self._events:
+                    await self._events.job_failed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        error_message=job.error_message,
+                    )
+
+            except MaterializationScanTimedOut as scan_exc:
+                # The pipeline's own verdict after every backoff retry at
+                # the narrowest scan: the graph store is not answering. A
+                # TimeoutError like the watchdog's, but its message names
+                # the scan, the width, the budget and the cap — it must
+                # not be reported as a watchdog kill.
+                job.status = "failed"
+                job.error_message = str(scan_exc)[:2000]
+                logger.error(
+                    "Aggregation job %s: graph store stopped answering: %s",
+                    job_id, scan_exc,
+                )
+
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                await record_terminal(
+                    session,
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    sequence=terminal_seq,
+                    status="failed",
+                    payload={"error_message": job.error_message, "reason": "timeout"},
+                )
+                await emitter.terminal(
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    status="failed",
+                    payload={"error_message": job.error_message, "reason": "timeout"},
+                )
+
+                if self._events:
+                    await self._events.job_failed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        error_message=job.error_message,
+                    )
 
             except asyncio.TimeoutError as timeout_exc:
                 reason = str(timeout_exc) or "watchdog timeout"
@@ -709,6 +1179,32 @@ class AggregationWorker:
                     )
 
             finally:
+                # Close the open step with the run's terminal state, on the
+                # one commit every path — success, failure, cancel, store
+                # outage — passes through. A failed run's ledger then NAMES
+                # the step it died in, which is the first question anyone
+                # asks of a failure.
+                ledger.seal(job.status)
+                _record_steps(job, ledger)
+                # What a run that did NOT complete learned under pressure.
+                # The success path writes ``observed_tuning`` unconditionally
+                # (``{}`` clears the previous lesson, because a hinted run
+                # re-grows its width and so proves it no longer needs the
+                # narrowing). A failed run proves no such thing, and it is the
+                # run with the most to teach: an hour spent halving the scan
+                # width down to 500 before dying was thrown away, so the retry
+                # started wide and hit the same wall. Written only when it is
+                # non-empty, so a run that failed for an unrelated reason — an
+                # ontology error, a dead node — cannot erase a valid lesson.
+                if job.status != "completed":
+                    learned = _learned_from(
+                        self._job_run_stats(job), job_id=job.id,
+                    )
+                    if learned:
+                        await self._update_ds_state(
+                            session, job.data_source_id,
+                            observed_tuning=json.dumps(learned),
+                        )
                 job.updated_at = _now()
                 await session.commit()
                 # Always unregister the cancel event, including on
@@ -723,6 +1219,37 @@ class AggregationWorker:
                         provider.set_admission_controller(None)
                     except Exception:
                         pass
+
+    async def _capacity_hints(self, session: AsyncSession, data_source_id: str) -> dict:
+        """What the worker knows about this graph that the pipeline cannot
+        measure before it runs: the bytes per new edge a previous successful
+        rebuild observed, and what that rebuild LEARNED under per-query
+        pressure (``observed_tuning``: the narrowest scan width it needed,
+        serial reads, the reconcile strategy, the write batch / delete
+        chunk), each handed over as ``<key>_observed``. Best-effort — no row,
+        no column, unparsable JSON: no hint."""
+        from .models import AggregationDataSourceStateORM
+
+        try:
+            state = await session.get(AggregationDataSourceStateORM, data_source_id)
+        except Exception as exc:
+            logger.debug("capacity hints unavailable for %s: %s", data_source_id, exc)
+            return {}
+        hints: dict = {}
+        observed = getattr(state, "observed_bytes_per_edge", None)
+        if observed:
+            hints["bytes_per_edge_observed"] = observed
+        ratio = getattr(state, "observed_cell_ratio", None)
+        if ratio:
+            hints["cell_ratio_observed"] = ratio
+        learned = self._job_tuning(types.SimpleNamespace(
+            tuning_json=getattr(state, "observed_tuning", None),
+        ))
+        for key in _LEARNED_KEYS:
+            value = learned.get(key) if isinstance(learned, dict) else None
+            if value:
+                hints[f"{key}_observed"] = value
+        return hints
 
     async def _update_ds_state(
         self,
@@ -916,6 +1443,79 @@ class AggregationWorker:
             levels,
         )
 
+    async def _live_limits(self, job_id: str) -> Optional[dict]:
+        """The job row's current live limits — ``timeout_secs`` and the
+        ``live_overrides`` document — read through a FRESH session (the
+        job's own session belongs to the materialize task). Never raises:
+        ``None`` means the row could not be read this tick (nothing changes,
+        retried next tick); a dict is the truth, and a key absent from it
+        has been cleared."""
+        if self._session_factory is None:
+            return None
+        try:
+            from sqlalchemy import select
+            async with self._session_factory() as s:
+                row = (await s.execute(
+                    select(AggregationJobORM.timeout_secs, AggregationJobORM.live_overrides)
+                    .where(AggregationJobORM.id == job_id)
+                )).first()
+        except Exception as exc:
+            logger.debug("live limits unavailable for %s: %s", job_id, exc)
+            return None
+        if row is None:
+            return None
+        timeout_secs, raw = row[0], row[1]
+        out: dict = {}
+        if timeout_secs:
+            out["timeout_secs"] = int(timeout_secs)
+        doc = self._job_tuning(types.SimpleNamespace(tuning_json=raw))
+        for key in ("max_wall_secs", "scan_timeout_s", "write_timeout_s"):
+            value = doc.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                out[key] = value
+        # Pacing may be set to 0 (no pacing); the two caps are positive ints.
+        pacing = doc.get("write_pacing_ratio")
+        if isinstance(pacing, (int, float)) and not isinstance(pacing, bool) and pacing >= 0:
+            out["write_pacing_ratio"] = float(pacing)
+        for key in ("extract_concurrency", "scan_width", "write_batch_max"):
+            value = _tuning_int(doc, key)
+            if value is not None:
+                out[key] = value
+        target = doc.get("write_batch_target_s")
+        if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0:
+            out["write_batch_target_s"] = float(target)
+        return out
+
+    @staticmethod
+    def _job_run_stats(job: Any) -> dict:
+        """The row's ``run_stats`` document (``{}`` when NULL or unparsable)."""
+        try:
+            doc = json.loads(getattr(job, "run_stats", None) or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    @staticmethod
+    def _job_tuning(job: Any) -> dict:
+        """The job's frozen tuning dict (``{}`` when NULL or unparsable)."""
+        try:
+            return json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+        except (TypeError, ValueError):
+            return {}
+
+    @staticmethod
+    async def _durable_cancel_set(job_id: str) -> bool:
+        """True when the API's durable cancel flag for *job_id* is set.
+
+        The same read ``__main__._is_cancelled`` does at job pickup; polled
+        here for the running case. Never raises — a failed read is "not
+        cancelled as far as we can tell", retried on the next tick."""
+        try:
+            from .redis_client import cancel_flag_key, get_redis
+            return bool(await get_redis().get(cancel_flag_key(job_id)))
+        except Exception:
+            return False
+
     async def _materialize_with_retries(
         self,
         session: AsyncSession,
@@ -927,6 +1527,8 @@ class AggregationWorker:
         emitter: Any,
         scope: PlatformJobScope,
         progress_marker: Optional[dict] = None,
+        limits: Optional[dict] = None,
+        ledger: Optional[StepLedger] = None,
     ) -> dict:
         """Retry wrapper around _materialize_with_checkpoints.
 
@@ -946,6 +1548,7 @@ class AggregationWorker:
         max_attempts = (job.max_retries or 3) + 1
         last_error: Exception | None = None
         provider_unavailable_count = 0
+        first_provider_error: Optional[str] = None
 
         # Phase 2 — quiesce events (ProviderBusy raised by the provider
         # when write p95 climbs above the trigger) are flow control,
@@ -956,6 +1559,7 @@ class AggregationWorker:
         # the job forever — after the cap the job moves to ``failed``.
         max_quiesce_events = int(os.getenv("AGGREGATION_MAX_QUIESCE_EVENTS", "20"))
         quiesce_event_count = 0
+        failover_parks = 0
         zombie_breaks = 0
 
         # Progress-aware retry budget: a job that keeps moving forward past
@@ -976,6 +1580,28 @@ class AggregationWorker:
             if progress_marker is not None:
                 progress_marker["at"] = time.monotonic()
 
+        async def _park(reason: str, delay: float) -> None:
+            """Wait, visibly. A retry backoff, a quiesce park and a failover
+            park are real time the run spends NOT running, and they used to
+            read exactly like a hang: the same step, the same frozen
+            counters, nothing said. Mark the open step parked and say what
+            for; the next checkpoint clears it. The pipeline is not running
+            in any of these handlers, so the commit is safe."""
+            if ledger is not None and ledger.waiting(reason):
+                _record_steps(job, ledger)
+                try:
+                    await session.commit()
+                except Exception as park_exc:
+                    logger.debug(
+                        "Aggregation job %s: park not recorded: %s", job.id, park_exc,
+                    )
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+            await asyncio.sleep(delay)
+            _mark_alive()
+
         while True:
             try:
                 return await self._materialize_with_checkpoints(
@@ -985,9 +1611,11 @@ class AggregationWorker:
                     containment_types=containment_types,
                     lineage_types=lineage_types,
                     cancel_event=cancel_event,
+                    ledger=ledger,
                     emitter=emitter,
                     scope=scope,
                     progress_marker=progress_marker,
+                    limits=limits,
                 )
             except JobCancelled:
                 # Cooperative cancel — control-flow signal, not a transient
@@ -1022,6 +1650,44 @@ class AggregationWorker:
                 except Exception as mark_exc:
                     logger.debug("terminal-backoff stamp failed: %s", mark_exc)
                 raise
+            except ProviderFailingOver as e:
+                # A node is being replaced. Like a quiesce park and unlike a
+                # failure: the store is not broken, the cluster is moving the
+                # slots, and in a few seconds the promoted replica answers.
+                # So no attempt is consumed — a rebuild must not burn its
+                # retry budget on a routine pod rotation. Bounded, because
+                # "failing over" that never ends IS a failure.
+                # Progress since the last park means the store came back and
+                # the run used it — a NEW rotation, not the same one dragging
+                # on. A rebuild running for hours rides out several routine
+                # rotations, and must not fail on the eleventh having
+                # successfully waited out the first ten.
+                if (job.processed_edges or 0) > last_progress:
+                    failover_parks = 0
+                    last_progress = job.processed_edges or 0
+                failover_parks += 1
+                if failover_parks > _FAILOVER_PARKS_MAX:
+                    job.error_message = (
+                        f"The graph store node {e.endpoint or 'holding this graph'} "
+                        f"was still not answering after {_FAILOVER_PARKS_MAX} waits. "
+                        f"The run keeps its checkpoint — Resume once the node is back."
+                    )[:2000]
+                    job.updated_at = _now()
+                    await session.commit()
+                    raise
+                delay = (e.retry_after_seconds or 3) + random.uniform(0, 2)
+                logger.info(
+                    "Aggregation job %s: node %s is failing over — waiting %.0fs "
+                    "(wait %d/%d, attempt %d not consumed).",
+                    job.id, e.endpoint or "?", delay, failover_parks,
+                    _FAILOVER_PARKS_MAX, attempt + 1,
+                )
+                await _park(
+                    f"the graph store node {e.endpoint or 'holding this graph'} "
+                    f"is failing over ({failover_parks}/{_FAILOVER_PARKS_MAX})",
+                    delay,
+                )
+                continue
             except ProviderBusy as e:
                 # ZOMBIE-LEASE takeover: if the park is a graph-lease
                 # conflict and the named holder's job row is already
@@ -1070,8 +1736,11 @@ class AggregationWorker:
                     job.id, delay, quiesce_event_count, max_quiesce_events,
                     attempt + 1, e,
                 )
-                await asyncio.sleep(delay)
-                _mark_alive()
+                await _park(
+                    f"the provider is quiesced "
+                    f"({quiesce_event_count}/{max_quiesce_events})",
+                    delay,
+                )
                 # Re-enter the OUTER loop without consuming the retry
                 # budget (``attempt`` is only incremented by the failure
                 # handlers below). The previous nested re-call loop only
@@ -1089,9 +1758,22 @@ class AggregationWorker:
                     # steady forward progress never exhausts retries.
                     attempt = 0
                     provider_unavailable_count = 0
+                    # …and the evidence with it: a node named hours ago, from
+                    # a fault the run has long since worked past, would point
+                    # the operator at a node that has been healthy since.
+                    failover_parks = 0
+                    first_provider_error = None
                     last_progress = job.processed_edges or 0
                 provider_unavailable_count += 1
                 job.retry_count = attempt + 1
+                reason_text = (e.reason or "").strip()
+                if (
+                    first_provider_error is None
+                    and "circuit open" not in reason_text.lower()
+                ):
+                    # Keep the reason that started this: by the time the
+                    # breaker trips, its own text no longer names the node.
+                    first_provider_error = reason_text
 
                 # Second occurrence whose reason is "Circuit open" — fail fast.
                 # Retrying further is pointless: the breaker has already
@@ -1100,17 +1782,23 @@ class AggregationWorker:
                     provider_unavailable_count >= 2
                     and "circuit open" in (e.reason or "").lower()
                 ):
+                    named = _named_failure(e, first_provider_error)
                     job.error_message = (
                         f"Provider {e.provider_name} unavailable after "
                         f"{attempt + 1} attempts; circuit breaker open"
+                        + (f". First failure: {first_provider_error}"
+                           if first_provider_error else "")
                     )[:2000]
                     job.updated_at = _now()
                     await session.commit()
                     logger.warning(
                         "Aggregation job %s: aborting — provider %s circuit "
-                        "open after %d attempts",
+                        "open after %d attempts (first failure: %s)",
                         job.id, e.provider_name, attempt + 1,
+                        first_provider_error or "n/a",
                     )
+                    if named is not None:
+                        raise named from e
                     raise
 
                 if attempt < max_attempts - 1:
@@ -1130,11 +1818,19 @@ class AggregationWorker:
                         "Aggregation job %s: retry %d/%d after %.0fs (provider unavailable) — %s",
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
-                    await asyncio.sleep(delay)
-                    _mark_alive()
+                    await _park(
+                        f"retry {attempt + 1}/{job.max_retries} — "
+                        f"provider {e.provider_name} unavailable",
+                        delay,
+                    )
                     attempt += 1
                 else:
-                    # Final attempt exhausted — let the caller handle it
+                    # Final attempt exhausted — let the caller handle it,
+                    # still carrying the reason that started the run of
+                    # failures rather than only the breaker's verdict.
+                    named = _named_failure(e, first_provider_error)
+                    if named is not None:
+                        raise named from e
                     raise
             except Exception as e:
                 last_error = e
@@ -1144,6 +1840,8 @@ class AggregationWorker:
                     # resets indefinitely.
                     attempt = 0
                     provider_unavailable_count = 0
+                    failover_parks = 0
+                    first_provider_error = None
                     last_progress = job.processed_edges or 0
                 job.retry_count = attempt + 1
 
@@ -1158,8 +1856,7 @@ class AggregationWorker:
                         "Aggregation job %s: retry %d/%d after %.0fs — %s",
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
-                    await asyncio.sleep(delay)
-                    _mark_alive()
+                    await _park(f"retry {attempt + 1}/{job.max_retries}", delay)
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
@@ -1179,6 +1876,8 @@ class AggregationWorker:
         emitter: Any,
         scope: PlatformJobScope,
         progress_marker: Optional[dict] = None,
+        limits: Optional[dict] = None,
+        ledger: Optional[StepLedger] = None,
     ) -> dict:
         """Run batch materialization with coalesced DB checkpointing.
 
@@ -1199,6 +1898,20 @@ class AggregationWorker:
         # happen immediately.
         is_first_checkpoint = True
 
+        # The per-run record, seeded from the row (a resume keeps what the
+        # previous attempt recorded) and updated from what the pipeline
+        # hands over at each checkpoint. Dumped onto the row only inside
+        # the coalesced commit below — never an extra write.
+        run_doc: dict = _merge_run_doc(self._job_run_stats(job), None)
+        run_doc_dirty = False
+        job_tuning = self._job_tuning(job)
+        stall_timeout = (limits or {}).get("stall_timeout") or (
+            job.timeout_secs or _tuning_int(job_tuning, "stall_timeout_secs") or _STALL_TIMEOUT_SECS
+        )
+        wall_limit = (limits or {}).get("wall_limit") or max(
+            _tuning_int(job_tuning, "max_wall_secs") or _MAX_WALL_SECS, stall_timeout,
+        )
+
         async def checkpoint(
             processed: int, total: int, cursor: Optional[str],
             aggregated: int = 0, phase: Optional[str] = None,
@@ -1206,6 +1919,7 @@ class AggregationWorker:
             stats: Optional[dict] = None,
         ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
+            nonlocal run_doc_dirty
             # Cooperative cancel point at the outer-batch boundary. The
             # checkpoint that just fired captured ``cursor`` for the
             # batch we've now committed; raising here means the next
@@ -1226,24 +1940,96 @@ class AggregationWorker:
             # keeps the generic UI label working.
             if phase is not None:
                 job.current_phase = phase
-            # The pipeline supplies a phase-weighted 0-100 percentage so
-            # the bar is monotonic across phases; without it, fall back to
-            # the processed/total ratio (clamped — ``total`` can lag when
-            # driven off a stale estimate). Clamped monotonic per job row:
-            # a transient-failure retry restarts the (cheap) extract phase
-            # from zero, and without the floor the UI bar would snap from
-            # 45% back to 0% on every retry.
+            # Move the step ledger with it. ``enter`` is idempotent for the
+            # step already open, so this costs a dict lookup per checkpoint
+            # and only marks the record dirty when the run actually moved.
+            # ``step`` is the phase's OWN unit of work — extract counts
+            # lineage edges, reconcile counts scan ranges, apply counts
+            # aggregated edges — the numbers each phase already had and
+            # used to fold into the percentage and throw away.
+            step_changed = False
+            if ledger is not None:
+                step_changed = ledger.enter(phase) if phase is not None else False
+                moved = step_changed
+                step_units = (stats or {}).get("step")
+                if isinstance(step_units, dict):
+                    # Read the three keys by name rather than splatting the
+                    # dict: a rolling deploy can pair this worker with a
+                    # pipeline that sends a fourth, and a TypeError here
+                    # would skip the checkpoint's PG commit, not just the
+                    # ledger.
+                    moved = ledger.note(
+                        done=step_units.get("done"),
+                        total=step_units.get("total"),
+                        unit=step_units.get("unit"),
+                    ) or moved
+                if moved:
+                    run_doc["steps"] = ledger.snapshot()
+                    run_doc_dirty = True
+            # The pipeline supplies a phase-weighted 0-100 percentage;
+            # without it, fall back to the processed/total ratio (clamped —
+            # ``total`` can lag when driven off a stale estimate).
+            #
+            # This is the CURRENT ATTEMPT's position, and it can go DOWN: a
+            # transient failure or a resume restarts EXTRACT and COMPUTE
+            # from zero, and that is work being redone, not work already
+            # done. It used to be floored at the row's previous value so the
+            # bar never moved backwards — which put it in permanent
+            # disagreement with ``processed_edges`` on the line below, which
+            # was never floored and does reset. A resumed run showed a bar
+            # at 75% beside "0 / 500,000 edges scanned", and the ETA divided
+            # by the inflated figure and promised minutes for hours of work.
+            # The stage rail says "restarted x1" now, so a bar that moves
+            # back is explained where it used to be unexplainable.
             if progress_pct is not None:
                 computed_pct = max(0, min(100, int(progress_pct)))
             else:
                 computed_pct = min(100, int((processed / total) * 100)) if total > 0 else 0
-            job.progress = max(job.progress or 0, computed_pct)
+            job.progress = computed_pct
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
+            # What the run ran with (once is enough, but it is ~40 scalars
+            # and arrives every time) and what the ladder has changed so
+            # far. The stall window and wall clock are the worker's, not
+            # the pipeline's, so they are added here with their sources.
+            if isinstance(stats, dict):
+                # Which graph store node this run writes. Durable on the row
+                # so Job History can group the running jobs by node without
+                # asking the store, and re-read every checkpoint so it
+                # follows a failover.
+                node = stats.get("node")
+                if isinstance(node, str) and node and run_doc.get("node") != node:
+                    run_doc["node"] = node
+                    run_doc_dirty = True
+                effective = stats.get("effective_tuning")
+                if isinstance(effective, dict) and run_doc.get("effective_tuning") != effective:
+                    doc = dict(effective)
+                    src = dict(doc.get("sources") or {})
+                    doc["stall_timeout_secs"] = stall_timeout
+                    src["stall_timeout_secs"] = (
+                        "job" if (job.timeout_secs or _tuning_int(job_tuning, "stall_timeout_secs")) else "env"
+                    )
+                    doc["max_wall_secs"] = wall_limit
+                    src["max_wall_secs"] = "job" if _tuning_int(job_tuning, "max_wall_secs") else "env"
+                    doc["max_retries"] = job.max_retries
+                    src["max_retries"] = "job"
+                    doc["sources"] = src
+                    run_doc["effective_tuning"] = doc
+                    run_doc_dirty = True
+                adapted = stats.get("adapted")
+                if isinstance(adapted, dict) and run_doc.get("adapted") != adapted:
+                    run_doc["adapted"] = adapted
+                    run_doc_dirty = True
             batches_since_commit += 1
             elapsed = time.monotonic() - last_commit_monotonic
             should_commit = (
                 is_first_checkpoint
+                # A step boundary is what the operator is watching for, and
+                # there are five of them in a run. Riding the cadence means
+                # the row can say EXTRACT while the run is a minute into
+                # RECONCILE — one slow scan range is longer than the
+                # two-second window. Land it now; it costs five commits.
+                or step_changed
                 or elapsed >= _CHECKPOINT_MAX_INTERVAL_SECS
                 or batches_since_commit >= _CHECKPOINT_MAX_BATCHES
             )
@@ -1270,6 +2056,12 @@ class AggregationWorker:
             # worker a counter that won't collide with sequences
             # already published from this same boundary.
             job.last_sequence = (job.last_sequence or 0) + 1
+            if run_doc_dirty and hasattr(job, "run_stats"):
+                try:
+                    job.run_stats = json.dumps(run_doc)
+                    run_doc_dirty = False
+                except (TypeError, ValueError):
+                    pass
             try:
                 await session.commit()
                 last_commit_monotonic = time.monotonic()
@@ -1319,6 +2111,8 @@ class AggregationWorker:
                     "current_phase": job.current_phase or "",
                     "writes": (stats or {}).get("writes"),
                     "deletes": (stats or {}).get("deletes"),
+                    **_adapted_scalars((stats or {}).get("adapted")),
+                    **_pace_scalars((stats or {}).get("pace")),
                 },
                 live_state={
                     "status": "running",
@@ -1331,10 +2125,14 @@ class AggregationWorker:
                     "current_phase": job.current_phase or "",
                     "writes": (stats or {}).get("writes", 0) or 0,
                     "deletes": (stats or {}).get("deletes", 0) or 0,
+                    **_adapted_scalars((stats or {}).get("adapted")),
+                    **_pace_scalars((stats or {}).get("pace")),
                 },
             )
 
-        async def intra_batch_heartbeat(running_aggregated: int) -> None:
+        async def intra_batch_heartbeat(
+            running_aggregated: int, *, pace: Optional[dict] = None,
+        ) -> None:
             """Per Cypher MERGE sub-batch heartbeat. **Redis-only** —
             no PG writes mid-batch. The previous PG-writing version
             put ~30× sustained write pressure on the JOBS pool during
@@ -1351,19 +2149,22 @@ class AggregationWorker:
             """
             if progress_marker is not None:
                 progress_marker["at"] = time.monotonic()
+            # The pressure ladder heartbeats from inside EXTRACT too, when
+            # nothing has been written yet; publishing ``created_edges: 0``
+            # there would flicker a resumed job's count back to zero.
+            counted = {"created_edges": running_aggregated} if running_aggregated > 0 else {}
+            # How the run is writing right now — batch size, the pause, the
+            # duty cycle, whether it is holding for the node and why — so
+            # the job's progress says what the operator would otherwise
+            # only learn from the logs.
+            pacing = _pace_scalars(pace)
             await emitter.publish(
                 job_id=job.id,
                 kind="aggregation",
                 scope=scope,
                 type="progress",
-                payload={
-                    "boundary": "intra_batch",
-                    "created_edges": running_aggregated,
-                },
-                live_state={
-                    "created_edges": running_aggregated,
-                    "last_heartbeat_at": _now(),
-                },
+                payload={"boundary": "intra_batch", **counted, **pacing},
+                live_state={**counted, "last_heartbeat_at": _now(), **pacing},
             )
 
         # Cooperative cancel hook handed to the provider. The pipeline
@@ -1376,25 +2177,24 @@ class AggregationWorker:
         def should_cancel() -> bool:
             return cancel_event.is_set()
 
-        try:
-            job_tuning = json.loads(getattr(job, "tuning_json", None) or "{}") or {}
-        except (TypeError, ValueError):
-            job_tuning = {}
+        # What a previous run of this graph measured on its shard — a hint,
+        # never tuning: an operator's override of the same figure arrives in
+        # ``job_tuning`` and wins over it.
+        capacity_hints = await self._capacity_hints(session, job.data_source_id)
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,
             lineage_edge_types=lineage_types,
             batch_size=job.batch_size,
             tuning=job_tuning,
+            capacity_hints=capacity_hints,
+            # Per-query budgets an operator may raise on the running job —
+            # the watchdog refreshes this dict; the pipeline reads it per query.
+            live_limits=(limits or {}).get("live"),
             job_id=job.id,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,
             should_cancel=should_cancel,
-            # Resume baselines so a resumed job's progress continues from its
-            # last checkpoint instead of resetting the bar to 0% (the streaming
-            # rebuild applies these only when last_cursor parses).
-            resume_processed=job.processed_edges or 0,
-            resume_created=job.created_edges or 0,
         )
 
         return result

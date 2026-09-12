@@ -1,39 +1,61 @@
-import { memo } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
-    AlertTriangle, Server, FolderOpen, ShieldCheck,
+    AlertTriangle, Server, FolderOpen, ShieldCheck, ChevronDown, Gauge,
+    Copy, Check,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
-import type { AggregationJobResponse } from '@/services/aggregationService'
+import type { AdaptedRunState, AggregationJobResponse, AggregationTuning, JobLimitsPatch } from '@/services/aggregationService'
 import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
 import {
     formatDuration, timeAgo, triggerLabel, STATUS_CONFIG, type DataSourceMeta,
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
 } from './shared'
+import { RunSettingsPanel } from './RunSettingsPanel'
+import { AttemptLog } from './AttemptLog'
+import { steadyLoadFromSnapshot, steadyLoadLine } from './steadyLoad'
+import { presetForRun } from './runSettings'
+import { AdjustRunningJob } from './AdjustRunningJob'
 // One vocabulary for the detector codes across Job History and the Freshness
 // cockpit — they must never disagree about what "overlay_missing" is called,
 // nor about what its evidence means.
 import { REASON_LABEL as RECONCILE_REASON_LABEL } from '../Freshness/DriftStateBadge'
 import { ReconcileWhy } from '../Freshness/reconcileEvidence'
+import { FAILURE_CATEGORY_LABEL, asFailureCategory } from '../Freshness/failureGuidance'
+import { remainingSecsFromLedger, stoppedStage, STEP_LABELS } from './runSteps'
+import { runRecordText } from './runRecord'
 
 /**
- * History-informed ETA: uses the PREVIOUS completed run's per-phase
- * durations (persisted run_stats) for this data source — remaining
- * time = the unfinished fraction of the current phase plus the full
- * duration of every later phase, at the rates this graph actually
- * exhibited last time. Falls back to null (caller uses the backend's
- * linear phase-weighted estimate) when there is no usable history.
+ * History-informed ETA: uses the PREVIOUS completed run's durations
+ * (persisted run_stats) for this data source — remaining time = the
+ * unfinished part of the current stage plus the full duration of every later
+ * stage, at the rates this graph actually exhibited last time. Falls back to
+ * null (caller uses the backend's linear phase-weighted estimate) when there
+ * is no usable history.
+ *
+ * Prefers the two runs' step ledgers when both have one: they carry each
+ * stage's real unit of work, and the two stages either side of the pipeline
+ * that the four-phase projection could not see at all.
  */
 function historicalEta(
     job: AggregationJobResponse,
     previousJob: AggregationJobResponse | undefined,
 ): string | null {
-    if (job.status !== 'running' || !job.currentPhase) return null
+    if (job.status !== 'running') return null
     const stats = previousJob?.status === 'completed' ? previousJob.runStats : null
     if (!stats) return null
+    // A verified/no-change previous run has near-zero reconcile+apply
+    // durations — projecting the CURRENT run from it yields an absurd
+    // "finishing now". Only writing runs are predictive, ledger or not.
+    if (stats.writes === 0 && stats.deletes === 0) return null
+    const fromLedger = remainingSecsFromLedger(job.runStats?.steps, stats.steps, Date.now())
+    if (fromLedger != null) {
+        return new Date(Date.now() + fromLedger * 1000).toISOString()
+    }
+    if (!job.currentPhase) return null
     const idx = PHASES.findIndex(p => p.id === job.currentPhase)
     const band = PHASE_BANDS[job.currentPhase]
     if (idx < 0 || !band) return null
@@ -42,11 +64,6 @@ function historicalEta(
         return acc + (typeof v === 'number' ? v : 0)
     }, 0)
     if (prevTotal < 5) return null   // previous run too fast to be signal
-    // A verified/no-change previous run has near-zero reconcile+apply
-    // durations — projecting the CURRENT run (which may rewrite
-    // everything, e.g. post-purge) from it yields an absurd "finishing
-    // now" estimate. Only writing runs are predictive.
-    if (stats.writes === 0 && stats.deletes === 0) return null
     const cur = stats[PHASES[idx].statKey]
     if (typeof cur !== 'number') return null
     const frac = Math.min(1, Math.max(0, (job.progress - band[0]) / (band[1] - band[0])))
@@ -130,9 +147,49 @@ export interface JobRowProps {
     actionLoading: boolean
     compact?: boolean
     previousJob?: AggregationJobResponse
+    /** The fleet Defaults row, so a run's value that equals it reads "Fleet default". */
+    storedGlobal?: AggregationTuning | null
+    /** Raise a pending or running job's time limits without cancelling it. */
+    onExtend?: (job: AggregationJobResponse, patch: JobLimitsPatch) => void | Promise<void>
 }
 
-export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob }: JobRowProps) {
+/**
+ * The whole run, as text, on the clipboard. Everything in it is already on
+ * this page — spread across the stage rail, the Run settings disclosure, the
+ * advisories and the error block — which is exactly why attaching it to a
+ * ticket meant five expanders and a screenshot.
+ */
+function CopyRunRecord({ job, meta }: { job: AggregationJobResponse; meta?: DataSourceMeta }) {
+    const [copied, setCopied] = useState(false)
+    const copy = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(runRecordText(job, meta))
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1800)
+        } catch {
+            // No clipboard permission (or an insecure origin). The record is
+            // not lost — it is the page the operator is looking at.
+            setCopied(false)
+        }
+    }, [job, meta])
+    return (
+        <Tip label="Copy this run's full record — stages, settings, result, advisories — as text">
+            <button
+                type="button"
+                onClick={e => { e.stopPropagation(); void copy() }}
+                data-testid="copy-run-record"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+            >
+                {copied
+                    ? <Check className="w-3 h-3 text-emerald-500" aria-hidden="true" />
+                    : <Copy className="w-3 h-3" aria-hidden="true" />}
+                {copied ? 'Copied' : 'Copy record'}
+            </button>
+        </Tip>
+    )
+}
+
+export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob, storedGlobal, onExtend }: JobRowProps) {
     // Open the SSE stream only for actively-running jobs so terminal
     // rows (the bulk of Job History) don't open dead EventSources.
     // Phase 3's useJobsLive(scope) consolidates this to one connection
@@ -169,6 +226,83 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     // not part of the polled job row, so read them off the snapshot directly.
     const liveWrites = isActive && !liveOverlay.terminal ? liveOverlay.snapshot.writes : undefined
     const liveDeletes = isActive && !liveOverlay.terminal ? liveOverlay.snapshot.deletes : undefined
+    // What the pressure ladder has changed so far: the live scalars from the
+    // stream while the job runs, else the polled record (written at every
+    // coalesced checkpoint, so it is at most seconds behind).
+    const snap = liveOverlay.snapshot
+    const liveAdapted = useMemo<Partial<AdaptedRunState> | null>(() => {
+        if (!isActive || liveOverlay.terminal) return null
+        const out: Partial<AdaptedRunState> = {}
+        if (snap.adapted_scan_width !== undefined) out.scan_width = snap.adapted_scan_width
+        if (snap.adapted_scan_width_min !== undefined) out.scan_width_min = snap.adapted_scan_width_min
+        if (snap.adapted_scan_shrinks !== undefined) out.scan_shrinks = snap.adapted_scan_shrinks
+        if (snap.adapted_extract_concurrency !== undefined) out.extract_concurrency = snap.adapted_extract_concurrency
+        if (snap.adapted_reconcile_strategy !== undefined) out.reconcile_strategy = snap.adapted_reconcile_strategy
+        if (snap.adapted_write_batch !== undefined) out.write_batch = snap.adapted_write_batch
+        if (snap.adapted_delete_chunk !== undefined) out.delete_chunk = snap.adapted_delete_chunk
+        if (snap.adapted_timeout_retries !== undefined) out.timeout_retries = snap.adapted_timeout_retries
+        if (snap.adapted_memory_flushes !== undefined) out.memory_flushes = snap.adapted_memory_flushes
+        if (snap.adapted_rss_high_water_mb !== undefined) out.rss_high_water_mb = snap.adapted_rss_high_water_mb
+        if (snap.adapted_mem_limit_mb !== undefined) out.mem_limit_mb = snap.adapted_mem_limit_mb
+        const live: NonNullable<AdaptedRunState['live']> = {}
+        if (snap.adapted_live_scan_timeout_s !== undefined) live.scan_timeout_s = snap.adapted_live_scan_timeout_s
+        if (snap.adapted_live_write_timeout_s !== undefined) live.write_timeout_s = snap.adapted_live_write_timeout_s
+        if (snap.adapted_live_write_pacing_ratio !== undefined) live.write_pacing_ratio = snap.adapted_live_write_pacing_ratio
+        if (snap.adapted_live_extract_concurrency !== undefined) live.extract_concurrency = snap.adapted_live_extract_concurrency
+        if (snap.adapted_live_scan_width !== undefined) live.scan_width = snap.adapted_live_scan_width
+        if (Object.keys(live).length > 0) out.live = live
+        return Object.keys(out).length > 0 ? out : null
+    }, [isActive, liveOverlay.terminal, snap.adapted_scan_width, snap.adapted_scan_width_min, snap.adapted_scan_shrinks,
+        snap.adapted_extract_concurrency, snap.adapted_reconcile_strategy, snap.adapted_write_batch,
+        snap.adapted_delete_chunk, snap.adapted_timeout_retries, snap.adapted_memory_flushes,
+        snap.adapted_rss_high_water_mb, snap.adapted_mem_limit_mb, snap.adapted_live_scan_timeout_s,
+        snap.adapted_live_write_timeout_s, snap.adapted_live_write_pacing_ratio,
+        snap.adapted_live_extract_concurrency, snap.adapted_live_scan_width])
+    const adaptedNow: Partial<AdaptedRunState> | null = liveAdapted ?? jobFromList.runStats?.adapted ?? null
+    // What the rebuild is doing to the graph store right now — only ever from
+    // the live stream: the batch shape, the duty cycle, a hold and its reason.
+    const steady = useMemo(() => {
+        if (!isActive || liveOverlay.terminal) return null
+        const now = steadyLoadFromSnapshot(snap)
+        return now ? steadyLoadLine(now) : null
+    }, [isActive, liveOverlay.terminal, snap])
+    const narrowing = jobFromList.status === 'running' && !!adaptedNow && (
+        adaptedNow.scan_width != null || adaptedNow.extract_concurrency != null
+        || adaptedNow.reconcile_strategy === 'keys_only' || adaptedNow.write_batch != null
+    )
+    const [showSettings, setShowSettings] = useState(false)
+    const presetLabel = useMemo(() => presetForRun(jobFromList.runStats?.effective_tuning), [jobFromList.runStats?.effective_tuning])
+
+    // The stage the run is on, off its own step ledger. ``currentPhase`` can
+    // only ever name the pipeline's four phases — the worker's two bookends
+    // (indexes + identity stamping before the first checkpoint, the
+    // after-fingerprint and state rows after the last) never reach it, and on
+    // a large graph those are minutes at each end of the run.
+    const openStepId = useMemo(
+        () => (jobFromList.runStats?.steps ?? []).find(
+            s => s.state === 'running' || s.state === 'waiting',
+        )?.id,
+        [jobFromList.runStats?.steps],
+    )
+    const hasSteps = (jobFromList.runStats?.steps?.length ?? 0) > 0
+    const stageLabel = STEP_LABELS[openStepId ?? job.currentPhase ?? ''] ?? 'Working'
+    // Where a terminal run stopped, for the row's own progress cell. Null for
+    // a run that got through every stage — and for one with no ledger, which
+    // falls back to the coverage figure it always showed.
+    const stoppedAt = useMemo(() => {
+        const id = stoppedStage(jobFromList.runStats?.steps)
+        return id ? {
+            label: STEP_LABELS[id] ?? id,
+            progress: Math.max(0, Math.min(100, Math.round(jobFromList.progress ?? 0))),
+        } : null
+    }, [jobFromList.runStats?.steps, jobFromList.progress])
+    // Only a COMPLETED previous run is a baseline: one that failed in APPLY
+    // spent no time there, and comparing against it reads every run as a
+    // catastrophic slowdown.
+    const previousRunStats = previousJob?.status === 'completed' ? previousJob.runStats : null
+
+    const failureCat = asFailureCategory(job.failureCategory)
+    const failureLabel = failureCat ? FAILURE_CATEGORY_LABEL[failureCat] : null
 
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
@@ -318,16 +452,43 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                 <td className={cn('px-4', compact ? 'py-2' : 'py-3')}>
                     {job.triggerSource === 'purge' ? (
                         <span className="text-[11px] text-ink-muted/40">{'\u2014'}</span>
-                    ) : isRunning && job.totalEdges > 0 ? (
-                        <div className="w-20">
-                            <div className="flex items-center justify-between mb-0.5">
-                                <span className="text-[10px] font-bold text-indigo-400 tabular-nums">{job.progress}%</span>
+                    ) : isRunning ? (
+                        // Never gated on an edge count: EXTRACT has not taken
+                        // one during PREPARE, and a running job that shows a
+                        // dash for its progress reads as a job doing nothing.
+                        <div className="w-24">
+                            <div className="flex items-center justify-between gap-1 mb-0.5">
+                                <span className="text-[9px] font-bold uppercase tracking-wider text-ink-muted truncate">
+                                    {stageLabel}
+                                </span>
+                                <span className="text-[10px] font-bold text-indigo-400 tabular-nums shrink-0">{job.progress}%</span>
                             </div>
                             <div className="w-full h-1.5 bg-indigo-500/10 rounded-full overflow-hidden">
                                 <motion.div
                                     className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full"
                                     animate={{ width: `${Math.min(100, job.progress)}%` }}
                                     transition={{ duration: 0.6, ease: 'easeOut' }}
+                                />
+                            </div>
+                        </div>
+                    ) : stoppedAt ? (
+                        // A run that died in APPLY used to show edgeCoveragePct
+                        // here — processed/total, which is ~100% the moment
+                        // EXTRACT finishes, in emerald. A failure reading as a
+                        // hundred percent success is worse than no number.
+                        <div className="w-24">
+                            <div className="flex items-center justify-between gap-1">
+                                <span className="text-[9px] font-bold uppercase tracking-wider text-red-400 truncate">
+                                    {stoppedAt.label}
+                                </span>
+                                <span className="text-[10px] font-bold text-red-400 tabular-nums shrink-0">
+                                    {stoppedAt.progress}%
+                                </span>
+                            </div>
+                            <div className="w-full h-1.5 mt-0.5 bg-red-500/15 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-red-500/70 rounded-full"
+                                    style={{ width: `${Math.min(100, stoppedAt.progress)}%` }}
                                 />
                             </div>
                         </div>
@@ -350,7 +511,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                     ) : (
                         <div className="space-y-0.5">
                             <span className="text-[11px] text-ink tabular-nums font-medium block">
-                                {job.processedEdges.toLocaleString()}{job.totalEdges > 0 ? ` / ${job.totalEdges.toLocaleString()}` : ''}
+                                {job.totalEdges > 0
+                                    ? `${job.processedEdges.toLocaleString()} / ${job.totalEdges.toLocaleString()}`
+                                    : job.processedEdges > 0
+                                        ? job.processedEdges.toLocaleString()
+                                        // Not "0 edges" — the scan has not counted
+                                        // any yet, which is not the same claim.
+                                        : <span className="text-ink-muted opacity-40">{'\u2014'}</span>}
                             </span>
                             {job.status === 'completed' && (
                                 statWrites != null || statDeletes != null ? (
@@ -501,17 +668,20 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     )}
                                                 </div>
                                             </div>
-                                            <span className="font-mono text-[10px] text-ink-muted/50 select-all">{job.id}</span>
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                <CopyRunRecord job={job} meta={meta} />
+                                                <span className="font-mono text-[10px] text-ink-muted/50 select-all">{job.id}</span>
+                                            </div>
                                         </div>
 
                                         {/* Progress bar (running / pending) */}
-                                        {(isRunning || isPending) && job.totalEdges > 0 && (
+                                        {(isRunning || isPending) && (job.totalEdges > 0 || hasSteps) && (
                                             <div className="space-y-2">
                                                 <div className="flex items-center justify-between">
                                                     <div className="flex items-center gap-2">
                                                         <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
                                                         <span className="text-[11px] font-semibold text-ink">
-                                                            {isRunning ? phaseLabel(job.currentPhase) : 'Queued'}
+                                                            {isRunning ? phaseLabel(openStepId ?? job.currentPhase) : 'Queued'}
                                                         </span>
                                                     </div>
                                                     <span className="text-[12px] font-bold text-indigo-400 tabular-nums">
@@ -528,10 +698,12 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 </div>
                                                 <div className="flex items-center justify-between text-[10px] text-ink-muted">
                                                     <span className="tabular-nums">
-                                                        {job.currentPhase === 'extracting' || !job.currentPhase ? (
-                                                            <>{job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()} edges scanned</>
-                                                        ) : (
-                                                            <>{job.totalEdges.toLocaleString()} edges scanned</>
+                                                        {job.totalEdges > 0 && (
+                                                            job.currentPhase === 'extracting' || !job.currentPhase ? (
+                                                                <>{job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()} edges scanned</>
+                                                            ) : (
+                                                                <>{job.totalEdges.toLocaleString()} edges scanned</>
+                                                            )
                                                         )}
                                                         {(liveWrites ?? 0) > 0 && (
                                                             <span className="text-emerald-500 ml-1.5">
@@ -552,17 +724,67 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                             <Tip label={hist
                                                                 ? 'Projected from the previous run\u2019s per-phase durations on this data source'
                                                                 : 'Linear projection from phase-weighted progress'}>
-                                                                <span>est. finish {new Date(eta).toLocaleTimeString()}</span>
+                                                                <span>
+                                                                    est. finish {new Date(eta).toLocaleTimeString()}
+                                                                    {hist && narrowing && adaptedNow?.scan_width != null && (
+                                                                        <span className="text-amber-500"> {'\u2014'} slower than last time: the scans narrowed</span>
+                                                                    )}
+                                                                </span>
                                                             </Tip>
                                                         )
                                                     })()}
                                                 </div>
-                                                {isRunning && (
+                                                {(isRunning || hasSteps) && (
                                                     <PhaseStepper
-                                                        currentPhase={job.currentPhase}
+                                                        currentPhase={openStepId ?? job.currentPhase}
                                                         runStats={job.runStats}
                                                         status={job.status}
+                                                        previousRunStats={previousRunStats}
                                                     />
+                                                )}
+                                                {isRunning && steady && (
+                                                    <div
+                                                        data-testid="steady-load"
+                                                        className={cn(
+                                                            'rounded-xl border px-4 py-3',
+                                                            steady.tone === 'steady'
+                                                                ? 'bg-black/[0.02] dark:bg-white/[0.02] border-glass-border'
+                                                                : 'bg-amber-500/[0.05] border-amber-500/15',
+                                                        )}
+                                                    >
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <Gauge className={cn('w-3.5 h-3.5', steady.tone === 'steady' ? 'text-ink-muted' : 'text-amber-400')} aria-hidden="true" />
+                                                            <span className={cn('text-[10px] font-bold uppercase tracking-wider', steady.tone === 'steady' ? 'text-ink-muted' : 'text-amber-500/90')}>
+                                                                {steady.title}
+                                                            </span>
+                                                        </div>
+                                                        <p className={cn('text-[11px] leading-relaxed', steady.tone === 'steady' ? 'text-ink-secondary' : 'text-amber-500/90')}>
+                                                            {steady.detail}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {narrowing && adaptedNow && (
+                                                    <div
+                                                        data-testid="narrowing-state"
+                                                        className="rounded-xl bg-amber-500/[0.05] border border-amber-500/15 px-4 py-3"
+                                                    >
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <Gauge className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                                                            <span className="text-[10px] font-bold text-amber-500/90 uppercase tracking-wider">Going slower to fit the graph store</span>
+                                                        </div>
+                                                        <p className="text-[11px] text-amber-500/90 leading-relaxed">
+                                                            {[
+                                                                adaptedNow.scan_width != null ? `scans narrowed to ${adaptedNow.scan_width.toLocaleString()} rows` : null,
+                                                                adaptedNow.extract_concurrency != null ? `reading ${adaptedNow.extract_concurrency === 1 ? 'serially' : `${adaptedNow.extract_concurrency} at a time`}` : null,
+                                                                adaptedNow.reconcile_strategy === 'keys_only' ? 'keys-only reconcile' : null,
+                                                                adaptedNow.write_batch != null ? `write batch ${adaptedNow.write_batch.toLocaleString()}` : null,
+                                                                adaptedNow.timeout_retries ? `${adaptedNow.timeout_retries} timeout ${adaptedNow.timeout_retries === 1 ? 'retry' : 'retries'}` : null,
+                                                            ].filter(Boolean).join(' \u00b7 ')}
+                                                        </p>
+                                                        <p className="mt-1 text-[10px] text-ink-muted">
+                                                            The store refused a query for size or time, so the rebuild reads less per query until each one fits. It keeps going — only a single row too large for the per-query ceiling can stop it.
+                                                        </p>
+                                                    </div>
                                                 )}
                                             </div>
                                         )}
@@ -587,10 +809,21 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 label="Trigger"
                                                 value={triggerLabel(job.triggerSource)}
                                             />
-                                            <StatCell label="Batch Size" value={
-                                                job.triggerSource === 'purge' ? '\u2014'
-                                                    : job.tuning ? 'Self-tuning'
-                                                    : job.batchSize.toLocaleString()
+                                            <StatCell label="Settings" value={
+                                                job.triggerSource === 'purge' ? '\u2014' : (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => { e.stopPropagation(); setShowSettings(s => !s) }}
+                                                        aria-expanded={showSettings}
+                                                        aria-controls={`run-settings-${job.id}`}
+                                                        className="inline-flex items-center gap-1 text-left hover:text-indigo-500 transition-colors"
+                                                    >
+                                                        <span className="truncate">
+                                                            {presetLabel ?? (job.runStats?.effective_tuning ? 'Custom' : job.tuning ? 'Self-tuning' : job.batchSize.toLocaleString())}
+                                                        </span>
+                                                        <ChevronDown className={cn('w-3 h-3 flex-shrink-0 transition-transform', showSettings && 'rotate-180')} aria-hidden="true" />
+                                                    </button>
+                                                )
                                             } />
                                             <StatCell label="Worker" value={
                                                 job.workerId
@@ -671,7 +904,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         <Tip label={
                                                             statRegime === 'cube'
                                                                 ? 'Every ancestor combination is materialized — all canvas granularities answer from storage.'
-                                                                : `Full detail would be ~${(statCubeEstimate ?? 0).toLocaleString()} edges — over the ${(statBudget ?? 0).toLocaleString()} budget, so only the canonical depth-diagonal is stored and finer granularities are derived on demand. Raise the budget or force full detail in Advanced tuning to pre-create everything.`
+                                                                : `Full detail would be ~${(statCubeEstimate ?? 0).toLocaleString()} edges — over the cube ceiling, or more than the ${(statBudget ?? 0).toLocaleString()} new edges the graph-store shard had room for, so only the canonical depth-diagonal is stored and finer granularities are derived on demand. Force full detail in Advanced tuning to pre-create everything; it fails loudly if the shard cannot hold it.`
                                                         }>
                                                             {statRegime === 'cube'
                                                                 ? <span className="text-emerald-400">Full detail</span>
@@ -682,17 +915,40 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             )}
                                         </div>
 
-                                        {/* Pipeline phases with per-phase durations */}
-                                        {job.status === 'completed' && job.runStats
-                                            && PHASES.some(p => job.runStats?.[p.statKey] != null) && (
+                                        {/* More time, or a gentler shape, for a job that is still going */}
+                                        {(isRunning || isPending) && onExtend && job.triggerSource !== 'purge' && (
+                                            <AdjustRunningJob job={job} onAdjust={onExtend} busy={actionLoading} />
+                                        )}
+
+                                        {/* What this run ran with, and what it adapted to */}
+                                        {showSettings && job.triggerSource !== 'purge' && (
+                                            <div id={`run-settings-${job.id}`}>
+                                                <RunSettingsPanel
+                                                    job={job} storedGlobal={storedGlobal}
+                                                    live={liveAdapted} previousJob={previousJob}
+                                                />
+                                            </div>
+                                        )}
+
+                                        {/* What the run did, stage by stage. A FAILED or CANCELLED
+                                            run gets this too now: its ledger names the stage it died
+                                            in and what that stage had got through, which is the first
+                                            question anyone asks of a failure. */}
+                                        {isTerminal && job.runStats
+                                            && (hasSteps || PHASES.some(p => job.runStats?.[p.statKey] != null)) && (
                                             <div className="rounded-lg bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2.5">
                                                 <PhaseStepper
                                                     currentPhase={null}
                                                     runStats={job.runStats}
                                                     status={job.status}
+                                                    previousRunStats={previousRunStats}
                                                 />
                                             </div>
                                         )}
+
+                                        {/* What earlier attempts of this run did. Resuming
+                                            used to overwrite all of it. */}
+                                        <AttemptLog attempts={job.runStats?.attempts} />
 
                                         {/* Conformance advisories — why a run scanned/wrote fewer
                                             edges than expected (identity or edge-type casing gap). */}
@@ -775,6 +1031,15 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 <div className="flex items-center gap-2 mb-2">
                                                     <AlertCircle className="w-3.5 h-3.5 text-red-400" />
                                                     <span className="text-[10px] font-bold text-red-400/80 uppercase tracking-wider">Error Detail</span>
+                                                    {/* The server already classifies every failure and
+                                                        nothing read it — the block below instead matched
+                                                        substrings of the message. */}
+                                                    {failureLabel && (
+                                                        <span
+                                                            data-testid="failure-category"
+                                                            className="px-1.5 py-0.5 rounded bg-red-500/15 text-[9px] font-bold text-red-400 uppercase tracking-wider"
+                                                        >{failureLabel}</span>
+                                                    )}
                                                 </div>
                                                 <pre className="text-[11px] font-mono text-red-400/80 break-words whitespace-pre-wrap leading-relaxed">
                                                     {job.errorMessage}
@@ -785,10 +1050,10 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         Likely caused by server restarts during processing, not a job logic failure.
                                                     </p>
                                                 )}
-                                                {job.errorMessage.includes('max_materialized_edges') && (
+                                                {job.errorMessage.includes('write budget:') && (
                                                     <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
                                                         <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                                        The computed result exceeds the write budget — deterministic, so the job was not retried. Raise Max Materialized Edges in tuning only if the FalkorDB instance has memory headroom.
+                                                        The rebuild measured the graph-store shard that owns this graph and refused before writing: the rollups would not fit. The message above names the shard, what they need, what was free and the shortfall — deterministic, so the job was not retried. Set Rollup storage to Auto, free or add memory on that shard, or adjust Shard memory reserve, Bytes per rollup edge or the Edge ceiling in tuning if the headroom is real.
                                                     </p>
                                                 )}
                                                 {job.errorMessage.includes('write lease held') && (
@@ -800,7 +1065,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 {job.errorMessage.includes('mem consumption exceeded') && (
                                                     <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
                                                         <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                                        One scan asked the graph store for more rows than a single query may hold. The store is healthy — this is not an outage. The rebuild narrows its scans automatically, so reaching this means it hit its narrowest slice: set Rollup storage to Auto so it reads fewer summary edges, or lower Scan Range Width in tuning.
+                                                        One query asked the graph store for more than a single query may hold{typeof job.runStats?.query_mem_capacity === 'number' ? ` (${(job.runStats.query_mem_capacity / 2 ** 20).toFixed(0)} MB)` : ''}. The store is healthy — this is not an outage. The rebuild had already dropped to serial reads, switched strategy and narrowed to a single row, so that one row is larger than the per-query ceiling. Raise QUERY_MEM_CAPACITY together with the container memory limit; the Gentle profile and Auto rollup storage lighten every query before this point but cannot shrink one row.
+                                                    </p>
+                                                )}
+                                                {job.errorMessage.includes('treating as a graph-store outage') && (
+                                                    <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
+                                                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                                        The graph store stopped answering: the narrowest scan kept timing out through every backoff retry. Check the store, then Resume from the checkpoint. If it is merely slow, raise the scan timeout in Advanced tuning (the store caps it at its TIMEOUT_MAX), or re-trigger with the Gentle profile.
                                                     </p>
                                                 )}
                                             </div>

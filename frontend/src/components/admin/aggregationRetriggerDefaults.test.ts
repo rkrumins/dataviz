@@ -9,7 +9,7 @@
  * projection lives rather than how fast it is built.
  */
 import { describe, expect, it } from 'vitest'
-import { buildInitialOverridesFromJob } from './RegistryJobHistory'
+import { buildInitialOverridesFromJob, gentleRetryReason, retryPresetReason } from './RegistryJobHistory'
 import type { AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 
 const CONFIGURED_DEFAULTS: AggregationTuning = {
@@ -17,7 +17,6 @@ const CONFIGURED_DEFAULTS: AggregationTuning = {
     writePacingRatio: 1.0,
     extractConcurrency: 1,
     maxPendingPairs: 50_000_000,
-    maxMaterializedEdges: 25_000_000,
 }
 
 /** A job frozen with cramped settings — the shape that keeps re-failing. */
@@ -40,9 +39,10 @@ describe('buildInitialOverridesFromJob', () => {
         const value = buildInitialOverridesFromJob(jobWithStaleTuning, CONFIGURED_DEFAULTS)
 
         expect(value.tuning).toEqual(CONFIGURED_DEFAULTS)
-        // The cramped 2M budget on the job row is exactly what fails a
-        // 1M-node / 2M-edge graph; it must not come back.
-        expect(value.tuning?.maxMaterializedEdges).toBe(25_000_000)
+        // The cramped 2M ceiling on the job row is exactly what fails a
+        // 1M-node / 2M-edge graph; it must not come back. With no ceiling
+        // configured, the measured shard budget governs the re-run.
+        expect(value.tuning?.maxMaterializedEdges).toBeUndefined()
     })
 
     it('uses the default retries and stall timeout, not the job row values', () => {
@@ -72,5 +72,42 @@ describe('buildInitialOverridesFromJob', () => {
         const legacy = { ...jobWithStaleTuning, batchSize: 0 } as AggregationJobResponse
 
         expect(buildInitialOverridesFromJob(legacy, CONFIGURED_DEFAULTS).batchSize).toBe(5000)
+    })
+})
+
+describe('a retry after the graph store kept refusing starts from the Gentle profile', () => {
+    const refused = { ...jobWithStaleTuning, status: 'failed', failureCategory: 'query_memory' } as AggregationJobResponse
+
+    it('pre-selects Gentle for a per-query memory or timeout failure, keeping the storage choice', () => {
+        const value = buildInitialOverridesFromJob(refused, { ...CONFIGURED_DEFAULTS, materializeFinePairs: 'auto' })
+        expect(value.tuning?.scanRangeWidth).toBe(25_000)
+        expect(value.tuning?.extractConcurrency).toBe(1)
+        expect(value.tuning?.scanShrinkFloor).toBe(1)
+        expect(value.tuning?.materializeFinePairs).toBe('auto')     // the fleet's storage choice survives
+        expect(value.maxRetries).toBe(5)
+        expect(gentleRetryReason(refused)).toMatch(/per-query memory limit/)
+        expect(gentleRetryReason({ status: 'failed', failureCategory: 'timeout' })).toMatch(/timed out/)
+    })
+
+    it('keeps the settings after a node went away — narrowing does not bring one back', () => {
+        const away = {
+            ...jobWithStaleTuning, status: 'failed', failureCategory: 'provider_unavailable',
+        } as AggregationJobResponse
+        expect(buildInitialOverridesFromJob(away, CONFIGURED_DEFAULTS).tuning).toEqual(CONFIGURED_DEFAULTS)
+        expect(gentleRetryReason(away)).toBeNull()          // not a Gentle case
+        expect(retryPresetReason(away)).toMatch(/not answering/)
+        expect(retryPresetReason(away)).toMatch(/checkpoint/)
+        // The Gentle cases still speak for themselves through the same call.
+        expect(retryPresetReason(refused)).toMatch(/per-query memory limit/)
+    })
+
+    it('leaves every other failure — and a completed run — on the configured defaults', () => {
+        for (const job of [
+            { ...jobWithStaleTuning, status: 'failed', failureCategory: 'write_budget' },
+            { ...jobWithStaleTuning, status: 'completed', failureCategory: null },
+        ] as AggregationJobResponse[]) {
+            expect(buildInitialOverridesFromJob(job, CONFIGURED_DEFAULTS).tuning).toEqual(CONFIGURED_DEFAULTS)
+            expect(gentleRetryReason(job)).toBeNull()
+        }
     })
 })

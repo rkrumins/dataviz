@@ -425,7 +425,16 @@ class GraphDataProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
+        """Label/type/tag breakdowns for the whole graph.
+
+        ``budget_s`` is the CALLER's wall clock, and an implementation that
+        can keep working after the caller has given up — a server-side query
+        timeout larger than the client's — must treat it as a deadline. A
+        scan nobody is waiting for still occupies the database.
+        """
         pass
 
     @abstractmethod

@@ -15,7 +15,7 @@ import {
 } from '@/hooks/useViewSchema'
 import type { GraphNode, GraphEdge, EntityTypeDefinition, NodeQuery } from '@/providers/GraphDataProvider'
 import { BoundedQueue, mapWithConcurrency } from '@/lib/concurrency'
-import { classifyGraphFailure } from '@/services/graphRequestFailure'
+import { classifyGraphFailure, isFailoverFailure } from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
@@ -172,11 +172,29 @@ export function worstHydrationFailure(errors: readonly unknown[]): HydrationFail
     return worst
 }
 
+/** A node being replaced retries on the same fast cadence as a store that is
+ *  starting up — both are seconds, not an outage — so both are `warming`. But
+ *  they are different events and the person watching should be told which:
+ *  "starting up" for a cold store, "reconnecting" for a node rotating under a
+ *  graph that was already up. Same status, different words. */
+const HYDRATION_FAILOVER_MESSAGE =
+    'Reconnecting to the graph store — the node holding this graph is restarting.'
+
 const HYDRATION_FAILURE_MESSAGE: Record<HydrationFailure, string> = {
     warming: 'Your graph is starting up…',
     slow: 'Your graph is taking longer than usual to load. Retrying automatically…',
     unavailable: 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.',
     error: 'This view hit an error while loading. Your data is safe — retrying automatically; a refresh usually clears it.',
+}
+
+/** The copy for a failure, given what actually caused it. Only `warming`
+ *  splits by cause; every other state reads the same whatever threw. */
+function hydrationMessage(failure: HydrationFailure, cause: unknown): string {
+    if (failure !== 'warming') return HYDRATION_FAILURE_MESSAGE[failure]
+    const causes = Array.isArray(cause) ? cause : [cause]
+    return causes.some(isFailoverFailure)
+        ? HYDRATION_FAILOVER_MESSAGE
+        : HYDRATION_FAILURE_MESSAGE.warming
 }
 
 /** True for the states in which a load ended without (complete) data. */
@@ -478,9 +496,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // not, and the retry loop keeps trying for the remainder. Not 'ready'
         // — 'ready' means complete — and not the blocking overlay either: the
         // canvas has data, so CanvasRouter shows a pill over it instead.
-        const markPartial = (failure: HydrationFailure) => {
+        const markPartial = (failure: HydrationFailure, cause?: unknown) => {
             setHydrationStatus(failure)
-            setHydrationError(HYDRATION_FAILURE_MESSAGE[failure])
+            setHydrationError(hydrationMessage(failure, cause))
             setHydrationPhase('complete')
         }
 
@@ -695,7 +713,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
                     if (partial) {
-                        markPartial(worstHydrationFailure(batchErrors))
+                        markPartial(worstHydrationFailure(batchErrors), batchErrors)
                         return
                     }
                 } else {
@@ -823,7 +841,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // SUCCEEDS (markReady), so "Start building" can't flash between
                     // attempts. Phase → complete so the loading ghosts stop.
                     setHydrationStatus(failure)
-                    setHydrationError(HYDRATION_FAILURE_MESSAGE[failure])
+                    setHydrationError(hydrationMessage(failure, err))
                     setHydrationPhase('complete')
                 }
             }

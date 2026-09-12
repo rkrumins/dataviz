@@ -29,6 +29,7 @@ from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
+from backend.common.adapters import ProviderFailingOver
 from backend.app.services.fair_share import get_fair_share
 from backend.app.services.graph_cache import (
     CacheScope,
@@ -825,6 +826,42 @@ def _bounded_compute(engine: ContextEngine, compute):
             sem.release()
 
     return _run
+
+
+def watch_for_failover(compute, seen: dict):
+    """Wrap a compute so a node being replaced is remembered, not just raised.
+
+    ``get_or_compute`` already serves the last good answer when the provider
+    cannot answer — the caller just never learned WHY, so a canvas that went
+    quietly stale during a failover looked no different from one that was
+    merely old. The route reads ``seen`` afterwards and labels the response.
+    """
+    async def _run():
+        try:
+            return await compute()
+        except ProviderFailingOver as exc:
+            seen["endpoint"] = exc.endpoint or ""
+            raise
+
+    return _run
+
+
+def label_failover(response: Response, target, seen: dict) -> None:
+    """Say that this answer is the last good one and the node is coming back.
+
+    ``target`` is anything carrying ``stale``/``stale_reason`` (the aggregated
+    result, a canvas freshness block). Only fires when the cache actually
+    stood in for the provider: a failover the retries absorbed changed
+    nothing the user can see, and does not deserve a banner.
+    """
+    if not seen or response.headers.get("X-Cache-Status") != "stale-fallback":
+        return
+    target.stale = True
+    if not getattr(target, "stale_reason", None):
+        target.stale_reason = "failing_over"
+    response.headers["Retry-After"] = "3"
+    if seen.get("endpoint"):
+        response.headers["X-Provider-Failing-Over"] = seen["endpoint"]
 
 
 async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
@@ -2504,6 +2541,7 @@ async def get_aggregated_edges(
     # Sort URN lists so two semantically identical requests with differing
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
+    failing_over: dict = {}
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
@@ -2515,10 +2553,11 @@ async def get_aggregated_edges(
             "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
         },
-        compute=_bounded_compute(engine, compute),
+        compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+    label_failover(response, result, failing_over)
 
     # Post-cache staleness overlay (Task 6): the source-changed marker is
     # set/cleared independently of the cache entry, so a cache hit (or a

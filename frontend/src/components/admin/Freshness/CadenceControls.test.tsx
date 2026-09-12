@@ -151,6 +151,64 @@ describe('drawer rebuild-cadence row', () => {
     })
 })
 
+describe('drawer rollup storage row', () => {
+    it('labels Inherit with what it resolves to and says where the value came from', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({
+            rollupStorageOverride: null, resolvedRollupStorage: 'auto',
+            rollupStorageSource: 'global', inheritedRollupStorage: 'auto',
+        }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        const group = await screen.findByRole('radiogroup', { name: 'Rollup storage for this source' })
+        expect(group).toBeInTheDocument()
+        expect(screen.getByRole('radio', { name: 'Inherit (Auto)' })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.getByText(/Inherited from the fleet Defaults/)).toBeInTheDocument()
+    })
+
+    it('Auto sends the override', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({
+            rollupStorageOverride: null, resolvedRollupStorage: 'true',
+            rollupStorageSource: 'default', inheritedRollupStorage: 'true',
+        }))
+        patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1', rollupStorage: 'auto' })
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        await userEvent.click(await screen.findByRole('radio', { name: 'Auto' }))
+        await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalledWith(
+            'ds-1', { rollupStorage: 'auto' },
+        ))
+    })
+
+    it('Inherit clears the override with an explicit null', async () => {
+        getSourceDoc.mockResolvedValue(makeDoc({
+            rollupStorageOverride: 'auto', resolvedRollupStorage: 'auto',
+            rollupStorageSource: 'custom', inheritedRollupStorage: 'true',
+        }))
+        patchFreshnessSettings.mockResolvedValue({ dataSourceId: 'ds-1', rollupStorage: null })
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByRole('radio', { name: 'Auto' })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.getByText(/Set on this source/)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('radio', { name: 'Inherit (Full detail)' }))
+        await waitFor(() => expect(patchFreshnessSettings).toHaveBeenCalledWith(
+            'ds-1', { rollupStorage: null },
+        ))
+    })
+
+    it('stays available on a never-built source, unlike the cadence', async () => {
+        // A graph too big for the full cube is exactly the source to put on
+        // Auto before its first build.
+        getSourceDoc.mockResolvedValue(makeDoc({
+            aggregationStatus: 'none', lastAggregatedAt: null,
+            resolvedRollupStorage: 'true', rollupStorageSource: 'default', inheritedRollupStorage: 'true',
+        }))
+        wrap(<FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />)
+
+        expect(await screen.findByRole('radiogroup', { name: 'Rollup storage for this source' })).toBeInTheDocument()
+        expect(screen.queryByLabelText(`${ACT_CADENCE} (custom, seconds)`)).not.toBeInTheDocument()
+    })
+})
+
 describe('drawer detect stage', () => {
     it('offers a detect override', async () => {
         getSourceDoc.mockResolvedValue(makeDoc({ resolvedProbeIntervalSecs: 60 }))

@@ -16,9 +16,16 @@ metadata:
   namespace: synodic
 data:
   # This overlay's shard statefulsets run FALKORDB_ARGS with
-  # TIMEOUT_MAX 120000 (not the base 180000) — keep the backend clamp
-  # aligned or FalkorDB rejects every query requesting more.
+  # TIMEOUT_MAX 120000 (not the base 180000) — keep this fallback aligned:
+  # the backend clamps to the TIMEOUT_MAX it reads from each node once it
+  # has, and to this value before that. A cap raised at runtime from
+  # Infrastructure lasts until the shard restarts; add the fragment the
+  # dialog hands over to the statefulset's FALKORDB_ARGS to keep it.
   FALKORDB_SERVER_TIMEOUT_MAX_MS: "120000"
+  # This overlay's shards run memory 56Gi (not the base 14Gi). The sizing
+  # guard checks a raised QUERY_MEM_CAPACITY against this number, so it has
+  # to be the one these pods actually have. 56 * 1024^3 = 60129542144.
+  FALKORDB_CONTAINER_MEMORY_BYTES: "60129542144"
   FALKORDB_MODE: "cluster"
   FALKORDB_CLUSTER_NODES: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379"
   FALKORDB_HOST: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local"

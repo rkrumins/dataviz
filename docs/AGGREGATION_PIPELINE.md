@@ -58,19 +58,23 @@ caveat on SELF-NESTING types, where the on-demand reader still reasons in
 ontology type levels and mixed-granularity drill answers can come back
 incomplete (depth-aware on-demand reads are the tracked follow-up).
 
-The cost is stated plainly because it is real: a FORCED cube **skips the
-up-front estimate**, so a graph whose result exceeds the WRITE BUDGET is
-not refused before it starts — it fails terminally mid-apply, leaving a
-partial cube over the previous generation's cells, because the reconcile
-delete pass never runs. On a fleet with multi-million-edge graphs, size
-`AGGREGATION_MAX_MATERIALIZED_EDGES` against the largest of them first.
+The cost is stated plainly because it is real: a FORCED cube is checked
+against the WRITE BUDGET **before it starts** — the same up-front estimate
+Auto runs, an upper bound with `AGGREGATION_ESTIMATE_MARGIN_PCT` of slack,
+against the free memory of the shard that owns the graph — and a graph
+that cannot fit is refused with nothing computed and nothing written. The
+exact count is checked again after COMPUTE and before every overflow wave,
+so a shard that fills up mid-run (another graph landing on it) still fails
+the job loudly rather than filling the shard; that late refusal is the one
+case that leaves a partial cube over the previous generation's cells,
+which the next successful rebuild reconciles.
 
 `auto` is the mode that degrades instead of failing: it ESTIMATES the full
 ancestor cross-product volume up front (one counting scan: Σ ancestors(src)+1
 × ancestors(tgt)+1 — a conservative upper bound), stores the cube when it fits
-`AGGREGATION_MAX_CUBE_EDGES`, and falls back to the structural boundary below
-otherwise, so it can never pick a cube that exceeds the budget. `false` forces
-the boundary. Operators move a whole fleet between these from Ingestion →
+`AGGREGATION_MAX_CUBE_EDGES` **and** the owning shard has room for it, and
+falls back to the structural boundary below otherwise, so it can never pick a
+cube that exceeds the budget. `false` forces the boundary. Operators move a whole fleet between these from Ingestion →
 Freshness → Automation (③ Act → Advanced) without a redeploy; a single run is
 set in the trigger dialog's Rollup storage control.
 
@@ -116,37 +120,112 @@ All reads are index-driven and bounded by the visible set —
 milliseconds even 8 levels deep on multi-million-edge graphs. Same
 answers, same response shape. Trace is unaffected: trace-at-level reads
 same-level cells (still materialized) and already uses raw edges at the
-finest level. A hard write budget (`AGGREGATION_MAX_MATERIALIZED_EDGES`,
-default 25M) fails a job loudly — terminally, no retries, with a
-per-level composition breakdown in the error — rather than ever letting
-a result OOM the shared instance.
+finest level. The write budget fails a job loudly — terminally, no
+retries, with every number a person needs in the error — rather than ever
+letting a result OOM the shared instance.
 
-**Size it against ONE SHARD.** A FalkorDB graph key lives entirely on one
-node — Redis Cluster does NOT split a graph, so sharding scales the
-*number* of graphs you can host, not the size of any one, and running on
-a cluster gives a single large graph zero extra headroom
-(`backend/app/providers/falkordb_connection.py` module docstring). The
-reference cluster (`deploy/k8s/overlays/production-cluster/`) runs
-`maxmemory 40gb` per shard against ~22GB planned usage — about 18GB of
-headroom. The 25M default is ~12.5GB at ~0.5KB/edge, roughly 70% of that.
-Boundary pairs run ~1.5-2x raw edge count, so it covers a graph of about
-12-16M edges — several times the 1M-node / 2M-edge floor the defaults
-target, which is the point: that floor is a MINIMUM, not a ceiling.
+**The budget is MEASURED from the shard that owns the graph.** A FalkorDB
+graph key lives entirely on one node — Redis Cluster does NOT split a
+graph, so sharding scales the *number* of graphs you can host, not the
+size of any one, and running on a cluster gives a single large graph zero
+extra headroom (`backend/app/providers/falkordb_connection.py` module
+docstring). So before it writes, the pipeline reads `INFO memory` on that
+one shard — the projection graph's shard in dedicated mode — through the
+client it already holds, and allows the write when the NEW edges fit
+under a reserve:
 
-Note this sits **above** the ~8GB "largest single graph" figure in
-[Infrastructure: Launch Scale](/docs/infra-launch-scale) §2.2, whose 18GB of
-headroom covers skew *and* the largest graph *and* growth together.
+```
+allowed_growth = (maxmemory - reserve_pct% x maxmemory - used_memory - held_by_other_rebuilds) / bytes_per_edge
+```
+
+Only growth is charged (edges the graph already holds are re-written in
+place), and the reading is fresh at every check: the up-front estimate,
+the exact count after COMPUTE, and each overflow wave. Adding memory to a
+shard is therefore visible to the very next rebuild. The refusal names the
+shard, the edges and bytes needed, what was free of what `maxmemory`, the
+shortfall and the ways out, and `run_stats.write_budget` records the same
+decision on success (`governed_by: shard`). Read the shard yourself with
+`redis-cli -h <shard> INFO memory` — the same two numbers.
+
+Three operator limits sit on top, resolved per-job tuning → Ingestion →
+Freshness → Defaults → env, like every other knob: **`shardReservePct`**
+(`AGGREGATION_SHARD_RESERVE_PCT`, 20) is how much of the shard must stay
+free for live queries and every other graph on it; **`bytesPerEdge`**
+(`AGGREGATION_BYTES_PER_EDGE`, 512) overrides what one edge is assumed to
+cost — a planning figure until a fresh rebuild with material growth has
+CALIBRATED it from the shard's own before/after usage, per graph, which
+the next rebuild of that graph then uses; and **`maxMaterializedEdges`**
+is an OPTIONAL explicit ceiling on the total, layered over the measured
+budget for a graph you want held BELOW what its shard could take. No
+preset sets it — a ceiling on the job wins over the measurement, which is
+exactly how a pinned 25M made adding shard memory change nothing.
+
+When the shard cannot be measured — no `maxmemory` configured (the five
+`deploy/topologies/docker-compose.falkordb-*.yml` files), or the read
+timed out — the budget degrades to the static count rule: the explicit
+ceiling if set, else `AGGREGATION_MAX_MATERIALIZED_EDGES` (25M, ~12.5GB
+at the default bytes/edge), and the message says that the static cap
+governed and why.
+
 Because keyslot placement is deterministic rather than load-aware, the
-case to watch is two graphs near this budget landing on the same shard —
-monitor per-shard `used_memory` and rebalance by moving a graph, per that
-document.
+case to watch is two graphs landing on the same shard. Two rebuilds racing
+onto one shard cannot both pass on the same headroom: a rebuild that passes
+a budget check enters what it still has to write in the node's reservation
+ledger (`agg:reserve:{node}` on the job-bus Redis, beside the write lease
+in `admission.py` — the whole growth before the apply, one wave for an
+overflow flush, the remainder at each mid-apply recheck, released with the
+lease), and every other rebuild's budget subtracts it as used memory until
+the writes land or the job ends. The ledger fails open like the rest of
+admission. Still monitor per-shard `used_memory` and rebalance by moving a
+graph, per [Infrastructure: Launch Scale](/docs/infra-launch-scale) §7.4.
 
-The budget is a backstop, not a sizing guard — it exists so a pathological
-result fails loudly instead of filling the shard. That matters *more* on a
-cluster: `noeviction` at the shard cap fails writes for every graph on
-that shard, and with `cluster-require-full-coverage no` the rest of the
-cluster keeps serving, so the failure is partial and confusing rather
-than obvious. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
+Under `noeviction` a full shard fails writes for every graph on it, and
+with `cluster-require-full-coverage no` the rest of the cluster keeps
+serving, so that failure is partial and confusing rather than obvious —
+which is why the budget refuses BEFORE the shard fills, not at the cap.
+
+**The apply re-measures.** The post-compute check answered for the whole
+result at one instant; a multi-million-edge APPLY can run for a long time
+while another graph's rebuild lands on the same shard. Every
+`AGGREGATION_BUDGET_RECHECK_EDGES` first-touch edges written, the pipeline
+re-reads the shard and refuses — with the numbers, and with "mid-apply
+recheck" in the message — when the REMAINDER would not fit. The refusal
+comes after the chunk's checkpoint, so the job can be resumed from its
+cursor once memory is freed; `run_stats.budget_rechecks` counts them.
+
+**Rollup storage per source.** A source can be pinned to Auto (or Full
+detail) on its own, from the drawer's ③ Act, before its first build if need
+be; the override is resolved into the job's frozen tuning at trigger time,
+so automation and manual rebuilds honour it alike and a per-job request
+still wins. The freshness row and doc carry the resolved value and where it
+came from (`rollupStorageOverride` / `resolvedRollupStorage` /
+`rollupStorageSource`).
+
+### The capacity API
+
+What the budget measures, for people: `GET /api/v1/admin/aggregation/capacity`
+lists EVERY master of every graph store — with or without sources on it — and
+places each aggregated source on one by hashing its rollup key (the projection
+graph in dedicated mode). Per node: used, `maxmemory`, the reserve, what
+running rebuilds hold in its ledger, what is free after both, how many more
+rollup edges that is at the fleet bytes-per-edge, and the sources on the
+shard with their footprint and what their last run learned. `GET /api/v1/admin/data-sources/{id}/capacity`
+adds the pre-flight: the pipeline's own verdict on the last run's cube
+estimate against the live reading (Full detail fits / short by / unknown
+until a first run; Auto is never refused). Both are ingestion-read like the
+settings GET and are served in-process in every mode — they read the graph
+store topology snapshot the web tier builds for itself
+(`services/graph_store`, `GRAPH_STORE_TOPOLOGY_*`), so capacity dials nothing
+of its own. Placement is arithmetic over that snapshot rather than a
+per-source provider resolution, which is why every master now appears, the
+row order never moves, and a failed refresh keeps the last good figures with
+`stale`/`lastError` set instead of blanking the card. Anything that cannot be
+placed is reported with a coarse reason; nothing raises; the assembly is
+cached for `AGGREGATION_CAPACITY_CACHE_TTL_S`. The Freshness page's capacity
+card, the drawer's Capacity block, the re-trigger fit check, the Defaults
+dialog's what-if and the Infrastructure page's memory headroom all read it —
+and **Admin → Graph store** is the full view behind them, with the replicas
+and the graphs per shard the capacity rows do not carry. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
 ontology level map — or with a SINGLE-LEVEL map (no container types) —
 fall back to it automatically. An empty graph completes as a clean
@@ -196,8 +275,10 @@ enumerating the unmapped subtree.
    dict walks over the extracted child→parent map; pair weights are
    aggregated bottom-up through the ancestor lattice. Deterministic —
    a crashed run just recomputes (minutes). Memory is bounded by
-   `AGGREGATION_MAX_PENDING_PAIRS`; overflow triggers an early flush
-   with first-touch-overwrite semantics that keeps weights exact.
+   `AGGREGATION_MAX_PENDING_PAIRS` and, under a cgroup limit, by the
+   memory-aware flush (`AGGREGATION_FLUSH_MEM_PCT` of the limit, once
+   `AGGREGATION_FLUSH_MIN_PAIRS` are pending); either triggers an early
+   flush with first-touch-overwrite semantics that keeps weights exact.
 3. **RECONCILE**: the current `:AGGREGATED` set is range-scanned once;
    stale edges are deleted precisely (guarded by `latestUpdate <
    run_start`, so edges written during the run — by overflow flushes, a
@@ -220,6 +301,172 @@ enumerating the unmapped subtree.
 
 In steady state a re-run after small source changes writes only the
 diff — near-zero load. Full recompute *is* the incremental strategy.
+
+## What the run reports about itself
+
+The four phases above are the pipeline's. A *run* has six stages, and the
+two the pipeline does not own used to be invisible:
+
+| Stage | Owner | What happens | Its unit of work |
+| --- | --- | --- | --- |
+| `preparing` | worker | `set_entity_type_levels`, `ensure_indices` (~131 `CREATE INDEX` on a 20-type ontology), `stamp_identity_urns` over the whole node ID space, and the **before**-fingerprint (three full graph scans) | none countable |
+| `extracting` | pipeline | EXTRACT | lineage edges scanned |
+| `computing` | pipeline | COMPUTE | none countable |
+| `reconciling` | pipeline | RECONCILE | ID-range scans of the stored cube |
+| `applying` | pipeline | APPLY | aggregated edges written of those found missing |
+| `finalizing` | worker | the **after**-fingerprint, the data-source state row, the workspace row, the audit row, the terminal events | none countable |
+
+**Why the two bookends matter.** On a large graph they are minutes at each
+end of the run, and before the ledger the row said nothing during either:
+`current_phase` is set only by the pipeline's checkpoints, and the UI's
+whole progress block was gated on `total_edges > 0`, which EXTRACT has not
+set yet. A run looked idle at the start and wedged at "Applying, 100%" at
+the end.
+
+**Why per-stage units matter.** `_checkpoint` sends `processed` / `total`
+= the EXTRACT counters *whatever phase is running* — by design, because
+that is what the resume cursor and the coverage figure are about. So from
+RECONCILE onwards those counters are frozen and `progress` (a
+phase-weighted 0-100) is the only moving number, with its denominator
+nowhere. Each phase already computed that denominator one line above its
+checkpoint call and folded it into the percentage; it is now passed as
+`unit_done` / `unit_total` / `unit` and kept.
+
+### The step ledger
+
+`backend/app/services/aggregation/steps.py`. One ordered record per run,
+written into **`run_stats["steps"]`** — so the same document is the live
+view while the job runs and the run's history once it is over. Per stage:
+
+* `state` — `pending` before it is entered, `running` while it holds the
+  run, `waiting` while it holds the run but is parked on something outside
+  it, `done` once a later stage opens, `failed` / `cancelled` when the run
+  ended inside it.
+* `started_at` / `ended_at` / `secs` — seconds accumulated across **every**
+  visit. The open stage's elapsed time is deliberately *not* baked in
+  (that would mark the document dirty on every checkpoint and collapse the
+  commit cadence into one PG write per batch); readers add the difference
+  from `started_at` themselves.
+* `visits` — >1 means a transient failure sent the run back to this stage.
+* `done` / `total` / `unit` — the stage's own unit of work, `null` for the
+  stages that have none. Inventing one would be worse than saying nothing.
+* `waiting_for` — why it is parked.
+
+**Re-entry is honest.** Going back to an earlier stage (a transient
+failure resumes from the cursor, and EXTRACT+COMPUTE always re-run) resets
+every later stage to `pending` while keeping the seconds it already
+accumulated. Nothing claims work that is about to be redone is finished.
+
+**Waiting is a state, not a silence.** A retry backoff, a quiesce park and
+a failover park are real time the run spends not running, and they used to
+read exactly like a hang: the same stage, the same frozen counters, nothing
+said. Each now marks the open stage `waiting` with its reason; the next
+checkpoint clears it.
+
+**Commit cadence.** Checkpoints coalesce their PG commit (2s or 5 batches),
+but a **stage boundary commits immediately** — there are five per run and
+it is the thing an operator is watching. One slow RECONCILE range is longer
+than the two-second window, so riding the cadence could leave the row
+saying EXTRACT a minute into RECONCILE.
+
+**Reading it in the UI.** `frontend/src/components/admin/job-history/runSteps.ts`
+turns the ledger into the stepper's segments: each segment fills with its
+own `done/total` while it runs, carries its duration live, and explains
+itself; one line under the stepper says what the running stage does and
+what is left of it. A failed or cancelled run renders it too — it names the
+stage the run died in. Runs from before the ledger existed fall back to the
+four segments derived from `current_phase`.
+
+### The attempt log
+
+A job ROW is a run; a run has many ATTEMPTS. Every per-attempt field — the
+ledger, the progress, the error, the retry count — used to be overwritten in
+place, so **resuming a failed job erased the record of why you were resuming
+it**, with the single click taken because it failed.
+
+`run_stats.attempts` keeps them. Each entry: the attempt number, the stage it
+stopped in, its progress, its error and typed category, its writes and
+deletes, and a trimmed copy of its ledger.
+
+* **Archived at the next attempt's START**, not at the previous one's
+  terminal block — a worker that died without reaching one still has to be
+  captured, and only the next attempt is guaranteed to run.
+* **Idempotent by construction**: `record_attempt` REMOVES the ledger from
+  the document as it archives it, so a second call finds nothing to move.
+  That is what lets `service.resume` and the worker's own start both call it
+  without coordinating — whichever runs first does the work.
+* **Only attempts that did not succeed are kept.** A successful attempt IS
+  the run record; storing it twice doubles every row's payload for nothing.
+  This is what keeps a healthy row carrying none of this at all, so the
+  bound below only ever binds on a run genuinely in trouble.
+* **Bounded** by `AGGREGATION_ATTEMPTS_KEPT` (default 20, 1–100), keeping the
+  most recent — the failure being worked is the recent one. Numbering comes
+  off the highest `n` the log has held, never its length, so trimming does
+  not restart the count.
+* **Trimmed**: an archived stage keeps `id, state, secs, visits, done, total,
+  unit` and drops the timestamps and park reason, which only mean anything
+  while the stage is live. About 500 bytes an attempt, so twenty of them on a
+  troubled row is ~10 KB and a healthy row is unchanged — which is why
+  forensics stay on the list response instead of needing a detail fetch.
+
+So: a failed run shows its failure in `steps` (the live ledger, sealed). A
+resumed-then-failed run shows attempt 1 in `attempts` and attempt 2 in
+`steps`. A resumed-then-succeeded run shows the failure in `attempts` and the
+success in `steps`.
+
+**What resume actually saves.** The cursor's phase decides: `aggregate`
+nothing (a fresh run); `reconcile` the ID ranges already compared; `apply`
+**the writes already landed** — RECONCILE rebuilds `existing`, which includes
+everything the prior attempt wrote. EXTRACT and COMPUTE always re-run. That
+is deliberate: they are deterministic and take minutes, APPLY takes the
+hours, and skipping them would mean spilling and reloading the whole
+accumulator — a large durability surface to save the cheap half.
+
+**Progress is the CURRENT ATTEMPT's position, and it can go down.** A
+transient failure or a resume restarts EXTRACT and COMPUTE from zero, and
+that is work being redone, not work already done. It used to be floored at
+the row's previous value (`max(job.progress, computed)`) so the bar never
+moved backwards — which put it in permanent disagreement with
+`processed_edges`, which was never floored and does reset. A resumed run
+showed a bar at 75% beside "0 / 500,000 edges scanned". The API's live-state
+overlay carried a second copy of the same rule (`if parsed > current`); both
+are gone, and the overlay now applies only to non-terminal rows, since a
+terminal row is the source of truth and its HSET can outlive it on the TTL.
+
+`resume_processed` / `resume_created` were the reason the floor existed.
+They were passed by the worker, forwarded by the provider, accepted by
+`materialize_aggregated_edges` — and never given to the pipeline. The
+documented behaviour ("a resumed job's progress continues from its last
+checkpoint") never happened; the floor was covering for it. All three layers
+are deleted: a resumed run's counters are its own attempt's, which is what
+the stage rail already shows.
+
+**The estimated finish** projects from the previous COMPLETED run's ledger,
+on both sides:
+
+* Job History's own (`historicalEta` in `JobRow.tsx`) uses the `previousJob`
+  the page already holds.
+* The API's `estimatedCompletionAt` (`_estimate_completion` +
+  `_prior_ledgers`) is what every other surface shows — the explorer banner,
+  Freshness, the workspace dashboard. It pre-fetches the baseline ONCE per
+  page for the running rows only, never per row.
+
+Both use the same rule: the unfinished part of the current stage, at the
+larger of last run's rate and this run's own, plus the full duration of
+every later stage — the two bookends included. Both refuse the same
+baselines: a run that failed (it spent no time in the stages it never
+reached) and a run that wrote and deleted nothing (it found everything
+already there, so its reconcile and apply took seconds).
+
+**No comparable run means no time at all**, rather than a fallback to
+guessing. What the API did before was `elapsed * (100 - pct) / pct`, which
+is only right if every stage runs at the same rate — EXTRACT is a scan,
+APPLY is paced writes, the bookends are fingerprints. On a resumed run it
+was wrong twice over: `pct` was held up by the floor above and `elapsed` ran
+from the FIRST attempt's `started_at`, so a job redoing two hours of work
+reported forty minutes left. The running stage's own "3 of 12 scan ranges, 9
+left" answers "how much is left" better than a clock time nobody can stand
+behind.
 
 ## Resume
 
@@ -248,21 +495,54 @@ the **first checkpoint**, before any graph work. Resume rules:
   it WITH the container limit, never alone), and — critically —
   `OMP_THREAD_COUNT 1`
   (unbounded per-query OpenMP threads on a big node under a small cgroup
-  quota were the main cause of the 150% CPU spikes). See
+  quota were the main cause of the 150% CPU spikes). `TIMEOUT_MAX` and
+  `QUERY_MEM_CAPACITY` can also be changed at runtime from Infrastructure →
+  Memory headroom (`services/aggregation/graph_store_limits.py`: read,
+  validate against the container formula, `GRAPH.CONFIG SET`, verify, tell
+  the providers) — until the next restart. See
   `docs/FALKORDB_DEPLOYMENT.md` for sizing rules.
 * **Distributed admission control**
   (`backend/app/services/aggregation/admission.py`, on the job-bus
   Redis): a per-graph write lease (one materializing job per graph across
-  all pods) and a per-endpoint write-slot semaphore
+  all pods); a per-node write-slot semaphore
   (`FALKORDB_ENDPOINT_WRITE_SLOTS`, default 2) so an HPA-scaled worker
-  fleet cannot stampede one FalkorDB. Fails **open** to the per-process
-  limits if Redis is down.
-* **Pacing**: every write sub-batch is AIMD-sized (shrinks on latency
-  creep) and followed by `duration × AGGREGATION_WRITE_PACING_RATIO`
-  sleep (default 1.0 → ≤ ~50% write duty cycle), on top of the existing
-  per-process write semaphore and latency-quiesce circuit. The ratio is a
-  sleep multiplier, so RAISING it slows the job down and LOWERING it
-  speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → no sleep at all.
+  fleet cannot stampede one FalkorDB; a per-node **scan**-slot semaphore
+  (`FALKORDB_ENDPOINT_READ_SLOTS`, default 4) capping how many rebuild
+  range scans are in flight against one node — a rebuild reads far more
+  than it writes and does it under `read_from_master_only`, so every scan
+  lands on the master rather than the replicas that absorb interactive
+  reads; and a per-node reservation ledger
+  (`agg:reserve:{node}`: what each running rebuild has been allowed to
+  write but the node's `used_memory` does not show yet, subtracted from
+  every other rebuild's write budget so two rebuilds cannot both pass on
+  the same headroom). Both semaphores are held per QUERY, not per job, and
+  key on the node the run's own shard reading names — `endpoint_key` is
+  the connection config's host:port, a seed address on a cluster, which
+  gave the whole cluster one semaphore instead of one per master. Fails
+  **open** to the per-process limits if Redis is down.
+* **Pacing — one batch settled, then a pause, then the next**: a write
+  batch is sized by an AIMD sizer against `AGGREGATION_WRITE_BATCH_TARGET_S`
+  (default 1.0 s: a batch that ran longer halves the next; five in a row
+  under two fifths of it grow it by 100 rows) up to
+  `AGGREGATION_WRITE_BATCH_MAX` (default 500 rows). The target is the
+  number that matters for users: a write query holds the graph's write
+  lock from its first mutation to its end, so one batch is the longest
+  stall a reader of that graph sees, and the same rows in more, shorter
+  batches cost readers less than fewer, longer ones. Each batch is
+  *settled* before the next: the write governor has read the node and
+  found it inside the envelope, the query has returned, the replicas have
+  acknowledged it (`replicaAckMin`), and then the run pauses for
+  `duration × AGGREGATION_WRITE_PACING_RATIO` (default 1.0 → ≤ ~50% write
+  duty cycle), never less than `AGGREGATION_WRITE_MIN_GAP_MS` (100 ms, so
+  fast small batches never run back to back), never more than 30 s. The
+  ratio is a sleep multiplier, so RAISING it slows the job down and
+  LOWERING it speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → only the
+  minimum gap. Short of a hold the run *eases*: replicas half way to the
+  limit the master drops them at, or the container's fork line within an
+  eighth of the limit, halve the batch ceiling and double the pause until
+  the reading is back. The run's progress carries all of it live (batch
+  rows, seconds per batch, the pause, the rolling duty cycle and rate,
+  whether it is holding or eased and why) and the run record keeps it.
 * **Interactive reads first**
   (`backend/app/services/aggregation/read_pressure.py`): the writers'
   only feedback used to be their OWN write latency, so a job issuing
@@ -288,13 +568,167 @@ the **first checkpoint**, before any graph work. Resume rules:
   that column NULL — reconciliation drift and first builds, the cron drift
   sweep, the stale-marker reconciler, Refresh rollups, the projector heal
   hook — so at 900 they were the only rebuilds being killed for going
-  quiet, on exactly the graphs large enough to do it.
+  quiet, on exactly the graphs large enough to do it. Both windows are
+  re-read from the job row while it runs (`PATCH …/jobs/{id}/limits`), so
+  an operator can give a running job more time without cancelling it.
+* **The pressure ladder**: every per-query refusal the graph store can
+  make — the memory ceiling (`QUERY_MEM_CAPACITY`) and the per-query
+  timeout, whether the client deadline or the server's own *Query timed
+  out* — is absorbed by reading less per query: the first event of a run
+  pins wave concurrency to 1; a RECONCILE scan switches to the keys-only
+  two-pass strategy under `AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH`; the
+  sticky scan width halves down to `AGGREGATION_SCAN_SHRINK_FLOOR` (default
+  one row) and re-grows after sustained successes, never straight back into
+  a width that failed; write and delete batches halve the same way. At the
+  narrowest width a timeout is retried with backoff and heartbeats
+  (`AGGREGATION_SCAN_TIMEOUT_RETRIES`) and only then raised as
+  `MaterializationScanTimedOut` — a `TimeoutError` the worker treats as an
+  outage (resumable from the checkpoint); a memory refusal on a single row
+  is the one terminal outcome. What a run learned is persisted per source
+  (`data_source_state.observed_tuning`) and seeds the next run's ladder
+  where it is stricter than the knobs (`ignoreObserved` opts out). **A run
+  that did not complete is written too** — it is the run with the most to
+  teach, and its lesson used to be discarded, so an hour spent halving the
+  scan width down to 500 before dying left the retry starting wide and
+  hitting the same wall. The two paths differ in one way that matters: a
+  clean run writes `{}` and so CLEARS the previous lesson, because it proves
+  the narrowing is no longer needed (a hinted run re-grows its width during
+  the run); a failed run proves nothing of the sort, so an empty lesson is
+  not written and a failure for an unrelated reason — a dead node, a missing
+  ontology — cannot erase a valid narrowing.
+
+### Replication backpressure, outage holds, and failing-over reads
+
+Four behaviours keep a rebuild from taking a shard down, and keep users from
+seeing it as an outage when a node is replaced anyway.
+
+- **The write governor.** Before every write batch the pipeline reads the node
+  it writes to — `INFO memory server persistence replication`, one round trip,
+  no config — and holds while the node is outside the envelope a rebuild may
+  write inside: a fork in flight (`BGSAVE`, an AOF rewrite running or
+  scheduled, a replica receiving a full resync), fewer replicas attached than
+  the run started with, a replica further behind than a fraction of the limit
+  the master drops it at (`AGGREGATION_REPLICA_LAG_HOLD_BYTES`, derived from
+  the node's own `client-output-buffer-limit` and `repl-backlog-size`), or RSS
+  past what the container could survive a fork at (`FALKORDB_CONTAINER_MEMORY_BYTES`
+  less `AGGREGATION_FORK_COW_PCT` × RSS, what replication holds and the
+  overhead). Every one of those is true of the node now and false a little
+  later, which is why it is a hold — heartbeating, backing off, re-reading —
+  and not a refusal. Writing through a fork is what turns the dataset's size
+  into twice the dataset's size: the rebuild dirties nearly every page the
+  child holds a copy of, the container limit is reached, the master is killed,
+  and its replica flushes the whole dataset to follow the promotion — the
+  incident in full. A hold ends when the node recovers, or after
+  `AGGREGATION_HOLD_MAX_SECS` with `MaterializationStoreUnstable` (a kind of
+  unreachable: checkpoint kept, a person looks). `replicaAckMin` 0 on the
+  running job waves the two replica reasons through; a fork and the memory
+  line are about the master's own survival and no knob waves them through.
+  The run records `store_holds`, `store_hold_s` and `store_hold_last` by
+  reason, and the run settings panel says so. After a hold the next batch is
+  half the size and re-grows additively.
+- **The replica gate.** After every apply/delete batch the pipeline asks the
+  master how many replicas have acknowledged (`WAIT replicaAckMin
+  replicaAckTimeoutMs`). Acknowledged: the batch is settled, and the sizer
+  judges it by the master's time or the wait, whichever was longer — a replica
+  that re-runs every batch on its main thread gets shorter batches, but a
+  replica that is merely behind is paced by the wait itself, never by a
+  shrunken batch on top of it (which helps no replica and starves the run).
+  Not acknowledged: the run HOLDS — heartbeating, re-reading
+  replication state, retrying — bounded only by the job's stall window, and
+  releasable live by setting `replicaAckMin` to 0, and bounded like every
+  hold by `AGGREGATION_HOLD_MAX_SECS`. A run that starts against a master
+  with no replicas never waits; one that LOSES a replica mid-run holds for
+  its return rather than writing into its resync. The run records `replica_waits`, `replica_wait_s`,
+  `replica_holds` and `replica_max_lag_bytes`, and warns at the start when a
+  master has replicas and an `EFFECTS_THRESHOLD` above 0 (see
+  `FALKORDB_DEPLOYMENT.md` §5aa — that is the setting that decides whether a
+  replica applies a change log or re-runs your whole batch).
+- **The outage hold.** A refused connection is not pressure: narrowing a query
+  does not help a node that is not there. Any connection fault inside the
+  ladder becomes a wait — heartbeat, backoff, re-resolve the owner (which finds
+  a promoted replica), then the SAME operation at the SAME width from the same
+  checkpoint — bounded by `AGGREGATION_STORE_OUTAGE_HOLD_S`. Past that the run
+  fails with `MaterializationStoreUnreachable`, whose message names the node,
+  how long it waited and what to check; the worker reports it as
+  `reason: "connection"` and the job resumes from its checkpoint.
+- **A retry that wrote is converging, not stuck.** A rebuild of a graph too
+  large for one wall clock fails in the same SHAPE every time, and the
+  reconciliation breaker used to read that as a poison source and suspend it —
+  for making progress. It is the opposite case: APPLY writes only the cells the
+  reconcile scan did not find, and the writes are durable, so each attempt
+  writes strictly less than the last and the source converges across runs. The
+  marker reconciler now reads the last attempt's `run_stats.writes` (committed
+  at every checkpoint, so a watchdog kill leaves an honest count) and, when it
+  is non-zero, clears the retry count instead of counting it. The breaker still
+  bounds attempts that achieve nothing, which is what it is for.
+- **One dead shard is not a dead cluster.** The circuit breaker is per
+  PROVIDER, and on a cluster a provider is every shard — so an error counted
+  against it while one shard is being replaced refuses every graph on every
+  other shard too. A refused connection to a cluster node was already reported
+  as `ProviderFailingOver` (logical, uncounted) for exactly that reason, but the
+  branch where the RECONNECT itself failed raised the raw error and counted it.
+  It now reports a failover as well, unless the reconnect failed on credentials
+  — a real provider fault, which the breaker is the right place for. The test
+  narrows on the reconnect error itself rather than its cause chain: the code
+  runs inside an `except`, so every reconnect failure carries the original
+  refused connection as its context and a chain-walking classifier calls all of
+  them transient, the password included.
+- **Reads from in-sync replicas.** A shard's master took every write AND
+  answered every read, so on a cluster with two replicas per shard two thirds
+  of the hardware sat idle while the master's query threads were the
+  bottleneck for a hundred people opening canvases. Read-only Cypher is now
+  offered to a replica, under four gates, any of which sends it to the master:
+  the provider allows it (`readFromReplicas`, default `auto`, per provider in
+  the wizard or fleet-wide via `FALKORDB_READ_FROM_REPLICAS`); the replica is
+  online and owes the replication stream no more than
+  `FALKORDB_REPLICA_READ_MAX_LAG_BYTES` (8 MiB), sampled once per shard per
+  few seconds rather than per read; this process has not written to that graph
+  inside `FALKORDB_REPLICA_READ_SETTLE_S` (30s), so a caller always sees its
+  own writes; and the replica is not in the short penalty box a failed read
+  puts it in. Lag is measured in bytes and never in the `lag` seconds `INFO`
+  reports — a replica acknowledges the stream about once a second whatever it
+  has applied, so those seconds read 0 for one that is gigabytes behind. A
+  connection fault, a `MOVED` or a replica still loading re-issues the read on
+  the master once; a query the store refused for its size, or aborted at its
+  own time limit, is raised as it stands, because re-running it on the master
+  would fail the same way and double the load the routing exists to shed. A
+  replica that lets the caller's deadline expire is benched like any other
+  fault, but the read is not started again — a second full-length run would
+  make its timeout no bound on how long the caller waits.
+
+  **A master that stops answering does not close the gate.** The lag reading
+  comes from the master, so a master that is gone would otherwise leave no
+  replica qualified and send every read to the node that just failed — at the
+  one moment its replicas hold the only copies of the graph still standing.
+  The replicas it vouched for when it last spoke stand instead (and if it
+  never spoke, whichever the client still lists); it is asked once per sample
+  window rather than once per read; the settle window stops pinning a freshly
+  written graph to it; and the failing-over memo, a verdict about the master,
+  no longer fast-fails a read already addressed to a replica. Reads therefore
+  keep flowing through a pod rotation. **Every read a rebuild makes is pinned to the master** for
+  the whole run — RECONCILE reads what APPLY just wrote — via a contextvar the
+  pipeline sets, so replica reads can never make a run see a graph it has
+  already changed.
+- **Failing-over reads.** When a cluster node stops answering, the provider
+  reports `ProviderFailingOver` — a logical exception the circuit breaker never
+  counts, so a routine pod rotation can no longer answer every user with
+  "Circuit open" for a reset window. A read gives up after one topology
+  re-resolve (and for the next couple of seconds is answered from a short memo
+  without dialling the dead address, so a hundred concurrent readers cost one
+  socket); the API maps it to 503 `PROVIDER_FAILING_OVER` with `Retry-After: 3`
+  and the endpoint; the canvas serves its last good document with
+  `staleReason: "failing_over"` behind a "Reconnecting" line and retries
+  itself. Writes still spend the whole failover window, because the rebuild is
+  the one caller that should keep trying.
 
 ## Tuning
 
-Resolution order per knob: **job `tuning` (frozen at trigger) → stored
-global defaults (`GET/PUT /api/v1/admin/aggregation/settings`, editable
-in the admin Defaults dialog) → env var → code default.** Per-job
+Resolution order per knob: **job `tuning` (frozen at trigger) → the
+source's Rollup storage override (`rollup_storage` on its state row, set
+from the drawer's ③ Act; the one per-source knob) → stored global defaults
+(`GET/PUT /api/v1/admin/aggregation/settings`, editable in the Defaults
+dialog, which shows every knob's live env default and where each value
+came from) → env var → code default.** Per-job
 overrides ride the trigger/resume APIs (`tuning` object with camelCase
 fields mirroring the env vars below plus `extractConcurrency`); the
 control plane freezes the merged dict onto the job row so workers stay
@@ -303,25 +737,56 @@ pipeline).
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGGREGATION_SCAN_RANGE_WIDTH` | 200000 | Edge-ID range width per scan query |
-| `AGGREGATION_MAX_PENDING_PAIRS` | 50000000 | In-memory pair cap before overflow flush |
+| `AGGREGATION_SCAN_RANGE_WIDTH` | 200000 | Edge-ID range width per scan query. Cappable live on a running job (Job History → Adjust this run → Halve scans) |
+| `AGGREGATION_MAX_PENDING_PAIRS` | 50000000 | In-memory pair cap before overflow flush — the flush-free ceiling, not the memory wall |
+| `AGGREGATION_FLUSH_MEM_PCT` | 60 | Memory-aware flush: share of the worker's cgroup memory limit at which the accumulator (and the extract base map) flushes early, whatever the count (30-90). Defaults as `flushMemPct`. Fail-open when RSS or the limit cannot be read |
+| `AGGREGATION_FLUSH_MIN_PAIRS` | 100000 | Pairs the accumulator must hold before a memory-aware flush fires (10k-50M) |
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
-| `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing |
-| `AGGREGATION_READ_PRESSURE_PACING_RATIO` | 4.0 | Sleep-after-write ratio used while the web tier reports interactive reads starving on the endpoint (≤ ~20% duty cycle); the larger of the two ratios wins. Env-only |
+| `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing. Changeable live on a running job (Pace ×2 / ×4), from the next write |
+| `AGGREGATION_WRITE_BATCH_MAX` | 500 | Ceiling on rows per write batch (10-2000). A write batch holds the graph's write lock, so this bounds the longest stall a reader of the graph sees. Per-job / Defaults as `writeBatchMax`; lowerable live on a running job (Smaller batches) |
+| `AGGREGATION_WRITE_BATCH_TARGET_S` | 1.0 | What one write batch should take, seconds (0.1-10): the sizer halves a batch that ran longer and grows one that stays under two fifths of it, up to the ceiling. Per-job / Defaults as `writeBatchTargetS`; changeable live |
+| `AGGREGATION_WRITE_MIN_GAP_MS` | 100 | Floor under the pause between two write batches, ms (0-10000) — the pause is a share of the batch's own duration, and fast small batches would otherwise run back to back. Per-job / Defaults as `writeMinGapMs` |
+| `AGGREGATION_WRITE_PACING_MIN_RATIO` | 0.25 | The sleep-after-write ratio on a node with ROOM TO SPARE: measured, no fork in flight, every replica the run started with attached and barely behind, and a quarter of the container still free (0-10). `AGGREGATION_WRITE_PACING_RATIO` is the CEILING on the pause and this is the floor; the governor's own reading picks between them, and starving interactive readers still override both. Per-job / Defaults as `writePacingMinRatio` |
+| `AGGREGATION_READ_PRESSURE_PACING_RATIO` | 4.0 | Sleep-after-write ratio used while the web tier reports interactive reads starving on the endpoint (≤ ~20% duty cycle). The LARGER of this and the live pacing ratio wins, so a job told not to pace itself still yields while users are being starved. Env-only |
 | `AGGREGATION_READ_PRESSURE_TTL_S` | 30 | How long one starved-read signal keeps the writers yielding (5–600; every new signal refreshes it) |
 | `AGGREGATION_READ_PRESSURE_POLL_SECS` | 2 | How long a worker reuses its last read-pressure verdict before asking Redis again |
 | `PROVIDER_CLOSE_TIMEOUT_S` | 2.0 | Ceiling on one provider's `close()`. The warmup cycle's idle reap and the cross-process invalidation listener both walk providers serially, so an unbounded close against a blackholed host froze both for every provider |
-| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
-| `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink ladder descends to. A floor-width TIMEOUT is an outage and fails the run; a floor-width per-query MEMORY refusal is a payload-size fact and fails the job terminally, no retries |
+| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query budget (s). Per-job / Defaults as `scanTimeoutS` (5-600); the server caps any query at its `TIMEOUT_MAX`, read from the node (`FALKORDB_SERVER_TIMEOUT_MAX_MS` is the fallback until then; raisable at runtime from Infrastructure → Memory headroom). Raisable on a running job |
+| `FALKORDB_BULK_CREATE_TIMEOUT_S` | 60 | Per-query budget for the pipeline's write and delete batches (s). Per-job / Defaults as `writeTimeoutS` (5-600), capped by the server like the scan budget. Raisable on a running job |
+| `AGGREGATION_SCAN_SHRINK_FLOOR` | 1 | Narrowest range width the pressure ladder descends to. Per-job / Defaults as `scanShrinkFloor`. At 1 the only terminal outcome is a single row larger than `QUERY_MEM_CAPACITY`; a floor-width timeout is retried with backoff and then reported as an outage (resumable) |
+| `AGGREGATION_SCAN_TIMEOUT_RETRIES` | 6 | Backoff retries (2s, 4s … 60s + jitter, heartbeating between) a floor-width scan gets before the run raises `MaterializationScanTimedOut` (0-20) |
+| `AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH` | 5000 | Width at or below which a RECONCILE scan under pressure switches to the keys-only two-pass strategy instead of halving (1-5M) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | true | Rollup storage. `true` (shipped default) always stores the full cube — leaf-involving and mixed-level pairs included — and FAILS above the write budget; `auto` picks cube-vs-boundary by estimate and degrades instead; `false` forces the boundary. Per-job as `materializeFinePairs`, fleet-wide from Ingestion → Freshness → Automation (③ Act → Advanced) |
-| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Hard write budget (fail loud, never OOM). ~12.5GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
-| `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
-| `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
-| `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
-| `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. Matches what every UI trigger path sends as `timeoutSecs`; the machine paths (reconciliation, Refresh rollups, the projector heal hook) send nothing and land here. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS` |
-| `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net |
+| `AGGREGATION_SHARD_RESERVE_PCT` | 20 | Write budget: share of the owning shard's `maxmemory` a rebuild must leave free. New rollup edges are allowed while they fit under it (0-90). Per-job / Defaults as `shardReservePct` |
+| `AGGREGATION_BYTES_PER_EDGE` | 512 | Write budget: bytes one stored `:AGGREGATED` edge is assumed to cost until a fresh rebuild has calibrated the figure for that graph (64-16384). Per-job / Defaults as `bytesPerEdge`, which also overrides the calibrated value |
+| `AGGREGATION_ESTIMATE_MARGIN_PCT` | 25 | Write budget: slack applied to the pre-write UPPER-BOUND estimate (and to the static cap) so a loose estimate does not refuse a cube the exact post-compute check would pass (0-100). Fleet-wide from Defaults as `estimateMarginPct` |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Static edge cap, in force ONLY when the owning shard cannot be measured (no `maxmemory`, or the `INFO` read failed). Per-job / Defaults as `maxMaterializedEdges` it is instead an optional explicit ceiling layered over the measured budget; no preset sets it. Bound 500M |
+| `AGGREGATION_MAX_CUBE_EDGES` | 50000000 | OPTIONAL appetite ceiling on Auto's full cube (10k-50M), defaulting to its bound so it does not bind. It used to default to 8M and was what actually decided whether a graph got full detail; two measurements do that now — the write budget (can the owning shard hold the cube) and the apply projection (can this job's wall clock finish writing it, at the rate this source measured last run). A fixed cell count answers neither for any particular graph. Fleet-wide from Defaults as `maxCubeEdges`; not per-job |
+| `AGGREGATION_BUDGET_RECHECK_EDGES` | 1000000 | Write budget: how many first-touch edges APPLY writes between re-reads of the owning shard. A shard that fills up mid-run (another graph landing on it) is refused loudly after a checkpoint — resumable from the cursor — instead of at its cap (100k-100M) |
+| `AGGREGATION_CAPACITY_CACHE_TTL_S` | 10 | Capacity API: how long one fleet sweep is served to every viewer before the next |
+| `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | 30 | How long one reading of every node is served to every viewer (and to the capacity API) before the next |
+| `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | 8 | Deadline for one wave of nodes (8 are read at a time), so the whole sweep scales with the fleet instead of starving the same tail nodes every time; capped at 60s. A node not read in time is reported as unreachable with that reason, never dropped |
+| `AGGREGATION_REPLICA_ACK_MIN` | 1 | Replicas of the write node that must acknowledge each rollup batch before the next is sent (0-5). 0 disables the gate. Per-job / Defaults as `replicaAckMin`, and raisable or clearable on a RUNNING job |
+| `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
+| `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |
+| `AGGREGATION_HOLD_MAX_SECS` | 1800 | The write governor: how long ONE hold may last — the run waiting, before a write batch, for the node to come back inside the envelope (a fork to finish, the replicas it started with to reattach and catch up, RSS to drop under the container's line) — before it stops for a person with its checkpoint intact (60-21600). Per hold, not per run |
+| `AGGREGATION_FORK_COW_PCT` | 125 | Copy-on-write allowance over RSS that a fork is budgeted at, for the container-aware write budget and the memory hold line (100-200). 125 is the deployment guide's figure, and is valid only because the pipeline holds its writes through a fork |
+| `AGGREGATION_REPLICA_LAG_HOLD_BYTES` | derived | How far behind a replica may fall before the governor holds. Unset: a quarter of the replica output-buffer hard limit or half the backlog, whichever is smaller — both read from the node — so the master never drops a replica because of a rebuild |
+| `FALKORDB_READ_FROM_REPLICAS` | auto | Whether read-only Cypher may be served by a shard's in-sync replicas. `never` pins every read to the master; per provider as `readFromReplicas` in the connection settings |
+| `FALKORDB_REPLICA_READ_MAX_LAG_BYTES` | 8388608 | How much of the replication stream a replica may still owe and answer a read anyway. Bytes, not the `lag` seconds `INFO` reports, which stay near 0 however far behind it is |
+| `FALKORDB_REPLICA_READ_SETTLE_S` | 30 | How long this process's own write to a graph pins that graph's reads to its master |
+| `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
+| `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per graph-store node |
+| `FALKORDB_ENDPOINT_READ_SLOTS` | 4 | Cross-pod SCAN budget per graph-store node: rebuild range scans in flight at once. Every scan-heavy phase runs under `read_from_master_only`, so this is a cap on the master's query threads, not the replicas'. Keep it above `AGGREGATION_EXTRACT_CONCURRENCY` or one job's own waves fill the node's allowance |
+| `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |
+| `AGGREGATION_IDENTITY_STAMP_PACING_RATIO` | 0.5 | Gap after each conformance-stamp chunk, as a share of the time that chunk took. The stamp is a write pass over the whole node ID space for any source not keyed by `urn`, on every run; it used to go out flat out. 0 restores that exactly
+| `METRICS_ENABLED` | false | Serve the Prometheus scrape endpoint. Off by default: it reads internal state. Web tier and control plane at `/api/v1/metrics`; the worker starts its own server on `METRICS_PORT` |
+| `METRICS_TOKEN` | — | When set, the scrape must present it as a bearer token |
+| `METRICS_PORT` | 9100 | The aggregation worker's scrape port — it has no other HTTP server |
+| `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. The job's `timeoutSecs` wins; a job that sends none (the machine paths: reconciliation, Refresh rollups, the projector heal hook) takes the fleet Defaults' `stallTimeoutSecs`, then this. Bound 7 days. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS`. Raisable on a running job |
+| `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net; per-job / Defaults as `maxWallSecs` (1h-7d), never lower than the job's stall window. Raisable on a running job |
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
 | `AGGREGATION_LARGE_JOB_EDGE_THRESHOLD` | 500000 | Edge count classifying a job as "large" |
 | `AGGREGATION_MAX_LARGE_JOBS_PER_WORKER` | 1 | Large jobs one worker may hold concurrently |
@@ -341,8 +806,16 @@ claim policy** — draining, RSS above the high-water mark, or a second
 re-enqueueing the job for an idle sibling, so one pod's big jobs can
 never OOM-stack while another idles. SIGTERM flips drain (no new
 claims; running jobs checkpoint and hand over via exec-lock expiry).
-Every job records `worker_id`, and completed jobs persist `run_stats`
-(per-phase durations + writes/deletes) shown in the job detail panel.
+Every job records `worker_id` and a `run_stats` document: at the first
+checkpoint, `effective_tuning` (every knob's value and its source — `job`,
+`hint`, `env` — plus the stall window, wall clock and retries) and, as the
+ladder engages, `adapted` (current and narrowest scan width, shrinks, the
+concurrency and reconcile strategy in force, write batch / delete chunk,
+timeout retries, the last pressure events, `from_last_run`); on success the
+per-phase durations, writes/deletes, the write budget, `query_mem_capacity`
+and the final `adapted` are merged over it. Job History's *Run settings*
+disclosure renders it for every status; the `adapted` scalars also ride the
+live progress events (`adapted_*`).
 
 Memory budget per large job at 2M nodes / 5M edges: child→parent map
 ~200MB + accumulator ~250MB + ID cache ~125MB ≈ under 1GB; worker pods
@@ -350,11 +823,100 @@ ship with a 4Gi limit. This is WORKER memory, not graph memory — it is
 unaffected by FalkorDB's topology. Note the accumulator is bounded by the
 PAIRS a graph actually produces, not by `AGGREGATION_MAX_PENDING_PAIRS` —
 the cap is only the early-flush trigger. At the 50M default the cap is far
-above the 4Gi budget (~50M pairs is ~5GB packed), so it will not fire
-before the pod's memory limit does. That is deliberate for graphs in the
+above the 4Gi budget (~50M pairs is ~5GB packed), so on its own it would
+not fire before the pod's memory limit did; the memory-aware flush
+(`AGGREGATION_FLUSH_MEM_PCT`) is what fires first under a cgroup limit,
+at 60% of it by default. The high cap is deliberate for graphs in the
 low-millions of pairs, where flushing costs write round-trips and buys
 nothing; lower it (or raise the worker limit) before aggregating a graph
 expected to exceed ~30M pairs.
+
+### Many workers, one graph store
+
+Four things can be true at once: several pods, several jobs per pod, several
+graphs per shard, and a worker that died mid-run. What bounds each of them:
+
+| Situation | What stops it | Where |
+| --- | --- | --- |
+| Two executors for **one job** | `agg:exec:{job}` — `SET NX PX 90s`, renewed, released by token. A duplicate delivery ACKs and exits. | `__main__.py` |
+| Two jobs writing **one graph** | `agg:graphwrite:{endpoint}:{graph}` lease, held for the job, renewed in the background. Contention raises `ProviderBusy` → park-and-resume, not a retry. | `admission.py` |
+| Two rebuilds spending **the same free memory** on one node | `agg:reserve:{node}` ledger: the write budget subtracts every OTHER job's entry from the node's free memory. | `admission.py` + `_check_write_budget` |
+| Too many write queries in flight **against one node** | `agg:writeslots:{node}` — a Lua sorted-set semaphore, default 2, matched to that node's `THREAD_COUNT` so interactive readers keep a thread. | `admission.py` |
+| Two rebuilds each **pacing as if alone** on one node | The pacing FLOOR is only for a node this run has to itself: the governor reads the node's ledger on its own cadence, and any other holder puts the run back on the configured ceiling. | `_is_roomy` |
+| A worker that **died mid-run** | The exec lock is the liveness signal. The reconciler re-dispatches only when it is gone (≥90 s), by which time the graph lease (60 s) has expired too, so the resumed run does not park on a dead holder's lease. Auto-resumes are capped and the counter never slides. | `reconciler.py` |
+| A **cancel** issued through another pod | A durable Redis flag, polled by the running job's watchdog and checked again at pickup. | `cancel.py`, `worker.py` |
+| A run whose **worker is already gone** leaving a lying record | Every terminal path INSIDE the worker goes through one `finally` — seal the ledger, release the source on both mirrors, emit. Nothing reaches it when the process is gone, so the out-of-process reapers share the same closing: `reap_job` seals the open step (so the run names the stage it died in) and hands the source back (so it stops reading as in-flight). | `reap.py` |
+
+**Ending a run the worker cannot end itself.** An OOM-killed pod, an
+evicted node and a lost dispatch message all leave a row that no `finally`
+will ever close. Those are reaped by the reconciler (or, without a job-bus
+Redis, the scheduler's watchdog) — neither of which holds a ledger, an
+emitter or a provider. Writing only `job.status` there left two records
+lying, and both readings were wrong in ways an operator could not see:
+
+* the **ledger** kept a step marked `running`, and both readers of "where did
+  this die" (`failed_stage`, and the UI's `stoppedStage`) look for `failed`
+  or `cancelled` — so a crash-killed run showed NO failure stage, and the
+  per-source "keeps dying in Apply" tally skipped exactly the runs worth
+  counting;
+* the **source row** kept `aggregation_status` at `running`, which the
+  freshness column reads straight off and the stale-marker reconciler treats
+  as in flight — so a source reaped this way was deferred every tick,
+  forever, and never retried.
+
+`reap_job` is those reapers' equivalent of the worker's `finally`: stamp the
+row, seal the open step (keeping its own counters, so the stage still draws
+how far it got), and release the source on both mirrors under the rule
+`cancel()` already applied — a job that never started on a never-built source
+goes back to `none` so the never-built detector can queue its first build,
+anything else carries its own terminal status. Every read fails open: a
+reaper that raises leaves the row `running`, which is the state it exists to
+clear.
+
+Those two faults get their own failure categories, keyed off stable message
+prefixes rather than prose: **`worker_lost`** (the process vanished — the run
+was healthy, its checkpoint is intact, Resume continues) and
+**`never_dispatched`** (nothing ever claimed the row — check the worker fleet
+before re-triggering, or you just queue another). Both used to read as
+`unknown`, or — for the watchdog's old wording — as `timeout`, which sends an
+operator to raise a stall window that was never the problem.
+
+**Which node a run writes is on the run.** `run_stats.node`, written from the
+first checkpoint with a measured reading and re-read every checkpoint so it
+follows a failover — earlier and more current than the copy inside
+`write_budget.shard`, which is the node as it was at the budget check. Job
+History groups the running jobs by it (*Graph store nodes being written*), so
+"what else is on this shard right now" — the first question during the
+incident — is a group-by over rows the page already has, not a question for
+the store.
+
+Two of these were wrong until the multi-writer audit:
+
+* **The write slots were keyed by `endpoint_key`** — the connection config's
+  host:port, which on a cluster is a *seed address* shared by every shard. One
+  semaphore therefore covered the whole cluster: two rebuilds on two different
+  masters contended with each other, while nothing bounded either master on
+  its own. They are keyed by the node the caller's shard reading names now —
+  the same identity the reservation ledger already used, and for the same
+  reason.
+* **The pacing floor did not know about other rebuilds.** `writePacingMinRatio`
+  is the floor a run drops to when the node has room to spare. Two runs each
+  read the same healthy node, each concluded the same thing, and the master
+  took twice the write rate either of them believed it was asking for — the
+  incident's shape, reached from two directions instead of one. The ledger's
+  holder count now gates the floor; a shared node gets the configured ceiling
+  from everyone on it. The running job says so (*sharing the node with another
+  rebuild* on the Steady load line), because otherwise it just looks slow.
+
+The **read-pressure** signal (`agg:readpressure:{node}`) was the third one
+keyed by the connection endpoint: pressure on one shard made a rebuild on a
+different, idle shard yield. Both halves now key by the owning node — the web
+tier resolves it from the client's current slot map (no round trip once the
+map is there), the writer asks about the node its governor last read. Outside
+cluster mode the two strings are the same. Across one rolling deploy the two
+halves can briefly disagree and a cluster's reads lose the yield; that is the
+same fail-open direction the rest of admission takes, and both halves ship in
+one image.
 
 ## Hardening wave (2026-07-10): what changed, why, and the impact
 
@@ -444,10 +1006,26 @@ slow query must not be multiplied), so a briefly-busy server or one dense
 ID range sent a multi-hour job back through worker retry into a full
 EXTRACT re-run. `_fetch_range` now halves the failing range down to
 `AGGREGATION_SCAN_SHRINK_FLOOR` (sticky for the rest of the run,
-re-growing after sustained health); only a floor-width timeout — an
-outage, not payload size — still fails the run. *Impact: multi-hour
-jobs absorb transient provider slowness instead of restarting; a
-partial scan is never silently treated as complete.*
+re-growing after sustained health). *Impact: multi-hour jobs absorb
+transient provider slowness instead of restarting; a partial scan is
+never silently treated as complete.*
+
+Two later findings changed the ladder's shape. First, the timeout arm was
+effectively dead in production: every query goes out with a server
+`TIMEOUT` 500 ms under the client budget, so a slow scan is aborted by the
+SERVER and arrives as a `ResponseError("Query timed out")`, which the
+ladder — listening for `asyncio.TimeoutError` only — re-raised; the real
+signal escaped to the worker's generic retry and restarted the run from
+its cursor. `_is_query_timeout_error` now matches it beside the memory
+matcher. Second, halving alone was the wrong lever for RECONCILE: its
+11-column projection is ~10× heavier per row than EXTRACT's two integers,
+so under pressure it now switches to a keys-only two-pass strategy (pass 1
+reads `ID(a), ID(b), ID(r), aggKey, latestUpdate`; pass 2 seeks the
+comparison columns by `aggKey` for exactly the desired, not-yet-flushed
+keys), the first event of a run pins wave concurrency to 1, the floor
+defaults to one row, and a floor-width timeout is retried with backoff
+before it is declared an outage. Writes and deletes halve their batches
+under the same signals. Only a single row over the ceiling is terminal.
 
 The same ladder now also catches the server's PER-QUERY memory refusal
 (`QUERY_MEM_CAPACITY`: *"Query's mem consumption exceeded capacity"*).
@@ -467,8 +1045,9 @@ concatenated URNs) and the `sourceEdgeTypes` array, while EXTRACT returns
 two integers at the same range width — so the full-cube regime, which
 multiplies RECONCILE's row count, is what brings a graph within reach of
 the ceiling. A run that survived by degrading reports `scan_width_min`
-and `scan_shrinks` in `run_stats`. *Impact: growing past the per-query
-ceiling costs a slower run, not a failed job — and never a breaker trip.*
+and `scan_shrinks` in `run_stats` (and, since the ladder's rework, the
+full `adapted` record). *Impact: growing past the per-query ceiling costs
+a slower run, not a failed job — and never a breaker trip.*
 
 **6. Apply-resume could skip pairs (completeness).** The apply-phase
 cursor fast-forward bisected past every key ≤ the recorded position —
@@ -554,13 +1133,127 @@ this pipeline silently drops aggregations: EXTRACT tiles the full ID
 space (a floor-width timeout fails the run rather than passing a
 partial scan off as complete); the pending-pairs cap is a flush
 trigger with exact weight semantics; the write budget fails terminally
-and loudly with a per-level composition breakdown (raise it via tuning
-when the instance has headroom); endpoints deleted mid-run are dropped
+and loudly with a per-level composition breakdown and the shard's own
+numbers (it reads the instance's headroom itself; the reserve and
+bytes-per-edge are the tunable parts); endpoints deleted mid-run are dropped
 WITH a warning and recomputed next run; read-path caps are response
 top-N contracts over complete stored data. The live suite pins the
 observable contract: exact cells/weights/level stamps under mixed
 casing, exact deltas on re-run, zero-touch no-op runs, and complete
 apply after resume.
+
+## Finding the cluster from a cold start
+
+Seeds are tried in this order, first that answers wins:
+
+1. **Nodes this process saw last sweep** — in memory, masters first.
+2. **Nodes ANY process last saw** — `graphstore:seeds:{instance}` on the bus
+   Redis, capped at nine, ordered by which answered most recently and then
+   masters before replicas.
+3. **The provider's configured `startupNodes`.**
+
+Only (3) existed before, and it is a list of masters as of the day someone
+wrote the connection down. Masters move, and the list does not follow — which
+is invisible while a process is warm, because (1) covers it, and total the
+moment a deploy or an eviction makes every process cold.
+
+Three rules the memory follows, and each is load-bearing:
+
+* **Role orders, never filters.** Any node answers `CLUSTER NODES`, so a
+  promoted replica is as good a seed as the master it replaced. Keeping only
+  the nodes that were masters would rebuild the original bug.
+* **A node is never forgotten for failing to answer.** With static allocation
+  an address survives its outage; a node that is down sorts below the ones
+  that spoke and returns to the front the moment it answers again. An address
+  ages out only when the cluster itself stops mentioning it.
+* **The memory may never slow a sweep.** It is an optimisation — discovery
+  works without it — so every read and write is bounded, and a bus that is
+  unreachable arms a cooldown rather than costing a connect timeout per
+  instance per sweep.
+
+The store is the bus Redis, deliberately NOT the FalkorDB being described:
+memory kept inside the thing it describes is unreadable in exactly the outage
+it exists for.
+
+## The cube estimate, and why it may not refuse on its own
+
+Before compute, the pipeline sums — over every raw lineage edge — the product of
+its endpoints' ancestor-chain lengths. That is an **upper bound on cells
+PRODUCED**. What the graph **stores** is cells **DISTINCT**: the write is
+`MERGE (s)-[r:AGGREGATED {aggKey}]->(t)`, so many raw edges between the same
+pair of containers collapse onto one cell and increment its weight.
+
+The two differ by roughly the **mean weight of an aggregated edge** — and
+aggregation exists to make that number large. A graph compressing 50:1 produces
+an estimate fifty times its real size. Refusing on that figure refuses graphs
+for being good at the thing they are doing.
+
+So the rule is:
+
+* **The bound fits → proceed.** Sound: an upper bound that fits guarantees the
+  real thing fits. This is the fast accept and it costs nothing.
+* **The bound does not fit, and the source has never been measured → proceed
+  anyway.** The bound can be fifty times too high; it supports no conclusion
+  here. `_check_write_budget` runs after compute, is exact, and refuses before
+  a single write reaches the shard. Under-estimating is the safe direction
+  *because* that gate is there.
+* **The bound does not fit, and the source HAS been measured → refuse**, with
+  both numbers in the message.
+
+`observed_cell_ratio` on the state row is what a complete run learned:
+`cells_exact / cube_estimate_upper`, clamped to (0, 1]. It is a property of the
+graph's SHAPE — how much lineage repeats between the same containers — so it is
+stable run to run in a way the absolute counts are not. NULL until a complete
+run has measured both, and a NULL ratio may never refuse anything.
+
+Three numbers ride on every run's `run_stats`, so the estimator can be held to
+account rather than trusted: `cube_estimate_upper` (what was counted),
+`cube_estimate` (after the correction) and `cells_exact` with
+`cell_ratio_observed` (what actually happened). If the first and last diverge,
+the ratio is drifting and the graph's shape has changed.
+
+## Index policy, and cleaning up the retired ones
+
+`backend/app/providers/index_policy.py` is the single declaration of every index
+this product creates — node labels and properties, and the `:AGGREGATED` edge
+indexes. Each edge entry names **the query shape that enters through it**.
+
+That last part is the rule, not decoration. A FalkorDB edge index is reachable
+only when the relationship is the plan's ENTRY POINT — an unanchored
+`MATCH ()-[r:T]->() WHERE r.p = $v`. Anchor a node first, as every
+`:AGGREGATED` read here does (`WHERE f.urn IN $frontier`, then traverse), and
+the planner seeks the NODE index and reads the edge property off the edge it
+already holds. The edge index cannot apply, and costs a document per edge in
+memory, on every write, and again on every load — indexes are rebuilt from
+scratch when a graph is read back off disk.
+
+Four single-column edge indexes are **retired**: no query filters on
+`sourceLevel`, `targetLevel`, `sourceDepth` or `targetDepth` alone — every
+predicate on them is a pair — so nothing could ever enter through them. Two
+composites are declared **conditionally**: they are reachable only via the
+unlabelled frontier bucket in `_build`, where `f` carries no label and FalkorDB
+offers no label-less node index (see `ensure_projections`). Settle those with a
+PROFILE against a real cluster before touching them; better still, make the
+frontier reliably label-anchored and that bucket — and their justification —
+disappears, taking `:AGGREGATED` from seven indexes to one.
+
+**Nothing in this codebase drops an index**, so a graph keeps every index it was
+ever given. To remove the retired ones from an existing environment:
+
+```bash
+# Dry run — shows what is there and what would go. Changes nothing.
+python backend/scripts/cleanup_graph_indices.py --host <any-node> --all-shards
+
+# Then, once the dry run reads right:
+python backend/scripts/cleanup_graph_indices.py --host <any-node> --all-shards --apply
+```
+
+A graph is one key on one shard, so `--all-shards` is what reaches all of them;
+without it only the graphs owned by `--host` are seen. The script drops only the
+exact retired (relationship, property) pairs — node indexes, `aggKey`, the two
+composites and anything it does not recognise are left alone and reported. If a
+build rejects both DROP spellings the script says so: that build cannot shed an
+edge index at all, and the only way to lose them is a rebuild without them.
 
 ## Removed (release notes)
 

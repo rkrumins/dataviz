@@ -82,6 +82,27 @@ FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_EDGES_BET
 # Aggregated-edge projection reads can scan large URN sets; the generic
 # 5s read timeout kills these on graphs with hundreds of containers.
 FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGATED_READ_TIMEOUT_SECS", "30"))
+# WALL CLOCK for the whole aggregated-edge read, as opposed to the
+# per-query budget above. The read is a ladder — on per-query pressure it
+# halves the page and re-issues, twice, then takes one short floor retry —
+# and every rung used to start a FRESH 30s budget. Worst case was
+# 4 x 30s + 1s = ~121s for one request, under a 45s ASGI tier: the tier
+# killed it before it reached its floor, so the degraded partial answer the
+# ladder exists to produce was unreachable, and the abandoned queries went
+# on holding FalkorDB query threads after the client had gone.
+#
+# Sized under HTTP_TIMEOUT_AGGREGATION_SECS so the provider's own structured
+# answer always wins the race with the tier above it. Each rung gets
+# min(per-query budget, what is left of this), and the read degrades as soon
+# as too little remains to be worth spending.
+FALKORDB_AGGREGATED_READ_BUDGET_SECS: float = float(
+    os.getenv("FALKORDB_AGGREGATED_READ_BUDGET_SECS", "0")
+) or round(float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45")) * 0.8, 1)
+# Below this much remaining budget a further attempt cannot finish anything
+# useful, so the read degrades instead of starting one it cannot complete.
+FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS: float = float(
+    os.getenv("FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS", "2")
+)
 # The FalkorDB server's TIMEOUT_MAX configuration (milliseconds). The
 # server REJECTS any query whose per-query TIMEOUT parameter exceeds it
 # ("The query TIMEOUT parameter value cannot exceed the TIMEOUT_MAX
@@ -111,6 +132,12 @@ AGGREGATED_EDGE_RESULT_CAP: int = int(os.getenv("AGGREGATED_EDGE_RESULT_CAP", "1
 # per-query server work and client memory churn; total rows returned are
 # unbounded by this value (the reader loops until a short page arrives).
 AGGREGATED_EDGE_PAGE_SIZE: int = int(os.getenv("AGGREGATED_EDGE_PAGE_SIZE", "50000"))
+# The narrowest page the materialized-cell read halves down to under the
+# store's per-query pressure (its memory ceiling or its time limit) before
+# it gives up on a batch — the read-side ladder. A page at the floor that is
+# still refused is a fact the result reports (stale_reason ``query_memory``
+# / ``timeout``, with the detail) rather than something to retry.
+AGGREGATED_EDGE_PAGE_FLOOR: int = int(os.getenv("AGGREGATED_EDGE_PAGE_FLOOR", "500"))
 # Max source URNs sent to a single aggregated-edge Cypher; oversized
 # requests are split and gathered. Hard upper bound at 100k is enforced
 # by the provider with a 413 response.

@@ -16,13 +16,31 @@ flags, so no new dependency):
    Contention raises ``ProviderBusy`` so the worker's existing
    park-and-resume path (not the retry budget) handles it.
 
-2. **Per-endpoint write slots** — ``agg:writeslots:{endpoint}``. A Lua
+2. **Per-node write slots** — ``agg:writeslots:{node}``. A Lua
    sorted-set semaphore capping how many aggregation write queries are
-   in flight against one FalkorDB endpoint across all pods (default 2 —
-   matched to the endpoint's worker THREAD_COUNT so interactive readers
-   always have a thread). Held per write query, not per job: a job that
-   is scanning or computing in Python holds no slot. Stale holders
-   (crashed mid-write) are pruned by score.
+   in flight against one FalkorDB NODE across all pods (default 2 —
+   matched to that node's worker THREAD_COUNT so interactive readers
+   always have a thread). Keyed by the node the caller's shard reading
+   names, for the same reason the ledger below is: ``endpoint_key`` is
+   the connection config's host:port, a seed address on a cluster, so
+   keying by it gave the whole cluster ONE semaphore — two rebuilds on
+   two different masters contending with each other while nothing
+   bounded either master on its own. Held per write query, not per job:
+   a job that is scanning or computing in Python holds no slot. Stale
+   holders (crashed mid-write) are pruned by score.
+
+3. **Per-node reservation ledger** — ``agg:reserve:{node}``. One HASH per
+   graph-store node: field = job id, value = the bytes that job has been
+   allowed to write but the node's ``used_memory`` does not show yet. The
+   write budget subtracts every OTHER job's entry from the node's free
+   memory, so two rebuilds racing onto one node cannot both pass on the
+   same headroom. Renewed in the background; a crashed holder's entry
+   expires (its ``expires_at``, pruned on read) and the key itself lives
+   only while someone keeps writing it. Keyed by the node the SHARD
+   READING names (``ShardMemory.endpoint`` — the live owner of the graph),
+   not by ``endpoint_key`` (the connection config's host:port, which in
+   cluster mode is a seed address): two rebuilds on one node must meet in
+   the same ledger whatever address they connected through.
 
 **Failure mode: Redis down ⇒ fail OPEN.** If the bus Redis is
 unreachable the controller logs (rate-limited) and admits the write —
@@ -35,21 +53,42 @@ the thing that deadlocks a running job.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _SLOT_LIMIT = int(os.getenv("FALKORDB_ENDPOINT_WRITE_SLOTS", "2"))
-_SLOT_STALE_SECS = float(os.getenv("AGGREGATION_SLOT_STALE_SECS", "260"))
+_READ_SLOT_LIMIT = int(os.getenv("FALKORDB_ENDPOINT_READ_SLOTS", "4"))
+"""How many rebuild SCANS may be in flight against one node at once.
+
+The write slots above cap what rebuilds WRITE to a node. Nothing capped what
+they READ, and a rebuild reads far more than it writes: EXTRACT scans every
+lineage edge, RECONCILE scans the stored cube. Worse, the pipeline runs
+entirely under ``read_from_master_only`` — deliberately, because it reads
+what it has just written — so those scans do NOT go to the replicas that
+absorb interactive reads. They go to the master.
+
+With ``WORKER_CONCURRENCY`` jobs per pod across an autoscaled fleet, that is
+tens of concurrent unbounded range scans against one master's small
+``THREAD_COUNT``, and the read-pressure signal only reacts AFTER interactive
+users have started to starve. This is the preventive half: leave threads for
+the readers rather than apologise to them.
+
+Deliberately larger than the write limit — scans are the bulk of a rebuild's
+work and each is short, so too small a cap starves rebuilds fleet-wide to
+protect threads that were never contended."""
+_SLOT_STALE_SECS = float(os.getenv("AGGREGATION_SLOT_STALE_SECS", "660"))
 """Holders older than this are pruned. Must exceed the longest single
-write query (server TIMEOUT_MAX 180s + slot-wait/event-loop jitter) or
-an in-flight write's slot could be reclaimed and the endpoint
-over-admitted."""
+query the pipeline may send, write or scan — the timeout knobs' maximum
+(600 s; the store's TIMEOUT_MAX can be raised to it at runtime from
+Infrastructure) plus slot-wait/event-loop jitter — or an in-flight query's
+slot could be reclaimed and the node over-admitted."""
 _SLOT_WAIT_MAX_SECS = float(os.getenv("AGGREGATION_SLOT_WAIT_MAX_SECS", "120"))
 """Upper bound on waiting for a slot before proceeding anyway (fail-open
 bias: local gates still apply, and an indefinitely-starved job is worse
@@ -57,6 +96,9 @@ than a briefly over-admitted endpoint)."""
 
 _GRAPH_LEASE_TTL_MS = int(os.getenv("AGGREGATION_GRAPH_LEASE_TTL_MS", "60000"))
 _GRAPH_LEASE_RENEW_SECS = _GRAPH_LEASE_TTL_MS / 1000 / 3
+_RESERVATION_TTL_MS = 2 * _GRAPH_LEASE_TTL_MS
+"""A reservation outlives a missed renewal or two, never a dead job: the
+entry is renewed on the lease cadence and expires at twice the lease TTL."""
 
 _READ_PRESSURE_PREFIX = "agg:readpressure"
 _READ_PRESSURE_POLL_SECS = float(os.getenv("AGGREGATION_READ_PRESSURE_POLL_SECS", "2"))
@@ -105,6 +147,51 @@ return 0
 """
 
 
+def reservation_key(endpoint: str) -> str:
+    """The ledger of one graph-store node — keyed by the node the shard
+    reading names, never by ``endpoint_key`` (see the module docstring)."""
+    return f"agg:reserve:{endpoint}"
+
+
+def _text(value: Any) -> str:
+    return value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+
+
+def _parse_ledger(raw: Any, now: float) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """The live entries of one ledger by job id, and the job ids whose
+    entries have expired or cannot be read (to prune)."""
+    live: Dict[str, Dict[str, Any]] = {}
+    expired: List[str] = []
+    for field, value in (raw or {}).items():
+        job = _text(field)
+        try:
+            entry = json.loads(_text(value))
+            nbytes = int(entry.get("bytes") or 0)
+            expires_at = float(entry.get("expires_at") or 0)
+        except Exception:                                   # noqa: BLE001 — garbage is pruned
+            expired.append(job)
+            continue
+        if expires_at <= now or nbytes <= 0:
+            expired.append(job)
+            continue
+        live[job] = {"bytes": nbytes, "expires_at": expires_at, "host": str(entry.get("host") or "")}
+    return live, expired
+
+
+async def read_reservations(redis_client: Any, endpoint: str) -> Dict[str, Dict[str, Any]]:
+    """Every live reservation on ``endpoint`` by job id (``bytes``,
+    ``expires_at``, ``host``), expired entries pruned as a side effect.
+    Raises on a bus failure — the caller decides how to fail open."""
+    key = reservation_key(endpoint)
+    live, expired = _parse_ledger(await redis_client.hgetall(key), time.time())
+    if expired:
+        try:
+            await redis_client.hdel(key, *expired)
+        except Exception:                                   # noqa: BLE001 — best-effort
+            pass
+    return live
+
+
 def endpoint_key(provider: Any) -> str:
     """Stable identity for the FalkorDB endpoint a provider talks to.
     Prefers host:port from the connection config; falls back to the graph
@@ -126,22 +213,52 @@ class GraphLease:
         self.renew_task = renew_task
 
 
-class _SlotContext:
-    """Async context manager for one write-query admission slot."""
+class ShardReservation:
+    """This job's entry in one node's ledger; renewed in the background."""
 
-    def __init__(self, admission: "AggregationAdmission", provider: Any) -> None:
+    def __init__(self, endpoint: str, job_id: str, nbytes: int) -> None:
+        self.endpoint = endpoint
+        self.job_id = job_id
+        self.bytes = int(nbytes)
+        self.renew_task: Optional[asyncio.Task] = None
+
+
+class _SlotContext:
+    """Async context manager for one query admission slot — a write batch
+    (``kind="write"``) or a rebuild scan (``kind="read"``)."""
+
+    def __init__(
+        self, admission: "AggregationAdmission", provider: Any,
+        node: Optional[str] = None, kind: str = "write",
+    ) -> None:
         self._admission = admission
         self._provider = provider
+        self._node = node
+        self._kind = kind
         self._member: Optional[str] = None
         self._key: Optional[str] = None
 
     async def __aenter__(self) -> "_SlotContext":
-        self._key, self._member = await self._admission._acquire_slot(self._provider)
+        self._key, self._member = await self._admission._acquire_slot(
+            self._provider, self._node, self._kind,
+        )
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
         if self._key and self._member:
             await self._admission._release_slot(self._key, self._member)
+
+
+def _metric(name: str, **labels: str) -> None:
+    """Emit, and never let emitting fail an admission decision. Labels here
+    are bounded by construction — a slot kind, a node endpoint, a fixed
+    reason — which is what keeps the registry a fixed size."""
+    try:
+        from backend.app.jobs.metrics import increment
+
+        increment(name, **labels)
+    except Exception:  # noqa: BLE001 — a counter is never worth a job
+        pass
 
 
 class AggregationAdmission:
@@ -323,15 +440,100 @@ class AggregationAdmission:
             # TTL cleans up within 60s — releasing is best-effort.
             self._warn_fail_open("graph-lease release", exc)
 
+    # -- per-node reservation ledger ---------------------------------------------
+
+    async def _write_reservation(self, endpoint: str, job_id: str, nbytes: int) -> None:
+        key = reservation_key(endpoint)
+        host = os.getenv("HOSTNAME", "") or "unknown-host"
+        value = json.dumps({
+            "bytes": int(nbytes),
+            "expires_at": time.time() + _RESERVATION_TTL_MS / 1000,
+            "host": host,
+        })
+        await self._redis.hset(key, job_id, value)
+        await self._redis.pexpire(key, _RESERVATION_TTL_MS)
+
+    async def reserve(
+        self, endpoint: str, job_id: str, nbytes: int,
+    ) -> Optional[ShardReservation]:
+        """Enter ``nbytes`` for ``job_id`` in ``endpoint``'s ledger — what
+        this job may still write that the node's ``used_memory`` does not
+        show — and keep it renewed. None (fail open: nothing held) when the
+        bus is unavailable or the node is unknown."""
+        if not endpoint or endpoint == "unknown" or not job_id:
+            return None
+        try:
+            await self._write_reservation(endpoint, job_id, nbytes)
+        except Exception as exc:
+            self._warn_fail_open("shard-reservation write", exc)
+            return None
+        reservation = ShardReservation(endpoint, job_id, nbytes)
+
+        async def _renew() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(_GRAPH_LEASE_RENEW_SECS)
+                    try:
+                        await self._write_reservation(endpoint, job_id, reservation.bytes)
+                    except Exception as exc:
+                        self._warn_fail_open("shard-reservation renew", exc)
+            except asyncio.CancelledError:
+                pass
+
+        reservation.renew_task = asyncio.create_task(_renew())
+        return reservation
+
+    async def update(self, reservation: Optional[ShardReservation], nbytes: int) -> None:
+        """Replace the bytes held (what is still to land shrinks as the
+        apply progresses)."""
+        if reservation is None:
+            return
+        reservation.bytes = int(nbytes)
+        try:
+            await self._write_reservation(reservation.endpoint, reservation.job_id, reservation.bytes)
+        except Exception as exc:
+            self._warn_fail_open("shard-reservation update", exc)
+
+    async def release(self, reservation: Optional[ShardReservation]) -> None:
+        if reservation is None:
+            return
+        if reservation.renew_task is not None:
+            reservation.renew_task.cancel()
+        try:
+            await self._redis.hdel(reservation_key(reservation.endpoint), reservation.job_id)
+        except Exception as exc:
+            # The entry expires on its own within the reservation TTL.
+            self._warn_fail_open("shard-reservation release", exc)
+
+    async def reserved_by_others(self, endpoint: str, job_id: str) -> Tuple[int, int]:
+        """(bytes, jobs) every OTHER job holds on ``endpoint`` right now.
+        ``(0, 0)`` when the bus is unavailable — the budget then measures
+        the node alone, as it did before the ledger existed."""
+        try:
+            live = await read_reservations(self._redis, endpoint)
+        except Exception as exc:
+            self._warn_fail_open("shard-reservation read", exc)
+            return 0, 0
+        others = [entry for job, entry in live.items() if job != job_id]
+        return sum(int(entry["bytes"]) for entry in others), len(others)
+
     # -- read pressure: interactive reads first -----------------------------------
 
-    async def read_pressure(self, provider: Any) -> Optional[str]:
-        """Why the web tier last reported interactive reads starving on this
-        provider's endpoint (``queue_full``, ``server_timeout``, ``deadline``),
-        or None. The materializer's pacing loop stretches its sleep-after-
-        write while this is set. Memoised for ``_READ_PRESSURE_POLL_SECS``;
-        fails open to None like everything else here."""
-        key = read_pressure_key(endpoint_key(provider))
+    async def read_pressure(
+        self, provider: Any, *, node: Optional[str] = None,
+    ) -> Optional[str]:
+        """Why the web tier last reported interactive reads starving on the
+        node this run writes (``queue_full``, ``server_timeout``,
+        ``deadline``), or None. The materializer's pacing loop stretches its
+        sleep-after-write while this is set. Memoised for
+        ``_READ_PRESSURE_POLL_SECS``; fails open to None like everything
+        else here.
+
+        ``node`` is the graph-store node the caller's shard reading names,
+        as for ``write_slot``. Without it the key falls back to the
+        connection endpoint, which on a cluster is a seed shared by every
+        shard — pressure on one shard then slowed rebuilds on idle ones."""
+        key = read_pressure_key(node or endpoint_key(provider))
         now = time.monotonic()
         memo = self._read_pressure_memo.get(key)
         if memo is not None and now - memo[0] < _READ_PRESSURE_POLL_SECS:
@@ -345,34 +547,66 @@ class AggregationAdmission:
         self._read_pressure_memo[key] = (now, reason)
         return reason
 
-    # -- per-endpoint write slots -------------------------------------------------
+    # -- per-node write and scan slots --------------------------------------------
 
-    def write_slot(self, provider: Any) -> _SlotContext:
-        """Async context manager gating one write query."""
-        return _SlotContext(self, provider)
+    def read_slot(self, provider: Any, *, node: Optional[str] = None) -> _SlotContext:
+        """Async context manager gating one rebuild SCAN — see
+        ``_READ_SLOT_LIMIT``. Same key discipline as ``write_slot``: the node
+        the caller's shard reading names, falling back to the connection
+        endpoint when nothing has been measured."""
+        return _SlotContext(self, provider, node, kind="read")
 
-    async def _acquire_slot(self, provider: Any) -> tuple:
-        key = f"agg:writeslots:{endpoint_key(provider)}"
+    def write_slot(self, provider: Any, *, node: Optional[str] = None) -> _SlotContext:
+        """Async context manager gating one write query.
+
+        ``node`` is the graph-store node the caller's shard reading names —
+        the SAME identity the reservation ledger is keyed by, and the thing
+        the cap is actually about. Without it the key falls back to the
+        connection config's host:port, which on a cluster is a seed address
+        shared by every shard: one semaphore for the whole cluster rather
+        than one per master, so two rebuilds on two different masters
+        contend while nothing bounds either master on its own."""
+        return _SlotContext(self, provider, node, kind="write")
+
+    async def _acquire_slot(
+        self, provider: Any, node: Optional[str] = None, kind: str = "write",
+    ) -> tuple:
+        reads = kind == "read"
+        key = f"agg:{'read' if reads else 'write'}slots:{node or endpoint_key(provider)}"
+        limit = _READ_SLOT_LIMIT if reads else _SLOT_LIMIT
         member = uuid.uuid4().hex
+        node = node or endpoint_key(provider)
         deadline = time.monotonic() + _SLOT_WAIT_MAX_SECS
+        waited = False
         while True:
             try:
                 got = await self._redis.eval(
                     _ACQUIRE_SLOT_LUA, 1, key,
-                    time.time(), _SLOT_STALE_SECS, _SLOT_LIMIT, member,
+                    time.time(), _SLOT_STALE_SECS, limit, member,
                 )
             except Exception as exc:
-                self._warn_fail_open("write-slot acquire", exc)
+                self._warn_fail_open(f"{kind}-slot acquire", exc)
+                _metric("aggregation_slot_fail_open_total", kind=kind, node=node,
+                        reason="bus_error")
                 return None, None
             if int(got or 0) == 1:
+                if waited:
+                    _metric("aggregation_slot_waits_total", kind=kind, node=node)
                 return key, member
             if time.monotonic() >= deadline:
+                # THE signal. Past here the cap is not capping: every waiter
+                # proceeds, which is the state immediately before a node is
+                # over-admitted. It was a rate-limited log line and nothing
+                # else, so nobody could alert on it or see it trending.
                 logger.warning(
-                    "aggregation admission: no write slot on %s after %.0fs — "
+                    "aggregation admission: no %s slot on %s after %.0fs — "
                     "proceeding anyway (fail-open bias).",
-                    key, _SLOT_WAIT_MAX_SECS,
+                    kind, key, _SLOT_WAIT_MAX_SECS,
                 )
+                _metric("aggregation_slot_fail_open_total", kind=kind, node=node,
+                        reason="deadline")
                 return None, None
+            waited = True
             # Jittered wait — doubles as natural pacing under contention.
             await asyncio.sleep(2.0 + random.uniform(0, 3.0))
 
@@ -381,4 +615,4 @@ class AggregationAdmission:
             await self._redis.zrem(key, member)
         except Exception as exc:
             # Score-based pruning reclaims it after _SLOT_STALE_SECS.
-            self._warn_fail_open("write-slot release", exc)
+            self._warn_fail_open("slot release", exc)

@@ -111,7 +111,15 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 4. **Traffic Update:** Clients attempting to hit `fdp-3` receive a `MOVED` redirect and update their routing tables to hit `fdp-8`.
 5. **Restoration:** GKE automatically reschedules missing pods to a healthy node in Zone B, reattaches PVs, and instances perform a differential sync.
 
-*Downtime: < 1 second for Shard 2 writes. No data loss.*
+*No data loss. What the application sees is a HOLD, not a transparent
+switch:* the cluster does not begin an election until `cluster-node-timeout`
+(15s) has passed, so for those seconds the shard's keys have no master. Reads
+fail fast with a 3-second retry hint and the canvas keeps serving its last
+answer behind a "Reconnecting to the graph store" line; a running rebuild
+waits for the node and resumes from its checkpoint. The circuit breaker is
+NOT allowed to open for this — a failover is a pause, and treating it as an
+outage is what used to answer every user with "Circuit open" for 30s at a
+time, long after the promotion had finished.
 
 ### 5.2 Full Zonal Outage (e.g., Zone C Datacenter Drops)
 
@@ -120,9 +128,57 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 1. **Quorum:** Zones A and B survive. Masters 1 and 2 retain quorum. 
 2. **Detection & Failover:** Shard 3's Master is dead. Its surviving replicas are in Zone A and Zone B. One is promoted to Master.
 3. **Cluster State:** After failover, **every single Shard (1, 2, and 3) still has exactly 1 Master and 1 Replica active in the surviving zones.**
-4. **Read Preservation:** Because replicas still exist for every shard, the heavy read workload does not fallback onto the Masters, preventing a cluster-wide CPU bottleneck.
+4. **Read Preservation:** Because replicas still exist for every shard, read-only queries keep being spread across them and do not all fall back onto the Masters. (Read-only Cypher is offered to a replica that is in step with its master, within a lag threshold, and never inside the window after this process's own write to that graph — see `AGGREGATION_PIPELINE.md`. A provider can be pinned to master-only reads.)
 
 *Downtime: < 1 second for Shard 3 writes. Slight read latency increase as capacity drops from 6 replicas to 3 across the cluster.*
+
+---
+
+## 5aa. Replication Under Heavy Writes (read this before a large rebuild)
+
+This is the mechanism behind the worst failure this deployment has had: a
+rebuild of a densely connected graph taking a whole shard down.
+
+**FalkorDB replicates a write query by RE-RUNNING it.** Below
+`EFFECTS_THRESHOLD` (µs per modification, default **300**), the master ships
+the Cypher itself and every replica executes the whole query again. A rollup
+apply batch is hundreds of cheap MERGEs, so it is always under the threshold
+and always replicated this way. Two properties make that dangerous:
+
+- a replicated command runs on the replica's **main thread**, not a worker;
+- it runs **without a timeout** — the server-side `TIMEOUT` is deliberately
+  not applied to replicated commands.
+
+So a replica re-running a batch over a dense graph answers no `PING`, no
+cluster-bus gossip and no reads for as long as the batch takes. With a 3s
+probe timeout and 3 failures, ~30 seconds of that is enough for the kubelet
+to restart it, the cluster to mark it FAIL, and the run to die on a refused
+connection to its shard.
+
+**Set `EFFECTS_THRESHOLD 0`** (in `FALKORDB_ARGS`, and on every node —
+masters decide how they replicate, and a promoted replica must already carry
+it). At `0`, every effects-capable write replicates as a compact change log
+the replica applies directly, which is orders of magnitude cheaper than
+re-running the query. Admin → Graph store flags any master that has replicas
+and a threshold above 0, and can set it at runtime.
+
+Three settings back that up:
+
+| Setting | Shipped | Why |
+| --- | --- | --- |
+| `--repl-backlog-size 1gb` | was 256mb | The window a disconnected replica can catch up through without a full resync. A rebuild fills 256 MB in seconds. |
+| `--client-output-buffer-limit replica 2gb 1gb 300` | was the 256 MB default | When a replica's output buffer overflows, the master **drops it** and it comes back with a full resync — a fork and a whole-dataset transfer, under the same write load that caused it. |
+| `--repl-timeout 300` | was 60 | A full resync of a large shard takes longer than a minute; timing it out mid-transfer starts it over. |
+| `--cluster-node-timeout 15000` | was 5000 | How long a node may be silent before the cluster calls it failed and elects a replacement. A node busy applying replication is silent for seconds at a time, and a 5s window turned that into an election — a promotion no one needed, and a slot map churn every client had to follow. The cost of 15s is that a genuinely dead master is replaced three times slower; the application covers that window (reads fail fast with a retry hint and keep serving cached data, a rebuild waits and resumes), so the trade is worth it. |
+
+And the liveness probe gets room to be slow: `timeoutSeconds: 10`,
+`failureThreshold: 6`. A busy main thread is not a dead process, and the
+readiness probe (strict, 3s) already takes a busy node out of rotation.
+
+Finally, the application does not rely on any of this alone: a rebuild asks
+the master how many replicas have acknowledged its writes (`WAIT`) and holds
+when they fall behind, so it can never write faster than its replicas absorb.
+See `AGGREGATION_PIPELINE.md`.
 
 ---
 
@@ -142,14 +198,26 @@ shared with 8 other containers — the instance died repeatedly under
 load and each restart paid a multi-minute AOF replay, presenting as
 "the stack blew up and is not recovering for hours").
 
-Rule of thumb:
+> **There is ONE sizing rule, and it is the formula in
+> [*Sizing: the ceilings share ONE budget*](#sizing-the-ceilings-share-one-budget)
+> below.** `maxmemory` is only one of its terms; query memory and the
+> replication buffers are charged inside the same container limit. Do not size
+> on a flat share of the machine — that is how a pairing that looks
+> conservative (62% of the node) ends up needing 119% of the container.
 
-- `maxmemory ≤ host_memory − 4GB` (other services + OS + page cache);
-- expected dataset ≤ ~60% of `maxmemory` — BGSAVE/BGREWRITEAOF fork
-  copy-on-write can spike usage well above the resident dataset while
-  writes are in flight;
-- if the dataset legitimately needs more, grow the HOST first
-  (Docker Desktop → Settings → Resources → Memory), then `maxmemory`.
+The rest of this section is the reasoning behind the first term, and the
+recovery cost that belongs in the same decision:
+
+- the dataset should sit around **60% of `maxmemory`** in steady state —
+  BGSAVE/BGREWRITEAOF fork copy-on-write spikes usage well above the resident
+  dataset while writes are in flight, which is where the formula's `1.25 ×`
+  comes from;
+- if the dataset legitimately needs more, grow the CONTAINER first (on a
+  laptop: Docker Desktop → Settings → Resources → Memory), re-run the formula,
+  then raise `maxmemory`;
+- lowering `maxmemory` on a LIVE instance below its current usage denies every
+  write immediately under `noeviction`. Check what each node holds first —
+  Admin → Graph store shows used and `maxmemory` per node.
 
 Recovery time is part of sizing: an AOF *incremental* replays
 command-by-command (minutes per GB) while the *base* RDB bulk-loads
@@ -177,6 +245,44 @@ lost the input. AOF `everysec` bounds the loss window to ~1 second;
 `aof-load-truncated` tolerates a torn AOF tail after a crash instead of
 refusing to start. Keep RDB snapshots enabled alongside AOF — they
 remain the fast-restart and DR-export mechanism.
+
+## 5bb. Forks, and the settings a rebuild cannot hold its way out of
+
+A rebuild took a master and its replica down. Read §5aa for the write side;
+this section is the four settings that decided how expensive each step was.
+
+**A fork under write load costs the dataset twice.** `BGSAVE`, an AOF rewrite
+and a replica's full resync all fork, and every page the parent writes while the
+child lives is copied. A rebuild writing at full speed dirties most of them, so
+the node's memory approaches `2 × RSS` and meets the container limit. The
+pipeline now **holds its writes for the whole fork** (`AGGREGATION_HOLD_MAX_SECS`;
+see `AGGREGATION_PIPELINE.md`), which makes a fork survivable. It does not make
+one free, and it cannot hold through a fork the node takes on its own schedule.
+
+* **`--save 21600 1`, not `--save 3600 1`.** The RDB here is a *floor*, not the
+  recovery path: AOF is, and an RDB is read only when the appendonlydir is
+  missing or quarantined, or across an engine upgrade (§5c). Its value does not
+  decay in six hours — Cloud SQL is the source of truth for every graph (§6) —
+  while an hourly save forked the node every hour whatever else it was doing.
+* **`--auto-aof-rewrite-min-size 512mb`.** The default 64 MB rewrites a small
+  AOF repeatedly for nothing. The *percentage* is deliberately left at its
+  default: lowering it shortens restart time by bounding the incremental tail,
+  but only in proportion — on a 13 GB base even 80% leaves 10 GB to replay —
+  and it buys that by forking more often, which is the wrong direction. If
+  restart time is the binding constraint, shrink the dataset per shard, not the
+  rewrite threshold.
+* **`--replica-lazy-flush yes` and `--lazyfree-lazy-server-del yes`.** A replica
+  following a promotion or a full resync flushes what it held first.
+  Synchronously, on 13 GB, that is minutes of a main thread answering nothing —
+  which is how a replica that was merely catching up failed its health probe and
+  was restarted, turning one node's trouble into two. Freed in the background it
+  answers throughout.
+
+The liveness probe already accepts `LOADING`, so a node replaying its AOF is not
+killed for taking an hour; readiness stays strict, so it takes no traffic while
+it does. `backend/tests/test_graph_store_fork_settings.py` parses the manifests
+and fails if any of this drifts, including across the three duplicated shard
+blocks in the production-cluster overlay.
 
 ## 5c. Engine Version Upgrades: Reload From RDB, Not AOF
 
@@ -371,6 +477,12 @@ rollback). Sizing, tuning knobs and provider-protection parameters live in
 
 ## Sizing & protection parameters
 
+> These are the graph store's own ceilings. The ceilings ABOVE it — the DB pool, the
+> per-source admission gate, the provider semaphore — and the rule that orders every
+> deadline in the chain are in
+> [`CONCURRENCY_TUNING.md`](CONCURRENCY_TUNING.md). `THREAD_COUNT` is the binding
+> constraint on read capacity for the whole platform, so read both before changing it.
+
 How the deployed `FALKORDB_ARGS` values are derived:
 
 - **`THREAD_COUNT`** = ceil(pod CPU limit). **`OMP_THREAD_COUNT` = 1** — per-query
@@ -401,15 +513,18 @@ How the deployed `FALKORDB_ARGS` values are derived:
   formula below — **not** at a flat 75% of the pod limit, which double-books
   the same headroom that query memory needs.
 
-### Sizing: the three ceilings share ONE budget
+### Sizing: the ceilings share ONE budget
 
-`maxmemory` and `QUERY_MEM_CAPACITY` are not independent. Query memory is
-charged **per concurrent query, on top of the dataset**, inside the same
-container limit:
+`maxmemory`, `QUERY_MEM_CAPACITY` and the replication buffers are not
+independent. Query memory is charged **per concurrent query, on top of the
+dataset**, and replication buffers are charged on top of both — all inside
+the same container limit:
 
 ```
 container_limit  >=  1.25 x maxmemory                      # dataset + fragmentation + AOF-rewrite COW
                   +  concurrent x 1.3 x QUERY_MEM_CAPACITY # in-flight queries
+                  +  repl-backlog-size                     # allocated once replication is in use
+                  +  replicas x replica-output-buffer-hard # worst case before a replica is dropped
                   +  256Mi                                 # server overhead (1Gi for instances >= 32Gi)
 ```
 
@@ -423,11 +538,56 @@ container_limit  >=  1.25 x maxmemory                      # dataset + fragmenta
   the same rows into the client reply buffer — which is Redis-core memory and
   is **not** counted against `QUERY_MEM_CAPACITY`. Peak RSS per query therefore
   exceeds the ceiling you configured.
+- **The replication terms are what a MASTER with replicas costs.** The backlog
+  (`repl-backlog-size`) is allocated and stays; an output buffer is per replica
+  and grows only when that replica falls behind — but it may reach its **hard**
+  limit before the master drops the replica, and that is the case you must have
+  room for. Budgeting the soft limit instead inverts the protection: the point
+  of the buffer limit is to lose a replica rather than the master, and a
+  container that OOM-kills first loses the master anyway.
+  On a **replica** pod the buffers cost nothing until it is promoted, but plan
+  the same figure — every pod runs the same manifest, and a promoted replica
+  becomes a master with buffers under the same limit. Replicas also serve
+  read-only queries (see `AGGREGATION_PIPELINE.md`), so their query-memory term
+  is real, not spare.
+- **A shard with no replicas drops both replication terms.** Single-node and
+  dev deployments size on the first three lines only.
 
-Worked example, the k8s base / Helm defaults: `1.25 x 6gb + 2 x 1.3 x 512Mi +
-256Mi ~= 9.1Gi`, which is why `limits.memory` is **10Gi**. The previous 8Gi
-booked the entire non-`maxmemory` remainder for fragmentation and left nothing
-for query memory at all.
+**Worked example 1 — the k8s base / Helm defaults** (single node, no replicas):
+`1.25 x 6gb + 2 x 1.3 x 512Mi + 256Mi ~= 9.1Gi`, which is why `limits.memory`
+is **10Gi**. The previous 8Gi booked the entire non-`maxmemory` remainder for
+fragmentation and left nothing for query memory at all.
+
+**Worked example 2 — the production cluster overlay** (3 shards x 1 master +
+2 replicas, `n4-highmem-8`, `limits.memory` **56Gi**, `THREAD_COUNT 6`):
+
+| Term | Figure | GiB |
+| :--- | :--- | ---: |
+| Dataset | `1.25 x 32gb` | 40.0 |
+| Query memory | `6 x 1.3 x 1gb` | 7.8 |
+| Replication backlog | `repl-backlog-size 1gb` | 1.0 |
+| Replica buffers | `2 replicas x 2gb hard` | 4.0 |
+| Server overhead | instance >= 32Gi | 1.0 |
+| **Needed** | | **53.8** |
+| **Limit** | | **56.0** |
+
+Two pairings that do NOT fit, and why they are worth knowing:
+
+- `maxmemory 40gb` with `QUERY_MEM_CAPACITY 2gb` — the shipped values before
+  this was checked — needs **66.6 GiB** against a 56 GiB limit even ignoring
+  replication. A shard under load could be OOM-killed by the kubelet while
+  every figure inside Redis looked healthy.
+- `maxmemory 32gb` with `QUERY_MEM_CAPACITY 1.5gb` needs 52.7 GiB by the first
+  three lines and **57.7 GiB** once the replication buffers are counted. It is
+  the near miss this table exists to catch: raising replication buffers is a
+  memory decision, not just a durability one.
+
+> **The in-app guard does not know your replication.** *Adjust limits* on
+> Admin → Graph store refuses a `QUERY_MEM_CAPACITY` raise the container cannot
+> back, but it computes **dataset + query memory + overhead** only — it cannot
+> read the container limit, and the reading it works from carries no replica
+> count. On a master with replicas, subtract the two replication terms from the
+> container figure you type in, or size with the table above.
 
 **Raising `QUERY_MEM_CAPACITY` alone converts a caught query error into an
 OOM-killed pod.** Raise the container limit with it, and prefer lowering
@@ -436,10 +596,50 @@ usage denies every write under `noeviction`.
 
 > **It is rarely the right first lever.** A "Query's mem consumption exceeded
 > capacity" failure means one query asked for too many rows, not that the
-> instance is short of memory. The aggregation pipeline reacts by halving its
-> scan range and re-reading (`AGGREGATION_SCAN_RANGE_WIDTH`, floored at
-> `AGGREGATION_SCAN_SHRINK_FLOOR`), so a job normally absorbs this on its own
-> and reports `scan_width_min` in `run_stats`. When it fails terminally, fix
-> the read size first — set the source's Rollup storage to Auto, which is what
-> makes the RECONCILE scan (the pipeline's widest projection: 11 columns
-> including `aggKey` and the `sourceEdgeTypes` array) read far fewer rows.
+> instance is short of memory. The aggregation pipeline reacts by reading
+> serially, switching the RECONCILE scan (its widest projection: 11 columns
+> including `aggKey` and the `sourceEdgeTypes` array) to a keys-only two-pass
+> strategy, and halving its scan range down to one row
+> (`AGGREGATION_SCAN_SHRINK_FLOOR`, default 1), so a job absorbs this on its
+> own and reports what it adapted to in `run_stats.adapted`. When it fails
+> terminally, a SINGLE ROW of one projection is larger than the ceiling — the
+> message names it — and raising the ceiling, with the container limit, is
+> then the only lever. The ceiling is read into `run_stats.query_mem_capacity`
+> and shown on the capacity card as *per-query limit*.
+>
+> **Both `QUERY_MEM_CAPACITY` and `TIMEOUT_MAX` can be changed at runtime**
+> from **Infrastructure → Memory headroom → Adjust graph store limits**
+> (system administrators). The dialog applies the formula above before it sets
+> anything — enter the container limit, or set
+> `FALKORDB_CONTAINER_MEMORY_BYTES` to prefill it — sets the value with
+> `GRAPH.CONFIG SET`, reads it back, and hands over the `FALKORDB_ARGS`
+> fragment that makes it permanent: a runtime change lasts until the server
+> restarts. The application clamps its per-query timeouts to the `TIMEOUT_MAX`
+> it reads from each node; `FALKORDB_SERVER_TIMEOUT_MAX_MS` is only the
+> fallback until a node has been read, so keep it equal to the launch value.
+
+### The rebuild reads `maxmemory` before it writes
+
+`maxmemory` is not only the ceiling writes fail at — it is what the
+aggregation write budget plans against. Before storing rollups, a rebuild
+reads `INFO memory` on the one shard that owns the graph (a graph key never
+spans shards) and proceeds only while the NEW `:AGGREGATED` edges fit under
+`AGGREGATION_SHARD_RESERVE_PCT` (20%) of `maxmemory`, at a bytes-per-edge
+figure it calibrates from its own runs; otherwise it refuses before writing,
+naming the shard, the bytes needed, what was free and the shortfall. So:
+
+- **Set `maxmemory` on every instance you want measured.** Without it (the
+  `deploy/topologies/docker-compose.falkordb-*.yml` files do not pass it) the
+  budget cannot read headroom and falls back to the static edge cap
+  `AGGREGATION_MAX_MATERIALIZED_EDGES`, and the refusal says so.
+- **Adding memory to a shard is enough.** Raise `maxmemory` (live, via
+  `CONFIG SET`, sized per the formula above) and the next rebuild sees it —
+  no application setting has to move. Lower the reserve, or clear an explicit
+  `maxMaterializedEdges` ceiling in Defaults, only if a refusal says one of
+  them governed.
+- **The reserve is the headroom that stays yours.** It is what keeps a large
+  rebuild from taking the room live queries and the other graphs on that
+  shard need — under `noeviction` a full shard fails every graph's writes.
+
+Sizing, the tuning knobs and the exact rule live in
+`docs/AGGREGATION_PIPELINE.md` (§ Semantics, "The budget is MEASURED from the shard that owns the graph", and § Tuning).

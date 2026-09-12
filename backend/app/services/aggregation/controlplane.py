@@ -71,6 +71,16 @@ if "REDIS_CACHE_MAX_CONNECTIONS" not in os.environ:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Control Plane startup / shutdown lifecycle."""
+    # The metrics backend, in every process that emits. The governor,
+    # admission and pacing counters are raised HERE, not in the web tier, so
+    # a worker without this installed counts nothing at all.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+
     from backend.app.db.engine import close_db, get_jobs_session
     from backend.app.providers.manager import ProviderManager
     from .service import AggregationService
@@ -289,6 +299,9 @@ async def _get_session(request: Request):
 # ── Schemas (import here to avoid circular) ─────────────────────────
 
 from .schemas import (  # noqa: E402
+    GraphStoreLimitsPatch,
+    GraphStoreLimitsResponse,
+    JobLimitsPatch,
     AggregationTriggerRequest,
     AggregationSettingsRequest,
     AggregationSettingsResponse,
@@ -316,6 +329,14 @@ from .service import ConflictError, NotFoundError  # noqa: E402
 
 
 # ── Health ──────────────────────────────────────────────────────────
+
+# The scrape endpoint, on the control plane's own app: this process raises the
+# reconciler, sweeper and probe counters, and nothing else can see them. Same
+# opt-in switch as the web tier's (METRICS_ENABLED), same module.
+from backend.app.api.v1.endpoints import metrics as _metrics_endpoint  # noqa: E402
+
+app.include_router(_metrics_endpoint.router)
+
 
 @app.get("/health", tags=["health"])
 async def health():
@@ -514,6 +535,28 @@ async def cancel_job(
         raise HTTPException(status_code=422, detail=str(e))
 
 
+# ── PATCH /aggregation/data-sources/{ds_id}/jobs/{job_id}/limits ─────
+
+@app.patch(
+    "/aggregation/data-sources/{ds_id}/jobs/{job_id}/limits",
+    response_model=AggregationJobResponse,
+    summary="Raise a running job's time limits without cancelling it",
+)
+async def set_job_limits(
+    ds_id: str,
+    job_id: str,
+    patch: JobLimitsPatch,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    try:
+        return await svc.set_job_limits(ds_id, job_id, session, patch)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 # ── DELETE /aggregation/jobs/{job_id} ────────────────────────────────
 
 @app.delete(
@@ -622,6 +665,64 @@ async def put_settings(
     return await svc.put_settings(session, body.tuning, cadence=body.cadence)
 
 
+# ── GET /aggregation/capacity, /aggregation/data-sources/{ds_id}/capacity ──
+# Kept for a caller that reaches the control plane directly. The web tier no
+# longer forwards these: both read the graph store topology snapshot, which
+# each tier builds for itself, so a hop would only add a second cache.
+
+@app.get(
+    "/aggregation/capacity",
+    summary="Graph-store capacity for rollups: every shard, what fits, the sources on it",
+)
+async def get_capacity(
+    fresh: bool = Query(False),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from .capacity import assemble_fleet_capacity
+    return await assemble_fleet_capacity(session, fresh=fresh)
+
+
+@app.get(
+    "/aggregation/data-sources/{ds_id}/capacity",
+    summary="One source's footprint, its shard's headroom, and whether a rebuild would fit",
+)
+async def get_source_capacity(
+    ds_id: str,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from .capacity import assemble_source_capacity
+    doc = await assemble_source_capacity(session, ds_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Data source {ds_id} not found")
+    return doc
+
+
+# ── PATCH /aggregation/graph-store/{endpoint}/limits ─────────────────
+
+@app.patch(
+    "/aggregation/graph-store/{endpoint}/limits",
+    response_model=GraphStoreLimitsResponse,
+    summary="Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY) at runtime",
+)
+async def set_graph_store_limits(
+    endpoint: str,
+    patch: GraphStoreLimitsPatch,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from .graph_store_limits import (
+        GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
+    )
+    try:
+        return await apply_graph_store_limits(session, svc._registry, endpoint, patch)
+    except GraphStoreEndpointNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except GraphStoreLimitsError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────
 
 @app.get(
@@ -706,6 +807,14 @@ async def set_freshness_settings(
             pause = await svc.set_source_pause(
                 ds_id, session, paused_until=body.paused_until,
             )
+        rollup = None
+        if "rollup_storage" in sent:
+            rollup = await svc.set_source_rollup_storage(
+                ds_id, session, body.rollup_storage,
+            )
+        breaker = {}
+        if body.reset_breaker:
+            breaker = await svc.reset_source_breaker(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return FreshnessSettingsResponse(
@@ -716,6 +825,8 @@ async def set_freshness_settings(
         probe_enabled=probe.get("probe_enabled"),
         probe_interval_secs=probe.get("probe_interval_secs"),
         paused_until=pause.get("paused_until"),
+        rollup_storage=rollup,
+        reset_breaker=breaker.get("reset_breaker"),
     )
 
 
@@ -955,17 +1066,41 @@ async def _run_provider_batch(
                 # strands the batch at state "running" forever.
                 try:
                     async with session_factory() as session:
-                        resp = await svc.refresh_source(
-                            ds_id, session,
-                            scope=body.scope, force=body.force,
-                            actor=body.actor, origin=body.origin,
-                        )
-                    item = {
-                        "dataSourceId": ds_id, "name": ds_name, "outcome": "done",
-                        "jobId": resp.job_id,
-                        "actions": list(resp.actions or []),
-                        "deferred": bool(resp.deferred),
-                    }
+                        # An operator hold is honoured PER ITEM, not in the
+                        # enumerator: filtering _live_ds_rows would silently
+                        # shrink ``total`` and the dialog would report 200
+                        # sources as 197 with no explanation. A provider- or
+                        # fleet-wide refresh is not a deliberate per-source
+                        # override (that is the single-source Rebuild, which
+                        # warns and proceeds), so a held source is skipped
+                        # and REPORTED as such.
+                        # Capability-checked like the provider probes
+                        # (``getattr(provider, "get_counts_fast", None)``):
+                        # the real AggregationService always exposes it.
+                        resolve = getattr(svc, "hold_for_source", None)
+                        hold = await resolve(ds_id, session) if resolve else None
+                        if hold is not None:
+                            resp = None
+                        else:
+                            resp = await svc.refresh_source(
+                                ds_id, session,
+                                scope=body.scope, force=body.force,
+                                actor=body.actor, origin=body.origin,
+                            )
+                    if resp is None:
+                        item = {
+                            "dataSourceId": ds_id, "name": ds_name, "outcome": "held",
+                            "jobId": None, "actions": [], "deferred": False,
+                            "heldBy": hold.scope, "heldKind": hold.kind,
+                            "heldUntil": hold.until,
+                        }
+                    else:
+                        item = {
+                            "dataSourceId": ds_id, "name": ds_name, "outcome": "done",
+                            "jobId": resp.job_id,
+                            "actions": list(resp.actions or []),
+                            "deferred": bool(resp.deferred),
+                        }
                 except Exception as exc:
                     logger.warning(
                         "refresh batch %s: item %s failed: %s", batch_id, ds_id, exc,

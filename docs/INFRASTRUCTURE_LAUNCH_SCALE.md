@@ -318,19 +318,38 @@ Node `n4-highmem-8` (8 vCPU / 64 GB), requests ≈ limits (the pod owns the node
 
 ```conf
 cluster-enabled yes
-cluster-node-timeout 5000
+cluster-node-timeout 15000            # a busy node is not a dead node; 5s started elections during heavy rebuilds
 cluster-require-full-coverage no      # a dead shard must not take down reads on the other two
 cluster-migration-barrier 1
-maxmemory 40gb                        # ~62% of the 64 GB node; the rest covers fork COW, replica buffers, query memory
+maxmemory 32gb                        # sized by the rule below, not by a share of the node
 maxmemory-policy noeviction           # Redis must never silently evict a graph key; eviction is the app's job (budgets below)
 appendonly yes
 appendfsync everysec
 save 3600 1                           # hourly RDB floor; the DR CronJob triggers explicit BGSAVE
-repl-backlog-size 256mb
+repl-backlog-size 1gb                 # the catch-up window; a rebuild fills 256mb in seconds and forces full resyncs
 repl-diskless-sync yes
+repl-timeout 300                      # a full resync of a large shard takes longer than a minute
+client-output-buffer-limit replica 2gb 1gb 300   # overflow drops the replica and forces a full resync under the same load
 ```
 
-FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUERY_MEM_CAPACITY 2147483648  TIMEOUT_MAX 120000  MAX_QUEUED_QUERIES 150` — `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O + AOF rewrite + replication; `QUERY_MEM_CAPACITY` 2 GiB bounds a runaway Cypher query. PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 6× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` (RDB load of a full shard is minutes).
+FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1073741824  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
+
+- `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O, AOF rewrite and replication; `OMP_THREAD_COUNT 1` stops one query spawning a thread per core inside the engine.
+- **The memory numbers come from the sizing rule, not from a share of the node.** Every term below is charged inside the SAME 56 GiB container limit — replication included:
+
+  | Term | Figure | GiB |
+  | :--- | :--- | ---: |
+  | Dataset | `1.25 × 32gb` | 40.0 |
+  | Query memory | `6 × 1.3 × 1gb` | 7.8 |
+  | Replication backlog | `repl-backlog-size 1gb` | 1.0 |
+  | Replica output buffers | `2 replicas × 2gb hard` | 4.0 |
+  | Server overhead | instance ≥ 32 GiB | 1.0 |
+  | **Needed** | | **53.8** |
+
+  Two pairings that do **not** fit: `maxmemory 40gb` with a 2 GiB per-query ceiling needs **66.6 GiB** even ignoring replication (these were the shipped values before this was checked, so a shard under load could be OOM-killed while every figure inside Redis looked healthy); and a 1.5 GiB ceiling needs **57.7 GiB** once the replication buffers are counted. Raising replication buffers is a memory decision, not only a durability one. Check what each shard currently holds before lowering `maxmemory`. Full rule and worked examples: `FALKORDB_DEPLOYMENT.md` § *Sizing: the ceilings share ONE budget*.
+- `EFFECTS_THRESHOLD 0` makes writes replicate as a compact change log instead of being **re-run on each replica's main thread** — the mechanism that took whole shards down during rebuilds (`FALKORDB_DEPLOYMENT.md` §5aa).
+
+PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` with `timeoutSeconds: 10` and `failureThreshold: 6` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation.
 
 ### 7.3 Mandatory application settings in cluster mode
 
@@ -340,12 +359,12 @@ FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUER
 | `FALKORDB_CLUSTER_NODES` | 3 shard-0 pod DNS names | Any three seeds; the client discovers the rest |
 | `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
 | `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | ≈ shard `maxmemory` × 0.8 per provider | Turns on cold-graph eviction so residency tracks the ~40M working set, not the full 45M+growth corpus |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory accumulation |
+| `AGGREGATION_SHARD_RESERVE_PCT` | `20` (default) | Share of a shard's `maxmemory` a rebuild must leave free: the write budget reads the owning shard's `used_memory` before storing rollups and refuses, naming the shortfall, rather than filling it |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
 
 ### 7.4 Placement & rebuild
 
-Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monitor per-shard `used_memory`; on skew, **move graphs** (drop + rebuild-from-Cloud-SQL onto the target shard), never live-reshard hot slots. The registry + rebuild-from-Postgres makes moves cheap. Full-cluster data loss is **acceptable by design** — every graph reseeds from Cloud SQL; RDB snapshots only shorten the rebuild.
+Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monitor per-shard `used_memory`; on skew, **move graphs** (drop + rebuild-from-Cloud-SQL onto the target shard), never live-reshard hot slots. The aggregation rebuild reads that same `used_memory` against `maxmemory` on the owning shard before it writes rollups (`docs/AGGREGATION_PIPELINE.md`), so a shard nearing its reserve shows up first as a refused rebuild that names the shard — the cue to move a graph. The registry + rebuild-from-Postgres makes moves cheap. Full-cluster data loss is **acceptable by design** — every graph reseeds from Cloud SQL; RDB snapshots only shorten the rebuild.
 
 ---
 
@@ -443,5 +462,4 @@ Phased; each gate verifiable before the next.
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |
 | `GRAPHVER_READ_MAX_LAG` | web tiers | `0` (strict) |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | workers | `true` |
 | `IMPORT_COMMIT_WINDOW` | import worker | `50000` |

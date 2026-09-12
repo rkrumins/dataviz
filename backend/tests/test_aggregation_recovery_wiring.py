@@ -17,6 +17,7 @@ instead of resuming them. These tests pin:
 * the reconciler's cross-replica advisory lock.
 """
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,7 +25,9 @@ import pytest
 
 from backend.app.services.aggregation import reconciler as recon_mod
 from backend.app.services.aggregation.models import AggregationJobORM
+from backend.app.services.aggregation.reap import WORKER_LOST
 from backend.app.services.aggregation.scheduler import AggregationScheduler
+from backend.app.services.aggregation.steps import StepLedger, failed_stage
 
 _AGG_DIR = Path(__file__).resolve().parents[1] / "app" / "services" / "aggregation"
 _APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -64,11 +67,22 @@ class _Result:
         return iter(self._items)
 
 
+class _State:
+    """The source row ``trigger()`` left in flight. Only a worker ever moved
+    it off, and this watchdog exists precisely for when there is no worker."""
+
+    def __init__(self):
+        self.data_source_id = "ds"
+        self.aggregation_status = "running"
+        self.last_aggregated_at = "2026-01-01T00:00:00+00:00"
+
+
 class _Session:
-    def __init__(self, results):
+    def __init__(self, results, state=None):
         self._results = list(results)
         self.statements = []
         self.committed = False
+        self.state = _State() if state is None else state
 
     async def __aenter__(self):
         return self
@@ -81,7 +95,10 @@ class _Session:
         return _Result(self._results.pop(0) if self._results else [])
 
     async def get(self, orm, key):
-        return None
+        # The aggregation-owned state row only; the public mirror is absent,
+        # as in a split-DB topology.
+        name = getattr(orm, "__name__", "")
+        return self.state if name.endswith("StateORM") else None
 
     async def commit(self):
         self.committed = True
@@ -92,7 +109,20 @@ def _stale_job(trigger_source="manual"):
     return AggregationJobORM(
         id="J", data_source_id="ds", status="running",
         trigger_source=trigger_source, updated_at=old,
+        started_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+        run_stats=json.dumps({"steps": _mid_run_steps()}),
     )
+
+
+def _mid_run_steps():
+    """A ledger with APPLY still open — what a row looks like when its
+    worker was killed rather than allowed to finish."""
+    led = StepLedger()
+    led.enter("preparing")
+    led.enter("extracting")
+    led.enter("applying")
+    led.note(done=4, total=10, unit="aggregated edges")
+    return led.snapshot()
 
 
 def _run(coro):
@@ -101,7 +131,7 @@ def _run(coro):
 
 def test_watchdog_stands_down_when_reconciler_redis_present():
     job = _stale_job()
-    session = _Session(results=[[], [job]])
+    session = _Session(results=[[job]])
     sched = AggregationScheduler(
         lambda: session, registry=None, redis_client=object(),
     )
@@ -115,18 +145,34 @@ def test_watchdog_stands_down_when_reconciler_redis_present():
 
 def test_watchdog_fallback_still_fails_stale_jobs_without_redis():
     job = _stale_job()
-    session = _Session(results=[[], [job]])
+    session = _Session(results=[[job]])
     sched = AggregationScheduler(lambda: session, registry=None)
     _run(sched._tick())
     assert job.status == "failed"
     assert session.committed
 
 
-def test_watchdog_fallback_excludes_purge_rows():
-    session = _Session(results=[[], []])
+def test_the_watchdog_reaps_rather_than_stamping():
+    """It used to set ``status`` and the aggregation-owned status column and
+    stop there, which left the ledger with a step still ``running`` — so the
+    run reported NO failure stage anywhere — and left the viz-service's
+    mirror of the source saying "running" forever."""
+    job = _stale_job()
+    session = _Session(results=[[job]])
     sched = AggregationScheduler(lambda: session, registry=None)
     _run(sched._tick())
-    stale_stmt = str(session.statements[1])
+
+    assert failed_stage(json.loads(job.run_stats)["steps"]) == "applying"
+    assert session.state.aggregation_status == "failed"
+    assert job.completed_at                      # a terminal row has an end
+    assert job.error_message.startswith(WORKER_LOST)
+
+
+def test_watchdog_fallback_excludes_purge_rows():
+    session = _Session(results=[[]])
+    sched = AggregationScheduler(lambda: session, registry=None)
+    _run(sched._tick())
+    stale_stmt = str(session.statements[0])
     assert "trigger_source !=" in stale_stmt, (
         "purge rows checkpoint via Redis only — the fallback sweep must "
         "exclude them or every >4h purge gets hijacked to failed"

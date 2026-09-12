@@ -45,6 +45,45 @@ export interface JobLiveOverlay {
         currentPhase: string
         writes: number
         deletes: number
+        /** What the pressure ladder has changed so far (see AdaptedRunState). */
+        adapted_scan_width: number
+        adapted_scan_width_min: number
+        adapted_scan_shrinks: number
+        adapted_extract_concurrency: number
+        adapted_reconcile_strategy: string
+        adapted_write_batch: number
+        adapted_delete_chunk: number
+        adapted_timeout_retries: number
+        adapted_memory_flushes: number
+        adapted_rss_high_water_mb: number
+        adapted_mem_limit_mb: number
+        /** What an operator changed on the running job, in force now. */
+        adapted_live_scan_timeout_s: number
+        adapted_live_write_timeout_s: number
+        adapted_live_write_pacing_ratio: number
+        adapted_live_extract_concurrency: number
+        adapted_live_scan_width: number
+        /** How the run is writing right now: the last batch, the rolling duty
+         *  cycle and rate, whether it is holding or eased and why, and what the
+         *  node's last reading said (see steadyLoad.ts). */
+        pace_batch_rows: number
+        pace_batch_s: number
+        pace_ack_s: number
+        pace_sleep_s: number
+        pace_batch_max: number
+        pace_target_s: number
+        pace_ratio: number
+        pace_batches: number
+        pace_rows: number
+        pace_duty_pct: number
+        pace_rows_per_s: number
+        pace_replica_lag_bytes: number
+        pace_headroom_bytes: number
+        /** Other rebuilds holding a reservation on the same graph store node. */
+        pace_sharing: number
+        pace_holding: string
+        pace_eased: string
+        pace_fork: string
     }>
 }
 
@@ -141,6 +180,27 @@ export function useJob(
             if (writes !== undefined) next.writes = writes
             const deletes = _coerceNumeric(payload['deletes'])
             if (deletes !== undefined) next.deletes = deletes
+            for (const key of [
+                'adapted_scan_width', 'adapted_scan_width_min', 'adapted_scan_shrinks',
+                'adapted_extract_concurrency', 'adapted_write_batch', 'adapted_delete_chunk',
+                'adapted_timeout_retries', 'adapted_memory_flushes', 'adapted_rss_high_water_mb',
+                'adapted_mem_limit_mb',
+                'adapted_live_scan_timeout_s', 'adapted_live_write_timeout_s', 'adapted_live_write_pacing_ratio',
+                'adapted_live_extract_concurrency', 'adapted_live_scan_width',
+                'pace_batch_rows', 'pace_batch_s', 'pace_ack_s', 'pace_sleep_s', 'pace_batch_max',
+                'pace_target_s', 'pace_ratio', 'pace_batches', 'pace_rows', 'pace_duty_pct',
+                'pace_rows_per_s', 'pace_replica_lag_bytes', 'pace_headroom_bytes',
+                'pace_sharing',
+            ] as const) {
+                const v = _coerceNumeric(payload[key])
+                if (v !== undefined) next[key] = v
+            }
+            const strategy = payload['adapted_reconcile_strategy']
+            if (typeof strategy === 'string') next.adapted_reconcile_strategy = strategy
+            for (const key of ['pace_holding', 'pace_eased', 'pace_fork'] as const) {
+                const v = payload[key]
+                if (typeof v === 'string') next[key] = v
+            }
 
             setState((prev) => ({
                 connected: true,

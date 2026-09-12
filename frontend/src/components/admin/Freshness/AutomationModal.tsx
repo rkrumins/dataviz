@@ -39,7 +39,7 @@
  * the StrictMode click-shield; the panel itself is inside <AnimatePresence> so
  * it leaves rather than vanishing.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -55,13 +55,34 @@ import { aggregationService, type AggregationCadence, type AggregationTuning } f
 import type { FreshnessSummary } from '@/services/freshnessService'
 import {
     CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECTORS, DETECT_PRESETS,
-    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, automationWarnings, hintIdFor,
+    HOLD_EFFECT, MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, automationWarnings, hintIdFor,
 } from './automationCopy'
 import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
+import { SnoozeRow } from './SnoozeRow'
 import { lastPassBrief, pickLastPassRun } from './reconcileHealth'
-import { useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
+import { RECONCILE_POLL_MS, useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
+import { fleetHold, timeUntil, type FleetHold } from './holds'
 
 const SETTINGS_KEY = ['aggregation', 'settings'] as const
+
+/** The one line under the rail that says what the server holds RIGHT NOW —
+ *  the rail shows the form, which may be edited and unsaved. A hold names
+ *  the control that releases it. */
+function rightNowLine(hold: FleetHold | null, needPerson: number): string {
+    let line: string
+    if (!hold) line = 'Right now: automatic rebuilds are on.'
+    else if (hold.reason === 'act') line = 'Right now: automatic rebuilds are stopped fleet-wide — ③ Act is off.'
+    else if (hold.reason === 'check') line = 'Right now: automatic rebuilds are stopped fleet-wide — ② Check is off.'
+    else if (hold.kind === 'paused') {
+        line = `Right now: automatic rebuilds are paused fleet-wide for another ${timeUntil(hold.until) ?? '0m'}.`
+    } else line = 'Right now: automatic rebuilds are stopped fleet-wide until resumed.'
+    if (needPerson > 0) {
+        line += needPerson === 1
+            ? ' 1 source needs a person.'
+            : ` ${needPerson.toLocaleString()} sources need a person.`
+    }
+    return line
+}
 
 /** Bounds this modal owns alone; the shared ones live in ``automationCopy``
  *  because the per-source drawer edits the same three cadences. */
@@ -104,8 +125,14 @@ function Ledger({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * The unsaved-changes guard, mirroring ``ProviderOnboardingWizard``'s
+ * The modal's one confirmation, mirroring ``ProviderOnboardingWizard``'s
  * ``ConfirmCloseDialog``.
+ *
+ * Two questions share it, because both are "this is about to lose something
+ * you cannot see from here": discarding unsaved edits, and stopping automatic
+ * rebuilds for every source in the estate. The focus trap below is the reason
+ * it is shared rather than copied — a second hand-rolled dialog would be a
+ * second chance to get that wrong.
  *
  * Putting these settings in a modal handed them two brand-new ways to throw
  * work away that the inline panel they replaced did not have — Escape and the
@@ -124,8 +151,12 @@ function Ledger({ children }: { children: React.ReactNode }) {
  * them. The listener is registered in CAPTURE so it runs before the parent's,
  * and it pulls focus back in if it ever lands outside.
  */
-function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
+function ConfirmDialog({ open, title, body, cancelLabel, confirmLabel, onCancel, onConfirm }: {
     open: boolean
+    title: string
+    body: ReactNode
+    cancelLabel: string
+    confirmLabel: string
     onCancel: () => void
     onConfirm: () => void
 }) {
@@ -170,8 +201,8 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
                     ref={panelRef}
                     role="alertdialog"
                     aria-modal="true"
-                    aria-labelledby="automation-discard-title"
-                    aria-describedby="automation-discard-body"
+                    aria-labelledby="automation-confirm-title"
+                    aria-describedby="automation-confirm-body"
                     initial={{ opacity: 0, y: 12, scale: 0.96 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     className="pointer-events-auto w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-lg"
@@ -181,13 +212,12 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
                             <AlertTriangle className="h-5 w-5" />
                         </div>
                         <div className="flex-1 min-w-0">
-                            <h3 id="automation-discard-title" className="text-lg font-semibold text-ink">
-                                Discard these automation changes?
+                            <h3 id="automation-confirm-title" className="text-lg font-semibold text-ink">
+                                {title}
                             </h3>
-                            <p id="automation-discard-body" className="mt-1 text-sm text-ink-muted">
-                                Your unsaved changes will be lost if you close now. The schedule
-                                keeps running on whatever it was last saved with.
-                            </p>
+                            <div id="automation-confirm-body" className="mt-1 text-sm text-ink-muted">
+                                {body}
+                            </div>
                         </div>
                     </div>
                     <div className="mt-6 flex items-center justify-end gap-3">
@@ -197,14 +227,14 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
                             onClick={onCancel}
                             className="rounded-xl border border-glass-border px-4 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-black/5 dark:hover:bg-white/5 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                         >
-                            Keep editing
+                            {cancelLabel}
                         </button>
                         <button
                             type="button"
                             onClick={onConfirm}
                             className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-600 outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
                         >
-                            Discard
+                            {confirmLabel}
                         </button>
                     </div>
                 </motion.div>
@@ -213,7 +243,7 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
     )
 }
 
-export function AutomationModal({ open, onClose, isAdmin, summary }: {
+export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspended }: {
     open: boolean
     /** Must be referentially stable: it feeds ``useModalA11y``'s focus effect,
      *  and a fresh identity on every parent render would pull focus back to
@@ -221,6 +251,10 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     onClose: () => void
     isAdmin: boolean
     summary?: FreshnessSummary | null
+    /** Takes the reader to the sources the breaker stopped (closes the modal
+     *  and filters the table) — a count of sources waiting for a person is a
+     *  to-do list, not a statistic. */
+    onShowSuspended?: () => void
 }) {
     const qc = useQueryClient()
     const { notify } = useAppNotifications()
@@ -235,8 +269,18 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         queryKey: SETTINGS_KEY,
         queryFn: () => aggregationService.getAggregationSettings(),
         enabled: open,
+        // As fresh as the policy half: the app default (five minutes) would
+        // show ③ Act flipped on another screen as still on, and the
+        // changed-elsewhere check below can only see what this refetches.
+        staleTime: 30_000,
+        refetchInterval: RECONCILE_POLL_MS,
     })
     const cadence = settingsQ.data?.cadence
+
+    // What the server holds RIGHT NOW, as the gates resolve it — the rail
+    // shows the form, which may be edited and unsaved. The policy read carries
+    // the resolver's own answer, so this line cannot disagree with the gates.
+    const rightNow = rightNowLine(fleetHold(policy), summary?.suspended ?? 0)
 
     const [probeEnabled, setProbeEnabled] = useState(true)
     const [probeSecs, setProbeSecs] = useState<number | null>(null)
@@ -274,6 +318,13 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     const [seededSig, setSeededSig] = useState('')
     /** Armed by a dismissal gesture while there are unsaved edits. */
     const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+    /** A fleet-wide stop waiting to be confirmed. Held as the action itself,
+     *  so the confirmation cannot drift from what it is confirming: nothing
+     *  is written until ``run`` is called. Only the two fleet-wide stops arm
+     *  it — a timed pause lapses on its own, and a provider or source hold is
+     *  a local, reversible act that would not survive being asked about
+     *  twice. */
+    const [pendingStop, setPendingStop] = useState<{ run: () => void } | null>(null)
 
     const remoteSig = JSON.stringify([
         policy?.enabled, policy?.checkIntervalSecs, policy?.maxActionsPerRun,
@@ -428,6 +479,18 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         ),
     })
     const saveRecon = useSetReconciliationPolicy()
+    // The drawer's "Resume automation", for every suspended source at once —
+    // an action riding the policy PUT, never staged into Save.
+    const resumeAll = () => {
+        const n = summary?.suspended ?? 0
+        saveRecon.mutate({ resetBreaker: true }, {
+            onSuccess: () => notify(
+                'success',
+                `Automation resumed for ${n.toLocaleString()} source${n === 1 ? '' : 's'} — their next check starts fresh.`,
+            ),
+            onError: (e: Error) => notify('error', e.message || 'Could not resume automation.'),
+        })
+    }
 
     // What the STORED policy would do to the fleet right now. Debounced so
     // opening and closing the modal does not set a fleet scan going, and
@@ -471,7 +534,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         // Both writes land in the same stored record, so they are sequenced
         // rather than raced: the policy first, then the cadence, each merging
         // into what the other left.
-        saveRecon.mutate(
+        const commitSave = () => saveRecon.mutate(
             {
                 enabled: checkEnabled,
                 checkIntervalSecs: checkSecs,
@@ -495,6 +558,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                     notify('error', e.message || 'Could not save the reconciliation policy.'),
             },
         )
+
+        // ③ Act going off is a fleet-wide stop, and the only one that arrives
+        // by way of Save — so it is asked about here rather than at the
+        // toggle, where it would interrupt someone still deciding. Turning it
+        // back on, or saving with it already off, asks nothing.
+        const actWasOn = (cadence?.driftAutoRebuild ?? settingsQ.data?.envDriftAutoRebuild ?? true) !== false
+        if (actWasOn && driftAuto === false) {
+            setPendingStop({ run: commitSave })
+            return
+        }
+        commitSave()
     }
 
     // On a FIRST read failure both queries stop loading with no data, so "not
@@ -620,6 +694,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                 One pipeline, in the order it runs. Each stage feeds the next, so
                                 turning one off changes what the ones after it can see.
                             </p>
+                            <p className="mt-1.5 text-[11px] font-medium text-ink-secondary leading-snug">
+                                {rightNow}
+                            </p>
+                            {/* What that state does NOT stop. The line above
+                                names the control; this one is why reaching for
+                                it is safe. */}
+                            {fleetHold(policy) != null && (
+                                <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">
+                                    {HOLD_EFFECT.continues}
+                                </p>
+                            )}
                         </div>
                         )}
 
@@ -647,6 +732,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     <StageRow
                                         stage="detect"
                                         on={probeEnabled}
+                                        whenOff
                                         stat={detectStat}
                                     >
                                         <Ledger>
@@ -681,6 +767,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     <StageRow
                                         stage="check"
                                         on={checkEnabled}
+                                        whenOff
                                         muted={starvedIntoCheck}
                                         stat={checkStat}
                                     >
@@ -801,6 +888,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                     <StageRow
                                         stage="act"
                                         on={driftAuto}
+                                        whenOff
                                         muted={starvedIntoCheck || starvedIntoAct}
                                         stat={actStat}
                                     >
@@ -808,6 +896,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                             <SettingRow
                                                 label="Automatically rebuild a source when drift is detected"
                                                 htmlFor="automation-drift-auto"
+                                                hint="Off is a fleet-wide stop: nothing is rebuilt automatically — including retries of rebuilds already requested — until this is back on."
                                             >
                                                 <ToggleSwitch
                                                     id="automation-drift-auto"
@@ -916,18 +1005,69 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                 </span>
                                             </SettingRow>
 
+                                            {/* The fleet-wide hold: the drawer's snooze at fleet
+                                                scope. Immediate, never staged into Save — a pause
+                                                that waited for a Save button would be the one
+                                                control here that does not do what it says when
+                                                clicked. Most restrictive wins, so no source or
+                                                provider control can release it; it is also the
+                                                one thing the Overlay integrity header banners. */}
+                                            <SnoozeRow
+                                                scope="fleet"
+                                                idPrefix="automation-fleet-hold"
+                                                pausedUntil={policy?.pausedUntil}
+                                                stoppedAt={policy?.stoppedAt}
+                                                allowStop
+                                                disabled={!isAdmin}
+                                                pending={saveRecon.isPending}
+                                                onPatch={(patch, ok) => {
+                                                    const write = () => saveRecon.mutate(patch, {
+                                                        onSuccess: () => notify('success', `Fleet-wide: ${ok}`),
+                                                        onError: (e: Error) =>
+                                                            notify('error', e.message || 'Could not update the fleet-wide hold.'),
+                                                    })
+                                                    // The indefinite stop, and only it: a timed pause
+                                                    // says when it ends, and resuming asks nothing.
+                                                    if (patch.stopped === true) setPendingStop({ run: write })
+                                                    else write()
+                                                }}
+                                            />
+
                                             {/* The breaker's limit is deploy-owned and the API does
                                                 not report it, so this states the rule and the live
-                                                count rather than inventing a number. */}
+                                                count — as a way to those sources, because a count
+                                                of sources waiting for a person is a to-do list, not
+                                                a statistic. The resume is on each source's drawer,
+                                                and here for all of them at once. */}
                                             <SettingRow
-                                                label="Stop a source that keeps failing"
-                                                hint="A source that keeps needing the same rebuild waits for a person instead."
+                                                label="A source that keeps failing waits for a person"
+                                                hint="After repeated rebuilds that never clear the same problem, automation stops for that source until someone resumes it from its drawer — or all of them here."
                                             >
                                                 <span className="flex items-center gap-2">
                                                     {summary?.suspended != null && (
-                                                        <span className="text-[12px] text-ink-secondary tabular-nums">
-                                                            {summary.suspended.toLocaleString()} stopped now
-                                                        </span>
+                                                        onShowSuspended && summary.suspended > 0 ? (
+                                                            <button
+                                                                type="button"
+                                                                onClick={onShowSuspended}
+                                                                className="rounded text-[12px] font-semibold tabular-nums text-amber-700 dark:text-amber-300 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                                            >
+                                                                {summary.suspended.toLocaleString()} need a person
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-[12px] text-ink-secondary tabular-nums">
+                                                                {summary.suspended.toLocaleString()} need a person
+                                                            </span>
+                                                        )
+                                                    )}
+                                                    {isAdmin && summary?.suspended != null && summary.suspended > 0 && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={resumeAll}
+                                                            disabled={saveRecon.isPending}
+                                                            className="rounded text-[12px] font-semibold tabular-nums text-indigo-600 dark:text-indigo-400 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-50"
+                                                        >
+                                                            Resume all {summary.suspended.toLocaleString()}
+                                                        </button>
                                                     )}
                                                     <DeployTag />
                                                 </span>
@@ -1048,12 +1188,48 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                 </AnimatePresence>
             </div>
 
-            <ConfirmCloseDialog
+            <ConfirmDialog
                 open={showCloseConfirm}
+                title="Discard these automation changes?"
+                body={
+                    <p>
+                        Your unsaved changes will be lost if you close now. The schedule
+                        keeps running on whatever it was last saved with.
+                    </p>
+                }
+                cancelLabel="Keep editing"
+                confirmLabel="Discard"
                 onCancel={() => setShowCloseConfirm(false)}
                 onConfirm={() => {
                     setShowCloseConfirm(false)
                     onClose()
+                }}
+            />
+
+            {/* The estate-wide consequence, stated before it happens rather
+                than discovered afterwards from rows that stopped rebuilding. */}
+            <ConfirmDialog
+                open={pendingStop != null}
+                title="Stop automatic rebuilds for every source?"
+                body={
+                    <div className="space-y-2">
+                        <p>
+                            {summary?.total != null
+                                ? `This holds all ${summary.total.toLocaleString()} sources.`
+                                : 'This holds every source.'}{' '}
+                            {HOLD_EFFECT.stops}
+                        </p>
+                        <p><span className="font-medium text-ink-secondary">Still happens:</span> {HOLD_EFFECT.continues}</p>
+                        <p>{HOLD_EFFECT.keeps}</p>
+                    </div>
+                }
+                cancelLabel="Keep automation on"
+                confirmLabel="Stop rebuilds"
+                onCancel={() => setPendingStop(null)}
+                onConfirm={() => {
+                    const pending = pendingStop
+                    setPendingStop(null)
+                    pending?.run()
                 }}
             />
         </>,

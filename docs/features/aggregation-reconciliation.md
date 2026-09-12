@@ -17,7 +17,8 @@ Three compounding holes:
    only checks sources with `aggregation_schedule IS NOT NULL AND aggregation_status = 'ready'`,
    and nothing in the product ever sets that cron. It also made a live
    `get_schema_stats()` call per source per 60-second tick, which would not have
-   scaled even if it were reachable.
+   scaled even if it were reachable. **That loop has since been removed
+   entirely** — see *The scheduler no longer fingerprints graphs* below.
 3. **Never-aggregated sources were excluded by design.** `_AGG_NOT_APPLICABLE`
    means an onboarded source with zero AGGREGATED edges never got a first build
    from any signal — a documented limitation of the convergence work.
@@ -72,6 +73,54 @@ Plane) resolves policy and enqueues; the stats service executes, because every
 outbound provider call belongs to the tier that owns them. They meet at the
 `insights.jobs.probe` stream, whose SET NX claim means any number of requests
 for one source inside the claim window buy exactly one probe.
+
+## The scheduler no longer fingerprints graphs
+
+`AggregationScheduler._tick()` used to hold a second, older drift detector
+beside the probe lane: for **every** ready source, every 60 seconds, serially,
+it fetched a provider and computed a live graph fingerprint.
+
+The docstring's "for each due schedule" was aspirational: the SQL had no due
+predicate, so `aggregation_schedule` was stored on the row and never consulted
+and a source scheduled daily was probed every minute like all the rest.
+
+Its cost, accurately. `compute_graph_fingerprint` takes the constant-time
+counters first, the same ones the probe lane uses — `4 + labels + types` round
+trips, small per source and a few thousand queries a minute across a few
+hundred of them, serially, on the very threads that serve the canvas, in a
+tick that then cannot finish inside its own 60-second period. And it falls
+back to `get_schema_stats` — three unbounded scans (`MATCH (n) …
+collect(name)`, `MATCH ()-[r]->() RETURN type(r), count(*)`, and a full pass
+over every node's tags) — on any graph whose counters cannot answer
+(multi-label nodes) or whose fast probe errors. That is a cliff, not a tail:
+the client abandons the probe at `SCHEDULER_DRIFT_CHECK_TIMEOUT` (5 s) while
+the query carries its own 30 s server budget, so the node keeps burning one of
+its few query threads on a result nobody will read, once a minute, forever.
+
+The loop is gone. Nothing in `_tick` touches a graph now; it reconciles stale
+markers and, without a job-bus Redis, runs the stale-job watchdog. Drift
+detection lives entirely in the two lanes above, both of which were built for
+it:
+
+* the **probe** enqueues constant-time counts reads on a per-source cadence;
+* the **sweeper** compares those cached counts against `raw_fingerprint`, a
+  baseline that excludes `AGGREGATED` and so does not move on every rebuild —
+  capped at 200 sources and a bounded number of *actions* per tick, so a
+  fleet-wide change cannot queue one rebuild per source at once. The deleted
+  loop had no such cap: it signalled every drifted id it found, in one pass.
+
+**What this costs, stated plainly.** The raw fingerprint is derived from entity-
+and edge-type counts, so a change that leaves every count identical but alters
+something else — node tags, say — is no longer seen as drift. The scan fallback
+was the only thing that could ever see such a change, and only on the graphs it
+could finish. It is picked up by the next real change or a manual rebuild, and
+rollups are idempotent, so a missed drift means slightly stale rollups, never
+wrong ones.
+
+`SCHEDULER_DRIFT_CHECK_TIMEOUT` now has no reader in the scheduler;
+`compute_graph_fingerprint` remains for the callers that take a fingerprint
+once, with a budget, on a path a person is waiting on.
+
 
 ## The design
 
@@ -147,17 +196,138 @@ do not "align" them.
 | NULL baseline = seed | The first sweep over a fleet would classify every source as drifted and queue a fleet-wide rebuild. |
 | `expected > 0` on detector 1 | A containment-only graph legitimately materialises an empty cube and would rebuild forever. |
 | `already_marked` | The stale-marker reconciler in `scheduler.py` owns that source. Two mechanisms must never both retry one rebuild. |
-| Circuit breaker (3 consecutive actions) | A finding we can never clear would rebuild a huge graph every hour indefinitely. |
+| Circuit breaker (3 consecutive actions) | A finding we can never clear would rebuild a huge graph every hour indefinitely. The same counter bounds the stale-marker reconciler's retries after a failed or cancelled job. |
 | `no_ontology` | `trigger()` would raise `OntologyResolutionError` once an hour. Recorded as a finding instead — a useful signal on its own. |
 
-Three conditions produce a finding that is **recorded and surfaced but not acted
-on**, so the cockpit stays honest about drift even where automation is off:
-`disabled`, `paused` (an operator snooze, held in the state row's
-`paused_until` until it lapses — future-only and at most 90 days out) and
-`cooldown` / `failed_backoff`. (The guard names above describe conditions; the
-per-sweep tally uses the `SKIP_REASONS` tokens in `reconcile.py`, and holds
-advance the fairness clock while staying due through the unresolved-drift
-clause.)
+Several conditions produce a finding that is **recorded and surfaced but not
+acted on**, so the cockpit stays honest about drift even where automation is
+off: the operator holds (`disabled`, `paused`, `provider_held`, `fleet_held`
+— see the next section) and `cooldown` / `failed_backoff`. The breaker is
+checked *first*: a source that is both paused and at the cap tallies as
+`suspended`, stamps the verdict and fires its notice, rather than hiding
+behind `paused`. (The guard names above describe conditions; the per-sweep
+tally uses the `SKIP_REASONS` tokens in `reconcile.py`, and holds advance the
+fairness clock while staying due through the unresolved-drift clause.)
+
+### Holds: pause and stop, at three scopes
+
+An operator hold says "do not rebuild this automatically". Two kinds, visibly
+distinct in every surface — **Pause** is timed and lapses on its own,
+**Stop** is indefinite until someone resumes — at three scopes:
+
+| Scope | Stored where | Pause | Stop |
+|---|---|---|---|
+| source | `aggregation.data_source_state` | `paused_until` | `reconcile_enabled = false` (the "rebuild automatically" toggle *is* the stop) |
+| provider | `aggregation.automation_holds` `('provider', <id>)` | `paused_until` | `stopped_at` |
+| fleet | `aggregation.automation_holds` `('fleet', '')` | `paused_until` | `stopped_at` |
+| fleet, from the Automation modal's switches | `aggregation_settings.cadence_json` | — | ③ Act off (`driftAutoRebuild`) is a fleet-wide stop; ② Check off (`reconcileEnabled`) is a fleet-wide stop for every source that inherits it — an explicit per-source `true` escapes that one |
+
+**Most restrictive wins**, fleet → provider → source, and there is no
+per-source escape from a wider hold. Every gate resolves through one function
+(`holds.resolve_hold`), which reports the *widest* hold in force — so a row
+held by its provider says "Stopped by provider" and points at the provider
+row, not at a source-level Resume that could not release it.
+
+**A hold stops automation, never a person.** The gates key on the signal's
+`origin` (`drift` / `reconcile` / `reconcile-sweep` are automation; `script`,
+`connector` and `api` are external systems and people) — never on
+`trigger_source`, which defaults to `api` for every scheduler caller. A
+person's Rebuild proceeds with a warning ("Rebuilding now runs once; the pause
+stays") and the refresh event carries an `override` action. The one exception
+is the provider- and fleet-wide batch refresh, which *skips* held sources and
+reports them (`outcome: held`): two hundred sources is not a deliberate
+per-source override. A job already running is never interrupted; a hold blocks
+the next one — and a rebuild automation queued *before* the hold is not "the
+next one": it still runs when a worker gets to it (a person can cancel it from
+Job History, where the *Automatic reconciliation* chip says which jobs
+automation queued).
+
+The gates, every path that can queue a job: the reconcile sweeper's act
+decision; `trigger()` for the automation sources (`reconcile`, `drift`,
+`schedule` → `HeldError`, which the sweeper's first-build dispatch counts as a
+skip, never an error); `signal_source_changed` for automation origins (outcome
+`held` — caches are still invalidated and the stale marker still set, so the
+read path keeps serving the honest "may be out of date" overlay; only the
+rebuild is withheld); and the **stale-marker reconciler** in the scheduler,
+which used to retry every marked source every minute regardless of every
+other switch and was the path a pause could never reach. It now defers a
+held source and *keeps* the marker — clearing it would make a paused source
+look fresh — and its retries are **bounded**: after a failed *or cancelled*
+job it waits one rebuild window, retries up to the breaker cap (counting on
+the same `reconcile_consecutive_actions` the sweeper uses), then stamps the
+source `suspended`, rings the same notice, and waits for **Resume
+automation**. `manual`, `onboarding` and `post_purge` are exempt by
+construction (a purge that deleted the cells must be allowed its own
+re-aggregate).
+
+The wider-scope rows — and, for the same reason, the cadence's ③ Act and
+② Check switches — are read by primary key on every resolution, never
+cached: "Pause provider" on the web tier followed at once by "Refresh
+provider" on the Control Plane must skip what was just paused, and a 30s
+per-process cache would not (nor would it stop the *other* control-plane
+replica queueing rebuilds for its TTL after ③ Act was switched off, or stop
+it reading the switch back to the operator as still on).
+
+A source the breaker suspended (`Needs a person`) — by the sweeper or by the
+stale-marker reconciler's retries — has a manual way back: **Resume
+automation** in its drawer (`resetBreaker: true` on the settings PATCH)
+zeroes the consecutive-action count and lifts the `suspended` verdict;
+before that, the count only ever reset when a later check found the source in
+sync. The count is shared, so a sweeper action followed by failed retries
+trips the breaker sooner than three retries; `resetBreaker` is the escape
+either way.
+
+### Turning automation off and on
+
+Everything below withholds **rebuilds**, and only rebuilds. Nothing here
+deletes anything, and nothing here stops a person.
+
+| I want to… | Control | Where | Releases with |
+|---|---|---|---|
+| Quiet the whole fleet for a few hours | **Pause** (timed) | Automation → ③ Act → Advanced | Lapses on its own, or Resume |
+| Stop the whole fleet until I say otherwise | **Until resumed (stop)** | Automation → ③ Act → Advanced | Resume fleet-wide |
+| Stop rebuilding but keep watching | **③ Act** off | Automation → ③ Act | Switch it back on |
+| Stop checking as well as rebuilding | **② Check** off | Automation → ② Check | Switch it back on |
+| Hold one provider | **Pause provider…** | The provider's group header | Resume provider |
+| Hold one source for a while | The snooze | Source drawer → ③ Act | Lapses, or Resume |
+| Stop one source indefinitely | **Rebuild this source automatically** off | Source drawer → ③ Act | Switch it back on |
+| Stop the rebuild running right now | **Cancel** | Job History | Automation retries it, bounded by the breaker |
+| Bring back sources that gave up | **Resume automation** / **Resume all N** | Source drawer → ② Check / Automation → ③ Act | — |
+
+Two fleet-wide stops — switching ③ Act off, and choosing "Until resumed" —
+ask for confirmation first, naming the count and the three facts below. A
+timed pause, a provider hold and a per-source control do not: they say when
+they end, or they are one reversible row.
+
+**What stops.** No source is rebuilt automatically: the sweeper's rebuilds and
+first builds, the stale-marker retries, the drift signal, and the
+provider/fleet batch refresh, which skips held sources and reports them
+(`outcome: held`). Rolled-up lineage stays as it is and drifts further from
+the data as that data changes.
+
+**What carries on.** Sources are still watched (① Detect) and still judged
+(② Check); findings, evidence and `drift_state` are still recorded; every row
+still shows what is drifting, plus a hold chip; the read path still serves the
+"may be out of date" overlay, because a hold keeps the stale marker rather
+than clearing it. A person's Rebuild still runs — with a warning that the hold
+stays — and so does a job that was already running or already queued.
+
+**What is never touched.** Nothing is deleted. Turning automation back on
+starts from a fresh check; no backlog of held rebuilds is replayed.
+
+**What it looks like downstream.** A drifting source that nothing is allowed
+to rebuild keeps its amber *Graph Drift Detected* banner on the canvas — that
+banner is terminal by design, since only a rebuild clears it. It names the
+hold and points at both ways out: its own **Re-aggregate** button, which is a
+person and so is never held, and Ingestion → Automation for an admin. The
+compensation is the reason to reach for a hold during an incident: while it
+stands, no rebuild load reaches FalkorDB at all.
+
+**Confirming it took effect.** The Automation modal's "Right now" line, the
+banner at the top of Overlay integrity, every row's chip reading "Stopped
+fleet-wide", and the next sweep's `bySkip` tallying `fleet_held`. All four are
+computed by the same resolver as the gates, so agreement is structural rather
+than hopeful.
 
 ### Caps
 
@@ -256,11 +426,15 @@ versioning does not read as drifted on its first sweep afterwards.
 ## Configuration
 
 Global policy lives in `aggregation_settings.cadence_json` beside the rebuild
-cadence — the same store, the same 30-second cache, the same dialog.
+cadence — the same store, the same dialog. It is read by primary key on every
+read and never cached, so a switch flipped on one replica is what every other
+replica's next tick sees.
 
 | Field | Env fallback | Default |
 |---|---|---|
-| `reconcileEnabled` | `AGGREGATION_RECONCILE_ENABLED` | `true` |
+| `driftAutoRebuild` (③ Act) | `AGGREGATION_DRIFT_AUTO_REBUILD` | `true` — `false` is a fleet-wide stop |
+| `reconcileEnabled` (② Check) | `AGGREGATION_RECONCILE_ENABLED` | `true` |
+| `rebuildMinIntervalSecs` | `AGGREGATION_REBUILD_MIN_INTERVAL_SECS` | `900` (`0` disables the throttle) |
 | `reconcileCheckIntervalSecs` | `AGGREGATION_RECONCILE_INTERVAL_SECS` | `3600` (floor 30) |
 | `reconcileMaxActionsPerRun` | `AGGREGATION_RECONCILE_MAX_ACTIONS` | `10` |
 | `reconcileShrinkTolerancePct` | `AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT` | `10` |
@@ -344,9 +518,10 @@ source per hour — with tallies by reason and by skip code, trimmed to 30 days.
 |---|---|---|
 | `GET /api/v1/admin/freshness/reconciliation` | ingestion-read | in-process |
 | `GET /api/v1/admin/freshness/reconciliation/activity?since=` | ingestion-read | in-process |
-| `PUT /api/v1/admin/freshness/reconciliation` | `system:admin` | in-process |
+| `PUT /api/v1/admin/freshness/reconciliation` (also the fleet hold: `pausedUntil`, `stopped`; and `resetBreaker`, fleet-wide) | `system:admin` | in-process |
+| `PUT /api/v1/admin/freshness/holds/provider/{id}` `{pausedUntil?, stopped?}` | `system:admin` | in-process |
 | `POST /api/v1/admin/freshness/reconcile-now` `{dryRun, dataSourceIds?}` | `system:admin` | proxy |
-| `PATCH /api/v1/admin/data-sources/{id}/freshness-settings` | `ds:manage` | existing |
+| `PATCH /api/v1/admin/data-sources/{id}/freshness-settings` (also `resetBreaker`) | `ds:manage` | existing |
 
 External systems that want to *push* a change signal rather than wait for the
 probe to find it should read
@@ -356,8 +531,8 @@ which documents the supported paths and the constraints on each.
 `activity` defaults to the last 24 hours (`since=24h`, or an ISO timestamp).
 Each row is a finding from `reconcile_runs.detail.findings`, joined to
 `refresh_events` by `run_id`, so a rebuilt source carries its `jobId` and a
-held source (cooldown, cap, automation off, paused, already suspended) is still
-visible.
+held source (cooldown, cap, automation off, paused, provider- or fleet-held,
+already suspended) is still visible.
 
 The reads stay in-process in both modes because they are pure SQL over tables
 the web tier already reads; the write proxies because the sweeper lives on the
@@ -367,6 +542,11 @@ control plane. `actor` is forced server-side.
 > sent are written. Every field treats an explicit `null` as "clear this
 > override", so applying absent fields too would make a partial update silently
 > destructive.
+
+The policy read (and the PUT's response) carries the fleet-level hold as the
+resolver reports it — `heldBy` / `heldKind` / `heldUntil`, plus `heldReason`
+(`act`, `check` or `hold`) — so no UI has to re-derive it from the two
+switches and the row.
 
 ## UI
 
@@ -468,6 +648,32 @@ Advanced there would be symmetry for its own sake). Env-only values
 (`statsMaxAgeSecs`, the breaker cap) render as read-only context clearly marked
 as deploy-set, never as disabled inputs pretending to be editable.
 
+③ Act's toggle ("Automatically rebuild a source when drift is detected") off
+is a **fleet-wide stop everywhere**: the sweeper's rebuilds and first builds,
+the stale-marker reconciler's retries of rebuilds already requested, and the
+provider/fleet batch refresh all hold, and every row reads "Stopped
+fleet-wide". A single-source Rebuild a person clicks still runs. Every
+replica reads the switch fresh on its next tick; nothing caches it.
+
+③ Act's Advanced also carries the **fleet-wide hold** (the same snooze row as
+the drawer, plus "Until resumed (stop)"), which writes immediately rather than
+waiting for Save, and the breaker's live count as **"N need a person"** — a
+button that filters the table to those sources — and **Resume all N**, the
+drawer's Resume automation for every suspended source at once
+(`resetBreaker: true` on the policy PUT — an action, never staged into Save).
+A fleet hold is also bannered at the top of Overlay integrity, with Resume,
+because it is the one setting that makes every row's chip and every
+provider's control read "held".
+
+Under the rail, one line says what the server holds **right now** ("Right
+now: automatic rebuilds are stopped fleet-wide — ③ Act is off." / "…are on.
+3 sources need a person."). It is read off the policy's `heldBy` /
+`heldReason`, which the hold resolver itself computes, so it cannot disagree
+with the gates while the rail shows an edited, unsaved form. The Overlay
+integrity banner reads the same fields: it names the switch that stopped the
+fleet and offers Resume only for the fleet row — the switches are released
+from the modal, so for those it offers *Open Automation* instead.
+
 Closing with unsaved edits — `Esc`, the close button, or the backdrop — raises a
 discard confirmation rather than silently dropping the work.
 
@@ -492,17 +698,29 @@ to leave alone. This is why the snooze sits in ③ Act: it gates the rebuild, no
 the detection. An unparseable or past stamp is treated as expired, so a corrupt
 value can never pause a source forever.
 
+The snooze row is one shared control (`SnoozeRow`) that also serves the
+provider dialog ("Pause provider…" on the group header) and the fleet in the
+Automation modal's ③ Act; only the two wider scopes offer "Until resumed
+(stop)". Under a provider or fleet hold the drawer's row becomes a read-out
+("Rebuilds are held by the provider — resume it from the provider row"): most
+restrictive wins, so a source control that could not release the hold is not
+offered. A suspended source shows **Resume automation** in ② Check.
+
 ### Row chips
 
 `automationChip` renders at most one chip per row, in strict precedence:
-**Needs a person** (breaker tripped) → **Automation off** (deliberate opt-out) →
-**Paused** (snooze, and only while it is holding back a real finding). Absence
-is the signal — a healthy automated source shows nothing rather than repeating
-"everything is fine" on every row.
+**Rebuild won't fix this** (stalled projection) → **Needs a person** (breaker
+tripped) → the hold: **Stopped** / **Paused · 3h**, suffixed with the scope
+when it is not the source's own (**Stopped by provider**, **Paused fleet-wide ·
+2d**). Absence is the signal — a healthy automated source shows nothing rather
+than repeating "everything is fine" on every row.
 
-Precedence is not cosmetic. "Automation off" outranks "Paused" because a
-drifting, paused, opted-out source resumes on *nothing* when the snooze lapses,
-and showing "Paused" there would imply otherwise.
+A hold chip shows whether or not the row is currently drifting: a paused source
+that happens to be fine right now is exactly the one an operator forgets, and
+it is the pause, not the drift, that they set and will need to release. The
+chip filters to the `held` facet; a slate **Automation held** tile appears in
+the stat band while anything is held. Held is its own bucket, never folded into
+**Needs attention** — the pause exists to quiet that count.
 
 There is deliberately **no cooldown chip**: `FreshnessBadges` already renders
 "Next rebuild in Xm" from the same `cooldownUntil` on the same row, so a chip
@@ -521,21 +739,36 @@ seven states.
   and reports, and queues nothing.
 - **The first sweep seeds and acts on nothing** for drift; detectors 1 and 3 can
   fire on it, which is the point.
-- **A source stuck at "Reconcile suspended"** hit the breaker: it was rebuilt
-  repeatedly without the finding clearing. Fix why the rollups keep
-  disappearing first — the breaker resets only when a later evaluation finds
-  the source `in_sync` (a manual check *after* the underlying cause is fixed
-  does it; while the finding persists, checks re-confirm the suspension).
+- **A source stuck at "Reconcile suspended"** hit the breaker, for one of two
+  reasons: it was rebuilt repeatedly without the finding clearing, or its
+  rebuild failed (or was cancelled) and three automatic retries failed too.
+  Fix the cause first, then **Resume automation** in the drawer — or
+  **Resume all** in the Automation modal's ③ Act Advanced, for every suspended
+  source at once; the breaker also resets when a later evaluation finds the
+  source `in_sync`.
+- **Cancelling a queued rebuild** (one no worker has started) releases its
+  source: a built source is retried by automation after one rebuild window,
+  a never-built one is queued for its first build again. Cancel and a
+  worker's start exclude each other, so a cancelled job never runs; and
+  Resume clears the cancel flag, so a cancelled job can be resumed at once.
 - **Turning a detector off** stops rebuilds for it. The problem is still
   detected and still shown.
-- **A source that fails every rebuild on `MaterializationBudgetExceeded`** is
-  the forced-cube default meeting a graph too big for the write budget. It is
-  deterministic, so the job is not retried and the breaker suspends the source
-  after three passes. Either raise `maxMaterializedEdges` (~0.5KB of FalkorDB
-  RAM per edge, sized against ONE shard) or move the fleet's Rollup storage to
-  Auto in the Automation modal, which degrades to the depth-diagonal instead of
-  failing. Note the failed job leaves a partial cube behind — the next
-  successful rebuild reconciles it.
+- **A source that fails every rebuild on `MaterializationBudgetExceeded`**
+  ("write budget: …", shown as *Would not fit* in Freshness) is the forced-cube
+  default meeting a graph the shard that owns it cannot hold: the rebuild
+  measured that shard before writing and refused, and the message names the
+  shard, the edges and bytes needed, what was free after the reserve and the
+  shortfall. It is deterministic, so the job is not retried and the breaker
+  suspends the source after three passes. Ways out, in order: move the
+  fleet's Rollup storage to Auto in the Automation modal (degrades to the
+  depth-diagonal instead of failing); free or add memory on that shard — the
+  next rebuild reads it, nothing else has to change — or move the graph (a
+  dedicated projection lands on its own shard); or, if the headroom is real,
+  lower *Shard memory reserve* / correct *Bytes per rollup edge* in Defaults,
+  or clear an explicit *Edge ceiling* if the message says one governed.
+  Refused on the up-front estimate, the job wrote nothing; only the rarer
+  mid-run refusal (the shard filled while it ran) leaves a partial cube
+  behind, which the next successful rebuild reconciles.
 
 ## Verifying it end to end
 

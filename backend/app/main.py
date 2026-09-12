@@ -434,6 +434,18 @@ async def lifespan(_app: FastAPI):
     configure_json_logging()
     _log_auth_fingerprint()
 
+    # Metrics backend FIRST, so anything that counts during startup counts.
+    # Installing it is free and unconditional; the /metrics route that reads
+    # it is opt-in (METRICS_ENABLED). Until this call existed the façade was
+    # no-op in every process, which is why none of the governor, admission or
+    # pacing signals could be seen anywhere but one job's own record.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+
     # Interactive reads first: when the breaker proxy sees FalkorDB starve a
     # read (queue full, server-side or client deadline), stamp the shared
     # read-pressure key so aggregation writers in other pods yield their
@@ -2024,6 +2036,7 @@ async def _provider_error_handler(request, exc):
 # the breaker is open, this handler fires in <1ms with no network I/O.
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
+    ProviderFailingOver as _ProviderFailingOver,
     ProviderLoading as _ProviderLoading,
     ProviderTimeout as _ProviderTimeout,
     ProviderUnavailable as _ProviderUnavailable,
@@ -2082,13 +2095,47 @@ async def _provider_loading_handler(request, exc: _ProviderLoading):
     )
 
 
-# ProviderTimeout is a subclass of ProviderUnavailable but semantically "one
-# operation was too slow for its deadline" — the provider is reachable and
-# the breaker did NOT count it. Map to 504 + Retry-After with a distinct
-# PROVIDER_TIMEOUT code so the frontend retries the request (the stale-
-# fallback cache or a warm cache often answers the retry) instead of
-# declaring the graph provider offline. Registered BEFORE the parent
-# handler so FastAPI's MRO match picks this one.
+# ProviderFailingOver and ProviderTimeout are SIBLING subclasses of
+# ProviderUnavailable and both handlers are load-bearing — they came from two
+# different changes and mean different things. Keeping only one silently
+# reinstates the outage the other removed, so both stay, and both must precede
+# the ProviderUnavailable handler below (FastAPI matches by MRO).
+#
+# ProviderFailingOver is semantically a PAUSE: the cluster node holding this
+# graph is restarting or being replaced, which takes seconds. Distinct code +
+# a 3s Retry-After so the frontend keeps the data on screen, says
+# "reconnecting" and comes back — instead of the 30s error wall every user of
+# that graph used to get while the breaker sat open.
+@app.exception_handler(_ProviderFailingOver)
+async def _provider_failing_over_handler(request, exc: _ProviderFailingOver):
+    logger.info(
+        "Provider failing over on %s: provider=%s endpoint=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.endpoint, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_FAILING_OVER",
+                "providerName": exc.provider_name,
+                "endpoint": exc.endpoint,
+                "reason": (
+                    "the graph store node holding this graph is restarting or "
+                    "failing over — retrying automatically"
+                ),
+                "technical": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderTimeout is semantically "one operation was too slow for its
+# deadline" — the provider is reachable and the breaker did NOT count it. Map
+# to 504 + Retry-After with a distinct PROVIDER_TIMEOUT code so the frontend
+# retries the request (the stale-fallback cache or a warm cache often answers
+# the retry) instead of declaring the graph provider offline.
 @app.exception_handler(_ProviderTimeout)
 async def _provider_timeout_handler(request, exc: _ProviderTimeout):
     logger.info(
@@ -2122,7 +2169,15 @@ async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
             "detail": {
                 "code": "PROVIDER_UNAVAILABLE",
                 "providerName": exc.provider_name,
-                "reason": exc.reason,
+                # The breaker's own words ("Circuit open; will probe
+                # downstream again in ~28s") are for an operator, not for
+                # whoever opened a canvas: they read as a defect in the app.
+                # Kept verbatim under ``technical``, which the UI discloses.
+                "reason": (
+                    "the graph store for this provider is not answering; "
+                    "retrying automatically"
+                ),
+                "technical": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },
@@ -2838,6 +2893,21 @@ async def dependency_health():
         result["providers"] = provider_manager.report_provider_states()
     except Exception as exc:
         result["providers"] = {"_error": str(exc)[:200]}
+
+    # Graph store shape, from the reading already in hand. Zero I/O and it
+    # never triggers a sweep: this is where on-call looks during an incident,
+    # and dialling a store that IS the incident is the last thing wanted. A
+    # breaker state says a provider is unhappy; this says which nodes of which
+    # cluster are answering, and what the sweep already found wrong.
+    try:
+        from backend.app.services.graph_store import topology as _gs_topology
+
+        summary = _gs_topology.cached_summary()
+        result["graph_store"] = summary if summary is not None else {
+            "status": "no reading yet in this process",
+        }
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["graph_store"] = {"_error": str(exc)[:200]}
 
     # Resilience counters (per process, monotonic since boot). How often the
     # breaker was asked to judge a slow or rejected query and correctly did

@@ -32,6 +32,7 @@ const FACET_LABEL: Record<Exclude<StatusFacet, ''>, string> = {
     // call it — this map is total on purpose so a new verdict cannot reach
     // the active-filter chip unnamed.
     projectionStalled: 'Connections not up to date',
+    held: 'Automation held',
 }
 
 interface Props {

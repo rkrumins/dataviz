@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, Index, Integer, Text, text,
 )
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from backend.app.db.engine import Base
 
 
@@ -133,6 +134,12 @@ class AggregationJobORM(Base):
     run_stats = Column(Text, nullable=True)
     # worker_id: which worker (pod/consumer) executed this job.
     worker_id = Column(Text, nullable=True)
+    # live_overrides: limits an operator raised on the RUNNING job (JSON:
+    # max_wall_secs, scan_timeout_s, write_timeout_s, and a bounded history
+    # of who changed what, from what, to what). The stall window itself is
+    # ``timeout_secs``. The worker re-reads both from the row while the job
+    # runs, so a raise takes effect without cancelling anything.
+    live_overrides = Column(Text, nullable=True)
 
     # ── Fingerprinting (change detection) ────────────────────────────
     graph_fingerprint_before = Column(Text, nullable=True)
@@ -228,6 +235,38 @@ class AggregationDataSourceStateORM(Base):
     aggregation_status = Column(Text, nullable=False, default="none")
     last_aggregated_at = Column(Text, nullable=True)
     aggregation_edge_count = Column(Integer, nullable=False, default=0)
+    # What the last successful rebuild measured on the owning shard, per NEW
+    # rolled-up edge. The next rebuild's write budget uses it in place of the
+    # planning default (512 B). NULL until a fresh run with material growth
+    # has calibrated it — see ``providers.shard_capacity``.
+    observed_bytes_per_edge = Column(Integer, nullable=True)
+    # How many cells this graph ACTUALLY stores per cell the pre-compute
+    # estimate counts. The estimate sums, over every raw lineage edge, the
+    # product of its endpoints' ancestor-chain lengths — cells PRODUCED. The
+    # graph stores cells DISTINCT, because many raw edges collapse onto one
+    # aggregated cell and bump its weight. So the ratio is roughly 1 / mean
+    # weight, and the better a graph aggregates the smaller it gets: 0.02 on a
+    # graph compressing 50:1. Stable per source, because it is a property of
+    # the graph's SHAPE. NULL until a complete run has measured both numbers,
+    # and while it is NULL the estimate may not refuse anything.
+    # DOUBLE_PRECISION, not Float: `Float` compiles to `FLOAT`, Postgres
+    # stores that AS double precision, and reflection reads it back as
+    # `DOUBLE PRECISION` — so a `Float` here can never match the live column
+    # and `upgrade verify-schema` calls it a structural mismatch forever.
+    observed_cell_ratio = Column(DOUBLE_PRECISION, nullable=True)
+    # Per-source Rollup storage override: 'auto' | 'true' (full detail) |
+    # 'false' (depth-diagonal). NULL = inherit the fleet default (the stored
+    # Defaults row, then the env). Resolved at trigger time into the job's
+    # frozen ``materialize_fine_pairs`` by ``_effective_tuning``; a per-job
+    # request still wins over it.
+    rollup_storage = Column(Text, nullable=True)
+    # What the last successful rebuild of this source LEARNED under
+    # per-query pressure — JSON: the narrowest scan width it needed, whether
+    # it had to read serially, the reconcile strategy it switched to, the
+    # write batch / delete chunk it settled on, plus observed_at / job_id.
+    # Fed back to the next run as capacity hints that only ever make it
+    # stricter (never widen a knob); ``"{}"`` = the last run needed nothing.
+    observed_tuning = Column(Text, nullable=True)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
     # Per-source rebuild-cooldown override (seconds). NULL = fall through to
@@ -348,5 +387,38 @@ class AggregationSettingsORM(Base):
     # drift_auto_rebuild). Kept separate from tuning_json so the global
     # cadence never leaks into per-job frozen tuning.
     cadence_json = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=True)
+    updated_by = Column(Text, nullable=True)
+
+
+class AutomationHoldORM(Base):
+    """An operator hold on automatic rebuilds at PROVIDER or FLEET scope.
+
+    One row per held scope, keyed ``(scope, scope_id)`` — ``('fleet', '')``
+    for the whole fleet, ``('provider', <provider_id>)`` for one provider —
+    carrying the same two nullable columns the per-source hold has on
+    ``data_source_state`` (``paused_until`` = timed, lapses on its own;
+    ``stopped_at`` = indefinite, until someone resumes). ``holds.resolve_hold``
+    applies most-restrictive-wins across fleet → provider → source, so the
+    source's own controls cannot escape a wider hold.
+
+    Not a column on ``public.providers`` (viz-owned; every aggregation touch
+    of ``public`` is a read) and not a scope-keyed ``aggregation_settings``
+    row (its cadence chain is most-SPECIFIC-wins, the opposite rule). A row
+    is deleted when both columns are cleared, so the table only ever holds
+    what is actually held.
+    """
+    __tablename__ = "automation_holds"
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('fleet', 'provider')", name="ck_automation_holds_scope",
+        ),
+        {"schema": "aggregation"},
+    )
+
+    scope = Column(Text, primary_key=True)
+    scope_id = Column(Text, primary_key=True)   # '' for the fleet row
+    paused_until = Column(Text, nullable=True)  # ISO-8601; timed hold
+    stopped_at = Column(Text, nullable=True)    # ISO-8601; indefinite hold
     updated_at = Column(Text, nullable=True)
     updated_by = Column(Text, nullable=True)

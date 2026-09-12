@@ -80,11 +80,21 @@ is the ``latestUpdate`` guard that protects edges written during the run
 from __future__ import annotations
 
 import asyncio
+import collections
+import dataclasses
 import logging
 import os
+import random
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.app.providers.process_memory import MemoryGauge
+from backend.app.providers.shard_capacity import (
+    ShardMemory, WriteBudget, bytes_per_edge_default, calibrate_bytes_per_edge,
+    compute_write_budget, container_headroom_bytes, container_limit_bytes,
+    estimate_margin_pct_default, format_refusal, hold_reason, human_bytes,
+    read_shard_memory, replica_lag_hold_bytes, shard_reserve_pct_default,
+)
 from backend.common.providers.identity import (
     node_identity_expr as _shared_identity_expr,
 )
@@ -129,7 +139,7 @@ def _scan_range_width() -> int:
 
 
 def _max_pending_pairs() -> int:
-    """Memory cap on the in-worker pair accumulator AND the raw-pair base
+    """Count cap on the in-worker pair accumulator AND the raw-pair base
     map. Crossing it triggers a lattice roll-up (base) or an early flush
     to the graph (accumulator) — memory stays bounded on pathological
     graphs at the cost of extra writes.
@@ -137,12 +147,89 @@ def _max_pending_pairs() -> int:
     Default 50M keeps every graph up to that size on the flush-free diff
     path: overflow is exact but costs extra write round-trips, and the
     target scale (1M nodes / 2M edges → ~3-4M boundary pairs) never comes
-    close to the cap. NOTE the cap is what bounds WORKER RSS (not graph
-    memory — unaffected by FalkorDB topology): 50M pairs is ~5GB packed,
-    ABOVE the worker's 4Gi budget, so a graph that truly accumulates that
-    many pairs will OOM rather than flush. Lower this (or raise the worker
-    limit) before aggregating beyond ~30M pairs."""
+    close to the cap. The cap is the FLUSH-FREE ceiling, not the memory
+    wall: under a cgroup limit the memory-aware flush
+    (``AGGREGATION_FLUSH_MEM_PCT``, ``_memory_pressure``) flushes the
+    accumulator when the worker's RSS crosses that share of the limit,
+    however many pairs it holds, so a graph that produces more pairs than
+    the worker can hold flushes instead of OOM-killing the pod."""
     return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 50_000_000, 50_000, 50_000_000)
+
+
+def _flush_mem_pct() -> int:
+    """Share of the worker's cgroup memory limit at which the pipeline
+    flushes its accumulator early — the memory-aware flush. Read only when
+    both the RSS and the limit are known (fail-open otherwise: the pair cap
+    still bounds memory). Fleet-wide as ``flushMemPct``."""
+    return _env_int("AGGREGATION_FLUSH_MEM_PCT", 60, 30, 90)
+
+
+def _flush_min_pairs() -> int:
+    """How many pairs the accumulator must hold before a memory-aware flush
+    may fire: a worker whose RSS is high for another reason (a large base
+    map, a neighbour job in the same process) must not flush a handful of
+    pairs over and over."""
+    return _env_int("AGGREGATION_FLUSH_MIN_PAIRS", 100_000, 10_000, 50_000_000)
+
+
+def _replica_ack_min() -> int:
+    """How many replicas of the node the rollups land on must acknowledge a
+    write batch before the pipeline sends the next one.
+
+    This is the backpressure that keeps a rebuild from taking a shard down.
+    FalkorDB replicates a write below ``EFFECTS_THRESHOLD`` by having every
+    replica RE-RUN the query — on the replica's main thread, with no
+    timeout — so a rebuild that paces itself only against the master's
+    latency can run the replicas into their output buffers, a full resync,
+    and a health probe that kills a node busy applying. Waiting for the
+    acknowledgement makes the replicas' real capacity the write rate.
+
+    0 disables the wait (a deployment with no replicas, or one that
+    deliberately lets them fall behind). Fleet-wide and per job as
+    ``replicaAckMin``; raisable and lowerable on a RUNNING job."""
+    return _env_int("AGGREGATION_REPLICA_ACK_MIN", 1, 0, 5)
+
+
+def _replica_ack_timeout_ms() -> int:
+    """How long one acknowledgement wait may block before the pipeline
+    treats the replicas as behind and holds. Not a failure — the hold
+    heartbeats, re-reads the replication state and tries again."""
+    return _env_int("AGGREGATION_REPLICA_ACK_TIMEOUT_MS", 5_000, 500, 60_000)
+
+
+def _store_outage_hold_s() -> int:
+    """How long one run waits out a graph store node that is not answering
+    before it gives up and keeps its checkpoint.
+
+    A node that goes away mid-rebuild — an OOM kill, a health-probe
+    restart, a drained pod, a failover — used to end the attempt at once:
+    a refused connection was not "pressure", so it flew past the ladder and
+    the job burned a retry re-running EXTRACT from zero. Waiting is almost
+    always right: the node comes back (a full AOF replay of a large shard
+    is minutes), the run reconnects to it or to the replica promoted in its
+    place, and carries on from where it was."""
+    return _env_int("AGGREGATION_STORE_OUTAGE_HOLD_S", 900, 30, 7_200)
+
+
+def _store_hold_max_s() -> int:
+    """How long ONE hold may last before the run stops and keeps its
+    checkpoint — a hold being the pipeline waiting, before a write batch,
+    for the node to come back inside the envelope a rebuild may write
+    inside: a fork to finish, the replicas the run started with to reattach
+    and catch up, RSS to drop back under the container's line.
+
+    Per hold, not per run: a rebuild running for hours meets several AOF
+    rewrites, each a few minutes. A hold that outlives this is a node that
+    is not recovering on its own — a fork that never finished, a replica
+    that never came back — and writing into that is exactly what the hold
+    exists to prevent, so the run stops for a person instead."""
+    return _env_int("AGGREGATION_HOLD_MAX_SECS", 1800, 60, 21_600)
+
+
+#: How long one governor reading of the node serves consecutive write
+#: batches. A sub-batch takes about a second, so this is close to one
+#: ``INFO`` per batch without ever being two for the same batch.
+_GOVERNOR_READ_INTERVAL_S = 1.0
 
 
 def _delete_chunk() -> int:
@@ -159,6 +246,93 @@ def _pacing_ratio() -> float:
     for interactive readers. Higher = GENTLER (and slower): 1.0 → ≤ ~50%
     duty cycle, 0.5 → ≤ ~66%, 0.0 → no sleep at all."""
     return _env_float("AGGREGATION_WRITE_PACING_RATIO", 1.0, 0.0, 10.0)
+
+
+def _write_batch_max() -> int:
+    """The ceiling on rows per write batch — the largest MERGE the sizer may
+    grow to. A write query holds the graph's write lock from its first
+    mutation to its end, so one batch is also the longest stall a reader of
+    that graph sees; this and the target below decide how long that is.
+    Per job / Defaults as ``writeBatchMax``; a cap on a RUNNING job only
+    ever lowers it."""
+    return _env_int("AGGREGATION_WRITE_BATCH_MAX", 500, 10, 2_000)
+
+
+def _write_batch_target_s() -> float:
+    """What one write batch should take. The sizer halves the batch when one
+    runs longer than this and grows it — by 100 rows, after five batches in
+    a row under two fifths of it — toward the ceiling. Smaller and steadier
+    beats larger and faster: the same rows land in more, shorter lock
+    windows, and readers of the graph wait for a shorter one each time.
+    Per job / Defaults as ``writeBatchTargetS``; changeable on a RUNNING job."""
+    return _env_float("AGGREGATION_WRITE_BATCH_TARGET_S", 1.0, 0.1, 10.0)
+
+
+def _write_pacing_min_ratio() -> float:
+    """The pause after a write batch on a node with room to spare, as a
+    share of the batch's own duration.
+
+    ``AGGREGATION_WRITE_PACING_RATIO`` is what a rebuild pauses for when
+    the node is working; it is a CEILING on that pause, not a fixed cost.
+    A node with no fork in flight, every replica attached and in sync, and
+    a quarter of its container still free is not being protected by a
+    rebuild that idles half the time — it is just being made slow, and a
+    rebuild that never finishes protects nobody. So the governor's own
+    reading picks where in ``[this, writePacingRatio]`` the run sits, and
+    interactive reads still override both (they take the LARGER ratio).
+
+    0 means a roomy node is written to as fast as the batches come back —
+    the minimum gap is then the only spacing. Per job / Defaults as
+    ``writePacingMinRatio``."""
+    return _env_float("AGGREGATION_WRITE_PACING_MIN_RATIO", 0.25, 0.0, 10.0)
+
+
+def _write_min_gap_ms() -> int:
+    """The floor under the pause between write batches. The pause is a share
+    of the batch's own duration (``AGGREGATION_WRITE_PACING_RATIO``), so
+    fast small batches would otherwise follow each other back to back —
+    steady load needs a gap even then. Per job / Defaults as ``writeMinGapMs``."""
+    return _env_int("AGGREGATION_WRITE_MIN_GAP_MS", 100, 0, 10_000)
+
+
+#: The share of the batch target under which a batch counts as "healthy"
+#: for re-growing the batch — the old 0.8 s of a 2.0 s target.
+_GROW_BELOW_SHARE = 0.4
+
+#: Rows a rebuild writes per second when nothing has measured this source
+#: yet: the shipped shape (500-row batches, ~0.6 s each, paced 1:1) with a
+#: wide margin under it. Only ever used for the FIRST run's projection —
+#: every run measures its own rate and hands it to the next.
+_APPLY_ROWS_PER_S_DEFAULT = 300.0
+
+#: The share of a job's wall clock the apply phase may be projected to
+#: need before Auto stops choosing the full cube. The rest is extract,
+#: compute and reconcile, plus the room a projection from a single rate
+#: deserves.
+_APPLY_WALL_SHARE = 0.6
+
+#: How many ancestor closures one run keeps.
+#:
+#: A leaf's closure used to be evicted the moment it was computed, so that
+#: the memo could not grow with the LEAF count. On a sparse graph that costs
+#: nothing. On a densely connected one it is the run's dominant cost: a node
+#: that is an endpoint of ten thousand lineage edges has its ancestry walked
+#: ten thousand times, because the raw pairs are distinct even though the
+#: endpoints repeat. Keeping them bounded is the compromise — the first
+#: ``N`` nodes are remembered and everything past it behaves as before, so
+#: memory is capped whatever the graph looks like. At four ancestors a
+#: closure is a few hundred bytes; 400k of them is well inside the worker's
+#: own flush guard, which samples RSS and would flush before this mattered.
+_CLOSURE_MEMO_MAX = 400_000
+
+
+async def _pressure(check: Any, provider: Any, node: Optional[str]) -> Optional[str]:
+    """``read_pressure`` against the owning node, tolerating a controller
+    that predates the keyword (a rolling deploy pairs the two)."""
+    try:
+        return await check(provider, node=node)
+    except TypeError:
+        return await check(provider)
 
 
 def _read_pressure_pacing_ratio() -> float:
@@ -197,10 +371,51 @@ def _extract_concurrency() -> int:
 
 
 def _scan_shrink_floor() -> int:
-    """Smallest ID-range width the shrink-on-timeout ladder descends to.
-    A range THIS narrow that still times out is a server outage, not a
-    payload problem — the timeout propagates and the run fails."""
-    return _env_int("AGGREGATION_SCAN_SHRINK_FLOOR", 10_000, 1, 5_000_000)
+    """Narrowest ID-range width the pressure ladder descends to. Default 1:
+    the ladder keeps halving until a single row is all a query reads, so
+    "too large for the per-query ceiling" is only ever said of ONE row. A
+    higher floor stops the descent early (faster failure, less certainty);
+    per job it is the ``scanShrinkFloor`` tuning knob."""
+    return _env_int("AGGREGATION_SCAN_SHRINK_FLOOR", 1, 1, 5_000_000)
+
+
+def _scan_timeout_retries() -> int:
+    """How many times a floor-width scan that keeps timing out is re-issued
+    (with exponential backoff and heartbeats) before the run gives up and
+    reports a graph-store outage. 0 = give up at once."""
+    return _env_int("AGGREGATION_SCAN_TIMEOUT_RETRIES", 6, 0, 20)
+
+
+def _reconcile_keys_only_width() -> int:
+    """Width at or below which a RECONCILE scan under pressure switches to
+    the keys-only strategy (two passes: a light key projection, then an
+    index seek for the desired keys) instead of halving further. Key rows
+    are ~10x lighter than the 11-column projection, so the width can stay
+    where it is."""
+    return _env_int("AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH", 5_000, 1, 5_000_000)
+
+
+def _write_timeout_s() -> float:
+    """Per-query budget for the pipeline's write and delete queries; the
+    same env the provider's bulk-CREATE timeout reads, but the pipeline
+    allows up to 600s because the server clamps every query at its own
+    ``TIMEOUT_MAX`` anyway (``FALKORDB_SERVER_TIMEOUT_MAX_MS``)."""
+    return _env_float("FALKORDB_BULK_CREATE_TIMEOUT_S", 60.0, 5.0, 600.0)
+
+
+def _stall_timeout_secs() -> int:
+    """The worker's no-forward-progress window, read here only so the
+    settings API can report it beside the other knobs (the worker keeps its
+    own reader as the final fallback). Per job: ``timeoutSecs`` on the job,
+    then the ``stallTimeoutSecs`` tuning knob, then this env."""
+    return _env_int("AGGREGATION_STALL_TIMEOUT_SECS", 10_800, 60, 604_800)
+
+
+def _max_wall_secs() -> int:
+    """The worker's wall-clock safety net, mirrored here for the settings
+    API like ``_stall_timeout_secs``. Never lower than the job's stall
+    window. Per job: the ``maxWallSecs`` tuning knob."""
+    return _env_int("AGGREGATION_JOB_MAX_WALL_SECS", 86_400, 3_600, 604_800)
 
 
 def _materialize_leaf_pairs() -> bool:
@@ -245,6 +460,12 @@ def _materialize_fine_pairs_mode() -> str:
     return "auto"
 
 
+#: Upper bound on the explicit edge ceiling. A 256GB shard holds ~400M edges
+#: at 512 B each; the old 50M bound was a wall an operator with the memory
+#: could not get past.
+_MAX_EDGES_BOUND = 500_000_000
+
+
 def _max_materialized_edges() -> int:
     """Hard write budget: the pipeline refuses (fails the job loudly with
     guidance) rather than writing more :AGGREGATED edges than this into
@@ -275,29 +496,183 @@ def _max_materialized_edges() -> int:
     more on a cluster than standalone — ``noeviction`` at the shard cap
     fails writes for every graph on that shard, and with
     ``cluster-require-full-coverage no`` the rest of the cluster keeps
-    serving, so it degrades partially instead of obviously. Raise it per
-    job (ceiling 50M) only on an instance with the headroom to match."""
-    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, 50_000_000)
+    serving, so it degrades partially instead of obviously. It is now the
+    FALLBACK rule: when the owning shard can be measured, the shard's real
+    headroom governs (see ``shard_capacity``) and this count applies only
+    as an explicit ceiling set in tuning."""
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, _MAX_EDGES_BOUND)
 
 
 def _max_cube_edges() -> int:
-    """Ceiling on the AUTO-mode full-cube estimate — deliberately separate
-    from ``_max_materialized_edges``.
+    """An OPTIONAL appetite ceiling on the Auto-mode full cube.
 
-    Auto mode stores the full cube when its estimate fits, and the cube
-    scales as edges × depth² (observed: 1.17M edges → 5.6M pairs → OOM).
-    Sharing the write budget would mean raising that backstop silently
-    flipped auto into full-cube for nearly every real graph — turning
-    "Auto" into "Always full detail". This knob keeps the cube decision
-    pinned to what the owning SHARD can actually hold (~8M edges ≈ 4GB at
-    0.5KB/edge) while the write budget stays a runaway backstop. Keep it
-    strictly below ``_max_materialized_edges`` — a cube the write budget
-    would reject should never be selected in the first place."""
-    return _env_int("AGGREGATION_MAX_CUBE_EDGES", 8_000_000, 10_000, 50_000_000)
+    It used to default to 8M and was the thing that actually decided
+    whether a graph got full detail, because when it was written there was
+    nothing better: the cube scales as edges × depth² (observed: 1.17M
+    edges → 5.6M pairs → OOM) and no measurement stood between a large
+    graph and an OOM-killed node.
+
+    Two measurements do now. The WRITE BUDGET reads the owning shard —
+    used memory against maxmemory, RSS against the container, minus what
+    other rebuilds hold — so "will this cube fit" is answered by the node
+    rather than by a number chosen in advance; and the APPLY PROJECTION
+    (``_projected_apply_secs``) answers "will it land inside this job's
+    wall clock" from the rate this source actually writes at. A fixed cell
+    count answers neither question for any particular graph: 8M cells is
+    half an hour on a roomy node and a refusal on a full one.
+
+    So it defaults to its bound, which is to say it does not bind, and the
+    two measurements govern. An operator who wants a deliberate appetite
+    limit — "never store more than N cells for this fleet however much
+    room there is" — sets one, and Auto honours it. Fleet-wide from the
+    Defaults dialog as ``maxCubeEdges``."""
+    return _env_int("AGGREGATION_MAX_CUBE_EDGES", 50_000_000, 10_000, 50_000_000)
+
+
+def _budget_recheck_edges() -> int:
+    """How many first-touch edges APPLY writes between re-reads of the
+    owning shard. The post-compute check answered for the whole result at
+    one instant; a shard shared with another graph's rebuild can fill up
+    while a multi-million-edge apply is still landing, and under
+    ``noeviction`` the write that fills it fails every graph's writes on
+    that shard. Re-measuring every N edges turns that into a loud refusal
+    a person can resume from the cursor once memory is freed."""
+    return _env_int("AGGREGATION_BUDGET_RECHECK_EDGES", 1_000_000, 100_000, 100_000_000)
+
+
+def env_tuning_defaults() -> Dict[str, Any]:
+    """Every tuning knob's ENV-resolved default, read live and keyed the way
+    ``tuning_json`` stores them — so the settings API can tell the editors
+    what "empty" really means instead of each editor hard-coding a guess.
+    ``estimate_margin_pct``, ``max_cube_edges``, ``budget_recheck_edges``,
+    ``scan_timeout_retries``, ``reconcile_keys_only_width``,
+    ``server_timeout_max_ms`` and ``flush_min_pairs`` are information only:
+    env-only, shown, never settable through ``AggregationTuning``."""
+    from backend.app.config import resilience
+    return {
+        "scan_range_width": _scan_range_width(),
+        "max_pending_pairs": _max_pending_pairs(),
+        "apply_chunk": _apply_chunk(),
+        "delete_chunk": _delete_chunk(),
+        "write_pacing_ratio": _pacing_ratio(),
+        "extract_concurrency": _extract_concurrency(),
+        "materialize_leaf_pairs": _materialize_leaf_pairs(),
+        "materialize_fine_pairs": _materialize_fine_pairs_mode(),
+        "max_materialized_edges": _max_materialized_edges(),
+        "shard_reserve_pct": shard_reserve_pct_default(),
+        "bytes_per_edge": bytes_per_edge_default(),
+        "scan_shrink_floor": _scan_shrink_floor(),
+        "scan_timeout_s": _scan_timeout_s(),
+        "write_timeout_s": _write_timeout_s(),
+        "stall_timeout_secs": _stall_timeout_secs(),
+        "max_wall_secs": _max_wall_secs(),
+        "ignore_observed": False,
+        "estimate_margin_pct": estimate_margin_pct_default(),
+        "max_cube_edges": _max_cube_edges(),
+        "budget_recheck_edges": _budget_recheck_edges(),
+        "scan_timeout_retries": _scan_timeout_retries(),
+        "reconcile_keys_only_width": _reconcile_keys_only_width(),
+        "server_timeout_max_ms": int(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS),
+        "flush_mem_pct": _flush_mem_pct(),
+        "replica_ack_min": _replica_ack_min(),
+        "replica_ack_timeout_ms": _replica_ack_timeout_ms(),
+        "flush_min_pairs": _flush_min_pairs(),
+        "write_batch_max": _write_batch_max(),
+        "write_batch_target_s": _write_batch_target_s(),
+        "write_min_gap_ms": _write_min_gap_ms(),
+        "write_pacing_min_ratio": _write_pacing_min_ratio(),
+    }
+
+
+def resolve_effective_tuning(
+    tuning: Optional[Dict[str, Any]], hints: Optional[Dict[str, Any]], *,
+    bulk_timeout_default: float = 60.0,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Every knob's value for a run and where each came from —
+    ``"job"`` (the frozen tuning), ``"hint"`` (what a previous run of the
+    same source measured; bytes per edge only), or ``"env"``. Resolves
+    exactly as the pipeline's own readers do (same bounds, same env
+    fallbacks), so the record a run leaves in ``run_stats`` is what it
+    actually ran with. Pure; also used by tests to pin the parity."""
+    t = dict(tuning or {})
+    h = dict(hints or {})
+    values: Dict[str, Any] = {}
+    sources: Dict[str, str] = {}
+
+    def _num(name: str, env_default: Callable[[], Any], lo: Any, hi: Any, cast: Callable) -> None:
+        raw = t.get(name)
+        if raw is None:
+            values[name], sources[name] = env_default(), "env"
+            return
+        try:
+            values[name], sources[name] = max(lo, min(hi, cast(raw))), "job"
+        except (TypeError, ValueError):
+            values[name], sources[name] = env_default(), "env"
+
+    _num("scan_range_width", _scan_range_width, 10_000, 5_000_000, int)
+    _num("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000, int)
+    _num("apply_chunk", _apply_chunk, 1_000, 200_000, int)
+    _num("delete_chunk", _delete_chunk, 100, 50_000, int)
+    _num("write_pacing_ratio", _pacing_ratio, 0.0, 10.0, float)
+    _num("extract_concurrency", _extract_concurrency, 1, 4, int)
+    _num("shard_reserve_pct", shard_reserve_pct_default, 0, 90, int)
+    _num("scan_shrink_floor", _scan_shrink_floor, 1, 5_000_000, int)
+    _num("scan_timeout_s", _scan_timeout_s, 5.0, 600.0, float)
+    _num("write_timeout_s", lambda: float(bulk_timeout_default), 5.0, 600.0, float)
+    _num("flush_mem_pct", _flush_mem_pct, 30, 90, int)
+    _num("max_cube_edges", _max_cube_edges, 10_000, 50_000_000, int)
+    _num("replica_ack_min", _replica_ack_min, 0, 5, int)
+    _num("replica_ack_timeout_ms", _replica_ack_timeout_ms, 500, 60_000, int)
+    _num("write_batch_max", _write_batch_max, 10, 2_000, int)
+    _num("write_batch_target_s", _write_batch_target_s, 0.1, 10.0, float)
+    _num("write_min_gap_ms", _write_min_gap_ms, 0, 10_000, int)
+    _num("write_pacing_min_ratio", _write_pacing_min_ratio, 0.0, 10.0, float)
+    _num("estimate_margin_pct", estimate_margin_pct_default, 0, 100, int)
+    values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
+
+    for name, env_default in (
+        ("materialize_leaf_pairs", _materialize_leaf_pairs),
+        ("ignore_observed", lambda: False),
+    ):
+        raw = t.get(name)
+        values[name], sources[name] = (bool(raw), "job") if raw is not None else (env_default(), "env")
+
+    raw_fine = t.get("materialize_fine_pairs")
+    if raw_fine is None:
+        values["materialize_fine_pairs"], sources["materialize_fine_pairs"] = (
+            _materialize_fine_pairs_mode(), "env",
+        )
+    elif isinstance(raw_fine, str) and raw_fine.strip().lower() == "auto":
+        values["materialize_fine_pairs"], sources["materialize_fine_pairs"] = "auto", "job"
+    else:
+        values["materialize_fine_pairs"] = "true" if raw_fine else "false"
+        sources["materialize_fine_pairs"] = "job"
+
+    raw_cap = t.get("max_materialized_edges")
+    try:
+        cap = int(raw_cap) if raw_cap is not None else None
+    except (TypeError, ValueError):
+        cap = None
+    # None = no explicit ceiling: the measured shard governs (the env count
+    # cap applies only when the shard cannot be measured).
+    values["max_materialized_edges"], sources["max_materialized_edges"] = (
+        (cap, "job") if cap else (None, "env")
+    )
+
+    raw_bpe = t.get("bytes_per_edge")
+    hint_bpe = h.get("bytes_per_edge_observed")
+    if raw_bpe is not None:
+        values["bytes_per_edge"], sources["bytes_per_edge"] = int(raw_bpe), "job"
+    elif hint_bpe:
+        values["bytes_per_edge"], sources["bytes_per_edge"] = int(hint_bpe), "hint"
+    else:
+        values["bytes_per_edge"], sources["bytes_per_edge"] = bytes_per_edge_default(), "env"
+    return values, sources
 
 
 class MaterializationBudgetExceeded(ValueError):
-    """The computed result is larger than ``max_materialized_edges``.
+    """The result would not fit the owning shard's headroom — or, when the
+    shard cannot be measured, exceeds ``max_materialized_edges``.
 
     Deterministic: recomputing yields the same count, so the worker must
     fail the job terminally instead of consuming its retry budget."""
@@ -325,6 +700,205 @@ class MaterializationQueryMemoryExceeded(ValueError):
     the worker unwrapped instead of being relabelled ``ProviderUnavailable``
     and counted against the breaker. A query too large for its slice is not
     a sick provider."""
+
+
+class TerminalStoreFailure(Exception):
+    """A verdict the run has already reached — no ladder may narrow its way
+    out of it.
+
+    Both terminal failures below quote the underlying redis error in their
+    message so a failed run names the node. Classification is by text, so
+    without this marker ``MaterializationStoreUnreachable`` reads back as
+    ordinary ``"connection"`` pressure and lands in the ladder that called
+    it: the ladder would halve a page it cannot deliver to a node that is
+    not there, re-enter the spent outage budget on each half, and — because
+    the narrowing is sticky — leave the run limping at the floor width long
+    after the node came back. The classifier tests this marker first, so a
+    terminal failure propagates whatever its message happens to say.
+    """
+
+
+class MaterializationScanTimedOut(TerminalStoreFailure, TimeoutError):
+    """A floor-width scan (or a minimum-size write/delete) kept timing out
+    through every backoff retry the ladder allows.
+
+    At the narrowest width the pipeline can read, a timeout is no longer a
+    payload problem but a graph store that is not answering — an outage.
+    Subclasses ``TimeoutError`` (which ``asyncio.TimeoutError`` IS on 3.11+)
+    so it counts toward the circuit breaker exactly as the raw timeout did
+    and the worker's ordinary transient-retry path resumes the job from its
+    checkpoint; unlike the raw timeout it carries a message that names the
+    scan, the width, the budget and the server cap instead of arriving at
+    the worker as an empty string that was then reported as a watchdog
+    kill."""
+
+
+class MaterializationStoreUnreachable(TerminalStoreFailure, ConnectionError):
+    """The graph store node the run writes to stopped answering and did not
+    come back inside the run's outage budget.
+
+    Not the same failure as a query the store refuses: nothing about the
+    query is wrong, and the run holds every byte of progress it had. It
+    subclasses ``ConnectionError`` so the worker's existing transient path
+    resumes the job from its checkpoint, and it carries the endpoint and how
+    long the wait was — the two facts a failed run used to lose entirely,
+    because the breaker's "Circuit open" text overwrote the only message
+    that named the node."""
+
+
+class MaterializationStoreUnstable(MaterializationStoreUnreachable):
+    """The node the run writes to stayed outside the envelope a rebuild may
+    write inside — forked, missing the replicas the run started with, a
+    replica too far behind, or past the memory line — for longer than one
+    hold may last (``AGGREGATION_HOLD_MAX_SECS``).
+
+    A kind of unreachable, and handled like one: the run keeps its
+    checkpoint and stops for a person, because a node that is not
+    recovering on its own is not one to write into. The message says what
+    the node was doing and what to check."""
+
+
+# ---------------------------------------------------------------------------
+# Pressure ladder primitives — pure, so they are unit-testable without a
+# provider. The pipeline reacts to two kinds of per-query pressure the same
+# way: it reads LESS per query (and, first, reads serially) until the query
+# fits, and only when a single row is all it reads does it conclude.
+# ---------------------------------------------------------------------------
+
+
+def _pressure_kind(exc: BaseException) -> Optional[str]:
+    """``"timeout"`` / ``"memory"`` / ``"connection"`` — the three signals
+    the pipeline reacts to; ``None`` for everything else (which propagates).
+
+    A timeout is EITHER the client deadline (``asyncio.TimeoutError`` /
+    ``TimeoutError``) OR the server's own ``Query timed out`` refusal — the
+    latter is what production actually produces, because every query goes
+    out with ``TIMEOUT = budget − 500 ms`` and the server aborts first."""
+    # A verdict the run already reached is not a signal to react to: it is
+    # the end of reacting. Tested first, before any text matching.
+    if isinstance(exc, TerminalStoreFailure):
+        return None
+    # One classifier, shared with the aggregated-edge read ladder.
+    from backend.app.providers.falkordb_provider import _pressure_kind as _kind
+    return _kind(exc)
+    return None
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _backoff_s(attempt: int) -> float:
+    """Exponential backoff with jitter for floor-width timeout retries:
+    2s, 4s, 8s … capped at 60s, plus up to 1s of jitter."""
+    return min(60.0, 2.0 ** (attempt + 1)) + random.uniform(0.0, 1.0)
+
+
+def _next_scan_width(
+    sticky: Optional[int], ceiling: int, fail_width: Optional[int], streak: int,
+) -> Optional[int]:
+    """The re-grow rule for the sticky scan width after ``streak``
+    consecutive successes: double after 8, but never back up to a width
+    that failed for this scan this run unless the streak has reached 64 —
+    a bounded probe instead of a sawtooth that re-fails every ninth query.
+    Returns the new sticky width (``None`` = back at the knob width)."""
+    if sticky is None:
+        return None
+    if streak < 8:
+        return sticky
+    doubled = sticky * 2
+    if fail_width is not None and doubled >= fail_width and streak < 64:
+        return sticky
+    return None if doubled >= ceiling else doubled
+
+
+class _PaceMeter:
+    """What the write side is doing, batch by batch: the last batch's
+    figures and a rolling window of the last twenty, from which the duty
+    cycle (share of the time the run is writing or waiting on the store,
+    rather than pausing) and the rate follow. Rows and seconds only — the
+    meter measures, the scheduler decides."""
+
+    __slots__ = ("batches", "rows", "busy_s", "idle_s", "last", "_window")
+
+    def __init__(self) -> None:
+        self.batches = 0
+        self.rows = 0
+        self.busy_s = 0.0
+        self.idle_s = 0.0
+        self.last: Dict[str, Any] = {}
+        self._window: "collections.deque" = collections.deque(maxlen=20)
+
+    def note(
+        self, *, rows: Optional[int], batch_s: float, ack_s: float, sleep_s: float,
+        batch_max: int, target_s: float, ratio: float,
+    ) -> None:
+        n = int(rows or 0)
+        self.batches += 1
+        self.rows += n
+        self.busy_s += batch_s + ack_s
+        self.idle_s += sleep_s
+        self._window.append((batch_s + ack_s, sleep_s, n))
+        self.last = {
+            "batch_rows": n, "batch_s": round(batch_s, 3), "ack_s": round(ack_s, 3),
+            "sleep_s": round(sleep_s, 3), "batch_max": int(batch_max),
+            "target_s": round(float(target_s), 2), "ratio": round(float(ratio), 2),
+        }
+
+    def snapshot(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            **self.last, "batches": self.batches, "rows": self.rows,
+            "busy_s": round(self.busy_s, 1), "idle_s": round(self.idle_s, 1),
+        }
+        busy = sum(w[0] for w in self._window)
+        idle = sum(w[1] for w in self._window)
+        rows = sum(w[2] for w in self._window)
+        if busy + idle > 0:
+            out["duty_pct"] = int(round(100.0 * busy / (busy + idle)))
+            out["rows_per_s"] = round(rows / (busy + idle), 1)
+        return out
+
+
+class _StickyCap:
+    """A sticky size cap for write/delete batches under pressure: halves
+    toward ``floor`` on a failure, re-grows by doubling after 8 successes,
+    and remembers the smallest size it needed this run."""
+
+    __slots__ = ("value", "floor", "streak", "shrinks", "minimum")
+
+    def __init__(self, floor: int, value: Optional[int] = None) -> None:
+        self.value: Optional[int] = value      # None = no cap in force
+        self.floor = max(1, floor)
+        self.streak = 0
+        self.shrinks = 0
+        self.minimum: Optional[int] = value
+
+    def apply(self, size: int) -> int:
+        return max(self.floor, min(size, self.value)) if self.value else max(self.floor, size)
+
+    def shrink(self, current: int) -> int:
+        """Halve from ``current`` toward the floor; returns the new cap."""
+        half = max(self.floor, current // 2)
+        if self.value is None or half < self.value:
+            self.value = half
+        if self.minimum is None or half < self.minimum:
+            self.minimum = half
+        self.shrinks += 1
+        self.streak = 0
+        return self.value
+
+    def note_success(self) -> None:
+        if self.value is None:
+            return
+        self.streak += 1
+        if self.streak >= 8:
+            self.streak = 0
+            self.value = self.value * 2
+
+    def at_floor(self, current: int) -> bool:
+        return current <= self.floor
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +982,26 @@ class _PairValues:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+def _metric(name: str, **labels: str) -> None:
+    """Emit, and never let emitting fail a rebuild. Every call site below sits
+    inside the governor or a write path."""
+    try:
+        from backend.app.jobs.metrics import increment
+
+        increment(name, **labels)
+    except Exception:  # noqa: BLE001 — a counter is never worth a job
+        pass
+
+
+def _observe(name: str, value: float, **labels: str) -> None:
+    try:
+        from backend.app.jobs.metrics import observe
+
+        observe(name, value, **labels)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class AggregationPipeline:
     """One materialization run against one provider/graph.
 
@@ -432,9 +1026,35 @@ class AggregationPipeline:
         should_cancel: Optional[Callable[[], bool]],
         tuning: Optional[Dict[str, Any]] = None,
         job_id: Optional[str] = None,
+        capacity_hints: Optional[Dict[str, Any]] = None,
+        live_limits: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.p = provider
         self._job_id = job_id or ""
+        # What the worker knows that the shard does not: the bytes-per-edge
+        # a previous run of THIS graph measured. Never tuning — an operator
+        # override of the same figure comes through ``tuning`` instead.
+        self._capacity_hints: Dict[str, Any] = dict(capacity_hints or {})
+        self._last_budget: Optional[WriteBudget] = None
+        # This job's entry in the owning node's reservation ledger: the
+        # bytes it may still write that the node's ``used`` does not show.
+        # Held from the first passed budget check, shrunk at each recheck,
+        # released with the lease.
+        self._reservation: Optional[Any] = None
+        self._used_before: Optional[int] = None
+        self._edges_before: int = 0
+        self._calibration: Optional[Dict[str, Any]] = None
+        #: What the cube would cost in time, and why Auto stepped off it.
+        self._cube_projection: Optional[Dict[str, Any]] = None
+        #: The mode was settled without a counting pass, so the extract scan
+        #: counts the cube's upper bound as it goes (see the forced branch
+        #: of ``_decide_materialization_mode``).
+        self._estimate_in_extract = False
+        self._anc_memo: Dict[int, int] = {}
+        self._degraded_reason: str = ""
+        self._slow_cube_advisory: Optional[Dict[str, Any]] = None
+        self._fresh_run: bool = True
+        self._budget_rechecks: int = 0       # mid-apply shard re-reads this run
         # Per-job tuning overrides (frozen on the job row at trigger time)
         # layered over env defaults — see _knob_int/_knob_float/_knob_bool.
         self._tuning: Dict[str, Any] = dict(tuning or {})
@@ -475,12 +1095,20 @@ class AggregationPipeline:
         # for run_stats so an over-budget fallback is never silent.
         self._cube_mode: Optional[bool] = None
         self._cube_estimate: Optional[int] = None
+        # The raw sum before the measured ratio is applied — reported so the
+        # estimator's accuracy is visible per run instead of only inferable
+        # from which jobs failed.
+        self._cube_estimate_upper: Optional[int] = None
         # Memoized ancestor closures ({ancestor_or_self: depth}) keyed by
         # CONTAINER id only — bounded by container count (every strict
         # ancestor is a containment parent); leaf closures are derived
         # from their parents' cached closures and never stored. Reset
         # when the parent map reloads.
         self._closure_memo: Dict[int, Dict[int, int]] = {}
+        #: Each endpoint's CONTAINER ancestry, the input the boundary rule
+        #: actually consumes. Derived from the closure and far smaller, and
+        #: the one a dense graph asks for over and over.
+        self._rep_memo: Dict[int, Dict[int, int]] = {}
         # Containment depth per node (roots 0, child = 1 + max over
         # parents) — one int per touched node; feeds ranks, the
         # sourceDepth/targetDepth stamps and the auto-mode estimate.
@@ -509,6 +1137,12 @@ class AggregationPipeline:
         self._deletes = 0
         self._scanned = 0                    # source lineage edges scanned
         self._total = 0                      # total source lineage edges
+        # Whether ``_total`` is a real pre-count or just the running scan
+        # tally. ``_count_type`` returns 0 both for "no edges of this type"
+        # and for a ``count(r)`` that timed out, and the extract loop then
+        # keeps ``_total`` equal to ``_scanned`` — a denominator drawn from
+        # that reads 100% complete for the whole scan.
+        self._total_counted = False
         self._progress_pct = 0
         self._max_applied_key = 0
 
@@ -518,7 +1152,27 @@ class AggregationPipeline:
         )
         self._yielding_to_reads = False      # last write batch was paced for readers
         self._read_pressure_yields = 0       # write batches paced at the read-pressure ratio
+        # Steady load: how large a write batch may grow, how long one should
+        # take (the lock window a reader of the graph waits for), and the
+        # floor under the pause between two. The meter records what the
+        # scheduler did with them; ``_eased`` is the graded response short
+        # of a hold — the node nearing a hold line halves the ceiling and
+        # doubles the pause until the reading is back.
+        self._write_batch_max = self._knob_int("write_batch_max", _write_batch_max, 10, 2_000)
+        self._write_batch_target_s = self._knob_float(
+            "write_batch_target_s", _write_batch_target_s, 0.1, 10.0)
+        self._write_min_gap_ms = self._knob_int("write_min_gap_ms", _write_min_gap_ms, 0, 10_000)
+        self._pacing_min_ratio = self._knob_float(
+            "write_pacing_min_ratio", _write_pacing_min_ratio, 0.0, 10.0)
+        self._roomy = False                  # the node had room at the last batch
+        self._full_speed_batches = 0         # batches written at the floor ratio
+        self._pace = _PaceMeter()
+        self._eased: Optional[str] = None
+        self._eases: Dict[str, int] = {}
+        self._holding: Optional[str] = None
+        self._hb_accepts_pace: Optional[bool] = None
         self._phase_started = time.monotonic()
+        self._started_mono = time.monotonic()
         self._phase_timings: Dict[str, float] = {}
         # Shrink-on-pressure scan state (see _fetch_range): a per-query
         # timeout OR a per-query memory-ceiling refusal halves the effective
@@ -532,6 +1186,118 @@ class AggregationPipeline:
         # in run_stats so a run that succeeded only BY degrading is visible.
         self._scan_min_width: Optional[int] = None
         self._scan_shrinks = 0
+        # The rest of the pressure ladder's state. ``_scan_conc_cap`` pins
+        # wave concurrency (to 1 after the first pressure event of the run);
+        # ``_scan_fail_width`` remembers, per scan label, the narrowest
+        # width that FAILED so re-growth does not saw-tooth back into it;
+        # ``_reconcile_strategy`` flips to keys-only when halving the
+        # 11-column RECONCILE projection stops being the cheapest move;
+        # the three sticky caps bound the MERGE sub-batch, the delete chunk
+        # and the keys-only lookup batch under write/delete pressure.
+        self._scan_conc_cap: Optional[int] = None
+        self._scan_fail_width: Dict[str, int] = {}
+        self._scan_timeout_retries = 0
+        self._reconcile_strategy = "full"
+        self._write_cap = _StickyCap(1)
+        self._delete_cap = _StickyCap(1)
+        self._lookup_cap = _StickyCap(1)
+        self._pressure_log: List[Dict[str, Any]] = []   # last 8 events
+        self._by_scan: Dict[str, Dict[str, Any]] = {}   # per label, ≤ 12
+        self._last_hb_mono = 0.0
+        self._query_mem_capacity: Optional[int] = None
+        # The memory-aware flush: the worker's RSS against its cgroup limit,
+        # sampled at most once a second from the merge loops; the
+        # accumulator flushes early when RSS crosses ``flush_mem_pct`` of
+        # the limit and holds at least ``flush_min_pairs``. Fail-open when
+        # either reading is unknown — the pair cap still bounds memory.
+        self._mem = MemoryGauge()
+        self._flush_pct = self._knob_int("flush_mem_pct", _flush_mem_pct, 30, 90)
+        self._flush_min_pairs = _flush_min_pairs()
+        self._memory_flushes = 0
+        self._memory_rollups = 0
+        # Replication backpressure: how many replicas must acknowledge each
+        # write batch, how long one wait may block, and what the waiting
+        # cost this run (for the record and the run settings panel).
+        self._replica_ack_min = self._knob_int("replica_ack_min", _replica_ack_min, 0, 5)
+        self._replica_ack_timeout_ms = self._knob_int(
+            "replica_ack_timeout_ms", _replica_ack_timeout_ms, 500, 60_000)
+        self._replica_waits = 0
+        self._replica_wait_s = 0.0
+        self._replica_holds = 0
+        self._replica_max_lag_bytes = 0
+        self._repl_state: Dict[str, Any] = {}
+        self._repl_state_at = 0.0
+        self._no_replicas_logged = False
+        self._replication_advisory: Optional[Dict[str, Any]] = None
+        # Waiting out a node that is not answering, and what the node said
+        # about itself when it came back.
+        self._outage_hold_s = _store_outage_hold_s()
+        self._outage_holds = 0
+        self._outage_s = 0.0
+        #: When the CURRENT outage began, or None while the store answers.
+        #: Separate from the run totals above because the budget is spent
+        #: per outage: a rebuild running for hours meets several rolling
+        #: restarts, and timing the second from the first one's blip would
+        #: fail it instantly with a wait it never made.
+        self._outage_since: Optional[float] = None
+        self._outage_holds_now = 0
+        self._node_restarts: List[Dict[str, Any]] = []
+        self._node_identity: Dict[str, Tuple[Optional[str], Optional[int]]] = {}
+        # The write governor: one reading of the node before each write
+        # batch, and a hold — never a failure — while the node is outside
+        # the envelope a rebuild may write inside (a fork in flight, the
+        # replicas the run started with gone or too far behind, RSS past
+        # what the container could survive a fork at). Bounded per hold by
+        # AGGREGATION_HOLD_MAX_SECS, after which the run keeps its
+        # checkpoint and stops for a person. The drop limits and the
+        # container limit are read once per run and carried onto every
+        # per-batch reading; ``_expected_replicas`` is what the run started
+        # with, so fewer attached later reads as a replica the rebuild lost.
+        from backend.app.services.aggregation.capacity import container_memory_bytes_env
+
+        self._hold_max_s = _store_hold_max_s()
+        self._expected_replicas: Optional[int] = None
+        self._node_config: Optional[Dict[str, Optional[int]]] = None
+        self._container_env_bytes = container_memory_bytes_env()
+        self._gov_reading: Optional[ShardMemory] = None
+        self._gov_read_at = 0.0
+        # (bytes, count) other rebuilds hold in the node's reservation
+        # ledger, refreshed with the governor's reading. ``(0, 0)`` means
+        # this run has the node to itself — or that there is no bus to ask,
+        # which admission treats as open everywhere else too.
+        self._gov_others: Tuple[int, int] = (0, 0)
+        self._store_holds: Dict[str, int] = {}
+        self._store_hold_s: Dict[str, float] = {}
+        self._store_hold_last: Optional[Dict[str, Any]] = None
+        self._rss_high_water_mb: Optional[float] = None
+        self._mem_limit_mb: Optional[float] = None
+        # Values an operator may raise on a RUNNING job (stall/wall windows
+        # live in the worker; the per-query budgets are read here per
+        # query). The worker owns the dict and refreshes it from the job
+        # row; the pipeline only ever reads it.
+        self._live: Dict[str, Any] = live_limits if live_limits is not None else {}
+        ceiling = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
+        self._scan_floor = min(
+            self._knob_int("scan_shrink_floor", _scan_shrink_floor, 1, 5_000_000), ceiling,
+        )
+        self._scan_timeout_knob = self._knob_float("scan_timeout_s", _scan_timeout_s, 5.0, 600.0)
+        self._write_timeout_knob = self._knob_float(
+            "write_timeout_s", lambda: float(getattr(self.p, "_bulk_create_timeout_s", 60.0)),
+            5.0, 600.0,
+        )
+        # What the last run of this source learned under pressure, applied
+        # only where it is STRICTER than the knob in force (a hint never
+        # widens anything) and unless the operator opted out.
+        self._hints_applied: Dict[str, Any] = {}
+        if not self._knob_bool("ignore_observed", lambda: False):
+            self._apply_hints(ceiling)
+        # What this run ran with, and where each value came from — the
+        # per-run record the worker persists at the first checkpoint, so a
+        # run that fails or is cancelled still shows its settings.
+        self._effective, self._effective_sources = resolve_effective_tuning(
+            self._tuning, self._capacity_hints,
+            bulk_timeout_default=float(getattr(self.p, "_bulk_create_timeout_s", 60.0)),
+        )
 
         # ── Conformance diagnostics (Phase IV — loud, never silent) ──
         # Structured advisories surfaced in run_stats (and thus the job-detail
@@ -572,6 +1338,679 @@ class AggregationPipeline:
             return env_default()
         return bool(raw)
 
+    def _apply_hints(self, ceiling: int) -> None:
+        """Seed the ladder from ``capacity_hints`` (the previous run's
+        ``observed_tuning``): start the scans at the width that run needed,
+        pin concurrency if it had to read serially, start the reconcile in
+        keys-only if it switched, cap the write batch / delete chunk where
+        it settled. Each applies only when stricter than the knob; the
+        ladder's normal re-growth then probes upward during the run, so a
+        graph that no longer needs the narrowing is found out within it."""
+        hints = self._capacity_hints
+
+        def _pos_int(key: str) -> Optional[int]:
+            try:
+                value = int(hints.get(key))
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        width = _pos_int("scan_width_observed")
+        if width is not None and width < ceiling:
+            self._scan_subwidth = max(self._scan_floor, width)
+            self._hints_applied["scan_width"] = self._scan_subwidth
+        conc = _pos_int("extract_concurrency_observed")
+        if conc is not None and conc < self._knob_int(
+            "extract_concurrency", _extract_concurrency, 1, 4,
+        ):
+            self._scan_conc_cap = conc
+            self._hints_applied["extract_concurrency"] = conc
+        if hints.get("reconcile_strategy_observed") == "keys_only":
+            self._reconcile_strategy = "keys_only"
+            self._hints_applied["reconcile_strategy"] = "keys_only"
+        batch = _pos_int("write_batch_observed")
+        if batch is not None and batch < getattr(self.p, "_MERGE_SUB_BATCH_SIZE", 500):
+            self._write_cap.value = batch
+            self._hints_applied["write_batch"] = batch
+        chunk = _pos_int("delete_chunk_observed")
+        if chunk is not None and chunk < self._knob_int(
+            "delete_chunk", _delete_chunk, 100, 50_000,
+        ):
+            self._delete_cap.value = chunk
+            self._hints_applied["delete_chunk"] = chunk
+        if self._hints_applied:
+            logger.info(
+                "aggregation pipeline on %s: starting from what the last run "
+                "learned — %s.", self.p._graph_name, self._hints_applied,
+            )
+
+    def _scan_timeout(self) -> float:
+        """Per-query budget for scans: the live override an operator raised
+        on the running job, else the ``scanTimeoutS`` knob, else env. Read
+        per query so a raise applies to the NEXT query, no restart."""
+        live = self._live.get("scan_timeout_s")
+        try:
+            return max(5.0, min(600.0, float(live))) if live else self._scan_timeout_knob
+        except (TypeError, ValueError):
+            return self._scan_timeout_knob
+
+    def _write_timeout(self) -> float:
+        """Per-query budget for writes and deletes — same resolution as
+        :meth:`_scan_timeout` over the ``writeTimeoutS`` knob."""
+        live = self._live.get("write_timeout_s")
+        try:
+            return max(5.0, min(600.0, float(live))) if live else self._write_timeout_knob
+        except (TypeError, ValueError):
+            return self._write_timeout_knob
+
+    def _live_pacing_ratio(self) -> float:
+        """The pacing ratio in force: a value set on the running job (PATCH
+        …/limits; 0 = no pacing) wins over the knob, from the next write."""
+        live = self._live.get("write_pacing_ratio")
+        if live is None:
+            return self._pacing_ratio
+        try:
+            return max(0.0, min(10.0, float(live)))
+        except (TypeError, ValueError):
+            return self._pacing_ratio
+
+    def _live_write_batch_max(self) -> int:
+        """The batch ceiling in force: a cap set on the RUNNING job, clamped
+        to [10, the knob] — a cap is a ceiling and never widens anything."""
+        live = self._live.get("write_batch_max")
+        if live is None:
+            return self._write_batch_max
+        try:
+            return max(10, min(self._write_batch_max, int(live)))
+        except (TypeError, ValueError):
+            return self._write_batch_max
+
+    def _live_write_batch_target_s(self) -> float:
+        live = self._live.get("write_batch_target_s")
+        if live is None:
+            return self._write_batch_target_s
+        try:
+            return max(0.1, min(10.0, float(live)))
+        except (TypeError, ValueError):
+            return self._write_batch_target_s
+
+    def _batch_ceiling(self) -> int:
+        """The most rows one write batch may carry right now: the ceiling in
+        force, halved while the run is eased."""
+        ceiling = self._live_write_batch_max()
+        if self._eased:
+            return max(10, ceiling // 2)
+        return ceiling
+
+    def _live_scan_width(self) -> Optional[int]:
+        """A cap on the scan width set on the running job, clamped to
+        [scan floor, the width knob]; None when none is set. Applied on
+        every READ of the sticky width and never written into it, so the
+        ladder's own narrowing and re-growth stay its own."""
+        live = self._live.get("scan_width")
+        if not live:
+            return None
+        try:
+            width = int(live)
+        except (TypeError, ValueError):
+            return None
+        ceiling = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
+        return max(self._scan_floor, min(ceiling, width))
+
+    def _live_replica_ack_min(self) -> int:
+        """How many replicas must acknowledge each write, in force now: a
+        value set on the RUNNING job wins over the knob (0 ends a hold
+        immediately — the operator's escape hatch)."""
+        live = self._live.get("replica_ack_min")
+        if live is None:
+            return self._replica_ack_min
+        try:
+            return max(0, min(5, int(live)))
+        except (TypeError, ValueError):
+            return self._replica_ack_min
+
+    def _live_replica_ack_timeout_ms(self) -> int:
+        live = self._live.get("replica_ack_timeout_ms")
+        if live is None:
+            return self._replica_ack_timeout_ms
+        try:
+            return max(500, min(60_000, int(live)))
+        except (TypeError, ValueError):
+            return self._replica_ack_timeout_ms
+
+    async def _replication_state(self, *, max_age_s: float = 60.0) -> Dict[str, Any]:
+        """The write node's replication state, re-read at most every
+        ``max_age_s``. One INFO a minute, not one per batch."""
+        now = time.monotonic()
+        if self._repl_state and now - self._repl_state_at < max_age_s:
+            return self._repl_state
+        read = getattr(self.p, "replication_state", None)
+        state = await read() if read is not None else {}
+        self._repl_state = state or {}
+        self._repl_state_at = now
+        return self._repl_state
+
+    def _note_replica_lag(self, state: Dict[str, Any]) -> Optional[int]:
+        lags = [r.get("lagBytes") for r in state.get("replicas", [])
+                if r.get("lagBytes") is not None]
+        worst = max(lags) if lags else None
+        if worst is not None:
+            self._replica_max_lag_bytes = max(self._replica_max_lag_bytes, int(worst))
+        return worst
+
+    async def _replica_gate(self) -> float:
+        """Hold until the write node's replicas have caught up.
+
+        Returns the seconds spent waiting, which the caller folds into the
+        write's own duration — so a replica-bound shard shrinks batches and
+        paces longer exactly as a slow master does, instead of the pipeline
+        cheerfully writing faster than the replicas can apply.
+
+        Never fails a run. No replicas attached, no way to ask, or a
+        governor turned off: the write proceeds. Replicas that are simply
+        behind: the pipeline waits, heartbeating, until they are not — the
+        job's stall window and wall clock (both raisable while it runs)
+        remain the only bound, and lowering ``replicaAckMin`` to 0 ends any
+        hold at once.
+        """
+        want = self._live_replica_ack_min()
+        if want <= 0:
+            return 0.0
+        state = await self._replication_state()
+        attached = int(state.get("connectedReplicas") or 0)
+        if attached <= 0:
+            if not self._no_replicas_logged:
+                self._no_replicas_logged = True
+                logger.info(
+                    "aggregation pipeline on %s: the write node reports no "
+                    "replicas — replication backpressure is off for this run.",
+                    self.p._graph_name,
+                )
+            return 0.0
+        # Never wait for more replicas than exist: a fleet default of 2
+        # against a one-replica shard would hold on every batch forever.
+        target = min(want, attached)
+        wait_for = getattr(self.p, "wait_for_replicas", None)
+        if wait_for is None:
+            return 0.0
+        started = time.monotonic()
+        acked = await wait_for(
+            min_replicas=target, timeout_ms=self._live_replica_ack_timeout_ms())
+        waited = time.monotonic() - started
+        if acked is None:
+            return 0.0
+        self._replica_waits += 1
+        self._replica_wait_s += waited
+        if acked >= target:
+            return waited
+        return waited + await self._hold_for_replicas(target)
+
+    async def _hold_for_replicas(self, target: int) -> float:
+        """Wait out replicas that are behind — or gone — saying why, until
+        they catch up, the operator lowers the bar, or the hold budget is
+        spent.
+
+        Gone is the case that matters. A replica that vanishes during a
+        rebuild almost always vanished BECAUSE of it (dropped for an
+        overflowing output buffer), and its return is a full resync: the
+        master forks under the very write load that lost it. Writing on
+        was how one shard's rebuild became that fork. So a run that started
+        with replicas holds for them; only a run that started with none has
+        nothing to wait for."""
+        self._replica_holds += 1
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            if self._live_replica_ack_min() <= 0:
+                logger.info(
+                    "aggregation pipeline on %s: replica acknowledgement turned "
+                    "off while waiting — continuing.", self.p._graph_name,
+                )
+                break
+            self._cancel_check()
+            await self._ladder_heartbeat()
+            state = await self._replication_state(max_age_s=0.0)
+            lag = self._note_replica_lag(state)
+            attached = int(state.get("connectedReplicas") or 0)
+            if attached <= 0 and not self._expected_replicas:
+                # The run started against a node with no replicas: nothing
+                # to wait for, and nothing this batch could have dropped.
+                break
+            held = time.monotonic() - started
+            if held >= self._hold_max_s:
+                what = (
+                    f"its replicas gone (the run started with {self._expected_replicas})"
+                    if attached <= 0 else
+                    f"{attached} replica(s) still behind"
+                    + (f" by up to {lag:,} bytes" if lag else "")
+                )
+                raise MaterializationStoreUnstable(
+                    f"the graph store node {self._store_endpoint()} spent "
+                    f"{held / 60:.0f} minute(s) with {what}. The run keeps its "
+                    f"checkpoint — check the replicas from Admin → Graph store "
+                    f"and Resume the job once they are attached and in sync."
+                )
+            if attempt == 0 or attempt % 4 == 0:
+                if attached <= 0:
+                    logger.warning(
+                        "aggregation pipeline on %s: the write node's replicas are "
+                        "gone (the run started with %d) — holding until they are "
+                        "back and in sync rather than writing into their resync.",
+                        self.p._graph_name, self._expected_replicas,
+                    )
+                else:
+                    logger.warning(
+                        "aggregation pipeline on %s: waiting for %d replica(s) of the "
+                        "write node to catch up%s — the rebuild is going at the "
+                        "replicas' pace.",
+                        self.p._graph_name, min(target, attached),
+                        f" (up to {lag:,} bytes behind)" if lag else "",
+                    )
+            await asyncio.sleep(_backoff_s(min(attempt, 4)))
+            attempt += 1
+            if attached <= 0:
+                continue                      # nothing to WAIT on yet; re-read
+            waiting_on = min(target, attached)
+            acked = await self.p.wait_for_replicas(
+                min_replicas=waiting_on,
+                timeout_ms=self._live_replica_ack_timeout_ms(),
+            )
+            if acked is None or acked >= waiting_on:
+                break
+        held = time.monotonic() - started
+        if held >= 60.0:
+            self._pressure_log.append({
+                "scan": "apply", "kind": "replica_lag",
+                "held_s": round(held, 1),
+                "lag_bytes": self._replica_max_lag_bytes or None,
+            })
+            if len(self._pressure_log) > 8:
+                del self._pressure_log[0]
+        return held
+
+    # -- the write governor ---------------------------------------------------
+
+    async def _governor_reading(self, *, fresh: bool = False) -> ShardMemory:
+        """The node as the governor sees it: one ``INFO`` per write batch,
+        never two for the same one, and fresh on every turn of a hold."""
+        now = time.monotonic()
+        if (
+            not fresh and self._gov_reading is not None
+            and now - self._gov_read_at < _GOVERNOR_READ_INTERVAL_S
+        ):
+            return self._gov_reading
+        # The drop limits are read once per run; a per-batch reading skips
+        # the CONFIG round trips and the slot-map refresh.
+        self._gov_reading = await self._read_shard(include_config=self._node_config is None)
+        self._gov_read_at = time.monotonic()
+        # Who ELSE is writing this node, on the same cadence. The pacing
+        # floor below is for a node this run has to itself: N rebuilds each
+        # reading the same free memory each conclude they may write at the
+        # floor, and the master takes N times the rate that none of them
+        # thought they were asking for. The write budget already subtracts
+        # the others' reservations; the pace did not.
+        self._gov_others = await self._reserved_by_others(self._gov_reading)
+        return self._gov_reading
+
+    def _gov_node(self) -> Optional[str]:
+        """The node the governor's last reading named, for the write-slot
+        key. ``None`` when nothing has been measured — the slot then falls
+        back to the connection's endpoint, exactly as before."""
+        reading = self._gov_reading
+        if reading is None or reading.source != "measured":
+            return None
+        return reading.endpoint or None
+
+    def _write_hold_reason(self, shard: ShardMemory) -> Optional[Tuple[str, str]]:
+        """Why the next batch must wait, if it must. ``replicaAckMin`` 0 —
+        the operator's escape hatch, live on the running job — turns the
+        replica reasons off; a fork and the memory line are about the
+        master's own survival and no knob waves them through."""
+        return hold_reason(
+            shard, expected_replicas=self._expected_replicas,
+            watch_replicas=self._live_replica_ack_min() > 0,
+        )
+
+    async def _govern_write(self) -> float:
+        """Hold the next write batch while the node is outside the envelope.
+
+        Read the node; while :func:`hold_reason` names something — a fork
+        in flight, the replicas the run started with gone or too far
+        behind, RSS past what the container could survive a fork at —
+        heartbeat, back off, and read again. Every reason is true of the
+        node now and false a little later, which is why this is a wait and
+        not a refusal; a wait that outlives ``AGGREGATION_HOLD_MAX_SECS``
+        is a node that is not recovering on its own, and the run stops for
+        a person with its checkpoint intact.
+
+        An unmeasured reading never holds: the store not answering is the
+        outage path's business. Returns the seconds held.
+        """
+        started: Optional[float] = None
+        kind: Optional[str] = None
+        detail = ""
+        attempt = 0
+        while True:
+            shard = await self._governor_reading(fresh=attempt > 0)
+            reason = self._write_hold_reason(shard)
+            if reason is None:
+                self._holding = None
+                self._note_easing(shard)
+                break
+            new_kind, detail = reason
+            if started is None:
+                started = time.monotonic()
+            if new_kind != kind:
+                kind = new_kind
+                self._holding = kind
+                self._store_holds[kind] = self._store_holds.get(kind, 0) + 1
+                logger.warning(
+                    "aggregation pipeline on %s: holding the next write batch — %s. "
+                    "Writing through this is how a rebuild takes a node down; the "
+                    "run waits (up to %d min per hold) and carries on from where it is.",
+                    self.p._graph_name, detail, self._hold_max_s // 60,
+                )
+            held = time.monotonic() - started
+            if held >= self._hold_max_s:
+                self._record_hold(kind, held, detail)
+                raise MaterializationStoreUnstable(
+                    f"the graph store node {shard.endpoint} stayed outside the "
+                    f"envelope a rebuild may write inside for {held / 60:.0f} "
+                    f"minute(s) — {detail}. The run keeps its checkpoint. Check "
+                    f"the node (a fork that never finished, a replica that never "
+                    f"came back, memory past the container's line) and Resume "
+                    f"the job once it is steady."
+                )
+            if attempt and attempt % 8 == 0:
+                logger.warning(
+                    "aggregation pipeline on %s: still holding after %.0fs — %s",
+                    self.p._graph_name, held, detail,
+                )
+            self._cancel_check()
+            await self._ladder_heartbeat()
+            await asyncio.sleep(_backoff_s(min(attempt, 3)))
+            attempt += 1
+        if started is None or kind is None:
+            return 0.0
+        held = time.monotonic() - started
+        self._record_hold(kind, held, detail)
+        # Re-enter gently: the pages the next batches touch are the ones a
+        # fork just finished copying, and the replicas have a stream to
+        # catch up on. Half the sub-batch; the AIMD sizer re-grows it
+        # additively as the writes come back fast.
+        p = self.p
+        size = getattr(p, "_aggregation_sub_batch_size", None)
+        if size is not None:
+            p._aggregation_sub_batch_size = max(
+                getattr(p, "_MERGE_SUB_BATCH_MIN", 50), int(size) // 2,
+            )
+        logger.info(
+            "aggregation pipeline on %s: %s hold released after %.0fs — carrying on.",
+            self.p._graph_name, kind, held,
+        )
+        return held
+
+    def _ease_reason(self, shard: ShardMemory) -> Optional[str]:
+        """The graded response short of a hold: the reading is half way to a
+        hold line. Replicas at least half as far behind as the master drops
+        them at (only while replication backpressure is on), or the
+        container's fork line within an eighth of the limit."""
+        if shard.source != "measured":
+            return None
+        lag = shard.replica_max_lag_bytes
+        if (
+            self._live_replica_ack_min() > 0 and lag is not None
+            and lag >= replica_lag_hold_bytes(shard) // 2
+        ):
+            return "replica_lag"
+        headroom = container_headroom_bytes(shard, planning=False)
+        limit = shard.container_limit_bytes
+        if headroom is not None and limit and headroom < limit // 8:
+            return "memory"
+        return None
+
+    def _is_roomy(self, shard: ShardMemory) -> bool:
+        """True when the node has room to spare AND this run has it to
+        itself: measured, no fork, every replica the run started with
+        attached and barely behind, a quarter of the container still free,
+        and no other rebuild holding a reservation on it.
+
+        This is the band the configured pacing ratio is NOT for. That ratio
+        is a ceiling on the pause — what a rebuild owes a node that is
+        working — and a node in this state is not being protected by a
+        rebuild that idles half the time, only slowed down. Interactive
+        reads are a separate signal and still override this: the read
+        pressure ratio is taken as the LARGER of the two."""
+        if shard.source != "measured" or shard.loading:
+            return False
+        if shard.fork_in_progress:
+            return False
+        # Another rebuild is writing this node. Its reading says the same
+        # thing ours does, so without this both take the floor and the
+        # master gets twice the write rate either of them asked for. The
+        # ceiling — the configured pacing ratio — is what a shared node
+        # gets, and it is the documented safe default.
+        if self._gov_others[1]:
+            return False
+        attached = shard.connected_replicas
+        if (
+            self._expected_replicas
+            and attached is not None and attached < self._expected_replicas
+        ):
+            return False
+        lag = shard.replica_max_lag_bytes
+        if lag is not None and lag > replica_lag_hold_bytes(shard) // 8:
+            return False
+        headroom = container_headroom_bytes(shard, planning=False)
+        limit = shard.container_limit_bytes
+        if headroom is None or not limit:
+            return False
+        return headroom > limit // 4
+
+    def _note_easing(self, shard: ShardMemory) -> None:
+        """Halve the batch ceiling and double the pause while the node is
+        nearing a hold line; back to the settings once the reading is."""
+        roomy = self._is_roomy(shard)
+        if roomy != self._roomy:
+            self._roomy = roomy
+            logger.info(
+                "aggregation pipeline on %s: %s",
+                self.p._graph_name,
+                f"{shard.endpoint} has room to spare — writing at the pacing "
+                f"floor ({self._pacing_min_ratio:g}x) until it does not"
+                if roomy else
+                "the node is working again — back to the configured pacing",
+            )
+        reason = self._ease_reason(shard)
+        if reason == self._eased:
+            return
+        if reason is not None:
+            self._eases[reason] = self._eases.get(reason, 0) + 1
+            logger.info(
+                "aggregation pipeline on %s: easing off — %s on %s; half the batch "
+                "ceiling and twice the pause until the reading is back.",
+                self.p._graph_name,
+                "replicas half way to the drop limit" if reason == "replica_lag"
+                else "the container's fork line in sight",
+                shard.endpoint,
+            )
+        else:
+            logger.info(
+                "aggregation pipeline on %s: the node is back inside the easing "
+                "line — batches and pacing back to the settings.", self.p._graph_name,
+            )
+        self._eased = reason
+
+    def _pace_scalars(self) -> Dict[str, Any]:
+        """How the run is writing right now, flat, for the heartbeat: the
+        meter's figures, whether it is holding or eased and why, and what
+        the node's last reading said about its replicas and its room."""
+        out = self._pace.snapshot()
+        out["holding"] = self._holding or ""
+        out["eased"] = self._eased or ""
+        out["roomy"] = 1 if self._roomy else 0
+        # How many OTHER rebuilds hold this node. It is why a run on an
+        # otherwise empty node is not at the pacing floor, and without it
+        # that reads as the run being needlessly slow.
+        out["sharing"] = int(self._gov_others[1])
+        shard = self._gov_reading
+        if shard is not None and shard.source == "measured" and shard.endpoint:
+            out["node"] = shard.endpoint
+        if shard is not None and shard.source == "measured":
+            if shard.replica_max_lag_bytes is not None:
+                out["replica_lag_bytes"] = int(shard.replica_max_lag_bytes)
+            headroom = container_headroom_bytes(shard, planning=False)
+            if headroom is not None:
+                out["headroom_bytes"] = int(headroom)
+            if shard.fork_in_progress:
+                out["fork"] = shard.fork_in_progress
+        return out
+
+    def _record_hold(self, kind: str, held: float, detail: str) -> None:
+        """The run's record of a hold: how long by reason, the last one in
+        full, and — when it was long enough to matter — a pressure event.
+
+        Also the fleet's. A hold is the governor finding the node outside the
+        envelope, and per-run it only ever answered "did THIS run wait"; the
+        question an operator has is how often, on which node, and whether it
+        is getting worse."""
+        _metric("aggregation_governor_holds_total", kind=kind, node=self._gov_node() or "unknown")
+        _observe("aggregation_governor_hold_seconds", held, kind=kind)
+        self._store_hold_s[kind] = self._store_hold_s.get(kind, 0.0) + held
+        self._store_hold_last = {"kind": kind, "held_s": round(held, 1), "detail": detail}
+        if held >= 60.0:
+            self._pressure_log.append({
+                "scan": "apply", "kind": f"hold:{kind}", "held_s": round(held, 1),
+            })
+            if len(self._pressure_log) > 8:
+                del self._pressure_log[0]
+
+    async def _through_outage(
+        self, attempt: Callable[[], Awaitable[Any]], *, op: str,
+    ) -> Any:
+        """Run ``attempt``; if the store is not answering, wait for it and
+        run the SAME thing again.
+
+        Deliberately no narrowing: a node that is restarting does not care
+        how small the next query is, and shrinking the scan would leave the
+        run limping at a fraction of its width long after the node
+        recovered. The ladder handles queries the store refuses; this
+        handles the store not being there.
+        """
+        while True:
+            try:
+                result = await attempt()
+            except Exception as exc:
+                if _pressure_kind(exc) != "connection":
+                    raise
+                await self._hold_for_store(exc, op)
+            else:
+                if self._outage_since is not None:
+                    logger.info(
+                        "aggregation pipeline on %s: the graph store answered "
+                        "again after %.0fs during %s — carrying on from the "
+                        "checkpoint.", self.p._graph_name,
+                        time.monotonic() - self._outage_since, op,
+                    )
+                    self._outage_since = None
+                    self._outage_holds_now = 0
+                return result
+
+    async def _hold_for_store(self, exc: Exception, op: str) -> None:
+        """One wait for a node that is not answering. Raises
+        :class:`MaterializationStoreUnreachable` once the run has waited
+        longer than it is allowed to."""
+        endpoint = self._store_endpoint()
+        if self._outage_since is None:
+            self._outage_since = time.monotonic()
+            await self._note_node_identity(endpoint)
+            logger.warning(
+                "aggregation pipeline on %s: the graph store node %s is not "
+                "answering (%s) during %s — waiting for it; the run keeps its "
+                "checkpoint.", self.p._graph_name, endpoint, type(exc).__name__, op,
+            )
+            self._on_pressure(op, "connection", 0, 0, size=0)
+        waited = time.monotonic() - self._outage_since
+        if waited >= self._outage_hold_s:
+            raise MaterializationStoreUnreachable(
+                f"the graph store node {endpoint} did not answer for "
+                f"{waited / 60:.0f} minute(s) during {op} ({type(exc).__name__}: "
+                f"{str(exc)[:160]}). The run keeps its checkpoint — Resume it "
+                f"once the node is back, and check whether the container was "
+                f"killed for memory or by its health probe."
+            )
+        self._outage_holds += 1
+        self._outage_holds_now += 1
+        await self._ladder_heartbeat()
+        self._cancel_check()
+        # Widens within THIS outage; a later one starts patient again.
+        delay = _backoff_s(min(self._outage_holds_now, 4))
+        await asyncio.sleep(delay)
+        self._outage_s += delay
+        # A restarted pod comes back at a new address and a failover moves
+        # the graph to a promoted replica: re-resolve rather than redial.
+        reconnect = getattr(self.p, "reconnect_owner", None)
+        if reconnect is not None:
+            await reconnect()
+        await self._note_node_identity(endpoint)
+
+    def _store_endpoint(self) -> str:
+        shard = self._last_budget.shard if self._last_budget is not None else None
+        endpoint = getattr(shard, "endpoint", None)
+        if endpoint and endpoint != "unknown":
+            return endpoint
+        label = getattr(self.p, "_endpoint_label", None)
+        return label() if label is not None else "the graph store"
+
+    async def _note_node_identity(self, endpoint: str) -> None:
+        """Remember (and compare) what the node says about itself.
+
+        A run id is regenerated on every start, so one that CHANGED while
+        the run was waiting is proof the node restarted rather than merely
+        being slow — the evidence a failed run never had."""
+        try:
+            shard = await self._read_shard()
+        except Exception:                             # noqa: BLE001 — evidence is optional
+            return
+        run_id = getattr(shard, "run_id", None)
+        uptime = getattr(shard, "uptime_s", None)
+        if run_id is None and uptime is None:
+            return
+        before = self._node_identity.get(endpoint)
+        if before is not None:
+            was_run, was_uptime = before
+            restarted = (
+                (run_id is not None and was_run is not None and run_id != was_run)
+                or (uptime is not None and was_uptime is not None and uptime < was_uptime)
+            )
+            if restarted:
+                self._node_restarts.append({
+                    "endpoint": endpoint,
+                    "uptime_s": uptime,
+                    "at": _now_iso(),
+                })
+                logger.warning(
+                    "aggregation pipeline on %s: node %s RESTARTED during this run "
+                    "(up %ss). Check whether the container was killed for memory or "
+                    "by its health probe.",
+                    self.p._graph_name, endpoint, uptime,
+                )
+        self._node_identity[endpoint] = (run_id, uptime)
+
+    def _effective_conc(self) -> int:
+        """Wave concurrency in force: the knob, capped by a value set on the
+        running job, pinned by the ladder to 1 after the first pressure
+        event of the run (a graph store refusing one query for size or time
+        gets nothing from three more of them)."""
+        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
+        live = self._live.get("extract_concurrency")
+        if live:
+            try:
+                conc = min(conc, max(1, int(live)))
+            except (TypeError, ValueError):
+                pass
+        return min(conc, self._scan_conc_cap) if self._scan_conc_cap else conc
+
     def _mark_phase(self, name: str) -> None:
         """Close the previous timing bucket and open ``name``."""
         now = time.monotonic()
@@ -586,7 +2025,18 @@ class AggregationPipeline:
     # -- public entry ------------------------------------------------------
 
     async def run(self) -> Dict[str, Any]:
+        # Every read this run makes goes to the MASTER. The pipeline reads
+        # what it has just written — RECONCILE over the cells APPLY wrote,
+        # the estimate scans, the budget reads — and a replica that is a
+        # second behind would show it a graph it has already changed.
+        from backend.app.providers.falkordb_provider import read_from_master_only
+
+        with read_from_master_only():
+            return await self._run()
+
+    async def _run(self) -> Dict[str, Any]:
         resume = parse_cursor(self._last_cursor)
+        self._fresh_run = resume is None
         if resume is not None:
             self._run_start_ms, phase, pos = resume
             logger.info(
@@ -627,11 +2077,15 @@ class AggregationPipeline:
             self._phase_started = time.monotonic()
             await self._checkpoint(PHASE_AGGREGATE, 0, phase_label="extracting")
 
+            # What the graph already stores and what the shard holds now:
+            # the growth budget and the calibration both start from here.
+            await self._capacity_baseline()
+
             # EXTRACT + COMPUTE always re-run (deterministic, minutes).
             await self._extract_and_compute()
-            # Hard write budget: refuse a result that cannot fit in the
-            # FalkorDB instance BEFORE the first write reaches it.
-            self._check_write_budget()
+            # Hard write budget: refuse a result the owning shard cannot
+            # take BEFORE the first apply write reaches it.
+            await self._check_write_budget()
             self._snapshot_pairs_by_level()
             self._mark_phase("reconcile_s")
 
@@ -655,6 +2109,7 @@ class AggregationPipeline:
 
             final_total = len(self._flushed | set(self._acc.keys()))
             await self._stamp_run_meta(final_total)
+            await self._calibrate()
             self._progress_pct = 100
             await self._checkpoint(
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
@@ -667,6 +2122,9 @@ class AggregationPipeline:
             )
             return self._result(final_total)
         finally:
+            if admission is not None and self._reservation is not None:
+                await admission.release(self._reservation)
+                self._reservation = None
             if admission is not None and lease is not None:
                 await admission.release_graph_lease(lease)
 
@@ -821,6 +2279,10 @@ class AggregationPipeline:
 
     def _result(self, affected: int = 0) -> Dict[str, Any]:
         advisories = self._conformance_advisories()
+        if self._replication_advisory is not None:
+            advisories = [*advisories, self._replication_advisory]
+        if self._slow_cube_advisory is not None:
+            advisories = [*advisories, self._slow_cube_advisory]
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -845,17 +2307,43 @@ class AggregationPipeline:
                         "regime": (
                             "boundary" if self._fine_filter_active() else "cube"
                         ),
-                        "materialize_budget": self._knob_int(
-                            "max_materialized_edges",
-                            _max_materialized_edges, 10_000, 50_000_000,
-                        ),
+                        "materialize_budget": self._governing_allowance(),
                     }
                     if self._cube_mode is not None else {}
                 ),
+                # The capacity decision, durable on the job: what the owning
+                # shard allowed, which rule governed, and what this run
+                # taught us about bytes per edge (or why it could not).
+                **(
+                    {"write_budget": self._last_budget.as_stats()}
+                    if self._last_budget is not None else {}
+                ),
+                **(self._calibration or {}),
+                # All three numbers, so the estimator can be held to account:
+                # what the upper bound counted, what the measured ratio
+                # corrected it to, and what the run actually stored. Nothing
+                # compared the first to the last before, which is how a
+                # systematic overshoot of fifty times stayed invisible.
                 **(
                     {"cube_estimate": self._cube_estimate}
                     if getattr(self, "_cube_estimate", None) is not None
                     else {}
+                ),
+                **(
+                    {"cube_estimate_upper": self._cube_estimate_upper}
+                    if getattr(self, "_cube_estimate_upper", None) is not None
+                    else {}
+                ),
+                **(
+                    {"cell_ratio_used": self._cell_ratio()}
+                    if self._cell_ratio() is not None else {}
+                ),
+                **(
+                    {
+                        "cells_exact": affected,
+                        "cell_ratio_observed": self._observed_cell_ratio(affected),
+                    }
+                    if self._observed_cell_ratio(affected) is not None else {}
                 ),
                 **(
                     {"pairs_by_level": self._pairs_by_level}
@@ -875,6 +2363,43 @@ class AggregationPipeline:
                     }
                     if self._scan_min_width is not None else {}
                 ),
+                # Mid-apply shard re-reads — present only when APPLY was long
+                # enough to need one, same convention as the ladder above.
+                **(
+                    {"budget_rechecks": self._budget_rechecks}
+                    if self._budget_rechecks else {}
+                ),
+                # Everything the pressure ladder changed this run — width,
+                # concurrency, reconcile strategy, batch sizes, timeout
+                # retries — bounded, and absent on a run that ran at its
+                # settings. The per-run "what did it adapt to" record.
+                **(
+                    {"adapted": self._adapted_snapshot()}
+                    if (
+                        self._pressure_log or self._scan_min_width is not None
+                        or self._hints_applied or self._live
+                        or self._memory_flushes or self._memory_rollups
+                        or self._replica_waits or self._replica_holds
+                        or self._outage_holds or self._node_restarts
+                        or self._store_holds or self._eases
+                        or self._full_speed_batches
+                    ) else {}
+                ),
+                # How the run wrote: batches, rows, the last batch's shape,
+                # the rolling duty cycle and rate. A record, not an
+                # adaptation — present on every run that wrote anything.
+                **({"pace": self._pace.snapshot()} if self._pace.batches else {}),
+                # What the full cube would have cost in time, and — when Auto
+                # stepped off it — which of the three gates said no.
+                **({"cube_projection": dict(self._cube_projection)}
+                   if self._cube_projection else {}),
+                **({"degraded_reason": self._degraded_reason}
+                   if self._degraded_reason else {}),
+                # The per-query ceiling the ladder narrows against, when the
+                # shard could say — always present, None when unknown.
+                "query_mem_capacity": self._query_mem_capacity,
+                # What the run ran with and where each value came from.
+                "effective_tuning": {**self._effective, "sources": dict(self._effective_sources)},
                 # Conformance advisories (identity / casing gaps) — present
                 # only when a gap was detected, so a clean run's run_stats is
                 # unchanged. Advisory-only: never flips the job off "completed".
@@ -891,7 +2416,19 @@ class AggregationPipeline:
                 observed_at=datetime.now(timezone.utc).isoformat(),
             )
 
-    async def _checkpoint(self, phase: str, pos: int, *, phase_label: str) -> None:
+    async def _checkpoint(
+        self, phase: str, pos: int, *, phase_label: str,
+        unit_done: Optional[int] = None,
+        unit_total: Optional[int] = None,
+        unit: Optional[str] = None,
+    ) -> None:
+        """Report a boundary. ``processed``/``total`` are — and have always
+        been — the EXTRACT counters, whatever phase is running; from
+        RECONCILE onwards they are frozen by design and the percentage is
+        the only moving number. ``unit_done``/``unit_total``/``unit`` are
+        this step's OWN unit of work, the numbers each phase already
+        computes for the percentage and used to discard, so the step ledger
+        can say how much of THIS step is left."""
         self._cancel_check()
         if self._progress_cb is None:
             return
@@ -900,7 +2437,29 @@ class AggregationPipeline:
             self._scanned, max(self._total, self._scanned), cursor,
             self._writes, phase_label,
         )
-        live_stats = {"writes": self._writes, "deletes": self._deletes}
+        live_stats: Dict[str, Any] = {"writes": self._writes, "deletes": self._deletes}
+        # Which graph store node this run is writing. It is on the run's own
+        # record rather than only inside ``write_budget`` because it is the
+        # answer to "what else is on this shard right now", which is asked
+        # about RUNNING jobs — long before the budget check happens — and
+        # because it follows a failover, where the budget's copy is the node
+        # as it was at the check.
+        node = self._gov_node()
+        if node:
+            live_stats["node"] = node
+        if unit_done is not None or unit_total is not None:
+            live_stats["step"] = {
+                "done": unit_done, "total": unit_total, "unit": unit,
+            }
+        # ~40 scalars: what the run runs with (sent every checkpoint so the
+        # worker needs no acknowledgement) and what the ladder has changed
+        # so far (only when it has).
+        live_stats["effective_tuning"] = {**self._effective, "sources": dict(self._effective_sources)}
+        adapted = self._adapted_snapshot()
+        if adapted:
+            live_stats["adapted"] = adapted
+        if self._pace.batches:
+            live_stats["pace"] = self._pace.snapshot()
         from backend.app.services.aggregation.cancel import JobCancelled
         try:
             if self._cb_accepts_pct is False:
@@ -926,37 +2485,103 @@ class AggregationPipeline:
             )
 
     async def _heartbeat(self) -> None:
+        """Feed the worker: the running write count, and — when the callback
+        takes it — how the run is writing right now (``pace=``), so the
+        live overlay says what batch size it is at, whether it is holding
+        and why, and how far the replicas are behind. Probed once, like the
+        progress callback: an older one-argument callback keeps working."""
         if self._intra_cb is None:
             return
         try:
-            await self._intra_cb(self._writes)
+            if self._hb_accepts_pace is False:
+                await self._intra_cb(self._writes)
+                return
+            try:
+                await self._intra_cb(self._writes, pace=self._pace_scalars())
+                self._hb_accepts_pace = True
+            except TypeError:
+                if self._hb_accepts_pace is True:
+                    raise  # a genuine TypeError from inside the callback
+                self._hb_accepts_pace = False
+                await self._intra_cb(self._writes)
         except Exception as exc:  # pragma: no cover - logging only
             logger.error(
                 "aggregation heartbeat callback failed (continuing): %s", exc,
             )
 
-    async def _paced_write(self, coro_factory: Callable[[], Awaitable[Any]]) -> Any:
-        """Run one write query under distributed admission control, then
-        sleep ``duration × pacing_ratio`` so this job never saturates the
-        provider's write path — stretched to ``duration ×
+    async def _paced_write(
+        self, coro_factory: Callable[[], Awaitable[Any]], *, rows: Optional[int] = None,
+    ) -> Any:
+        """One write batch, settled before the next: hold while the node is
+        outside the envelope, take a write slot, run the query, wait for
+        the replicas to acknowledge it, then pause — ``duration ×
+        pacing_ratio``, never less than the minimum gap — so this job never
+        saturates the provider's write path. Stretched to ``duration ×
         read_pressure_pacing_ratio`` while the web tier reports interactive
-        reads starving on this endpoint. Interactive reads come first: a
-        rebuild finishing later costs nobody a page; a canvas queued behind
-        a MERGE batch costs every user of that graph."""
+        reads starving on this endpoint, and doubled while the run is eased.
+        Interactive reads come first: a rebuild finishing later costs
+        nobody a page; a canvas queued behind a MERGE batch costs every
+        user of that graph. ``rows`` is what the batch carried, for the
+        meter.
+
+        Returns ``(signal, result)``: the seconds the sizer should judge the
+        batch by — the master's own time or the replicas' acknowledgement,
+        whichever was longer. Not the sum: a replica that is merely behind
+        already paces the run through the wait itself, and shrinking the
+        batch on top of that does not help the replica (it applies the same
+        rows) while it starves the run — 50-row batches behind a 5 s wait
+        is how a rebuild takes a day. The pause after the batch is drawn on
+        the master's time alone, for the same reason: the wait was idle
+        time on the master already."""
+        # The governor first: nothing is sent while the node is outside the
+        # envelope, and the wait holds no write slot — another rebuild on
+        # the same node decides for itself from its own reading.
+        await self._govern_write()
         admission = getattr(self.p, "_admission_controller", None)
         t0 = time.monotonic()
         if admission is not None:
-            async with admission.write_slot(self.p):
+            async with admission.write_slot(self.p, node=self._gov_node()):
                 result = await coro_factory()
         else:
             result = await coro_factory()
-        elapsed = time.monotonic() - t0
-        ratio = self._pacing_ratio
+        # The master's own time, which is the number the pause is a share of
+        # and half of the number the sizer judges the batch by.
+        batch_s = time.monotonic() - t0
+        # Then wait for the replicas: the batch is not settled until they
+        # have it. Their wait is the OTHER half of the sizer's signal (it is
+        # the batch's cost when a replica re-runs it on its main thread) and
+        # none of the pause's (it was idle time on the master already).
+        ack = await self._replica_gate()
+
+        # The ratio in force is the LIVE one (an operator can set
+        # write_pacing_ratio on a running job; 0 means no pacing) — but read
+        # pressure raises the floor regardless. Interactive reads starving is
+        # a fact about the shard, not a preference about this job, so a job
+        # told not to pace itself still yields while users are being starved.
+        #
+        # The configured ratio is a CEILING on the pause, and the governor's
+        # own reading picks where in [floor, ratio] this batch sits: a node
+        # with no fork, its replicas in sync and a quarter of its container
+        # free is written to at the floor. A rebuild that never finishes
+        # protects nobody, and the three signals that mean "slow down" —
+        # the node, the replicas, the readers — all still apply below.
+        ratio = self._live_pacing_ratio()
+        if self._roomy and self._pacing_min_ratio < ratio:
+            ratio = self._pacing_min_ratio
+            self._full_speed_batches += 1
         check = getattr(admission, "read_pressure", None)
-        pressure = await check(self.p) if check is not None else None
+        # Keyed by the node this run writes, like the slot and the ledger:
+        # on a cluster the connection endpoint is a seed shared by every
+        # shard, so pressure on one shard used to slow a rebuild on an idle
+        # one. An older controller without the keyword still answers.
+        pressure = await _pressure(check, self.p, self._gov_node()) if check else None
         if pressure:
             ratio = max(ratio, self._read_pressure_pacing_ratio)
             self._read_pressure_yields += 1
+            # Users are starving NOW. Per-run this was a tally nobody saw
+            # until the run finished.
+            _metric("aggregation_read_pressure_yields_total",
+                    reason=str(pressure)[:32], node=self._gov_node() or "unknown")
         if bool(pressure) != self._yielding_to_reads:
             self._yielding_to_reads = bool(pressure)
             if pressure:
@@ -970,10 +2595,23 @@ class AggregationPipeline:
                     "aggregation on %s: read pressure cleared, write pacing ratio back to %g",
                     getattr(self.p, "_graph_name", "?"), ratio,
                 )
-        pace = elapsed * ratio
+        # Eased — the node nearing a hold line — doubles the pause on top of
+        # whatever the readers asked for. The pause is a share of the batch's
+        # own duration on the master (a duty cycle, so a slow node gets more
+        # room; the replicas' wait was idle time on the master already),
+        # never less than the minimum gap (so fast small batches never run
+        # back to back), never more than 30 s.
+        if self._eased:
+            ratio = max(ratio * 2.0, 2.0)
+        pace = min(max(batch_s * ratio, self._write_min_gap_ms / 1000.0), 30.0)
         if pace > 0:
-            await asyncio.sleep(min(pace, 30.0))
-        return elapsed, result
+            await asyncio.sleep(pace)
+        self._pace.note(
+            rows=rows, batch_s=batch_s, ack_s=ack, sleep_s=pace,
+            batch_max=self._batch_ceiling(), target_s=self._live_write_batch_target_s(),
+            ratio=ratio,
+        )
+        return max(batch_s, ack), result
 
     # -- type resolution -----------------------------------------------------
 
@@ -988,11 +2626,11 @@ class AggregationPipeline:
         labels: Set[str] = set()
         try:
             res = await self.p._ro_query(
-                "CALL db.relationshipTypes()", timeout=_scan_timeout_s(),
+                "CALL db.relationshipTypes()", timeout=self._scan_timeout(),
             )
             rels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
             res = await self.p._ro_query(
-                "CALL db.labels()", timeout=_scan_timeout_s(),
+                "CALL db.labels()", timeout=self._scan_timeout(),
             )
             labels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
         except Exception as exc:
@@ -1013,7 +2651,7 @@ class AggregationPipeline:
             try:
                 res = await self.p._ro_query(
                     "MATCH ()-[r]->() RETURN DISTINCT type(r)",
-                    timeout=_scan_timeout_s(),
+                    timeout=self._scan_timeout(),
                 )
                 rels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
                 if rels:
@@ -1133,7 +2771,7 @@ class AggregationPipeline:
     async def _max_edge_id(self, cypher_pattern: str, *, proj: bool) -> int:
         q = f"MATCH {cypher_pattern} RETURN max(ID(r))"
         runner = self.p._proj_ro_query if proj else self.p._ro_query
-        res = await runner(q, timeout=_scan_timeout_s())
+        res = await runner(q, timeout=self._scan_timeout())
         rows = res.result_set or []
         if rows and rows[0] and rows[0][0] is not None:
             return int(rows[0][0])
@@ -1142,7 +2780,7 @@ class AggregationPipeline:
     async def _count_type(self, safe_type: str) -> int:
         res = await self.p._ro_query(
             f"MATCH ()-[r:`{safe_type}`]->() RETURN count(r)",
-            timeout=_scan_timeout_s(),
+            timeout=self._scan_timeout(),
         )
         rows = res.result_set or []
         return int(rows[0][0] or 0) if rows and rows[0] else 0
@@ -1165,8 +2803,107 @@ class AggregationPipeline:
             self.p._graph_name, label, lo, hi, reason, self._scan_subwidth,
         )
 
-    def _query_memory_guidance(self, label: str, lo: int, hi: int) -> str:
-        """Terminal message for a floor-width query-memory failure.
+    # -- the pressure ladder -------------------------------------------------
+
+    _SCAN_PROJECTIONS = {
+        "extract:containers": "container directory (ID, identity, labels)",
+        "apply:node-directory": "node directory (ID, identity, labels)",
+        "reconcile:AGGREGATED": "current :AGGREGATED rollups (11 columns "
+                                "including aggKey and sourceEdgeTypes)",
+        "reconcile:lookup": ":AGGREGATED rollups by aggKey (index seek)",
+        "reconcile:delete": "stale :AGGREGATED rollups by aggKey (UNWIND delete)",
+        "apply:merge": ":AGGREGATED rollups (UNWIND MERGE by label pair)",
+    }
+
+    def _describe_scan(self, label: str) -> str:
+        if label.startswith("extract:") and label not in self._SCAN_PROJECTIONS:
+            return f"source edges of type {label[len('extract:'):]} (two IDs per row)"
+        return self._SCAN_PROJECTIONS.get(label, label)
+
+    def _on_pressure(self, label: str, kind: str, lo: int, hi: int, *, size: int) -> None:
+        """Book-keeping shared by every ladder step: the first pressure
+        event of a run pins wave concurrency to 1, and every event is
+        recorded (bounded) for run_stats."""
+        if self._scan_conc_cap is None:
+            self._scan_conc_cap = 1
+            logger.warning(
+                "aggregation pipeline on %s: %s on %s — dropping wave "
+                "concurrency to 1 for the rest of the run.",
+                self.p._graph_name,
+                "per-query memory refusal" if kind == "memory" else "query timeout",
+                label,
+            )
+        event = {"scan": label, "kind": kind, "lo": lo, "hi": hi, "size": size}
+        self._pressure_log.append(event)
+        if len(self._pressure_log) > 8:
+            del self._pressure_log[0]
+        entry = self._by_scan.get(label)
+        if entry is None and len(self._by_scan) < 12:
+            entry = self._by_scan[label] = {"events": 0, "min_size": size, "kind": kind}
+        if entry is not None:
+            entry["events"] += 1
+            entry["min_size"] = min(entry["min_size"], size)
+            entry["kind"] = kind
+
+    async def _ladder_heartbeat(self) -> None:
+        """Heartbeat at most every 2s from inside the ladder, so a run that
+        is reading one narrow slice at a time keeps the stall watchdog fed."""
+        now = time.monotonic()
+        if now - self._last_hb_mono >= 2.0:
+            self._last_hb_mono = now
+            await self._heartbeat()
+
+    async def _retry_at_floor(
+        self, attempt: Callable[[], Awaitable[Any]], *, label: str, lo: int, hi: int,
+        size: int, budget: float,
+    ) -> Any:
+        """A minimum-size query that timed out: back off and re-issue up to
+        ``AGGREGATION_SCAN_TIMEOUT_RETRIES`` times, heartbeating between
+        attempts so the watchdog sees the wait as progress. When every
+        attempt times out the graph store is not answering — raise
+        :class:`MaterializationScanTimedOut` (a TimeoutError) so the worker
+        resumes from the checkpoint through its ordinary outage path."""
+        retries = _scan_timeout_retries()
+        for n in range(retries):
+            self._scan_timeout_retries += 1
+            await self._heartbeat()
+            delay = _backoff_s(n)
+            logger.warning(
+                "aggregation pipeline on %s: %s [%d, %d) timed out at its "
+                "narrowest size (%d) — retry %d/%d after %.1fs.",
+                self.p._graph_name, label, lo, hi, size, n + 1, retries, delay,
+            )
+            await asyncio.sleep(delay)
+            self._cancel_check()
+            try:
+                return await attempt()
+            except Exception as exc:
+                if _pressure_kind(exc) != "timeout":
+                    raise
+        cap_ms = self._server_timeout_cap_ms()
+        cap_text = f"{cap_ms / 1000:.0f}s" if cap_ms > 0 else "none"
+        raise MaterializationScanTimedOut(
+            f"scan {label} over ID range [{lo}, {hi}) (width {size}) timed out "
+            f"{retries + 1} times in a row at the narrowest width (query timeout "
+            f"{budget:.0f}s, graph store cap {cap_text}) — treating as a "
+            f"graph-store outage; the job resumes from its checkpoint. Check the "
+            f"graph store, then Resume; raise the scan timeout (scanTimeoutS) if "
+            f"the store is merely slow, or run the Gentle profile if this recurs."
+        )
+
+    def _server_timeout_cap_ms(self) -> int:
+        """The store's per-query time cap as the provider knows it — read
+        from the node the graph lives on — else the env mirror. 0 = none."""
+        fn = getattr(self.p, "_server_timeout_cap_ms", None)
+        if callable(fn):
+            return int(fn() or 0)
+        from backend.app.config import resilience
+        return int(getattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0) or 0)
+
+    def _query_memory_guidance(
+        self, label: str, lo: int, hi: int, *, kind: str = "scan", size: Optional[int] = None,
+    ) -> str:
+        """Terminal message for a minimum-size query-memory failure.
 
         Everything an operator needs must be HERE: ``run_stats`` is only
         persisted on a successful run, so on the terminal path the worker's
@@ -1177,118 +2914,278 @@ class AggregationPipeline:
         "headroom"/"room" either), ``timeout``, ``ontology``, ``conflict``
         — so this text cannot be mis-bucketed into someone else's
         resolution guidance."""
+        size = (hi - lo) if size is None else size
+        if kind == "scan":
+            what = (
+                f"scan {label} — {self._describe_scan(label)} — over ID range "
+                f"[{lo}, {hi})"
+            )
+            unit = "row" if size == 1 else "rows"
+            narrowed = (
+                f"The pipeline had already dropped read concurrency to 1"
+                + (
+                    " and switched the reconcile to the keys-only strategy"
+                    if self._reconcile_strategy == "keys_only" else ""
+                )
+                + f", and this slice is {size} {unit} wide"
+            )
+            if size <= 1:
+                narrowed += (
+                    ": a SINGLE row of this projection is larger than the "
+                    "ceiling, so no narrower read exists"
+                )
+            else:
+                narrowed += (
+                    f": the descent was stopped at {size} by the scan floor "
+                    f"(scanShrinkFloor / AGGREGATION_SCAN_SHRINK_FLOOR) — set it "
+                    f"to 1 to let the ladder narrow to a single row"
+                )
+        else:
+            what = (
+                f"{kind} query {label} — {self._describe_scan(label)} — with "
+                f"{size} rows"
+            )
+            narrowed = (
+                f"The pipeline had already halved the batch down to {size} "
+                f"rows, the smallest it issues"
+            )
+        cap = self._query_mem_capacity
+        cap_text = f" ({human_bytes(cap)})" if cap else ""
         return (
-            f"scan {label} over ID range [{lo}, {hi}) exceeded the graph "
-            f"store's per-query memory ceiling (QUERY_MEM_CAPACITY) even at "
-            f"the narrowest width the shrink ladder descends to "
-            f"({hi - lo}, AGGREGATION_SCAN_SHRINK_FLOOR). The graph store "
-            f"reported: \"Query's mem consumption exceeded capacity\". The "
-            f"engine buffers a query's whole result set inside that "
-            f"ceiling, so this is deterministic at a fixed width and the "
-            f"job is NOT retried. "
-            f"Fixes, most effective first: (1) set this source's Rollup "
-            f"storage to Auto (materializeFinePairs) — a full cube makes the "
-            f"reconcile scan read far more :AGGREGATED rows than any other "
-            f"query in the pipeline; (2) lower AGGREGATION_SCAN_SHRINK_FLOOR "
-            f"below {hi - lo} so the ladder can descend further; (3) raise "
-            f"the server's QUERY_MEM_CAPACITY, but only together with the "
-            f"container memory limit — see docs/FALKORDB_DEPLOYMENT.md for "
-            f"the sizing formula, since the ceiling is charged per "
-            f"concurrent query on top of maxmemory."
+            f"{what} exceeded the graph store's per-query memory ceiling "
+            f"(QUERY_MEM_CAPACITY{cap_text}). The graph store reported: "
+            f"\"Query's mem consumption exceeded capacity\". {narrowed}. The "
+            f"engine buffers a query's whole result set inside that ceiling, "
+            f"so this is deterministic and the job is NOT retried. "
+            f"Fixes: (1) raise the server's QUERY_MEM_CAPACITY, but only "
+            f"together with the container memory limit — see "
+            f"docs/FALKORDB_DEPLOYMENT.md for the sizing formula, since the "
+            f"ceiling is charged per concurrent query on top of maxmemory; "
+            f"(2) the Gentle profile and Auto rollup storage lighten every "
+            f"query BEFORE this point but cannot shrink one row — use them "
+            f"once the ceiling has room for it."
         )
 
-    async def _fetch_range(
-        self, run_one, lo: int, hi: int, *, label: str = "scan",
+    def _adapted_snapshot(self) -> Dict[str, Any]:
+        """What the ladder changed this run, bounded, for run_stats and the
+        live overlay. Empty when the run ran at its settings."""
+        out: Dict[str, Any] = {}
+        if self._scan_subwidth is not None:
+            out["scan_width"] = self._scan_subwidth
+        if self._scan_min_width is not None:
+            out["scan_width_min"] = self._scan_min_width
+        if self._scan_shrinks:
+            out["scan_shrinks"] = self._scan_shrinks
+        if self._scan_conc_cap is not None:
+            out["extract_concurrency"] = self._effective_conc()
+        if self._reconcile_strategy != "full":
+            out["reconcile_strategy"] = self._reconcile_strategy
+        if self._write_cap.value is not None or self._write_cap.shrinks:
+            out["write_batch"] = self._write_cap.value
+            out["write_batch_min"] = self._write_cap.minimum
+            out["write_shrinks"] = self._write_cap.shrinks
+        if self._delete_cap.value is not None or self._delete_cap.shrinks:
+            out["delete_chunk"] = self._delete_cap.value
+            out["delete_chunk_min"] = self._delete_cap.minimum
+            out["delete_shrinks"] = self._delete_cap.shrinks
+        if self._scan_timeout_retries:
+            out["timeout_retries"] = self._scan_timeout_retries
+        if self._budget_rechecks:
+            out["budget_rechecks"] = self._budget_rechecks
+        if self._pressure_log:
+            out["pressure"] = list(self._pressure_log)
+        if self._by_scan:
+            out["by_scan"] = {k: dict(v) for k, v in self._by_scan.items()}
+        if self._hints_applied:
+            out["from_last_run"] = dict(self._hints_applied)
+        if self._outage_holds or self._node_restarts:
+            out["store_outage_holds"] = self._outage_holds
+            out["store_outage_s"] = round(self._outage_s, 1)
+            if self._node_restarts:
+                out["node_restarts"] = list(self._node_restarts)
+        if self._replica_waits or self._replica_holds:
+            out["replica_waits"] = self._replica_waits
+            out["replica_wait_s"] = round(self._replica_wait_s, 1)
+            if self._replica_holds:
+                out["replica_holds"] = self._replica_holds
+            if self._replica_max_lag_bytes:
+                out["replica_max_lag_bytes"] = self._replica_max_lag_bytes
+        if self._eases:
+            # How often the run eased off short of a hold, by reason.
+            out["eases"] = dict(self._eases)
+        if self._full_speed_batches:
+            # Batches written at the pacing floor because the node had room.
+            out["full_speed_batches"] = self._full_speed_batches
+        if self._store_holds:
+            # Why the write side waited, how often and for how long — the
+            # node's side of the story, by reason.
+            out["store_holds"] = dict(self._store_holds)
+            out["store_hold_s"] = {k: round(v, 1) for k, v in self._store_hold_s.items()}
+            if self._store_hold_last is not None:
+                out["store_hold_last"] = dict(self._store_hold_last)
+        if self._memory_flushes or self._memory_rollups:
+            out["memory_flushes"] = self._memory_flushes
+            out["memory_rollups"] = self._memory_rollups
+            if self._rss_high_water_mb is not None:
+                out["rss_high_water_mb"] = round(self._rss_high_water_mb)
+            if self._mem_limit_mb is not None:
+                out["mem_limit_mb"] = round(self._mem_limit_mb)
+        # What an operator changed on the running job, in force now.
+        live = {
+            k: v for k, v in self._live.items()
+            if isinstance(v, (int, float, str)) and not isinstance(v, bool)
+        }
+        if live:
+            out["live"] = live
+        return out
+
+    async def _slotted_scan(
+        self, run_one: Callable[[int, int], Awaitable[list]], lo: int, hi: int,
     ) -> list:
-        """Run ``run_one(lo, hi) -> rows`` with shrink-on-pressure.
+        """One range scan, holding a per-node READ slot while it is in flight.
 
-        Two provider signals mean "this slice was too big", and both are
-        deterministic for a given width, so both shrink rather than retry:
+        The write slots cap what rebuilds WRITE to a node; nothing capped
+        what they READ, and a rebuild reads far more than it writes — and
+        does it under ``read_from_master_only``, so every scan lands on the
+        master rather than the replicas that absorb interactive reads.
 
-        * a per-query ``asyncio.TimeoutError`` (deliberately never retried
-          at the connection layer — a slow query must not be multiplied);
-        * ``QUERY_MEM_CAPACITY`` exhaustion. FalkorDB materializes a
-          query's ENTIRE result set inside its tracked per-query budget
-          (no streaming), and these scans are plain projections with no
-          sort or aggregation buffer — so the tracked bytes scale linearly
-          with the rows returned, and halving the width halves them. The
-          exposure is very uneven across the four callers: the reconcile
-          scan projects 11 columns including ``aggKey`` (two concatenated
-          URNs) and the ``sourceEdgeTypes`` array, hundreds of bytes per
-          row, while the extract scan returns two integers.
+        The slot is taken around the LEAF query only: not around
+        ``_through_outage``'s retry loop (a node that is failing over would
+        hold slots nobody can use) and not around the sub-range walk in
+        ``_fetch_range`` (one scan would hold a slot while queuing for the
+        next). Held per query, exactly like the write slot — a job halving
+        its way down the ladder holds nothing between attempts.
+        """
+        admission = getattr(self.p, "_admission_controller", None)
+        # getattr, not a version check: a controller that predates read
+        # slots simply does not gate reads, which is what it did before.
+        slot = getattr(admission, "read_slot", None)
+        if slot is None:
+            return await run_one(lo, hi)
+        if self._gov_reading is None:
+            # The node's identity, once. Every scan-heavy phase runs BEFORE
+            # the first write batch, so without this the slot would key on
+            # the connection endpoint for all of EXTRACT and RECONCILE —
+            # a seed address on a cluster, i.e. one semaphore for the whole
+            # fleet instead of one per master. The reading is memoised and
+            # never raises; the write path refreshes it per batch after.
+            await self._governor_reading()
+        async with slot(self.p, node=self._gov_node()):
+            return await run_one(lo, hi)
 
-        Either used to fail the WHOLE run, sending the job back through
-        worker retry into a full EXTRACT re-run — and for the memory case
-        every retry re-issued the identical query and failed identically,
-        burning the budget and stepping the circuit breaker. Instead:
-        halve the effective width — sticky for the rest of the run so later
-        ranges don't re-discover it — and re-fetch as sub-ranges. Eight
-        consecutive un-split successes double the width back toward the
-        knob ceiling. Outer loops keep knob-width strides, so RECONCILE
-        cursor positions (absolute range lower bounds) are unaffected.
+    async def _fetch_range(
+        self, run_one: Callable[[int, int], Awaitable[list]],
+        lo: int, hi: int, *, label: str,
+    ) -> list:
+        """Run one ID-range scan, absorbing per-query pressure until the
+        query fits.
 
-        At floor width the two diverge: a timeout is a real outage and
-        propagates unchanged, while a memory failure is a payload-size
-        fact no retry can alter, so it raises the terminal
-        :class:`MaterializationQueryMemoryExceeded`."""
-        floor = _scan_shrink_floor()
+        Two signals are absorbed the same way — a per-query TIMEOUT (the
+        client deadline or, far more often, the server's own ``Query timed
+        out`` refusal) and the per-query MEMORY ceiling
+        (``Query's mem consumption exceeded capacity``): the first event of
+        the run pins wave concurrency to 1; a RECONCILE scan switches to the
+        keys-only strategy once halving would take it under
+        ``AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH``; otherwise the sticky
+        effective width halves and the slice is re-fetched, down to the
+        floor (default 1 row). The sticky width re-grows after sustained
+        successes, never straight back into a width that failed for this
+        scan (``_next_scan_width``).
+
+        At the floor the two diverge: a timeout is retried with backoff and
+        heartbeats and only then declared an outage
+        (:class:`MaterializationScanTimedOut`, resumable); a memory
+        failure on a single row is a fact no retry can alter and raises the
+        terminal :class:`MaterializationQueryMemoryExceeded` naming the
+        scan. Every sub-range heartbeats and honours a cancel, so however
+        narrow the ladder goes the watchdog sees progress."""
+        floor = self._scan_floor
         width = hi - lo
         sticky = self._scan_subwidth
+        live_cap = self._live_scan_width()
+        if live_cap is not None:
+            sticky = live_cap if sticky is None else min(sticky, live_cap)
         if sticky is not None and width > sticky:
             rows: list = []
             cur = lo
             while cur < hi:
+                self._cancel_check()
+                await self._ladder_heartbeat()
                 rows.extend(await self._fetch_range(
                     run_one, cur, min(cur + sticky, hi), label=label,
                 ))
                 cur = min(cur + sticky, hi)
             return rows
         try:
-            rows = await run_one(lo, hi)
-        except asyncio.TimeoutError:
-            if width <= floor:
-                logger.error(
-                    "aggregation pipeline on %s: floor-width scan %s "
-                    "[%d, %d) still timed out — treating as a provider "
-                    "outage.", self.p._graph_name, label, lo, hi,
-                )
-                raise
-            self._shrink_scan_width(width, floor, lo, hi, label, "timed out")
-            return await self._fetch_range(run_one, lo, hi, label=label)
-        except Exception as exc:
-            from backend.app.providers.falkordb_provider import (
-                _is_query_memory_error,
+            rows = await self._through_outage(
+                lambda: self._slotted_scan(run_one, lo, hi), op=label,
             )
-            if not _is_query_memory_error(exc):
+        except Exception as exc:
+            kind = _pressure_kind(exc)
+            if kind is None:
                 raise
-            if width <= floor:
+            self._on_pressure(label, kind, lo, hi, size=width)
+            reason = (
+                "exceeded the per-query memory ceiling" if kind == "memory"
+                else "timed out"
+            )
+            if (
+                label == "reconcile:AGGREGATED"
+                and self._reconcile_strategy == "full"
+                and max(floor, width // 2) <= _reconcile_keys_only_width()
+            ):
+                # Halving the 11-column projection again would cost more
+                # queries than reading keys only at this width: switch
+                # strategy instead and re-read the same slice.
+                self._reconcile_strategy = "keys_only"
+                self._scan_success_streak = 0
+                logger.warning(
+                    "aggregation pipeline on %s: reconcile scan [%d, %d) %s — "
+                    "switching to the keys-only reconcile strategy at width %d.",
+                    self.p._graph_name, lo, hi, reason, width,
+                )
+                return await self._fetch_range(run_one, lo, hi, label=label)
+            if width > floor:
+                self._scan_fail_width[label] = min(
+                    width, self._scan_fail_width.get(label, width),
+                )
+                self._shrink_scan_width(width, floor, lo, hi, label, reason)
+                return await self._fetch_range(run_one, lo, hi, label=label)
+            if kind == "memory":
                 logger.error(
-                    "aggregation pipeline on %s: floor-width scan %s "
-                    "[%d, %d) still exceeded the per-query memory ceiling "
-                    "— failing terminally.", self.p._graph_name, label,
-                    lo, hi,
+                    "aggregation pipeline on %s: narrowest scan %s [%d, %d) "
+                    "still exceeded the per-query memory ceiling — failing "
+                    "terminally.", self.p._graph_name, label, lo, hi,
                 )
                 raise MaterializationQueryMemoryExceeded(
                     self._query_memory_guidance(label, lo, hi)
                 ) from exc
-            self._shrink_scan_width(
-                width, floor, lo, hi, label,
-                "exceeded the per-query memory ceiling",
+            logger.error(
+                "aggregation pipeline on %s: narrowest scan %s [%d, %d) "
+                "timed out — retrying with backoff before declaring an outage.",
+                self.p._graph_name, label, lo, hi,
             )
-            return await self._fetch_range(run_one, lo, hi, label=label)
+            rows = await self._retry_at_floor(
+                lambda: run_one(lo, hi), label=label, lo=lo, hi=hi, size=width,
+                budget=self._scan_timeout(),
+            )
         self._scan_success_streak += 1
-        if self._scan_subwidth is not None and self._scan_success_streak >= 8:
-            self._scan_success_streak = 0
+        if self._scan_subwidth is not None:
             ceiling = self._knob_int(
                 "scan_range_width", _scan_range_width, 10_000, 5_000_000,
             )
-            doubled = self._scan_subwidth * 2
-            self._scan_subwidth = None if doubled >= ceiling else doubled
-            logger.info(
-                "aggregation pipeline on %s: scans healthy — effective "
-                "range width back to %s.",
-                self.p._graph_name, self._scan_subwidth or ceiling,
+            nxt = _next_scan_width(
+                self._scan_subwidth, ceiling, self._scan_fail_width.get(label),
+                self._scan_success_streak,
             )
+            if nxt != self._scan_subwidth:
+                self._scan_success_streak = 0
+                self._scan_subwidth = nxt
+                logger.info(
+                    "aggregation pipeline on %s: scans healthy — effective "
+                    "range width back to %s.",
+                    self.p._graph_name, self._scan_subwidth or ceiling,
+                )
         return rows
 
     async def _scan_type_ranges(self, safe_type: str, *, proj: bool = False):
@@ -1304,7 +3201,6 @@ class AggregationPipeline:
         per-range round-trip latency without touching the write path.
         """
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
-        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         max_id = await self._max_edge_id(f"()-[r:`{safe_type}`]->()", proj=proj)
         runner = self.p._proj_ro_query if proj else self.p._ro_query
 
@@ -1314,7 +3210,7 @@ class AggregationPipeline:
                 f"WHERE ID(r) >= $lo AND ID(r) < $hi "
                 f"RETURN ID(s), ID(t)",
                 params={"lo": lo, "hi": hi},
-                timeout=_scan_timeout_s(),
+                timeout=self._scan_timeout(),
             )
             return res.result_set or []
 
@@ -1324,9 +3220,14 @@ class AggregationPipeline:
             )
 
         lows = list(range(0, max_id + 1, width))
-        for start in range(0, len(lows), conc):
+        start = 0
+        while start < len(lows):
             self._cancel_check()
-            wave = lows[start:start + conc]
+            # Re-read per wave: the ladder pins concurrency to 1 after the
+            # first pressure event, and that must take effect at the NEXT
+            # wave boundary, not at the next phase.
+            wave = lows[start:start + self._effective_conc()]
+            start += len(wave)
             results = await asyncio.gather(*(fetch(lo) for lo in wave))
             for lo, rows in results:
                 yield lo, rows
@@ -1361,6 +3262,7 @@ class AggregationPipeline:
         self._parents = parents
         # Closures/depths derive from the fresh parent map.
         self._closure_memo = {}
+        self._rep_memo = {}
         self._depth_memo = {}
         logger.info(
             "aggregation pipeline on %s: containment loaded — %d child→parent "
@@ -1377,12 +3279,28 @@ class AggregationPipeline:
         for etype in self._effective_types:
             totals += await self._count_type(_sanitize_label(etype))
         self._total = totals
+        self._total_counted = totals > 0
+        # Everything above — the containment load, the mode decision, the
+        # non-leaf ids, these counts — happens inside EXTRACT with no
+        # checkpoint between the one that opened it and the first scan
+        # batch. On a large graph that is minutes reporting nothing. Say the
+        # denominator the moment it is known; the scan then fills it in.
+        await self._checkpoint(
+            PHASE_AGGREGATE, 0, phase_label="extracting",
+            unit_done=0, unit_total=totals or None, unit="lineage edges",
+        )
 
         # ---- stream lineage edges → base map → lattice roll-ups ----
         values = self._values
         cap = self._pair_cap()
         base: Dict[int, int] = {}
 
+        # Counting the cube's upper bound HERE, when the mode was decided
+        # without a pre-compute pass, is what keeps a forced-cube source
+        # calibratable without reading every lineage edge twice.
+        counting = bool(self._estimate_in_extract)
+        anc_count = self._anc_count
+        estimate = 0
         for etype in self._effective_types:
             type_bit = self._type_bit[etype]
             safe = _sanitize_label(etype)
@@ -1390,6 +3308,8 @@ class AggregationPipeline:
                 for sid, tid in rows:
                     if sid is None or tid is None:
                         continue
+                    if counting:
+                        estimate += anc_count(int(sid)) * anc_count(int(tid))
                     key = _pack(int(sid), int(tid))
                     cur = base.get(key)
                     base[key] = (
@@ -1404,14 +3324,32 @@ class AggregationPipeline:
                 )
                 await self._checkpoint(
                     PHASE_AGGREGATE, self._scanned, phase_label="extracting",
+                    unit_done=self._scanned,
+                    # Only when the pre-count actually answered. A timed-out
+                    # ``count(r)`` returns 0, the clamp above then keeps
+                    # ``_total`` equal to ``_scanned``, and a bar drawn from
+                    # that reads 100% complete for the whole scan. Without a
+                    # denominator the stage reports the edges it has read,
+                    # which is true.
+                    unit_total=self._total if self._total_counted else None,
+                    unit="lineage edges",
                 )
-                if len(base) >= cap:
+                if len(base) >= cap or (
+                    len(base) >= self._flush_min_pairs and self._memory_pressure()
+                ):
                     # Roll-ups are linear: rolling partial bases and summing
                     # equals rolling the whole base. Collapse now to bound
-                    # memory; the accumulator merges across partials.
+                    # memory; the accumulator merges across partials (and
+                    # flushes on memory pressure as it goes).
+                    if len(base) < cap:
+                        self._memory_rollups += 1
                     await self._rollup_base(base)
                     base = {}
 
+        if counting:
+            self._cube_estimate_upper = estimate
+            self._cube_estimate = self._corrected_estimate(estimate, self._cell_ratio())
+            self._note_cube_projection(self._cube_estimate, forced=True)
         self._progress_pct = 45
         self._mark_phase("compute_s")
         await self._checkpoint(
@@ -1525,15 +3463,51 @@ class AggregationPipeline:
         await self._maybe_overflow_flush()
 
     def _closure(self, node: int) -> Dict[int, int]:
-        """Ancestors-or-self → containment depth for ``node``. Container
-        closures are memoized (every strict ancestor is a containment
-        parent, so the memo is bounded by container count); a leaf's own
-        entry is evicted after the call so leaf-count never inflates it."""
-        struct = self._struct_parents or set()
+        """Ancestors-or-self → containment depth for ``node``.
+
+        Container closures are always memoized (every strict ancestor is a
+        containment parent, so that part is bounded by container count).
+        A LEAF's entry used to be evicted the moment it was computed, which
+        keeps the memo free of leaf count and makes a densely connected
+        graph quadratic in walks: an endpoint shared by ten thousand
+        lineage edges was walked ten thousand times. Leaves are now kept
+        too, up to :data:`_CLOSURE_MEMO_MAX`; past the bound the old
+        eviction resumes, so memory is capped on any graph."""
         closure = ancestor_closure(self._parents, node, memo=self._closure_memo)
-        if node not in struct:
-            self._closure_memo.pop(node, None)
+        if len(self._closure_memo) > _CLOSURE_MEMO_MAX:
+            struct = self._struct_parents or set()
+            if node not in struct:
+                self._closure_memo.pop(node, None)
         return closure
+
+    def _anc_count(self, node: int) -> int:
+        """Upper bound on |ancestors-or-self| over the containment DAG:
+        1 + Σ over parents. Exact on single-parent chains; diamonds
+        overcount shared ancestors, which only PUSHES the estimate up —
+        auto can still never pick a cube that exceeds the budget, and an
+        int-per-node memo keeps the counting linear wherever it happens."""
+        memo = self._anc_memo
+        hit = memo.get(node)
+        if hit is not None:
+            return hit
+        parents = self._parents
+        stack: List[int] = [node]
+        while stack:
+            cur = stack[-1]
+            if cur in memo:
+                stack.pop()
+                continue
+            pending = [
+                p for p in parents.get(cur, ()) if p != cur and p not in memo
+            ]
+            if pending:
+                stack.extend(pending)
+                continue
+            memo[cur] = 1 + sum(
+                memo[p] for p in parents.get(cur, ()) if p != cur
+            )
+            stack.pop()
+        return memo[node]
 
     def _depth_of(self, node: int) -> int:
         """Containment depth of ANY node (roots and uncontained nodes 0,
@@ -1568,11 +3542,21 @@ class AggregationPipeline:
         """Non-leaf ancestors-or-self of ``node`` with containment depths
         — one side's input to the shared ``boundary_pairs`` rule. Leaf
         endpoints contribute their full container ancestry (the closure
-        walks through leaf-only gaps); isolated leaves yield {}."""
+        walks through leaf-only gaps); isolated leaves yield {}.
+
+        Memoized per node, bounded like the closure memo: this is what a
+        dense graph asks for once per raw pair, and it is the same answer
+        every time. The returned mapping is READ-ONLY — the rule only ever
+        reads it, and handing out the memo's own dict is what makes the
+        repeat lookups free."""
+        hit = self._rep_memo.get(node)
+        if hit is not None:
+            return hit
         struct = self._struct_parents or set()
-        return {
-            a: d for a, d in self._closure(node).items() if a in struct
-        }
+        reps = {a: d for a, d in self._closure(node).items() if a in struct}
+        if len(self._rep_memo) <= _CLOSURE_MEMO_MAX:
+            self._rep_memo[node] = reps
+        return reps
 
     async def _merge_canonical_pairs(self, base: Dict[int, int]) -> None:
         """Boundary-mode rollup: canonical depth-bridged pairs per raw
@@ -1616,7 +3600,7 @@ class AggregationPipeline:
         Falls back to local time if the probe fails."""
         try:
             res = await self.p._proj_ro_query(
-                "RETURN timestamp()", timeout=_scan_timeout_s(),
+                "RETURN timestamp()", timeout=self._scan_timeout(),
             )
             rows = res.result_set or []
             if rows and rows[0] and rows[0][0] is not None:
@@ -1629,29 +3613,350 @@ class AggregationPipeline:
             )
         return int(time.time() * 1000)
 
+    def _apply_rate(self) -> Tuple[float, str]:
+        """Rows per second this run's apply lands at, and where the figure
+        came from: what THIS run has measured so far, else what the last
+        run of this source measured, else the shipped default."""
+        pace = self._pace.snapshot()
+        measured = pace.get("rows_per_s")
+        if isinstance(measured, (int, float)) and measured > 0:
+            return float(measured), "measured"
+        hint = self._capacity_hints.get("apply_rows_per_s_observed")
+        try:
+            if hint and float(hint) > 0:
+                return float(hint), "last run"
+        except (TypeError, ValueError):
+            pass
+        return _APPLY_ROWS_PER_S_DEFAULT, "default"
+
+    def _projected_apply_secs(self, cells: int) -> Tuple[float, str]:
+        """How long writing ``cells`` rows would take at the rate above.
+
+        This is the question a cell COUNT cannot answer and the one that
+        decides whether a rebuild is useful: a cube that fits the shard
+        perfectly well and needs nine hours to land is a job that gets
+        cancelled, retried, and cancelled again. Every batch of it is safe;
+        the run is still a failure."""
+        rate, source = self._apply_rate()
+        return max(0.0, cells) / max(1.0, rate), source
+
+    def _apply_wall_budget_s(self) -> float:
+        """Seconds of this job's wall clock the apply may be projected to
+        use: the share of the window that is not already spent."""
+        wall = float(self._knob_int("max_wall_secs", _max_wall_secs, 3_600, 604_800))
+        spent = max(0.0, time.monotonic() - self._started_mono)
+        return max(60.0, (wall - spent) * _APPLY_WALL_SHARE)
+
     def _pair_cap(self) -> int:
         return self._knob_int("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000)
 
+    # -- capacity: the owning shard decides, the operator overrides ----------
+
+    def _explicit_ceiling(self) -> Optional[int]:
+        """``maxMaterializedEdges`` only when tuning set it — an operator's
+        ceiling on the TOTAL, layered over whichever rule governs."""
+        raw = self._tuning.get("max_materialized_edges")
+        if raw is None:
+            return None
+        try:
+            return max(10_000, min(_MAX_EDGES_BOUND, int(raw)))
+        except (TypeError, ValueError):
+            return None
+
+    def _static_cap(self) -> int:
+        """The count rule that governs when the shard cannot be measured:
+        the explicit ceiling if set, else the env default."""
+        return self._explicit_ceiling() or _max_materialized_edges()
+
+    def _governing_allowance(self) -> int:
+        """For ``run_stats``: how many edges the rule in force allowed."""
+        b = self._last_budget
+        if b is not None and b.governed_by == "shard":
+            return int(b.allowed_growth_edges or 0)
+        return self._static_cap()
+
+    async def _read_shard(self, *, include_config: bool = True) -> ShardMemory:
+        """The shard that owns the graph the rollups land on — the
+        projection graph in dedicated mode, which may live on a different
+        shard from the source graph. Read through the client the provider
+        holds NOW and never cached: a failover rebuilds that client, and
+        re-reading is what follows it.
+
+        ``include_config`` is the full reading — the node's drop limits and
+        a slot-map refresh — which the budget wants; the governor's
+        per-batch reading passes False and carries the run's once-per-run
+        facts onto it instead."""
+        p = self.p
+        dedicated = getattr(p, "_projection_mode", None) == "dedicated"
+        db = (getattr(p, "_proj_db", None) if dedicated else None) or getattr(p, "_db", None)
+        key = f"{p._graph_name}_proj" if dedicated else p._graph_name
+        cfg = getattr(p, "_conn_cfg", None)
+        shard = await read_shard_memory(
+            db, mode=getattr(cfg, "mode", None), graph_key=key,
+            timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            include_config=include_config, refresh=include_config,
+        )
+        return self._complete_reading(shard, include_config=include_config)
+
+    def _complete_reading(self, shard: ShardMemory, *, include_config: bool) -> ShardMemory:
+        """Carry the run's once-per-run facts onto a reading: the node's
+        drop limits (read with the first full reading, reused after), the
+        container limit the pod is killed at, and how many replicas the
+        run started with."""
+        if shard.source != "measured":
+            return shard
+        if include_config:
+            self._node_config = {
+                "repl_backlog_bytes": shard.repl_backlog_bytes,
+                "replica_outbuf_hard_bytes": shard.replica_outbuf_hard_bytes,
+            }
+        elif self._node_config:
+            carried = {
+                name: value for name, value in self._node_config.items()
+                if value is not None and getattr(shard, name) is None
+            }
+            if carried:
+                shard = dataclasses.replace(shard, **carried)
+        if shard.container_limit_bytes is None:
+            limit = container_limit_bytes(shard, env_bytes=self._container_env_bytes)
+            if limit is not None:
+                shard = dataclasses.replace(shard, container_limit_bytes=limit)
+        if self._expected_replicas is None and shard.connected_replicas is not None:
+            self._expected_replicas = int(shard.connected_replicas)
+        return shard
+
+    async def _budget(self) -> WriteBudget:
+        """A fresh reading plus the operator's limits. Bytes per edge:
+        tuning → what a previous run of this graph measured → env."""
+        shard = await self._read_shard()
+        cap = getattr(shard, "query_mem_capacity", None)
+        if cap:
+            self._query_mem_capacity = int(cap)
+        # Teach the provider what the node the rollups land on allows, so
+        # its per-query clamp follows the server (a cap raised at runtime
+        # from Infrastructure) rather than the env mirror.
+        note = getattr(self.p, "note_server_limits", None)
+        if note is not None:
+            note(
+                shard.endpoint,
+                timeout_max_ms=getattr(shard, "timeout_max_ms", None),
+                query_mem_capacity=cap or None,
+                thread_count=getattr(shard, "thread_count", None),
+                timeout_default_ms=getattr(shard, "timeout_default_ms", None),
+            )
+        raw_bpe = self._tuning.get("bytes_per_edge")
+        hint = self._capacity_hints.get("bytes_per_edge_observed")
+        if raw_bpe is not None:
+            bpe, source = raw_bpe, "tuning"
+        elif hint:
+            bpe, source = hint, "calibrated"
+        else:
+            bpe, source = None, "default"
+        reserved_bytes, reserved_count = await self._reserved_by_others(shard)
+        budget = compute_write_budget(
+            shard,
+            reserve_pct=self._tuning.get("shard_reserve_pct"),
+            bytes_per_edge=bpe, bpe_source=source,
+            explicit_ceiling=self._explicit_ceiling(),
+            static_cap=self._static_cap(),
+            reserved_bytes=reserved_bytes, reserved_count=reserved_count,
+        )
+        self._last_budget = budget
+        return budget
+
+    def _ledger(self, shard: ShardMemory) -> Optional[Any]:
+        """The admission controller, when there is one and the node it
+        would keep a ledger for is known and measurable."""
+        admission = getattr(self.p, "_admission_controller", None)
+        if admission is None or not shard.measurable or shard.endpoint == "unknown":
+            return None
+        return admission
+
+    async def _reserved_by_others(self, shard: ShardMemory) -> Tuple[int, int]:
+        """What other rebuilds hold in the node's ledger — allowed to write,
+        not yet in ``used``. ``(0, 0)`` without a controller or a bus."""
+        admission = self._ledger(shard)
+        read = getattr(admission, "reserved_by_others", None)
+        if read is None:
+            return 0, 0
+        return await read(shard.endpoint, self._job_id)
+
+    async def _reserve(self, shard: ShardMemory, nbytes: int) -> None:
+        """Hold what this job may still write in the node's ledger, so a
+        rebuild racing onto the same node budgets against it too. The
+        figure is what ``used`` does not show yet: the whole growth before
+        the apply, one wave for an overflow flush, the remainder at a
+        mid-apply recheck — replaced, never summed. Fail-open like the
+        rest of admission: no bus, nothing held."""
+        admission = self._ledger(shard)
+        if admission is None:
+            return
+        if self._reservation is not None and self._reservation.endpoint != shard.endpoint:
+            await admission.release(self._reservation)      # the graph moved (failover)
+            self._reservation = None
+        if self._reservation is None:
+            reserve = getattr(admission, "reserve", None)
+            if reserve is not None:
+                self._reservation = await reserve(shard.endpoint, self._job_id, nbytes)
+        else:
+            await admission.update(self._reservation, nbytes)
+
+    async def _count_aggregated(self) -> int:
+        """How many :AGGREGATED edges the graph holds — what a rebuild
+        re-materialises rather than grows. Best-effort: unknown reads as 0,
+        which budgets every cell as growth (the conservative direction)."""
+        try:
+            res = await self.p._proj_ro_query(
+                "MATCH ()-[r:AGGREGATED]->() RETURN count(r)",
+                timeout=self._scan_timeout(),
+            )
+            rows = res.result_set or []
+            return int(rows[0][0] or 0) if rows and rows[0] else 0
+        except Exception as exc:
+            logger.info(
+                "aggregation pipeline on %s: existing rollup count unavailable "
+                "(%s) — budgeting every cell as growth.", self.p._graph_name, exc,
+            )
+            return 0
+
+    async def _capacity_baseline(self) -> None:
+        """E0 for the growth budget on every run; the shard's ``used`` for
+        the calibration on a FRESH run only (a resumed run's start is gone).
+        Also the run's first look at how the write node replicates."""
+        self._edges_before = await self._count_aggregated()
+        if self._fresh_run:
+            shard = await self._read_shard()
+            self._used_before = shard.used if shard.measurable else None
+        await self._check_replication_shape()
+
+    async def _check_replication_shape(self) -> None:
+        """Warn when this shard's replicas will RE-RUN every rollup batch.
+
+        FalkorDB ships a write to its replicas as a compact change log only
+        when the average time per modification exceeds ``EFFECTS_THRESHOLD``
+        (300 µs by default). A rollup batch is thousands of cheap MERGEs, so
+        it falls below that and each replica repeats the whole query on its
+        main thread, answering no health check while it works. The rebuild
+        still completes — it paces itself against the acknowledgements — but
+        the fix is one setting, so the run says so.
+        """
+        state = await self._replication_state()
+        attached = int(state.get("connectedReplicas") or 0)
+        if self._expected_replicas is None:
+            # What the run started with: fewer attached later is a replica
+            # the rebuild lost, and the governor holds for its return.
+            self._expected_replicas = attached
+        if attached <= 0:
+            return
+        self._note_replica_lag(state)
+        shard = self._last_budget.shard if self._last_budget is not None else None
+        threshold = getattr(shard, "effects_threshold_us", None) if shard else None
+        if threshold is None:
+            threshold = getattr(await self._read_shard(), "effects_threshold_us", None)
+        if threshold is None or threshold <= 0:
+            return
+        endpoint = getattr(shard, "endpoint", None) or self.p._endpoint_label()
+        self._replication_advisory = {
+            "kind": "effects_threshold",
+            "endpoint": endpoint,
+            "effects_threshold_us": int(threshold),
+            "replicas": attached,
+            "detail": (
+                f"{attached} replica(s) of {endpoint} re-run every rollup write on "
+                f"their main thread (effects threshold {threshold} µs). Set it to 0 "
+                f"from Admin → Graph store so they apply a change log instead."
+            ),
+        }
+        logger.warning(
+            "aggregation pipeline on %s: %s",
+            self.p._graph_name, self._replication_advisory["detail"],
+        )
+
+    async def _calibrate(self) -> None:
+        """What this run actually cost the shard per NEW edge, for the next
+        run's budget. The gates (fresh run, material growth, positive delta,
+        clamp) live in ``shard_capacity``; the outcome lands in run_stats
+        either way, so a run that could not calibrate says why."""
+        if not self._fresh_run:
+            self._calibration = {"calibration": "skipped_resume"}
+            return
+        if self._used_before is None:
+            self._calibration = {"calibration": "skipped_unmeasured"}
+            return
+        shard = await self._read_shard()
+        edges_after = await self._count_aggregated()
+        observed = calibrate_bytes_per_edge(
+            used_before=self._used_before,
+            used_after=shard.used if shard.measurable else None,
+            edges_before=self._edges_before, edges_after=edges_after,
+        )
+        self._calibration = (
+            {"bytes_per_edge_observed": observed, "calibration": "measured"}
+            if observed is not None else {"calibration": "skipped_small_growth"}
+        )
+        # The rate this run actually wrote at, for the next run's projection.
+        # Measured on every run that wrote anything — unlike the pressure
+        # lessons, which are only meaningful when there WAS pressure.
+        rate = self._pace.snapshot().get("rows_per_s")
+        if isinstance(rate, (int, float)) and rate > 0:
+            self._calibration["apply_rows_per_s_observed"] = round(float(rate), 1)
+
+    def _memory_pressure(self) -> bool:
+        """True when the worker's RSS is at or over the flush share of its
+        cgroup limit. Fail-open: an unknown RSS or no limit reads as no
+        pressure, and the pair cap still bounds memory. Records the peak
+        RSS and the limit for the run's record."""
+        rss, limit = self._mem.sample()
+        if rss is None or limit is None:
+            return False
+        self._rss_high_water_mb = max(self._rss_high_water_mb or 0.0, rss)
+        self._mem_limit_mb = limit
+        return rss * 100.0 >= limit * self._flush_pct
+
+    def _should_flush(self, size: int) -> Tuple[bool, str]:
+        """Whether the accumulator (``size`` pairs) flushes now, and why:
+        ``"cap"`` at the pair cap, ``"memory"`` when the worker is under
+        memory pressure with enough pairs to make a flush worth its writes."""
+        if size >= self._pair_cap():
+            return True, "cap"
+        if size >= self._flush_min_pairs and self._memory_pressure():
+            return True, "memory"
+        return False, ""
+
     async def _maybe_overflow_flush(self) -> None:
-        """Early-apply the accumulator when it exceeds the memory cap.
+        """Early-apply the accumulator when it exceeds the pair cap, or when
+        the worker is under memory pressure (``_should_flush``).
 
         The first flush of a key this run OVERWRITES the stored weight
         (discarding any stale value or prior attempt's partial); repeat
         flushes ADD. Flushed edges carry ``latestUpdate >= run_start_ms``
         so the reconcile delete pass never removes them. Weights therefore
         stay EXACT across flushes and across restart-from-zero resumes."""
-        cap = self._pair_cap()
-        if len(self._acc) < cap:
+        flush, reason = self._should_flush(len(self._acc))
+        if not flush:
             return
-        self._check_write_budget()
+        if reason == "memory":
+            self._memory_flushes += 1
         flushed = self._flushed
         overwrite = [k for k in self._acc if k not in flushed]
         add = [k for k in self._acc if k in flushed]
-        logger.info(
-            "aggregation pipeline on %s: accumulator hit cap %d — early "
-            "flush (%d first-touch overwrite, %d add).",
-            self.p._graph_name, cap, len(overwrite), len(add),
-        )
+        # This wave's growth is exactly its first-touch keys; the shard is
+        # re-read, so the waves before it are already inside ``used``.
+        await self._check_write_budget(wave=overwrite)
+        if reason == "memory":
+            logger.info(
+                "aggregation pipeline on %s: worker at %.0f MB of its %.0f MB limit "
+                "(flush at %d%%) with %d pending pairs — early flush on memory "
+                "(%d first-touch overwrite, %d add).",
+                self.p._graph_name, self._rss_high_water_mb or 0.0, self._mem_limit_mb or 0.0,
+                self._flush_pct, len(self._acc), len(overwrite), len(add),
+            )
+        else:
+            logger.info(
+                "aggregation pipeline on %s: accumulator hit cap %d — early "
+                "flush (%d first-touch overwrite, %d add).",
+                self.p._graph_name, self._pair_cap(), len(overwrite), len(add),
+            )
         snapshot = self._acc
         self._acc = {}
         await self._write_keys(snapshot, overwrite, weight_mode="overwrite")
@@ -1678,6 +3983,105 @@ class AggregationPipeline:
             return False
         return not bool(self._cube_mode)
 
+    def _cell_ratio(self) -> Optional[float]:
+        """Distinct cells this source stores per cell the estimate counts.
+
+        Measured by the last complete run and carried on the state row. It is
+        a property of the graph's SHAPE — how much lineage repeats between the
+        same pair of containers — so it is stable run to run in a way the
+        absolute counts are not.
+
+        None means never measured, and a None ratio may not refuse anything.
+        Clamped to (0, 1]: the estimate is a sound upper bound, so a ratio
+        above 1 would mean one of the two numbers is not what it claims, and
+        the answer to that is to distrust the correction, not to act on it.
+        """
+        raw = self._capacity_hints.get("cell_ratio_observed")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 < value <= 1.0):
+            logger.warning(
+                "aggregation pipeline on %s: stored cell ratio %r is outside "
+                "(0, 1] — ignoring it and treating this run as uncalibrated.",
+                self.p._graph_name, raw,
+            )
+            return None
+        return value
+
+    def _note_cube_projection(self, cells: int, *, forced: bool) -> None:
+        """Record what writing ``cells`` would cost in time, and — on a
+        FORCED cube that cannot land inside the job's wall clock — say so.
+
+        Never a refusal: an operator asked for the full cube and the shard
+        may well hold it. But a run that cannot finish inside its own wall
+        clock is a run that gets killed part-way and retried from its
+        checkpoint forever, and nothing downstream said so."""
+        needed_s, rate_src = self._projected_apply_secs(cells)
+        wall_budget = self._apply_wall_budget_s()
+        self._cube_projection = {
+            "cells": int(cells), "seconds": round(needed_s),
+            "wall_budget_s": round(wall_budget), "rate": rate_src,
+        }
+        if not forced or needed_s <= wall_budget:
+            return
+        self._slow_cube_advisory = {
+            "kind": "cube_slower_than_wall_clock",
+            "severity": "warning",
+            "estimated_cells": int(cells),
+            "projected_apply_secs": round(needed_s),
+            "wall_budget_secs": round(wall_budget),
+            "rate_source": rate_src,
+            "message": (
+                f"The full cube for this source is ~{cells:,} cells, which at the "
+                f"{rate_src} write rate needs about {needed_s / 3600:.1f} hours to "
+                f"land — more than the ~{wall_budget / 3600:.1f} hours this job's "
+                f"wall clock leaves for the apply. The run keeps its checkpoint and "
+                f"resumes, so it will finish eventually, but to finish in ONE run "
+                f"either raise Max wall clock, lower Write pacing ratio (or its "
+                f"floor) so the node is written to faster, or set Rollup storage to "
+                f"Auto, which stores the depth-diagonal at this size and serves the "
+                f"rest on demand."
+            ),
+        }
+        logger.warning(
+            "aggregation pipeline on %s: %s",
+            self.p._graph_name, self._slow_cube_advisory["message"],
+        )
+
+    def _corrected_estimate(self, upper: int, ratio: Optional[float]) -> int:
+        """The upper bound scaled by what this source actually stores.
+
+        Uncalibrated, the upper bound stands as-is — it is still the honest
+        thing to REPORT, it simply may not be used to refuse.
+        """
+        if ratio is None:
+            return upper
+        return max(1, int(upper * ratio)) if upper > 0 else 0
+
+    def _observed_cell_ratio(self, exact_cells: int) -> Optional[float]:
+        """What this run just taught us, for the next one to start from.
+
+        Only from a run that computed BOTH numbers: no estimate pass (the
+        mode was decided without one) or no cells means nothing to learn, and
+        writing a ratio from half a measurement would be worse than none.
+        """
+        upper = getattr(self, "_cube_estimate_upper", None)
+        if not upper or upper <= 0 or exact_cells <= 0:
+            return None
+        ratio = exact_cells / upper
+        if not (0.0 < ratio <= 1.0):
+            # The "upper bound" was exceeded, so it is not one. Say so loudly
+            # rather than storing a correction that would inflate next time.
+            logger.warning(
+                "aggregation pipeline on %s: %d cells stored against an upper "
+                "bound of %d — the bound is not bounding. Not calibrating.",
+                self.p._graph_name, exact_cells, upper,
+            )
+            return None
+        return round(ratio, 6)
+
     async def _decide_materialization_mode(self) -> None:
         """Pick cube vs boundary for this run (see
         ``_materialize_fine_pairs_mode``). The auto estimator is one
@@ -1688,6 +4092,7 @@ class AggregationPipeline:
         self._struct_parents = {
             p for ps in self._parents.values() for p in ps
         }
+        self._rep_memo = {}        # rep sets are defined against this set
         if not self._struct_parents and self._containment:
             # Containment types are DECLARED but matched zero edges. If
             # the graph holds rollup cells, EITHER mode would recompute a
@@ -1696,7 +4101,7 @@ class AggregationPipeline:
             # casing problem) instead of wiping.
             probe = await self.p._proj_ro_query(
                 "MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1",
-                timeout=_scan_timeout_s(),
+                timeout=self._scan_timeout(),
             )
             if probe.result_set:
                 raise MaterializationPreconditionFailed(
@@ -1706,48 +4111,48 @@ class AggregationPipeline:
                     "stored container cell as stale. Check the ontology's "
                     "containment types / source aliases / casing."
                 )
+        self._anc_memo = {}
+        anc_count = self._anc_count
         mode = self._fine_mode()
         if not self._struct_parents:
             # No containment at all: the lattice degenerates to the leaf
             # mirror; the boundary has nothing to rank. Legacy path.
             self._cube_mode = True
             return
-        if mode == "true":
-            self._cube_mode = True
-            return
         if mode == "false":
             self._cube_mode = False
             return
-        parents = self._parents
-        cnt_memo: Dict[int, int] = {}
+        # Forced full detail used to skip the estimate and fail mid-apply,
+        # leaving a partial cube over the previous generation's cells. It
+        # now pays the same counting scan Auto does, so a cube the owning
+        # shard cannot take is refused BEFORE compute and before any write.
+        forced = mode == "true"
 
-        def anc_count(node: int) -> int:
-            """Upper bound on |ancestors-or-self| over the containment DAG:
-            1 + Σ over parents. Exact on single-parent chains; diamonds
-            overcount shared ancestors, which only PUSHES the estimate up —
-            auto can still never pick a cube that exceeds the budget, and
-            an int-per-node memo keeps the counting scan linear."""
-            hit = cnt_memo.get(node)
-            if hit is not None:
-                return hit
-            stack: List[int] = [node]
-            while stack:
-                cur = stack[-1]
-                if cur in cnt_memo:
-                    stack.pop()
-                    continue
-                pending = [
-                    p for p in parents.get(cur, ())
-                    if p != cur and p not in cnt_memo
-                ]
-                if pending:
-                    stack.extend(pending)
-                    continue
-                cnt_memo[cur] = 1 + sum(
-                    cnt_memo[p] for p in parents.get(cur, ()) if p != cur
-                )
-                stack.pop()
-            return cnt_memo[node]
+        if forced and self._cell_ratio() is None:
+            # The estimate has two jobs: refuse before the compute, and
+            # MEASURE the cell ratio this source stores per cell counted, so
+            # that every later run can refuse on it. Forced full detail with
+            # no ratio yet cannot do the first — an upper bound that may be
+            # fifty times too high proves nothing by failing — but it must
+            # still do the second, or the source stays uncalibrated forever
+            # and no run ever refuses early.
+            #
+            # So the counting pass is not skipped, it is MOVED: the real
+            # extract scan already visits every lineage edge, and counting
+            # there costs two memoized dict lookups per edge instead of a
+            # second full read of the store. On a 500k-edge graph that is
+            # the difference between one pass and two.
+            self._cube_mode = True
+            self._estimate_in_extract = True
+            logger.info(
+                "aggregation pipeline on %s: forced full cube and no measured "
+                "cell ratio yet — the pre-compute counting scan cannot refuse, "
+                "so the estimate is counted during the extract scan instead of "
+                "in a second pass over the same edges. The exact check after "
+                "compute still refuses before any write if it must.",
+                self.p._graph_name,
+            )
+            return
 
         from backend.app.providers.falkordb_provider import _sanitize_label
         estimate = 0
@@ -1758,26 +4163,105 @@ class AggregationPipeline:
                     if sid is None or tid is None:
                         continue
                     estimate += (anc_count(int(sid))) * (anc_count(int(tid)))
-        # The cube ceiling is deliberately NOT the write budget: the budget
-        # is a runaway backstop sized well above any real result, while the
-        # cube decision must stay pinned to what the instance can hold.
-        # Sharing them would make raising the backstop silently turn "Auto"
-        # into "Always full detail". See _max_cube_edges.
-        cap = _max_cube_edges()
-        write_budget = self._knob_int(
-            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
-        )
+        # What was just summed is cells PRODUCED: for every raw lineage edge,
+        # the product of its endpoints' ancestor-chain lengths. What the graph
+        # STORES is cells DISTINCT — the write is a MERGE on aggKey, so many
+        # raw edges collapse onto one cell and bump its weight. The two differ
+        # by roughly the mean weight, and aggregation exists to make that
+        # number large: a graph compressing 50:1 estimates 50× its real size.
+        # Refusing on the raw figure refuses graphs for aggregating WELL.
+        self._cube_estimate_upper = estimate
+        ratio = self._cell_ratio()
+        estimate = self._corrected_estimate(estimate, ratio)
         self._cube_estimate = estimate
-        self._cube_mode = estimate <= cap
-        logger.info(
-            "aggregation pipeline on %s: auto mode — full-cube estimate "
-            "~%d cells vs cube ceiling %d (write budget %d) → %s.",
-            self.p._graph_name, estimate, cap, write_budget,
-            "FULL CUBE (every ancestor combination stored)"
-            if self._cube_mode else
-            "structural depth-diagonal (cube exceeds ceiling; mixed "
-            "granularities served on demand)",
+
+        budget = await self._budget()
+        margin = self._knob_int("estimate_margin_pct", estimate_margin_pct_default, 0, 100)
+        verdict = budget.verdict(
+            projected=estimate, growth_edges=max(0, estimate - self._edges_before),
+            margin_pct=margin,
         )
+        if forced:
+            self._cube_mode = True
+            self._note_cube_projection(estimate, forced=True)
+            # Reachable only with a measured cell ratio: an UNCALIBRATED
+            # estimate may not refuse (the upper bound supports one
+            # conclusion only — if it fits, the real thing fits — and "it
+            # does not fit" proves nothing about a number that can be fifty
+            # times too high), and that case returned above without paying
+            # for the scan at all.
+            if not verdict.ok:
+                _metric('aggregation_write_budget_refusals_total',
+                        node=self._gov_node() or 'unknown')
+                raise MaterializationBudgetExceeded(format_refusal(
+                    budget, verdict, graph=self.p._graph_name,
+                    composition=(
+                        f"full cube, estimated before compute "
+                        f"(upper bound {self._cube_estimate_upper:,} cells × "
+                        f"measured ratio {ratio:.4f})"
+                    ),
+                    from_estimate=True, margin_pct=margin,
+                ))
+            logger.info(
+                "aggregation pipeline on %s: forced full cube — estimate ~%d "
+                "cells (upper bound %d%s); the %s rule allows it.",
+                self.p._graph_name, estimate, self._cube_estimate_upper,
+                f", measured ratio {ratio:.4f}" if ratio is not None else ", uncalibrated",
+                budget.governed_by,
+            )
+            return
+        # The cube ceiling is deliberately NOT the write budget: it is Auto's
+        # appetite, a product choice, while the budget is what the shard can
+        # take. Auto keeps its ceiling AND never picks a cube the shard would
+        # refuse. See _max_cube_edges.
+        cap = self._knob_int("max_cube_edges", _max_cube_edges, 10_000, 50_000_000)
+        ceiling = self._explicit_ceiling()
+        if ceiling is not None and cap > ceiling:
+            logger.warning(
+                "aggregation pipeline on %s: the cube ceiling (%d) sits above the "
+                "explicit edge ceiling maxMaterializedEdges=%d — a cube Auto would "
+                "pick could be refused by the budget; keep maxCubeEdges below it.",
+                self.p._graph_name, cap, ceiling,
+            )
+        # Three gates, and only the first two are measurements of anything.
+        #
+        #  * the shard: can it hold the cube (the write budget's verdict).
+        #    Uncalibrated, an over-large upper bound must not push Auto off
+        #    the cube — that trades a graph's full detail for the degraded
+        #    depth-diagonal on arithmetic that can be fifty times too high.
+        #  * the clock: can the apply land inside this job's wall clock at
+        #    the rate this source writes at. A cube the shard can hold and
+        #    the job cannot finish is a rebuild that gets cancelled and
+        #    retried forever, which serves nobody the full detail either.
+        #  * the operator's appetite ceiling, which by default does not bind.
+        needed_s, rate_src = self._projected_apply_secs(estimate)
+        wall_budget = self._apply_wall_budget_s()
+        fits_clock = needed_s <= wall_budget
+        self._cube_projection = {
+            "cells": int(estimate), "seconds": round(needed_s),
+            "wall_budget_s": round(wall_budget), "rate": rate_src,
+        }
+        self._cube_mode = (
+            (verdict.ok or ratio is None) and fits_clock and estimate <= cap
+        )
+        why = (
+            "the shard cannot hold it" if not (verdict.ok or ratio is None)
+            else f"it needs ~{needed_s / 3600:.1f}h to write and the job allows "
+                 f"~{wall_budget / 3600:.1f}h" if not fits_clock
+            else f"it exceeds the appetite ceiling {cap:,}" if estimate > cap
+            else ""
+        )
+        logger.info(
+            "aggregation pipeline on %s: auto mode — full-cube estimate ~%d "
+            "cells, ~%.0f min to write at the %s rate (%s rule: %s) → %s%s.",
+            self.p._graph_name, estimate, needed_s / 60, rate_src,
+            budget.governed_by, "fits" if verdict.ok else "does not fit",
+            "FULL CUBE (every ancestor combination stored)"
+            if self._cube_mode else "structural depth-diagonal",
+            "" if self._cube_mode else f" — {why}; mixed granularities served on demand",
+        )
+        if not self._cube_mode:
+            self._degraded_reason = why
 
     async def _load_nonleaf_ids(self) -> None:
         """Build the structural boundary from the containment parent map:
@@ -1812,9 +4296,8 @@ class AggregationPipeline:
         directory: Dict[int, Tuple[str, str]] = {}
         type_levels: Dict[int, int] = {}
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
-        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         res = await self.p._ro_query(
-            "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
+            "MATCH (n) RETURN max(ID(n))", timeout=self._scan_timeout(),
         )
         rows = res.result_set or []
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
@@ -1828,7 +4311,7 @@ class AggregationPipeline:
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
                 f"RETURN ID(n), {_ident_expr}, labels(n)",
                 params={"lo": lo, "hi": hi},
-                timeout=_scan_timeout_s(),
+                timeout=self._scan_timeout(),
             )
             return r.result_set or []
 
@@ -1838,9 +4321,11 @@ class AggregationPipeline:
             )
 
         lows = list(range(0, max_id + 1, width))
-        for start in range(0, len(lows), conc):
+        start = 0
+        while start < len(lows):
             self._cancel_check()
-            wave = lows[start:start + conc]
+            wave = lows[start:start + self._effective_conc()]
+            start += len(wave)
             for result in await asyncio.gather(*(fetch(lo) for lo in wave)):
                 for row in result:
                     nid, urn, labels = row[0], row[1], row[2] or []
@@ -1868,29 +4353,43 @@ class AggregationPipeline:
             ", ".join(f"d{rk}={n}" for rk, n in sorted(by_rank.items())),
         )
 
-    def _check_write_budget(self) -> None:
-        """Refuse to exceed the FalkorDB write budget — failing the job with
-        guidance beats OOM-killing the shared instance."""
-        cap = self._knob_int(
-            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
-        )
+    async def _check_write_budget(
+        self, *, wave: Optional[List[int]] = None,
+        growth_edges: Optional[int] = None, note: Optional[str] = None,
+    ) -> None:
+        """Refuse a write the owning shard cannot take — failing the job
+        with the numbers beats OOM-killing a shared instance.
+
+        Growth, not size, is what the shard pays for. Before the apply it is
+        every cell the graph does not already hold; for an overflow ``wave``
+        it is that wave's first-touch keys, the shard having been re-read so
+        the waves before it are already inside ``used``; for a mid-apply
+        recheck it is ``growth_edges``, what is still to land. ``note`` rides
+        into the refusal so the message says which check refused."""
         # Union, not sum: a key flushed earlier AND re-touched since sits
         # in both sets — summing double-counts it and terminally fails a
         # legitimately under-budget job.
         flushed = self._flushed
         projected = len(flushed) + sum(1 for k in self._acc if k not in flushed)
-        if projected > cap:
-            raise MaterializationBudgetExceeded(
-                f"aggregation would materialize ~{projected} :AGGREGATED edges "
-                f"({self._budget_composition()}), exceeding "
-                f"max_materialized_edges={cap} for graph "
-                f"'{self.p._graph_name}'. Writing this would risk exhausting the "
-                f"FalkorDB instance's memory. This count is deterministic — the "
-                f"job is not retried. Fixes: keep the default level-based "
-                f"materialization (materialize_fine_pairs=false) so only "
-                f"same-level container pairs are stored; raise the cap via "
-                f"tuning only if the instance has headroom (~0.5KB per edge)."
-            )
+        if growth_edges is not None:
+            growth = max(0, int(growth_edges))
+        elif wave is not None:
+            growth = len(wave)
+        else:
+            growth = max(0, projected - self._edges_before)
+        budget = await self._budget()
+        verdict = budget.verdict(projected=projected, growth_edges=growth)
+        if not verdict.ok:
+            composition = self._budget_composition()
+            if note:
+                composition = f"{composition}; {note}"
+            _metric('aggregation_write_budget_refusals_total',
+                    node=self._gov_node() or 'unknown')
+            raise MaterializationBudgetExceeded(format_refusal(
+                budget, verdict, graph=self.p._graph_name, composition=composition,
+            ))
+        # Passed: hold what is still to land in the node's ledger.
+        await self._reserve(budget.shard, int(verdict.needed_bytes or 0))
 
     def _budget_composition(self) -> str:
         """Per-rank-pair histogram of the would-be result, so operators
@@ -1923,14 +4422,13 @@ class AggregationPipeline:
         # so reaching this point means legacy full-cube mode: load the FULL
         # node set.
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
-        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         # Canonical identity per node: `urn`, or the source's configured URN-equivalent (e.g. `id`)
         # for onboarded third-party graphs whose nodes carry no `urn` (stamp_identity_urns normally
         # populates `urn` first; this coalesce covers any node it hasn't reached).
         ident_prop = getattr(self.p, "_node_identity_property", None)
         ident_expr = _node_identity_expr(ident_prop)
         res = await self.p._ro_query(
-            "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
+            "MATCH (n) RETURN max(ID(n))", timeout=self._scan_timeout(),
         )
         rows = res.result_set or []
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
@@ -1941,7 +4439,7 @@ class AggregationPipeline:
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
                 f"RETURN ID(n), {ident_expr}, labels(n)",
                 params={"lo": lo, "hi": hi},
-                timeout=_scan_timeout_s(),
+                timeout=self._scan_timeout(),
             )
             return res.result_set or []
 
@@ -1951,9 +4449,11 @@ class AggregationPipeline:
             )
 
         lows = list(range(0, max_id + 1, width))
-        for start in range(0, len(lows), conc):
+        start = 0
+        while start < len(lows):
             self._cancel_check()
-            wave = lows[start:start + conc]
+            wave = lows[start:start + self._effective_conc()]
+            start += len(wave)
             for rows in await asyncio.gather(*(fetch(lo) for lo in wave)):
                 for row in rows:
                     nid, identity, labels = row[0], row[1], row[2] or []
@@ -2049,7 +4549,7 @@ class AggregationPipeline:
         try:
             res = await self.p._ro_query(
                 f"MATCH (n) WITH n LIMIT 5000 RETURN count(n), {parts}",
-                timeout=_scan_timeout_s(),
+                timeout=self._scan_timeout(),
             )
             row = (res.result_set or [[]])[0] if res.result_set else []
             if not row:
@@ -2156,29 +4656,118 @@ class AggregationPipeline:
         # honoring the bulk-create ceiling. Ramping up beats starting big —
         # an oversized first batch on a cold/loaded server stalls the whole
         # write path behind one slow query.
-        return max(100, min(
+        ceiling = self._batch_ceiling()
+        size = max(min(100, ceiling), min(
             self.p._aggregation_sub_batch_size,
             self.p._bulk_create_batch_size,
+            ceiling,
         ))
+        # Under write pressure the ladder's sticky cap wins, down to a
+        # single row — below the AIMD floor of 100 / the provider's 50,
+        # because a batch the server refuses for size or time is re-issued
+        # smaller, never unchanged.
+        if self._write_cap.value is not None:
+            size = max(1, min(size, self._write_cap.value))
+        return size
+
+    async def _write_rows_with_ladder(
+        self, cypher: str, rows: List[Dict[str, Any]], *, label: str,
+        cap: "_StickyCap", params: Optional[Dict[str, Any]] = None,
+        count_as: str = "writes",
+    ) -> None:
+        """Issue one UNWIND write (MERGE or DELETE) under the pressure
+        ladder: a per-query timeout or memory refusal halves the batch and
+        re-issues the halves; at the minimum size a timeout is retried with
+        backoff and then declared an outage, a memory refusal is terminal.
+
+        Re-issuing after a failure is safe: a write FalkorDB aborts at its
+        ``TIMEOUT`` or at the memory ceiling is rolled back, and the
+        residual client-deadline race (server completes 500 ms after the
+        client gave up) re-applies at most one batch via MERGE ON MATCH /
+        an idempotent keyed delete — the bound ``_run_guarded`` already
+        accepts for its own connection retries."""
+        if not rows:
+            return
+        p = self.p
+        payload_key = "keys" if count_as == "deletes" else "batch"
+        base_params = dict(params or {})
+
+        def _issue(batch: List[Dict[str, Any]]):
+            return self._paced_write(lambda: p._proj_query(
+                cypher, params={**base_params, payload_key: batch},
+                timeout=self._write_timeout(),
+            ), rows=len(batch))
+
+        try:
+            elapsed, _ = await self._through_outage(lambda: _issue(rows), op=label)
+        except Exception as exc:
+            kind = _pressure_kind(exc)
+            if kind is None:
+                raise
+            self._on_pressure(label, kind, 0, 0, size=len(rows))
+            if not cap.at_floor(len(rows)) and len(rows) > 1:
+                new_cap = cap.shrink(len(rows))
+                if count_as == "writes":
+                    # Pull the provider's AIMD sizer down too, so the NEXT
+                    # chunk starts small instead of re-discovering the
+                    # ceiling; healthy writes re-grow it additively.
+                    p._aggregation_sub_batch_size = max(
+                        getattr(p, "_MERGE_SUB_BATCH_MIN", 50),
+                        min(p._aggregation_sub_batch_size, new_cap),
+                    )
+                logger.warning(
+                    "aggregation pipeline on %s: %s of %d rows %s — halving "
+                    "to %d and re-issuing.", p._graph_name, label, len(rows),
+                    "exceeded the per-query memory ceiling" if kind == "memory"
+                    else "timed out", new_cap,
+                )
+                mid = max(1, min(new_cap, len(rows) - 1))
+                for part in (rows[:mid], rows[mid:]):
+                    if part:
+                        await self._write_rows_with_ladder(
+                            cypher, part, label=label, cap=cap, params=params,
+                            count_as=count_as,
+                        )
+                return
+            if kind == "memory":
+                raise MaterializationQueryMemoryExceeded(
+                    self._query_memory_guidance(
+                        label, 0, 0, kind=count_as[:-1], size=len(rows),
+                    )
+                ) from exc
+            elapsed, _ = await self._retry_at_floor(
+                lambda: _issue(rows), label=label, lo=0, hi=0, size=len(rows),
+                budget=self._write_timeout(),
+            )
+        cap.note_success()
+        if count_as == "writes":
+            self._note_write_latency(elapsed)
+            self._writes += len(rows)
+        else:
+            self._deletes += len(rows)
+        await self._heartbeat()
 
     def _note_write_latency(self, elapsed: float) -> None:
-        """Feed the provider's AIMD sizer: sustained slow writes shrink
-        sub-batches (multiplicative), healthy ones re-grow (additive)."""
+        """Feed the provider's AIMD sizer against the batch target in force:
+        a batch that ran past the target halves the next (multiplicative);
+        five in a row under two fifths of it grow it by a step (additive),
+        never past the ceiling."""
         p = self.p
         current = p._aggregation_sub_batch_size
-        if elapsed > p._MERGE_SUB_BATCH_TARGET_HIGH_S:
+        target = self._live_write_batch_target_s()
+        ceiling = self._batch_ceiling()
+        if elapsed > target:
             p._aggregation_sub_batch_size = max(p._MERGE_SUB_BATCH_MIN, current // 2)
             p._aggregation_sub_batch_under_target_run = 0
-        elif elapsed < p._MERGE_SUB_BATCH_TARGET_LOW_S:
+        elif elapsed < _GROW_BELOW_SHARE * target:
             p._aggregation_sub_batch_under_target_run += 1
             if (
                 p._aggregation_sub_batch_under_target_run
                 >= p._MERGE_SUB_BATCH_GROW_AFTER
-                and current < p._MERGE_SUB_BATCH_SIZE
+                and current < ceiling
             ):
                 p._aggregation_sub_batch_size = min(
-                    p._MERGE_SUB_BATCH_SIZE,
-                    current + p._MERGE_SUB_BATCH_GROW_STEP,
+                    ceiling, current + p._MERGE_SUB_BATCH_GROW_STEP,
                 )
                 p._aggregation_sub_batch_under_target_run = 0
         else:
@@ -2253,15 +4842,10 @@ class AggregationPipeline:
                     {k: v for k, v in it.items() if not k.startswith("_")}
                     for it in chunk
                 ]
-                elapsed, _ = await self._paced_write(
-                    lambda c=cypher, b=payload: self.p._proj_query(
-                        c, params={"batch": b, "digest": self._level_digest},
-                        timeout=self.p._bulk_create_timeout_s,
-                    )
+                await self._write_rows_with_ladder(
+                    cypher, payload, label="apply:merge", cap=self._write_cap,
+                    params={"digest": self._level_digest},
                 )
-                self._note_write_latency(elapsed)
-                self._writes += len(chunk)
-                await self._heartbeat()
 
     async def _write_keys(
         self, source: Dict[int, int], keys: List[int], *, weight_mode: str,
@@ -2300,7 +4884,7 @@ class AggregationPipeline:
                 probe = await self.p._proj_ro_query(
                     "MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL "
                     "RETURN 1 LIMIT 1",
-                    timeout=_scan_timeout_s(),
+                    timeout=self._scan_timeout(),
                 )
                 if probe.result_set:
                     # Chunked: a legacy generation can hold millions of
@@ -2308,16 +4892,18 @@ class AggregationPipeline:
                     # on every run — leaving the legacy cube double-serving
                     # pairs forever. LIMIT-bounded passes make progress
                     # each run even if a later pass fails.
-                    chunk = self._knob_int("delete_chunk", _delete_chunk, 100, 50_000)
                     while True:
                         self._cancel_check()
+                        chunk = self._delete_cap.apply(
+                            self._knob_int("delete_chunk", _delete_chunk, 100, 50_000)
+                        )
                         _, res = await self._paced_write(lambda: self.p._proj_query(
                             "MATCH ()-[r:AGGREGATED]->() "
                             "WHERE r.aggKey IS NULL "
                             "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
                             f"WITH r LIMIT {chunk} DELETE r",
                             params={"runStart": self._run_start_ms},
-                            timeout=self.p._bulk_create_timeout_s,
+                            timeout=self._write_timeout(),
                         ))
                         removed = getattr(res, "relationships_deleted", None)
                         if removed is not None:
@@ -2330,7 +4916,7 @@ class AggregationPipeline:
                             "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
                             "RETURN 1 LIMIT 1",
                             params={"runStart": self._run_start_ms},
-                            timeout=_scan_timeout_s(),
+                            timeout=self._scan_timeout(),
                         )
                         if not reprobe.result_set:
                             break
@@ -2370,27 +4956,48 @@ class AggregationPipeline:
         lo = start_lo
 
         async def run_one(lo_: int, hi_: int):
+            # Strategy is read at CALL time: a pressure event inside
+            # _fetch_range can flip it between two sub-ranges of the same
+            # knob-width range, so one range may mix full and key rows —
+            # the classifier below branches on row shape, never on the
+            # strategy in force when the range started.
+            keys_only = self._reconcile_strategy == "keys_only"
             if not dedicated:
-                res = await runner(
-                    "MATCH (a)-[r:AGGREGATED]->(b) "
-                    "WHERE ID(r) >= $lo AND ID(r) < $hi "
-                    "RETURN ID(a), ID(b), r.aggKey, r.weight, r.levelDigest, "
-                    "r.latestUpdate, r.sourceEdgeTypes, r.sourceLevel, "
-                    "r.targetLevel, r.sourceDepth, r.targetDepth",
-                    params={"lo": lo_, "hi": hi_},
-                    timeout=_scan_timeout_s(),
-                )
+                if keys_only:
+                    cypher = (
+                        "MATCH (a)-[r:AGGREGATED]->(b) "
+                        "WHERE ID(r) >= $lo AND ID(r) < $hi "
+                        "RETURN ID(a), ID(b), ID(r), r.aggKey, r.latestUpdate"
+                    )
+                else:
+                    cypher = (
+                        "MATCH (a)-[r:AGGREGATED]->(b) "
+                        "WHERE ID(r) >= $lo AND ID(r) < $hi "
+                        "RETURN ID(a), ID(b), r.aggKey, r.weight, r.levelDigest, "
+                        "r.latestUpdate, r.sourceEdgeTypes, r.sourceLevel, "
+                        "r.targetLevel, r.sourceDepth, r.targetDepth"
+                    )
             else:
-                res = await runner(
-                    "MATCH (a)-[r:AGGREGATED]->(b) "
-                    "WHERE ID(r) >= $lo AND ID(r) < $hi "
-                    "RETURN r.aggKey, r.weight, r.levelDigest, r.latestUpdate, "
-                    "r.sourceEdgeTypes, r.sourceLevel, r.targetLevel, "
-                    "r.sourceDepth, r.targetDepth",
-                    params={"lo": lo_, "hi": hi_},
-                    timeout=_scan_timeout_s(),
-                )
+                if keys_only:
+                    cypher = (
+                        "MATCH (a)-[r:AGGREGATED]->(b) "
+                        "WHERE ID(r) >= $lo AND ID(r) < $hi "
+                        "RETURN ID(r), r.aggKey, r.latestUpdate"
+                    )
+                else:
+                    cypher = (
+                        "MATCH (a)-[r:AGGREGATED]->(b) "
+                        "WHERE ID(r) >= $lo AND ID(r) < $hi "
+                        "RETURN r.aggKey, r.weight, r.levelDigest, r.latestUpdate, "
+                        "r.sourceEdgeTypes, r.sourceLevel, r.targetLevel, "
+                        "r.sourceDepth, r.targetDepth"
+                    )
+            res = await runner(
+                cypher, params={"lo": lo_, "hi": hi_}, timeout=self._scan_timeout(),
+            )
             return res.result_set or []
+
+        full_cols = 11 if not dedicated else 9
 
         while lo <= max_id:
             hi = lo + width
@@ -2401,16 +5008,28 @@ class AggregationPipeline:
             to_delete: List[str] = []
             to_overwrite: List[int] = []
             to_add: List[int] = []
+            # Keys-only rows whose comparison columns still have to be
+            # read: aggKey → (pair key, relationship id).
+            lookup: Dict[str, Tuple[int, int]] = {}
             for row in range_rows:
+                is_full = len(row) >= full_cols
+                rid: Optional[int] = None
+                weight = row_digest = row_et = row_sl = row_tl = row_sd = row_td = None
                 if not dedicated:
-                    (aid, bid, agg_key, weight, row_digest, latest,
-                     row_et, row_sl, row_tl, row_sd, row_td) = row
+                    if is_full:
+                        (aid, bid, agg_key, weight, row_digest, latest,
+                         row_et, row_sl, row_tl, row_sd, row_td) = row
+                    else:
+                        aid, bid, rid, agg_key, latest = row
                     if aid is None or bid is None:
                         continue
                     key: Optional[int] = _pack(int(aid), int(bid))
                 else:
-                    (agg_key, weight, row_digest, latest,
-                     row_et, row_sl, row_tl, row_sd, row_td) = row
+                    if is_full:
+                        (agg_key, weight, row_digest, latest,
+                         row_et, row_sl, row_tl, row_sd, row_td) = row
+                    else:
+                        rid, agg_key, latest = row
                     key = key_by_aggkey.get(agg_key) if agg_key else None
                 val = self._acc.get(key) if key is not None else None
                 if val is None or key in existing:
@@ -2435,6 +5054,7 @@ class AggregationPipeline:
                         # re-creates one fresh edge after the duplicates
                         # collapse.
                         existing.discard(key)
+                        lookup.pop(agg_key, None)
                     if agg_key:
                         to_delete.append(agg_key)
                     continue
@@ -2444,6 +5064,14 @@ class AggregationPipeline:
                     # the accumulator holds only the remainder → ADD it
                     # unconditionally (a weight comparison is meaningless).
                     to_add.append(key)
+                elif not is_full:
+                    # Keys-only row: the comparison columns are read in
+                    # pass 2 by aggKey (an index seek) for exactly the
+                    # desired, not-yet-flushed keys — never for stale ones.
+                    if agg_key and rid is not None:
+                        lookup[agg_key] = (key, int(rid))
+                    else:
+                        to_overwrite.append(key)
                 elif (
                     int(weight or 0) != values.weight(val)
                     or (row_digest or "") != digest
@@ -2452,6 +5080,9 @@ class AggregationPipeline:
                     )
                 ):
                     to_overwrite.append(key)
+
+            if lookup:
+                to_overwrite.extend(await self._lookup_changed(lookup))
 
             await self._delete_stale(to_delete)
             await self._write_keys(self._acc, to_overwrite, weight_mode="overwrite")
@@ -2462,10 +5093,110 @@ class AggregationPipeline:
 
             lo = hi
             self._progress_pct = 55 + min(20, int(20 * (lo // width) / total_ranges))
-            await self._checkpoint(PHASE_RECONCILE, lo, phase_label="reconciling")
+            await self._checkpoint(
+                PHASE_RECONCILE, lo, phase_label="reconciling",
+                unit_done=lo // width, unit_total=total_ranges,
+                unit="scan ranges",
+            )
 
         self._progress_pct = 75
         return existing
+
+    async def _lookup_changed(self, lookup: Dict[str, Tuple[int, int]]) -> List[int]:
+        """Keys-only reconcile, pass 2: read the comparison columns for the
+        desired keys pass 1 saw, by ``aggKey`` (edge-property index seek),
+        in ladder-capped batches, and return the pair keys whose stored
+        weight / digest / metadata differ from the accumulator's.
+
+        Matched on ``(aggKey, ID(r))`` so a duplicate aggKey elsewhere in
+        the graph cannot stand in for the row pass 1 classified; a key
+        whose row is no longer returned (the edge vanished between the two
+        passes) is rewritten — the MERGE recreates a desired pair, which is
+        idempotent. Rows for other relationship ids are ignored: the range
+        that covers their ID classifies them."""
+        values = self._values
+        digest = self._level_digest
+        changed: List[int] = []
+        seen: Set[str] = set()
+        cypher = (
+            "UNWIND $keys AS k "
+            "MATCH ()-[r:AGGREGATED {aggKey: k}]->() "
+            "RETURN k, ID(r), r.weight, r.levelDigest, r.sourceEdgeTypes, "
+            "r.sourceLevel, r.targetLevel, r.sourceDepth, r.targetDepth"
+        )
+        agg_keys = list(lookup)
+        start = 0
+        while start < len(agg_keys):
+            self._cancel_check()
+            size = self._lookup_cap.apply(min(
+                2_000, self._knob_int("delete_chunk", _delete_chunk, 100, 50_000),
+            ))
+            batch = agg_keys[start:start + size]
+            start += len(batch)
+
+            async def run_batch(b=batch):
+                res = await self.p._proj_ro_query(
+                    cypher, params={"keys": b}, timeout=self._scan_timeout(),
+                )
+                return res.result_set or []
+
+            rows = await self._fetch_batch_with_ladder(run_batch, batch, label="reconcile:lookup")
+            for row in rows:
+                (k, rid, weight, row_digest, row_et, row_sl, row_tl,
+                 row_sd, row_td) = row
+                entry = lookup.get(k)
+                if entry is None or rid is None or int(rid) != entry[1]:
+                    continue
+                key = entry[0]
+                seen.add(k)
+                val = self._acc.get(key)
+                if val is None:
+                    continue
+                if (
+                    int(weight or 0) != values.weight(val)
+                    or (row_digest or "") != digest
+                    or self._row_meta_stale(
+                        val, row_et, row_sl, row_tl, row_sd, row_td, key,
+                    )
+                ):
+                    changed.append(key)
+        for k, (key, _rid) in lookup.items():
+            if k not in seen:
+                changed.append(key)
+        return changed
+
+    async def _fetch_batch_with_ladder(
+        self, run_batch: Callable[..., Awaitable[list]], batch: list, *, label: str,
+    ) -> list:
+        """The read-side twin of ``_write_rows_with_ladder`` for UNWIND
+        reads keyed by a list: halve the key list on pressure, retry a
+        one-key timeout with backoff, and treat a one-key memory refusal
+        as terminal."""
+        try:
+            return await self._through_outage(lambda: run_batch(batch), op=label)
+        except Exception as exc:
+            kind = _pressure_kind(exc)
+            if kind is None:
+                raise
+            self._on_pressure(label, kind, 0, 0, size=len(batch))
+            if len(batch) > 1:
+                self._lookup_cap.shrink(len(batch))
+                mid = len(batch) // 2
+                out: list = []
+                for part in (batch[:mid], batch[mid:]):
+                    await self._ladder_heartbeat()
+                    out.extend(await self._fetch_batch_with_ladder(
+                        lambda b: run_batch(b), part, label=label,
+                    ))
+                return out
+            if kind == "memory":
+                raise MaterializationQueryMemoryExceeded(
+                    self._query_memory_guidance(label, 0, 0, kind="lookup", size=1)
+                ) from exc
+            return await self._retry_at_floor(
+                lambda: run_batch(batch), label=label, lo=0, hi=0, size=1,
+                budget=self._scan_timeout(),
+            )
 
     def _row_meta_stale(
         self, val: int, row_et: Any, row_sl: Any, row_tl: Any,
@@ -2522,7 +5253,7 @@ class AggregationPipeline:
         while True:
             try:
                 res = await self.p._proj_ro_query(
-                    "CALL db.indexes()", timeout=_scan_timeout_s(),
+                    "CALL db.indexes()", timeout=self._scan_timeout(),
                 )
             except Exception as exc:
                 logger.info(
@@ -2558,12 +5289,13 @@ class AggregationPipeline:
         plus the depth-stamp indexes the depth-keyed readers (Q3, trace
         structural drill) seek on. A run that writes stampVersion=2 cells
         must leave the graph readable at index speed."""
-        for ddl in (
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
-        ):
+        # The same declaration ``ensure_indices`` reads, so the projection graph
+        # and the source graph cannot drift apart — this list used to be a
+        # second copy, three of whose four entries duplicated that one and one
+        # of which (targetDepth alone) no query could ever enter through.
+        from backend.app.providers.index_policy import edge_index_ddl
+
+        for ddl in edge_index_ddl():
             try:
                 await self.p._proj_query(
                     ddl,
@@ -2586,7 +5318,6 @@ class AggregationPipeline:
         this delete."""
         if not agg_keys:
             return
-        chunk_size = self._knob_int("delete_chunk", _delete_chunk, 100, 50_000)
         run_start = self._run_start_ms
         cypher = (
             "UNWIND $keys AS k "
@@ -2594,15 +5325,18 @@ class AggregationPipeline:
             "WHERE r.latestUpdate IS NULL OR r.latestUpdate < $runStart "
             "DELETE r"
         )
-        for start in range(0, len(agg_keys), chunk_size):
+        start = 0
+        while start < len(agg_keys):
             self._cancel_check()
+            chunk_size = self._delete_cap.apply(
+                self._knob_int("delete_chunk", _delete_chunk, 100, 50_000)
+            )
             chunk = agg_keys[start:start + chunk_size]
-            params: Dict[str, Any] = {"keys": chunk, "runStart": run_start}
-            await self._paced_write(lambda c=cypher, p=params: self.p._proj_query(
-                c, params=p, timeout=self.p._bulk_create_timeout_s,
-            ))
-            self._deletes += len(chunk)
-            await self._heartbeat()
+            start += len(chunk)
+            await self._write_rows_with_ladder(
+                cypher, chunk, label="reconcile:delete", cap=self._delete_cap,
+                params={"runStart": run_start}, count_as="deletes",
+            )
 
     # -- APPLY ---------------------------------------------------------------------
 
@@ -2616,6 +5350,13 @@ class AggregationPipeline:
         chunk_size = self._knob_int("apply_chunk", _apply_chunk, 1_000, 200_000)
         done = 0
         flushed = self._flushed
+        # Only first-touch ("overwrite") keys grow the shard: a flushed key
+        # already sits there and its remainder ADDs weight in place. What
+        # the mid-apply recheck charges is the first-touch keys still to land.
+        first_touch_total = sum(1 for k in missing if k not in flushed)
+        first_touch_done = 0
+        since_recheck = 0
+        recheck_every = _budget_recheck_edges()
 
         for start in range(0, len(missing), chunk_size):
             chunk = missing[start:start + chunk_size]
@@ -2630,7 +5371,29 @@ class AggregationPipeline:
             self._progress_pct = 75 + min(25, int(25 * done / total))
             await self._checkpoint(
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
+                unit_done=done, unit_total=total, unit="aggregated edges",
             )
+            # Re-measure the owning shard every N first-touch edges: the
+            # post-compute check answered at one instant, and a shard shared
+            # with another graph's rebuild can fill up while this apply is
+            # still landing. The checkpoint above is already committed, so a
+            # refusal here resumes from the cursor once memory is freed —
+            # deterministic, not retried, and never the write that fills the
+            # shard and fails every graph on it. The fresh reading already
+            # contains every chunk landed so far; only the remainder is owed.
+            first_touch_done += len(overwrite)
+            since_recheck += len(overwrite)
+            remaining = first_touch_total - first_touch_done
+            if since_recheck >= recheck_every and remaining > 0:
+                since_recheck = 0
+                self._budget_rechecks += 1
+                await self._check_write_budget(
+                    growth_edges=remaining,
+                    note=(
+                        f"mid-apply recheck after {done:,} of {len(missing):,} "
+                        f"keys; {remaining:,} new edges still to write"
+                    ),
+                )
 
     async def _stamp_run_meta(self, edge_count: int) -> None:
         """Persist run metadata IN the graph — atomic with the data it
@@ -2666,7 +5429,7 @@ class AggregationPipeline:
                     "runStart": self._run_start_ms,
                     "now": now_iso,
                 },
-                timeout=self.p._bulk_create_timeout_s,
+                timeout=self._write_timeout(),
             )
         except Exception as exc:
             logger.warning(
@@ -2700,10 +5463,10 @@ async def materialize_aggregated_edges(
     progress_callback: Optional[Any] = None,
     intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
-    resume_processed: int = 0,
-    resume_created: int = 0,
     tuning: Optional[Dict[str, Any]] = None,
     job_id: Optional[str] = None,
+    capacity_hints: Optional[Dict[str, Any]] = None,
+    live_limits: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Entry point used by ``FalkorDBProvider.materialize_aggregated_edges_batch``."""
     pipeline = AggregationPipeline(
@@ -2716,5 +5479,7 @@ async def materialize_aggregated_edges(
         should_cancel=should_cancel,
         tuning=tuning,
         job_id=job_id,
+        capacity_hints=capacity_hints,
+        live_limits=live_limits,
     )
     return await pipeline.run()

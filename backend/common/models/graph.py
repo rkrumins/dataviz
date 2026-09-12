@@ -665,12 +665,22 @@ class AggregatedEdgeResult(BaseModel):
     # "legacy_cells" (cells predate depth stamps — mixed/leaf derivation off),
     # "chain_cache_miss" (leaf/mixed resolution dropped pairs pending cache),
     # "degraded" (an on-demand sub-query failed),
+    # "query_memory" / "timeout" (the store refused part of the read at its
+    # per-query memory ceiling or time limit, at the narrowest page or batch
+    # the read-side ladder goes to — what it could read is kept),
     # "source_changed" (source data changed; rebuild in flight — overlaid
-    # post-cache, so cached/composed reads reflect it too).
+    # post-cache, so cached/composed reads reflect it too),
+    # "failing_over" (the graph store node holding this graph is restarting
+    # or being replaced; this answer is the last good one, and the client
+    # retries per Retry-After).
     stale: bool = False
     stale_reason: Optional[str] = Field(default=None, alias="staleReason")
     stamp_version: Optional[int] = Field(default=None, alias="stampVersion")
     regime: Optional[str] = None
+    # Why a loss under the store's per-query pressure happened, for the
+    # canvas: kind, how far the ladder narrowed, the node and its ceiling.
+    # None unless rows were lost — narrowing that completed is complete.
+    degraded_detail: Optional[Dict[str, Any]] = Field(default=None, alias="degradedDetail")
 
     class Config:
         populate_by_name = True

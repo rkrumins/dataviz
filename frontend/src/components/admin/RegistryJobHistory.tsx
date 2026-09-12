@@ -17,12 +17,11 @@ import {
 import { cn } from '@/lib/utils'
 import {
     aggregationService,
-    type AggregationJobResponse,
+    type AggregationJobResponse, type JobLimitsPatch,
     type AggregationTuning,
     type JobHistoryFilters,
     type JobsSummary,
-    type PaginatedJobsResponse,
-} from '@/services/aggregationService'
+    type PaginatedJobsResponse, type EnvTuningDefaults } from '@/services/aggregationService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
@@ -38,8 +37,10 @@ import { ConfirmDialog } from './job-history/ConfirmDialog'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
 import { JobHistoryFilterBar } from './job-history/JobHistoryFilterBar'
 import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
+import { NodeLoadPanel } from './job-history/NodeLoadPanel'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
-import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { extendStallPatch } from './job-history/timeLimits'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -73,13 +74,66 @@ export function buildInitialOverridesFromJob(
     // the default any time the stored value is below the validator's floor.
     const storedBatchSize = job.batchSize ?? DEFAULT_BATCH_SIZE
     const safeBatchSize = storedBatchSize < 100 ? DEFAULT_BATCH_SIZE : storedBatchSize
-    return {
+    const base = {
         batchSize: safeBatchSize,
-        projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'),
+        projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source') as 'dedicated' | 'in_source',
+    }
+    // A run the graph store kept refusing for size or time starts its retry
+    // from the Gentle profile — narrow scans, serial reads, generous pacing,
+    // a long scan timeout — keeping only the source's rollup-storage choice.
+    if (gentleRetryReason(job)) {
+        const gentle = gentlePreset()
+        const finePairs = defaultTuning?.materializeFinePairs
+        return {
+            ...base,
+            maxRetries: gentle.maxRetries,
+            timeoutMinutes: gentle.timeoutMinutes,
+            tuning: finePairs === undefined ? { ...gentle.tuning } : { ...gentle.tuning, materializeFinePairs: finePairs },
+        }
+    }
+    return {
+        ...base,
         maxRetries: DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
         tuning: defaultTuning,
     }
+}
+
+/** Why a retry of this job is pre-set to the Gentle profile, or null. */
+export function gentleRetryReason(job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>): string | null {
+    if (job.status !== 'failed') return null
+    if (job.failureCategory === 'query_memory') {
+        return 'Pre-selected the Gentle profile: the last run hit the graph store’s per-query memory limit. Gentle reads less per query from the start.'
+    }
+    if (job.failureCategory === 'timeout') {
+        return 'Pre-selected the Gentle profile: the last run timed out against the graph store. Gentle scans narrower with a longer per-query timeout.'
+    }
+    return null
+}
+
+/**
+ * The note above a retry's settings — the Gentle pre-selection, or, after a
+ * node went away, why the settings are deliberately left alone.
+ *
+ * Narrowing scans does not bring a node back, so a connection failure keeps
+ * the run's own settings: the rebuild resumes from its checkpoint at the same
+ * width once the node answers again.
+ */
+export function retryPresetReason(
+    job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>,
+): string | null {
+    const gentle = gentleRetryReason(job)
+    if (gentle) return gentle
+    if (job.status === 'failed' && job.failureCategory === 'provider_unavailable') {
+        return 'Kept this run’s settings: the last attempt stopped because a graph store node was not answering, not because it read too much. Check the node is back — the rebuild resumes from its checkpoint.'
+    }
+    return null
+}
+
+/** The control that goes with the Gentle pre-selection: after a per-query
+ *  memory failure, the way to the node's own limit (system administrators). */
+export function gentleRetryAction(job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>): 'raise-per-query-limit' | null {
+    return job.status === 'failed' && job.failureCategory === 'query_memory' ? 'raise-per-query-limit' : null
 }
 
 function buildInitialOverridesForDataSource(
@@ -134,7 +188,7 @@ export function RegistryJobHistory() {
     const [confirmDelete, setConfirmDelete] = useState<AggregationJobResponse | null>(null)
     // Retrigger dialog: either job-derived (from a JobRow) or data-source-derived (from grouped card).
     const [retriggerCtx, setRetriggerCtx] = useState<
-        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue }
+        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue; presetReason?: string | null; presetAction?: 'raise-per-query-limit' | null }
         | { kind: 'dataSource'; dataSourceId: string; dataSourceLabel: string; initialValue: AggregationOverridesValue }
         | null
     >(null)
@@ -168,6 +222,9 @@ export function RegistryJobHistory() {
     // nothing, so the dialog's radio can show the mode the job would actually
     // run in rather than assuming Auto for an absent key.
     const [envFinePairs, setEnvFinePairs] = useState<'auto' | 'true' | 'false' | undefined>(undefined)
+    // Every knob's live env default, so the dialog's placeholders are the
+    // deployment's numbers rather than a guess baked into the bundle.
+    const [envDefaults, setEnvDefaults] = useState<EnvTuningDefaults | null>(null)
 
     // Load reference data + summary
     useEffect(() => {
@@ -179,6 +236,7 @@ export function RegistryJobHistory() {
             .then(s => {
                 setDefaultTuning(s.tuning ?? undefined)
                 setEnvFinePairs(s.envMaterializeFinePairs ?? undefined)
+                setEnvDefaults(s.envTuningDefaults ?? null)
             })
             .catch(() => {})
     }, [])
@@ -357,9 +415,35 @@ export function RegistryJobHistory() {
     }, [notify, fetchJobs])
 
     const handleCancel = useCallback((job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled', 'Could not cancel that job.'),
+        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled. If automation requested this rebuild it may retry a few more times, then it waits for a person.', 'Could not cancel that job.'),
         [withAction],
     )
+
+    const handleExtend = useCallback((job: AggregationJobResponse, patch: JobLimitsPatch) =>
+        withAction(job.id, () => aggregationService.setJobLimits(job.dataSourceId, job.id, patch),
+            'Change applied. The worker picks it up within about thirty seconds; per-query budgets, pacing, concurrency and scan width apply from the next query.',
+            'Could not change that job’s limits.'),
+        [withAction],
+    )
+
+    // Every running or queued job at once — the same +3 h each, one toast.
+    const runningJobs = useMemo(
+        () => (data?.items ?? []).filter(j => (j.status === 'running' || j.status === 'pending') && j.triggerSource !== 'purge'),
+        [data?.items],
+    )
+    const [extendingAll, setExtendingAll] = useState(false)
+    const handleExtendAll = useCallback(async () => {
+        if (runningJobs.length === 0) return
+        setExtendingAll(true)
+        const results = await Promise.allSettled(
+            runningJobs.map(j => aggregationService.setJobLimits(j.dataSourceId, j.id, extendStallPatch(j, 3))),
+        )
+        setExtendingAll(false)
+        const failed = results.filter(r => r.status === 'rejected').length
+        if (failed === 0) notify('success', `Gave ${results.length} running ${results.length === 1 ? 'job' : 'jobs'} 3 more hours.`)
+        else notify('error', `Raised ${results.length - failed} of ${results.length}; ${failed} could not be raised.`)
+        await fetchJobs()
+    }, [runningJobs, notify, fetchJobs])
 
     // Both Resume and Re-trigger buttons on JobRow open the same dialog. The
     // user picks the action inside (Resume preserves last_cursor; Re-trigger
@@ -373,13 +457,13 @@ export function RegistryJobHistory() {
     // appears one frame later, which still reads as instant.
     const handleResume = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: retryPresetReason(job), presetAction: gentleRetryAction(job) })
         })
     }, [defaultTuning])
 
     const handleRetrigger = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: retryPresetReason(job), presetAction: gentleRetryAction(job) })
         })
     }, [defaultTuning])
 
@@ -596,6 +680,11 @@ export function RegistryJobHistory() {
                         onShowFailed={handleShowFailed}
                     />
 
+                    {/* Which graph store node each running rebuild is writing.
+                        Renders only while something is running and has named
+                        its node, so a quiet page is unchanged. */}
+                    <NodeLoadPanel jobs={data?.items ?? []} dsLookup={dsLookup} />
+
                     {/* Filters */}
                     <JobHistoryFilterBar
                         filters={filters}
@@ -667,6 +756,23 @@ export function RegistryJobHistory() {
                         </div>
                     )}
 
+                    {/* Every running job at once */}
+                    {runningJobs.length > 1 && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-4 py-2.5" data-testid="extend-all-running">
+                            <p className="text-[11px] text-ink">
+                                <span className="font-semibold">{runningJobs.length} jobs</span> are running or queued. Give every one of them more time without cancelling anything.
+                            </p>
+                            <button
+                                type="button"
+                                onClick={handleExtendAll}
+                                disabled={extendingAll}
+                                className="px-3 py-1.5 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-60"
+                            >
+                                {extendingAll ? 'Raising…' : 'Extend all by +3 h'}
+                            </button>
+                        </div>
+                    )}
+
                     {/* Job Table */}
                     {data && data.items.length > 0 && (
                         <div className="glass-panel rounded-xl border border-glass-border overflow-hidden">
@@ -705,6 +811,8 @@ export function RegistryJobHistory() {
                                                 purgeConfirm={purgeConfirm}
                                                 setPurgeConfirm={setPurgeConfirm}
                                                 actionLoading={actionLoading === job.id}
+                                                storedGlobal={defaultTuning ?? null}
+                                                onExtend={handleExtend}
                                             />
                                         ))}
                                     </tbody>
@@ -785,6 +893,15 @@ export function RegistryJobHistory() {
                     status: retriggerCtx.job.status,
                 } : undefined}
                 defaultFinePairs={envFinePairs}
+                dataSourceId={
+                    retriggerCtx?.kind === 'job'
+                        ? retriggerCtx.job.dataSourceId
+                        : retriggerCtx?.kind === 'dataSource' ? retriggerCtx.dataSourceId : undefined
+                }
+                envDefaults={envDefaults}
+                storedGlobal={defaultTuning ?? null}
+                presetReason={retriggerCtx?.kind === 'job' ? retriggerCtx.presetReason ?? null : null}
+                presetAction={retriggerCtx?.kind === 'job' ? retriggerCtx.presetAction ?? null : null}
                 onConfirmRetrigger={handleConfirmRetrigger}
                 onConfirmResume={retriggerCtx?.kind === 'job' ? handleConfirmResume : undefined}
             />

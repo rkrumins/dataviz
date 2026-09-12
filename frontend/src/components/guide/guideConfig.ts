@@ -343,6 +343,24 @@ export const guideEntries: GuideEntry[] = [
     readingTime: '6 min',
     importFn: () => import('@docs/guide/GOVERNANCE_OPS.md?raw'),
   },
+  {
+    slug: 'graph-store-topology',
+    section: 'admin',
+    persona: 'admin',
+    title: 'The Graph Store: Shards, Replicas & Placement',
+    description: 'What every figure on the Graph store page means, and what to do when one looks wrong',
+    readingTime: '8 min',
+    importFn: () => import('@docs/guide/GRAPH_STORE_TOPOLOGY.md?raw'),
+  },
+  {
+    slug: 'rollup-capacity',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Rollup Capacity & Large Graphs',
+    description: 'What a rebuild measures before it writes, the limits you set, and what "would not fit" means',
+    readingTime: '7 min',
+    importFn: () => import('@docs/guide/ROLLUP_CAPACITY.md?raw'),
+  },
 
   // Reference
   {

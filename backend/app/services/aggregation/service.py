@@ -13,13 +13,16 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
 from .models import AggregationJobORM
+from .reap import NEVER_DISPATCHED as _NEVER_DISPATCHED
+from .reap import WORKER_LOST as _WORKER_LOST
 from .reservation import claim_exclusive
+from .steps import archive_attempt, remaining_secs
 from .schemas import (
     AggregationCadence,
     AggregationJobResponse,
@@ -38,9 +41,18 @@ from .schemas import (
     RefreshEventSummary,
     RefreshResponse,
     ResumeOverrides,
+    JobLimitsPatch,
     SourceChangedResponse,
 )
-from .fingerprint import compute_graph_fingerprint, fingerprints_match
+from .fingerprint import (
+    compute_graph_fingerprint,
+    fingerprint_unknown,
+    fingerprints_match,
+)
+from .holds import (  # noqa: F401  (HeldError re-exported for callers)
+    AUTOMATION_ORIGINS, FLEET_KEY, HELD_TRIGGER_SOURCES, HeldError, Hold,
+    read_scope_holds, resolve_hold, resolve_scope_hold, set_scope_hold,
+)
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 
@@ -124,12 +136,11 @@ AGGREGATION_PROBE_BATCH_CAP = int(
 # ``resolve_rebuild_interval`` — is used by every consumer (the cooldown
 # gate, the scheduler reconciler pre-check, and the web-tier badge
 # derivation) so the "Next rebuild in Xm" badge never disagrees with the
-# behavior. The persisted global is read through a small in-process cache
-# (≤ _SETTINGS_CACHE_TTL_S) so the 60s scheduler tick and the fleet read
-# never hammer the settings row; put_settings busts it for same-process
-# immediacy, and the cache TTL bounds cross-process (web ⇄ CP) propagation.
-_SETTINGS_CACHE_TTL_S = 30.0
-_GLOBAL_CADENCE_CACHE: dict = {"cadence": None, "at": 0.0}
+# behavior. The persisted global is read by primary key on EVERY read, never
+# cached: ③ Act and ② Check are fleet-wide stops, and a per-process cache
+# left the other control-plane replica acting on the old value for its TTL
+# (and reading it back to the operator as still on) — the same reason the
+# wider-scope hold rows are uncached (see ``holds.read_scope_holds``).
 
 
 def resolve_rebuild_interval(
@@ -160,6 +171,73 @@ def resolve_reconcile_enabled(
     if global_value is not None:
         return global_value
     return AGGREGATION_RECONCILE_ENABLED
+
+
+def resolve_drift_auto_rebuild(global_value: Optional[bool]) -> bool:
+    """③ Act: persisted global → env default. There is no per-source
+    override. ``False`` is a fleet-wide stop in the hold resolver, so the
+    scheduler's drift gate and every hold read the same answer."""
+    if global_value is not None:
+        return global_value
+    return AGGREGATION_DRIFT_AUTO_REBUILD
+
+
+def hold_for_state(
+    state, cadence, *, provider_id: Optional[str] = None, scope_holds=None,
+) -> Optional[Hold]:
+    """The operator hold in force for a source whose state row (or ``None``)
+    and the global cadence are already in hand.
+
+    Pure — no I/O — so the stale-marker reconciler and
+    ``signal_source_changed`` call it on rows they already loaded, and so it
+    does not depend on whichever service object a caller was handed. Most
+    restrictive wins across fleet → provider → source
+    (``holds.resolve_hold``). The source's own ② Check override and the
+    fleet's ② Check / ③ Act switches are passed separately, so an inherited
+    stop is reported at fleet scope — the control that releases it.
+    """
+    return resolve_hold(
+        scope_holds=scope_holds,
+        provider_id=provider_id,
+        source_paused_until=getattr(state, "paused_until", None),
+        source_reconcile_enabled=getattr(state, "reconcile_enabled", None),
+        fleet_reconcile_enabled=resolve_reconcile_enabled(
+            None, getattr(cadence, "reconcile_enabled", None),
+        ),
+        drift_auto_rebuild=resolve_drift_auto_rebuild(
+            getattr(cadence, "drift_auto_rebuild", None),
+        ),
+    )
+
+
+async def _scope_context(session, ds_id: str):
+    """``(scope_holds, provider_id)`` for one source: the fleet row, the
+    source's provider, and that provider's row. Two or three primary-key
+    reads (see ``holds.read_scope_holds`` for why they are not cached).
+    Never raises — a failed provider lookup means "no provider hold", the
+    fail-open direction the rest of the freshness read path takes."""
+    provider_id = None
+    try:
+        from backend.app.db.models import WorkspaceDataSourceORM
+
+        ds = await session.get(WorkspaceDataSourceORM, ds_id)
+        provider_id = getattr(ds, "provider_id", None)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Provider lookup for hold on %s failed: %s", ds_id, exc)
+    scope_holds = await read_scope_holds(
+        session, [provider_id] if provider_id else [],
+    )
+    return scope_holds, provider_id
+
+
+async def hold_for_source_row(session, ds_id: str, state, cadence) -> Optional[Hold]:
+    """The hold in force for a source whose state row (or ``None``) and the
+    global cadence are already in hand — :func:`hold_for_state` plus the
+    fleet/provider rows. The one call every gate makes."""
+    scope_holds, provider_id = await _scope_context(session, ds_id)
+    return hold_for_state(
+        state, cadence, provider_id=provider_id, scope_holds=scope_holds,
+    )
 
 
 def resolve_reconcile_interval(
@@ -196,6 +274,46 @@ def resolve_probe_interval(
     return AGGREGATION_PROBE_INTERVAL_SECS
 
 
+# ── Rollup storage (per-source override → stored global → env) ────────
+#
+# The wire vocabulary is 'auto' | 'true' | 'false'. The pipeline's own knob
+# (``materialize_fine_pairs``) is a bool or the string "auto", and its
+# ``_fine_mode`` reads ANY truthy value as full detail — so the string
+# "false" must never reach a job: ``rollup_storage_to_tuning`` is the one
+# place the wire word becomes the pipeline's value.
+
+
+def normalize_rollup_storage(raw: Any) -> Optional[str]:
+    """Anything a stored or requested value may look like → the wire word,
+    or None for "not set"."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        return v if v in ("auto", "true", "false") else None
+    return None
+
+
+def resolve_rollup_storage(
+    override: Any, global_value: Any, env_value: Any,
+) -> tuple:
+    """``(value, source)`` — per-source override ('custom') → stored global
+    ('global') → env ('default'). Always answers: the env is never unset."""
+    for raw, source in ((override, "custom"), (global_value, "global")):
+        v = normalize_rollup_storage(raw)
+        if v is not None:
+            return v, source
+    return normalize_rollup_storage(env_value) or "true", "default"
+
+
+def rollup_storage_to_tuning(value: Optional[str]) -> Any:
+    """The wire word as the pipeline's ``materialize_fine_pairs`` value."""
+    v = normalize_rollup_storage(value)
+    return {"auto": "auto", "true": True, "false": False}.get(v)  # type: ignore[arg-type]
+
+
 def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
     """Build the detectors' :class:`Policy` from the persisted global cadence.
 
@@ -219,25 +337,14 @@ def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
     )
 
 
-def invalidate_global_cadence_cache() -> None:
-    """Drop the cached global cadence so the next read reflects a just-written
-    value in THIS process (put_settings calls this). Cross-process staleness
-    is bounded by the cache TTL, not this."""
-    _GLOBAL_CADENCE_CACHE["at"] = 0.0
-
-
 async def read_global_cadence(session: AsyncSession) -> AggregationCadence:
-    """Persisted global cadence (aggregation_settings.cadence_json), cached
-    in-process for ≤ _SETTINGS_CACHE_TTL_S. NEVER raises — any DB/parse
-    failure degrades to an empty cadence (⇒ callers fall through to env),
-    mirroring the never-raise convention of the freshness read path."""
-    import time as _time
+    """Persisted global cadence (aggregation_settings.cadence_json), read by
+    primary key on every call — never cached, so a switch flipped on any
+    replica is what every other replica's next tick and read see. NEVER
+    raises — any DB/parse failure degrades to an empty cadence (⇒ callers
+    fall through to env), mirroring the never-raise convention of the
+    freshness read path."""
     from .models import AggregationSettingsORM
-
-    now = _time.monotonic()
-    cached = _GLOBAL_CADENCE_CACHE
-    if cached["cadence"] is not None and (now - cached["at"]) < _SETTINGS_CACHE_TTL_S:
-        return cached["cadence"]
 
     cadence = AggregationCadence()
     try:
@@ -249,10 +356,38 @@ async def read_global_cadence(session: AsyncSession) -> AggregationCadence:
         logger.warning(
             "Global cadence read failed (using env defaults): %s", exc,
         )
-        return cadence
-    cached["cadence"] = cadence
-    cached["at"] = now
     return cadence
+
+
+def _env_rollup_storage() -> str:
+    """The env tri-state, read live (an operator may flip it on a running
+    deploy to rescue a fleet). Local import: the providers package pulls in
+    the graph client, and this module is imported long before it."""
+    from backend.app.providers.falkordb_materialize import (
+        _materialize_fine_pairs_mode,
+    )
+    return _materialize_fine_pairs_mode()
+
+
+async def read_global_rollup_storage(session: AsyncSession) -> Optional[str]:
+    """The fleet-wide Rollup storage from the stored Defaults row
+    (``tuning_json.materialize_fine_pairs``), as the wire word — or None
+    when unset, so callers fall through to the env. An identity-map hit
+    after ``read_global_cadence`` on the same session; never raises."""
+    from .models import AggregationSettingsORM
+
+    try:
+        row = await session.get(AggregationSettingsORM, "global")
+        raw = getattr(row, "tuning_json", None) if row is not None else None
+        if raw:
+            return normalize_rollup_storage(
+                (json.loads(raw) or {}).get("materialize_fine_pairs"),
+            )
+    except Exception as exc:  # pragma: no cover - defensive, never fail a read
+        logger.warning(
+            "Global rollup-storage read failed (using env default): %s", exc,
+        )
+    return None
 
 # Bounds for ``refresh_source(wait="complete")`` — it polls a queued rebuild
 # to a terminal status before returning, so an operator can refresh-then-read
@@ -287,29 +422,86 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
-def _estimate_completion(job) -> Optional[str]:
-    """ETA extrapolated from PHASE-WEIGHTED progress (0-100, monotonic
-    across EXTRACT→COMPUTE→RECONCILE→APPLY). The previous
-    processed/total extrapolation saturated the moment the extract scan
-    finished (~45%% of real work) and promised completion 'now' while
-    reconcile/apply were still running."""
-    if job.status != "running" or not job.started_at:
-        return None
-    pct = job.progress or 0
-    if pct <= 0:
+def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
+    """When this run should finish, projected off its STEP LEDGER against
+    the previous completed run's on the same source.
+
+    What it replaced extrapolated ``elapsed * (100 - pct) / pct`` from the
+    one phase-weighted percentage. That is only right if every stage runs
+    at the same rate, which is exactly false: EXTRACT is a scan, APPLY is
+    paced writes, and the two bookends are fingerprints. On a RESUMED run
+    it was wrong twice over — the percentage was held up by a monotonic
+    clamp while the run redid its early stages, and ``elapsed`` ran from
+    the FIRST attempt's start, so a job redoing two hours of work reported
+    forty minutes left.
+
+    ``None`` when there is no comparable previous run. That is the honest
+    answer rather than a fallback to guessing: without one there is no
+    basis for a whole-run figure, and the running stage's own "3 of 12
+    scan ranges, 9 left" answers "how much is left" better than a
+    confidently wrong clock time.
+    """
+    if job.status != "running":
         return None
     try:
-        started = datetime.fromisoformat(job.started_at)
-        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-        if elapsed < 5:
-            return None
-        pct = min(99, max(1, int(pct)))
-        remaining = elapsed * (100 - pct) / pct
-        return (
-            datetime.now(timezone.utc) + timedelta(seconds=remaining)
-        ).isoformat()
-    except Exception:
+        steps = (json.loads(getattr(job, "run_stats", None) or "{}") or {}).get("steps")
+    except (TypeError, ValueError):
         return None
+    remaining = remaining_secs(steps, prior_steps)
+    if remaining is None:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
+
+
+async def _prior_ledgers(
+    session: AsyncSession, jobs: Any,
+) -> Dict[str, Any]:
+    """The last COMPLETED run's step ledger per data source, for the running
+    jobs in ``jobs`` — one query for the page, never one per row.
+
+    Only running jobs have an ETA, and a fleet rarely has many at once, so
+    this is a handful of ids. A failed previous run is never the baseline:
+    it spent no time in the stages it never reached, and projecting from it
+    reads every run as a catastrophic slowdown.
+    """
+    ds_ids = {j.data_source_id for j in jobs if j.status == "running" and j.data_source_id}
+    if not ds_ids:
+        return {}
+    try:
+        rows = await session.execute(
+            select(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.run_stats,
+                AggregationJobORM.completed_at,
+            )
+            .where(
+                AggregationJobORM.data_source_id.in_(ds_ids),
+                AggregationJobORM.status == "completed",
+            )
+            .order_by(AggregationJobORM.completed_at.desc())
+        )
+    except Exception as exc:                      # noqa: BLE001 — an ETA is not worth a 500
+        logger.debug("prior ledgers unavailable: %s", exc)
+        return {}
+    out: Dict[str, Any] = {}
+    for ds_id, run_stats, _completed_at in rows:
+        if ds_id in out:
+            continue                              # newest first; the first that qualifies wins
+        try:
+            doc = json.loads(run_stats or "{}") or {}
+        except (TypeError, ValueError):
+            continue
+        # A run that wrote and deleted NOTHING is not predictive of one that
+        # rewrites the cube: it found everything already there, so its
+        # reconcile and apply stages took seconds. Projecting a real rebuild
+        # from it promises a finish that was never possible. Keep looking
+        # back for one that actually wrote.
+        if not (doc.get("writes") or doc.get("deletes")):
+            continue
+        steps = doc.get("steps")
+        if steps:
+            out[ds_id] = steps
+    return out
 
 
 def _is_resumable(job) -> bool:
@@ -320,6 +512,27 @@ def _is_resumable(job) -> bool:
     delivery attempts), never the user. (Drives the UI's resume affordance.)
     """
     return job.status in ("failed", "cancelled")
+
+
+#: Origins whose ONLY evidence that a source changed is the fingerprint
+#: probe itself. When that probe cannot answer, they have nothing — so they
+#: must not assert a change (see the gate in ``signal_source_changed``).
+#: Every other origin is a caller who watched a write happen.
+_PROBE_ONLY_ORIGINS = frozenset({"drift", "reconcile", "reconcile-sweep"})
+
+#: ``JobLimitsPatch.reset`` keys (the wire names) → the ``live_overrides``
+#: fields they clear.
+_LIVE_RESET_FIELDS = {
+    "writePacingRatio": "write_pacing_ratio",
+    "extractConcurrency": "extract_concurrency",
+    "scanWidth": "scan_width",
+    "scanTimeoutS": "scan_timeout_s",
+    "writeTimeoutS": "write_timeout_s",
+    "replicaAckMin": "replica_ack_min",
+    "replicaAckTimeoutMs": "replica_ack_timeout_ms",
+    "writeBatchMax": "write_batch_max",
+    "writeBatchTargetS": "write_batch_target_s",
+}
 
 
 class AggregationService:
@@ -380,6 +593,21 @@ class AggregationService:
                 f"invalid trigger_source {trigger_source!r}; expected one of "
                 f"{', '.join(API_TRIGGER_SOURCES)}"
             )
+
+        # ── Operator hold ──────────────────────────────────────────────
+        # Every path that can queue a job funnels through here, so this is
+        # the one place a hold cannot be bypassed — for AUTOMATION callers.
+        # A person (``manual``), provisioning (``onboarding``) and the
+        # purge's own re-aggregate (``post_purge``) proceed; ``api`` proceeds
+        # here because its automation subset is caught upstream by the
+        # origin check in signal_source_changed (``api`` is also what a
+        # person's Rebuild and the versioning projector send — holding it
+        # would abandon rollups the projector already skipped). Above the
+        # idempotency lookup so a refusal never leaves a half-open read.
+        if trigger_source in HELD_TRIGGER_SOURCES:
+            hold = await self.hold_for_source(ds_id, session)
+            if hold is not None:
+                raise HeldError(hold)
 
         # An EXPLICIT (non-auto) trigger clears the terminal-failure
         # backoff key: the user is deliberately retrying (typically after
@@ -559,6 +787,13 @@ class AggregationService:
             # OntologyResolutionError inside ``_resolve_ontology``. The
             # frozen list still gets persisted for the worker.
 
+            # Request overrides layered over the source's override, the
+            # stored global defaults and env — frozen here so the worker
+            # stays stateless. Resolved once: the same dict seeds
+            # ``tuning_json`` AND the stall window below.
+            effective_tuning = await self._effective_tuning(
+                session, getattr(request, "tuning", None), ds_id=ds_id,
+            )
             # Create job with frozen edge types + denormalized graph metadata
             job_kwargs = dict(
                 id=_generate_id(),
@@ -584,14 +819,14 @@ class AggregationService:
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
                 idempotency_key=idem_key,
-                # Per-job overrides: when None, the worker / ORM defaults
-                # apply (timeout_secs → stall-timeout env, max_retries → 3).
-                timeout_secs=request.timeout_secs,
-                # Pipeline tuning: request overrides layered over the stored
-                # global defaults, frozen here so the worker stays stateless.
-                tuning_json=(lambda t: json.dumps(t) if t else None)(
-                    await self._effective_tuning(session, getattr(request, "tuning", None))
+                # Per-job stall window: the request's, else the fleet's
+                # ``stallTimeoutSecs`` default, else NULL (the worker's env
+                # default). max_retries → 3 via the ORM default.
+                timeout_secs=(
+                    request.timeout_secs if request.timeout_secs is not None
+                    else effective_tuning.get("stall_timeout_secs")
                 ),
+                tuning_json=json.dumps(effective_tuning) if effective_tuning else None,
                 created_at=_now(),
             )
             # Only set max_retries when caller supplied one, so the ORM
@@ -740,10 +975,15 @@ class AggregationService:
                         pass
                 if state.graph_fingerprint:
                     current_fp = await asyncio.wait_for(
-                        compute_graph_fingerprint(provider),
+                        compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                         timeout=_DRIFT_TIMEOUT,
                     )
-                    drift = not fingerprints_match(state.graph_fingerprint, current_fp)
+                    # Unknown is not drift: a probe that could not answer
+                    # says nothing about whether the graph moved.
+                    drift = (
+                        not fingerprint_unknown(current_fp)
+                        and not fingerprints_match(state.graph_fingerprint, current_fp)
+                    )
             except Exception:
                 pass  # Can't reach the graph — don't block or false-warn
 
@@ -765,6 +1005,9 @@ class AggregationService:
         # exact combination that read "ready" for fourteen hours with no
         # lineage on the canvas. The stored column keeps its meaning; this read
         # path stops presenting it as the whole truth.
+        cadence = await read_global_cadence(session)
+        hold = await hold_for_source_row(session, ds_id, state, cadence)
+
         health = (await _projector_health_map()).get(ds_id)
         projection = _projection_wire_fields(health)
         if status == "ready" and projection["projector_current"] is False:
@@ -795,8 +1038,14 @@ class AggregationService:
             last_reconcile_reason=getattr(state, "last_reconcile_reason", None),
             auto_reconcile=resolve_reconcile_enabled(
                 getattr(state, "reconcile_enabled", None),
-                (await read_global_cadence(session)).reconcile_enabled,
+                cadence.reconcile_enabled,
             ),
+            # The same call every gate makes, so the banner explains the hold
+            # that would actually withhold the rebuild — not a second opinion
+            # assembled from the switches.
+            held_by=hold.scope if hold is not None else None,
+            held_kind=hold.kind if hold is not None else None,
+            held_until=hold.until if hold is not None else None,
             **projection,
             message=message,
         )
@@ -828,7 +1077,9 @@ class AggregationService:
             query = query.where(AggregationJobORM.status == status)
 
         result = await session.execute(query)
-        return [self._to_response(j) for j in result.scalars()]
+        jobs = list(result.scalars())
+        prior = await _prior_ledgers(session, jobs)
+        return [self._to_response(j, prior.get(j.data_source_id)) for j in jobs]
 
     # ── Global summary (KPI stats) ─────────────────────────────────
 
@@ -945,10 +1196,11 @@ class AggregationService:
         jobs = result.scalars().all()
 
         why = await _reconcile_reason_map(session, jobs)
+        prior = await _prior_ledgers(session, jobs)
         items = [
             self._to_global_response(
                 job, job.workspace_id, None, job.data_source_label,
-                why=why.get(job.id),
+                why=why.get(job.id), prior_steps=prior.get(job.data_source_id),
             )
             for job in jobs
         ]
@@ -962,8 +1214,13 @@ class AggregationService:
         workspace_name: str,
         data_source_label: Optional[str],
         why: Optional[dict] = None,
+        prior_steps: Any = None,
     ) -> AggregationJobResponse:
-        """Convert ORM to enriched response for the global listing."""
+        """Convert ORM to enriched response for the global listing.
+
+        ``prior_steps`` is the previous completed run's step ledger for this
+        source, pre-fetched once for the page — the ETA is projected off it.
+        """
         # Compute duration
         duration = None
         if job.started_at:
@@ -983,7 +1240,7 @@ class AggregationService:
             coverage = round(job.processed_edges / job.total_edges * 100, 1)
 
         # Estimate completion (same logic as _to_response)
-        estimated = _estimate_completion(job)
+        estimated = _estimate_completion(job, prior_steps)
 
         return AggregationJobResponse(
             id=job.id,
@@ -1024,6 +1281,8 @@ class AggregationService:
             tuning=AggregationService._job_tuning_dict(job),
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
+            failure_category=classify_failure(getattr(job, "error_message", None)),
+            live_overrides=AggregationService._job_live_overrides_dict(job),
         )
 
 
@@ -1031,12 +1290,21 @@ class AggregationService:
 
     async def _effective_tuning(
         self, session: AsyncSession, request_tuning: Optional[AggregationTuning],
+        *, ds_id: Optional[str] = None,
     ) -> dict:
-        """Request tuning layered over the stored global defaults. The
-        merged dict is frozen onto the job row so the worker never reads
-        the settings table (stateless jobs; consistent with the frozen
-        edge-type pattern)."""
-        from .models import AggregationSettingsORM
+        """Request tuning layered over the source's Rollup storage override
+        layered over the stored global defaults. The merged dict is frozen
+        onto the job row so the worker never reads the settings table
+        (stateless jobs; consistent with the frozen edge-type pattern).
+
+        The per-source layer carries ONE knob: ``materialize_fine_pairs``
+        from the state row's ``rollup_storage``. It sits between the request
+        and the global on purpose — an operator's explicit choice for this
+        source beats the fleet default, and a per-job request still beats
+        both. Automation triggers carry no request tuning, so this is how
+        the override reaches every rebuild, not only the ones a person
+        starts."""
+        from .models import AggregationDataSourceStateORM, AggregationSettingsORM
 
         defaults: dict = {}
         try:
@@ -1047,6 +1315,19 @@ class AggregationService:
             logger.warning(
                 "Aggregation settings read failed (using env defaults): %s", exc,
             )
+        if ds_id is not None:
+            try:
+                state = await session.get(AggregationDataSourceStateORM, ds_id)
+                override = rollup_storage_to_tuning(
+                    getattr(state, "rollup_storage", None),
+                )
+                if override is not None:
+                    defaults["materialize_fine_pairs"] = override
+            except Exception as exc:
+                logger.warning(
+                    "Rollup-storage override read failed for %s (using the fleet "
+                    "default): %s", ds_id, exc,
+                )
         if request_tuning is None:
             return defaults
         return request_tuning.merged_over(defaults)
@@ -1063,8 +1344,9 @@ class AggregationService:
         # Local import — the providers package pulls in the graph client and
         # this module is imported long before it.
         from backend.app.providers.falkordb_materialize import (
-            _materialize_fine_pairs_mode,
+            _materialize_fine_pairs_mode, env_tuning_defaults,
         )
+        from .schemas import EnvTuningDefaults
 
         env_kwargs = dict(
             env_rebuild_min_interval_secs=AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
@@ -1072,6 +1354,9 @@ class AggregationService:
             env_probe_enabled=AGGREGATION_PROBE_ENABLED,
             env_probe_interval_secs=AGGREGATION_PROBE_INTERVAL_SECS,
             env_materialize_fine_pairs=_materialize_fine_pairs_mode(),
+            # Every knob's env default, live — the same readers the pipeline
+            # resolves with, so the editors' placeholders cannot drift.
+            env_tuning_defaults=EnvTuningDefaults(**env_tuning_defaults()),
         )
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:
@@ -1167,7 +1452,6 @@ class AggregationService:
         row.updated_at = _now()
         row.updated_by = updated_by
         await session.commit()
-        invalidate_global_cadence_cache()
         # Echo the stored state (re-parse the columns rather than only the
         # request, so a tuning-only PUT still returns the persisted cadence).
         return await self.get_settings(session)
@@ -1231,13 +1515,32 @@ class AggregationService:
         # delivery attempts), never the user. We RESET the automated retry
         # budget so the restarted run gets a fresh set of auto-retries for
         # transient provider blips (e.g. FalkorDB "BusyLoadingError: Redis is
-        # loading the dataset in memory"). The checkpoint (last_cursor) is
-        # preserved, so it resumes from where it stopped — not from zero.
+        # loading the dataset in memory") — including the per-job auto-resume
+        # counter the stuck-job reconciler and crash recovery share, which
+        # no longer expires on its own — and the durable cancel flag, or a
+        # Resume inside the flag's hour would be re-cancelled at pickup. The
+        # checkpoint (last_cursor) is preserved, so it resumes from where it
+        # stopped — not from zero.
+        # Archive what this attempt did before the next one overwrites it.
+        # Resume used to clear the error, reset the retry count and let a
+        # fresh ledger replace the old one — erasing, with the single click
+        # taken BECAUSE a run failed, the whole record of why it failed.
         job.status = "pending"
+        job.updated_at = _now()
+        archive_attempt(job, category=classify_failure(job.error_message))
         job.retry_count = 0
         job.error_message = None
-        job.updated_at = _now()
         await session.commit()
+        try:
+            from .redis_client import cancel_flag_key, get_redis, redispatch_key
+            redis = get_redis()
+            await redis.delete(redispatch_key(job_id))
+            await redis.delete(cancel_flag_key(job_id))
+        except Exception as exc:
+            logger.warning(
+                "Could not clear the auto-resume counter / cancel flag for %s: %s",
+                job_id, exc,
+            )
 
         await self._dispatcher.dispatch(job.id)
 
@@ -1246,6 +1549,80 @@ class AggregationService:
             "max_retries=%d)", job_id, job.max_retries,
         )
 
+        return self._to_response(job)
+
+    # ── Live limits ──────────────────────────────────────────────────
+
+    async def set_job_limits(
+        self, ds_id: str, job_id: str, session: AsyncSession, patch: "JobLimitsPatch",
+    ) -> AggregationJobResponse:
+        """Change a PENDING or RUNNING job's limits without cancelling it:
+        the stall window (``timeout_secs``), the wall clock, the two
+        per-query budgets, and the scan shape — pacing ratio, a cap on read
+        concurrency, a cap on the scan width — or clear live values with
+        ``reset``. The worker re-reads the row every few watchdog ticks and
+        the pipeline reads the live values per query, write or wave, so a
+        change takes effect within a minute. A terminal job takes Resume
+        overrides instead (422 here).
+
+        The audit trail is the row itself: ``live_overrides.history`` keeps
+        the last 20 changes (who, when, field, from, to) — deliberately not
+        a ``job_event_log`` row, whose CHECK constraint and consumers expect
+        terminal events only — plus one INFO log line per change."""
+        job = await session.get(AggregationJobORM, job_id, with_for_update=True)
+        if not job or job.data_source_id != ds_id:
+            raise NotFoundError(f"Aggregation job {job_id} not found")
+        if job.status not in ("pending", "running"):
+            raise ValueError(
+                f"Job {job_id} is {job.status}; limits can only be raised on a "
+                "pending or running job — use Resume with overrides instead"
+            )
+        doc = AggregationService._job_live_overrides_dict(job) or {}
+        history = list(doc.get("history") or [])
+        changes: list = []
+        now = _now()
+
+        def _record(field: str, old: Any, new: Any) -> None:
+            if old == new:
+                return
+            entry = {"at": now, "by": patch.actor or None, "field": field, "from": old, "to": new}
+            history.append(entry)
+            changes.append(entry)
+
+        if patch.timeout_secs is not None:
+            _record("timeout_secs", job.timeout_secs, int(patch.timeout_secs))
+            job.timeout_secs = int(patch.timeout_secs)
+        for field in (
+            "max_wall_secs", "scan_timeout_s", "write_timeout_s",
+            "write_pacing_ratio", "extract_concurrency", "scan_width",
+            "replica_ack_min", "replica_ack_timeout_ms",
+            "write_batch_max", "write_batch_target_s",
+        ):
+            value = getattr(patch, field)
+            if value is not None:
+                _record(field, doc.get(field), value)
+                doc[field] = value
+        for key in patch.reset or []:
+            field = _LIVE_RESET_FIELDS[key]
+            if field in doc:
+                _record(field, doc.get(field), None)
+                doc.pop(field, None)
+        if not changes:
+            raise ValueError(
+                "No limit changed: send at least one of timeoutSecs, maxWallSecs, scanTimeoutS, "
+                "writeTimeoutS, writePacingRatio, extractConcurrency, scanWidth, replicaAckMin, "
+                "replicaAckTimeoutMs, writeBatchMax, writeBatchTargetS, or a reset"
+            )
+        doc["history"] = history[-20:]
+        job.live_overrides = json.dumps(doc)
+        job.updated_at = now
+        await session.commit()
+        for entry in changes:
+            logger.info(
+                "Aggregation job %s: %s changed %s from %s to %s (live)",
+                job_id, entry["by"] or "an operator", entry["field"], entry["from"],
+                "the job's setting" if entry["to"] is None else entry["to"],
+            )
         return self._to_response(job)
 
     # ── Cancel ────────────────────────────────────────────────────────
@@ -1263,14 +1640,19 @@ class AggregationService:
         emits the ``job_cancelled`` event, and unregisters.
 
         For pending jobs (no worker is running), we mark cancelled
-        directly and emit the event — there's nothing to coordinate
-        with. For running jobs we keep the dispatcher's
-        ``cancel_task`` as a hard fallback that fires after a grace
-        period, but the cooperative path should win in practice.
+        directly, release the source's state row and emit the event —
+        there's nothing to coordinate with. For running jobs we keep the
+        dispatcher's ``cancel_task`` as a hard fallback that fires after a
+        grace period, but the cooperative path should win in practice.
         """
         from .cancel import request_cancel as request_cooperative_cancel
+        from .models import AggregationDataSourceStateORM
 
-        job = await session.get(AggregationJobORM, job_id)
+        # Row-locked (FOR UPDATE on Postgres, a no-op on SQLite) so this and
+        # the worker's start are mutually exclusive: the precondition below
+        # runs on the CURRENT row, and a worker that loads the row after this
+        # commit sees ``cancelled`` and never flips it back to running.
+        job = await session.get(AggregationJobORM, job_id, with_for_update=True)
         if not job or job.data_source_id != ds_id:
             raise NotFoundError(f"Aggregation job {job_id} not found")
 
@@ -1339,10 +1721,21 @@ class AggregationService:
             )
 
         # Pending job, or no worker registered (e.g. the worker process
-        # crashed and the row is orphaned). Mark cancelled directly.
+        # crashed and the row is orphaned). Mark cancelled directly — the
+        # source's state row too, which ``trigger()`` set to ``pending`` and
+        # which only a worker would otherwise ever change: left as it was,
+        # the stale-marker reconciler defers the source as in-flight forever.
+        # A job that never started on a never-built source goes back to
+        # ``none`` so the sweeper's never-built detector can queue its first
+        # build again; anything else reads ``cancelled``, what the worker
+        # writes on a mid-run cancel, which automation retries with backoff.
         job.status = "cancelled"
         job.completed_at = _now()
         job.updated_at = _now()
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is not None:
+            never_ran = job.started_at is None and not state.last_aggregated_at
+            state.aggregation_status = "none" if never_ran else "cancelled"
         await session.commit()
 
         # Hard fallback for the orphaned-row case where there's no
@@ -1627,6 +2020,52 @@ class AggregationService:
             "probe_interval_secs": state.probe_interval_secs,
         }
 
+    async def set_source_rollup_storage(
+        self, ds_id: str, session: AsyncSession, value: Optional[str],
+    ) -> Optional[str]:
+        """Set or clear this source's Rollup storage override ('auto' |
+        'true' | 'false'; None = inherit the fleet default).
+
+        UPSERTS like the probe and reconcile setters: a never-built source has
+        no state row, and a graph too big for the full cube is exactly the
+        source an operator wants on Auto BEFORE its first build. Takes effect
+        at the next trigger — a running job keeps its frozen tuning."""
+        normalized = normalize_rollup_storage(value)
+        if value is not None and normalized is None:
+            raise ValueError(f"rollup_storage must be auto|true|false, got {value!r}")
+        state = await self._get_or_create_state(ds_id, session)
+        state.rollup_storage = normalized
+        await session.commit()
+        logger.info(
+            "Rollup storage override %s for data source %s",
+            normalized if normalized is not None else "cleared", ds_id,
+        )
+        return normalized
+
+    def hold_for_state(
+        self, state, cadence, *, provider_id: Optional[str] = None,
+        scope_holds=None,
+    ) -> Optional[Hold]:
+        """See the module-level :func:`hold_for_state`; kept on the service
+        so callers holding a service can resolve without a second import."""
+        return hold_for_state(
+            state, cadence, provider_id=provider_id, scope_holds=scope_holds,
+        )
+
+    async def hold_for_source(
+        self, ds_id: str, session: AsyncSession,
+    ) -> Optional[Hold]:
+        """The hold in force for *ds_id*, loading what it needs. Used where
+        no state row is in hand yet: ``trigger()`` for automation sources,
+        and the provider/fleet refresh batches. A source with no state row
+        can still be held by the fleet's ② Check switch (resolved through
+        the cadence), which is the one thing an absent row inherits."""
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        cadence = await read_global_cadence(session)
+        return await hold_for_source_row(session, ds_id, state, cadence)
+
     async def set_source_pause(
         self, ds_id: str, session: AsyncSession, *, paused_until: Optional[str],
     ) -> dict:
@@ -1649,6 +2088,29 @@ class AggregationService:
         )
         return {"paused_until": state.paused_until}
 
+    async def reset_source_breaker(
+        self, ds_id: str, session: AsyncSession,
+    ) -> dict:
+        """Manual resume from the circuit breaker — the one thing that could
+        not be done before: ``reconcile_consecutive_actions`` only ever reset
+        on an ``in_sync`` verdict, so a source the breaker suspended stayed
+        suspended until the finding cleared by itself. Zeroes the count and
+        lifts the ``suspended`` stamp (the next sweep re-evaluates from
+        scratch); touches nothing else."""
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is None:
+            raise NotFoundError(
+                f"Data source {ds_id} not found in aggregation state"
+            )
+        state.reconcile_consecutive_actions = 0
+        if state.drift_state == "suspended":
+            state.drift_state = None
+        await session.commit()
+        logger.info("Reconcile breaker reset for data source %s", ds_id)
+        return {"reset_breaker": True}
+
     # ── Change Detection ──────────────────────────────────────────────
 
     async def check_drift(
@@ -1670,7 +2132,7 @@ class AggregationService:
                 timeout=_DRIFT_TIMEOUT,
             )
             current_fp = await asyncio.wait_for(
-                compute_graph_fingerprint(provider),
+                compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                 timeout=_DRIFT_TIMEOUT,
             )
         except Exception as e:
@@ -1682,7 +2144,16 @@ class AggregationService:
                 last_checked_at=_now(),
             )
 
-        drift = not fingerprints_match(state.graph_fingerprint, current_fp)
+        # A fingerprint that could not be taken is the absence of a
+        # measurement, not a change. Reporting drift from it queued a rebuild
+        # on every check of a graph too large to fingerprint, and each rebuild
+        # made the next probe slower — while the caches were invalidated on
+        # the way past. The caller that could not measure reports what it
+        # knows: nothing.
+        drift = (
+            not fingerprint_unknown(current_fp)
+            and not fingerprints_match(state.graph_fingerprint, current_fp)
+        )
 
         return DriftCheckResponse(
             drift_detected=drift,
@@ -1776,7 +2247,7 @@ class AggregationService:
         if provider is not None:
             try:
                 current_fp = await asyncio.wait_for(
-                    compute_graph_fingerprint(provider),
+                    compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                     timeout=_DRIFT_TIMEOUT,
                 )
             except Exception:
@@ -1787,6 +2258,44 @@ class AggregationService:
 
         # 3. Change gate. A matching fingerprint (and no force) is a no-op —
         # nothing below runs.
+        #
+        # An UNKNOWN fingerprint is a third outcome, and conflating it with
+        # the second was expensive. The probe returns "" when the fast
+        # counters cannot answer for this graph AND the fallback scan failed
+        # or ran past its budget — which is the absence of a measurement,
+        # not evidence of a change. ``fingerprints_match`` says False for
+        # both, so on a graph too large to scan inside the probe's budget
+        # every automatic check asserted "changed": the scope-wide read
+        # generation was bumped each time, so no cached read of that source
+        # could ever survive to be hit (an aggregated-lineage hit ratio
+        # pinned at 0% is what that looks like from the outside), and a
+        # rebuild was queued each time, which made the next scan slower.
+        #
+        # A caller with its OWN evidence of a write — an external loader
+        # saying so, an operator forcing a refresh, the API signal — is
+        # still right to proceed; ``force`` and the explicit origins carry
+        # that. A caller whose only evidence WAS the probe has none.
+        if not force and fingerprint_unknown(current_fp) and origin in _PROBE_ONLY_ORIGINS:
+            logger.info(
+                "signal_source_changed: the graph fingerprint for %s could not "
+                "be taken (origin=%s) — treating it as unknown rather than as a "
+                "change. Nothing is invalidated and no rebuild is queued; the "
+                "reconciliation sweep's edge counts remain the evidence that "
+                "does not need a scan.", ds_id, origin,
+            )
+            event_id = await self._emit_signal_event(
+                workspace_id=workspace_id, ds_id=ds_id, origin=origin,
+                actor=actor, gate="unknown", actions={}, outcome="noop",
+                audit_reason=audit_reason, evidence=evidence, run_id=run_id,
+            )
+            return SourceChangedResponse(
+                changed=False,
+                job_id=None,
+                reason=reason,
+                current_fingerprint=current_fp,
+                stored_fingerprint=stored_fp,
+                event_id=event_id,
+            )
         if not force and fingerprints_match(stored_fp, current_fp):
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,
@@ -1869,13 +2378,33 @@ class AggregationService:
         deferred = False
         trigger_outcome = None
         trigger_detail = None
+        held: Optional[Hold] = None
         if applicable:
             cadence = await read_global_cadence(session)
             interval_secs = resolve_rebuild_interval(
                 getattr(state, "rebuild_min_interval_secs", None),
                 cadence.rebuild_min_interval_secs,
             )
-            if not force and self._within_rebuild_cooldown(state, interval_secs):
+            # Operator hold, for AUTOMATION callers only — keyed on
+            # ``origin``, NOT ``trigger_source`` (which defaults to "api"
+            # for every scheduler caller and so cannot tell automation from
+            # a person). Steps 4-7 already ran: caches are invalidated and
+            # the stale marker is set, so the read path keeps serving the
+            # honest "may be out of date" overlay. Only the rebuild is
+            # withheld, and the marker is deliberately NOT cleared. A
+            # person or an external system (origin script/connector/api)
+            # is never held here; they proceed, and the UI warns.
+            if origin in AUTOMATION_ORIGINS:
+                held = await hold_for_source_row(session, ds_id, state, cadence)
+            if held is not None:
+                trigger_outcome = "held"
+                trigger_detail = held.detail
+                logger.info(
+                    "signal_source_changed: rebuild for %s held by operator "
+                    "(%s, origin=%s) — caches invalidated, marker kept, "
+                    "nothing queued", ds_id, held.detail, origin,
+                )
+            elif not force and self._within_rebuild_cooldown(state, interval_secs):
                 deferred = True
                 logger.info(
                     "signal_source_changed: rebuild deferred (cooldown) for "
@@ -1945,6 +2474,8 @@ class AggregationService:
         }
         if force:
             actions["force"] = True
+        if held is not None:
+            actions["held"] = held.detail
         event_id = await self._emit_signal_event(
             workspace_id=workspace_id, ds_id=ds_id, origin=origin,
             actor=actor, gate=("forced" if force else "changed"),
@@ -1961,6 +2492,10 @@ class AggregationService:
             stored_fingerprint=stored_fp,
             deferred=deferred,
             event_id=event_id,
+            held=held is not None,
+            held_by=held.scope if held else None,
+            held_kind=held.kind if held else None,
+            held_until=held.until if held else None,
         )
 
     async def _emit_signal_event(
@@ -2078,6 +2613,17 @@ class AggregationService:
         if state is None and ds_orm is None:
             raise NotFoundError(f"Data source {ds_id} not found")
 
+        # A hold stops automation, never this verb: a person (or an external
+        # system) proceeds. It is REPORTED, and a rebuild actually queued past
+        # it carries an ``override`` action, so the UI can say "ran once, the
+        # pause stays" instead of implying the hold was lifted.
+        hold = await self.hold_for_source(ds_id, session)
+        hold_fields = dict(
+            held_by=hold.scope if hold else None,
+            held_kind=hold.kind if hold else None,
+            held_until=hold.until if hold else None,
+        )
+
         # 1. auto — delegate to the signal, which owns the change gate and
         # emits its own event; reuse that event id, never emit a second.
         if scope == "auto":
@@ -2095,6 +2641,8 @@ class AggregationService:
                 actions.append("rebuild_deferred")
             elif signal.changed:
                 actions.append("invalidated")
+            if hold is not None and signal.job_id:
+                actions.append("override")
             if wait == "complete" and signal.job_id:
                 actions.append(
                     await self._wait_for_job(ds_id, signal.job_id, session)
@@ -2103,6 +2651,7 @@ class AggregationService:
                 scope="auto", gate=gate, changed=signal.changed,
                 actions=actions, job_id=signal.job_id,
                 deferred=signal.deferred, event_id=signal.event_id,
+                **hold_fields,
             )
 
         # Non-auto scopes own their single audit event. ``audit`` mirrors the
@@ -2237,6 +2786,9 @@ class AggregationService:
             detail=detail,
         )
 
+        if hold is not None and job_id:
+            actions.append("override")
+
         # 4. Optional synchronous wait for a queued rebuild.
         if wait == "complete" and job_id:
             actions.append(await self._wait_for_job(ds_id, job_id, session))
@@ -2244,6 +2796,7 @@ class AggregationService:
         return RefreshResponse(
             scope=scope, gate="n/a", changed=True, actions=actions,
             job_id=job_id, deferred=False, event_id=event_id,
+            **hold_fields,
         )
 
     async def _wait_for_job(
@@ -2336,6 +2889,9 @@ class AggregationService:
         # persisted global → env), so the badge matches the cooldown gate.
         cadence = await read_global_cadence(session)
         states = await _state_map(session, [ds.id])
+        scope_holds = await read_scope_holds(session, [ds.provider_id])
+        rollup_global = await read_global_rollup_storage(session)
+        rollup_env = _env_rollup_storage()
         state_row = states.get(ds.id, {})
         override_secs = state_row.get("rebuild_min_interval_secs")
         cooldown_interval_secs = resolve_rebuild_interval(
@@ -2440,11 +2996,20 @@ class AggregationService:
                 cooldown_interval_secs=cooldown_interval_secs,
                 state_row=state_row,
                 reconcile_enabled_global=cadence.reconcile_enabled,
+                drift_auto_rebuild_global=cadence.drift_auto_rebuild,
                 last_failure_reason=last_failure_reason,
                 last_failure_category=last_failure_category,
                 platform_mastered=ds.id in versioned,
                 projector_health=health.get(ds.id),
+                scope_holds=scope_holds,
+                rollup_storage_global=rollup_global,
+                rollup_storage_env=rollup_env,
             ),
+            # What "Inherit" would mean for this source right now, so the
+            # drawer can label the choice while an override is set.
+            inherited_rollup_storage=resolve_rollup_storage(
+                None, rollup_global, rollup_env,
+            )[0],
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
             cache_key_count=cache_key_count,
@@ -2577,7 +3142,11 @@ class AggregationService:
         Recovery distinguishes two cases:
         - A *running* job with a checkpoint (last_cursor) was actively making
           progress when the process died.  This is a clean crash recovery —
-          re-dispatch from the checkpoint **without** incrementing retry_count.
+          re-dispatch from the checkpoint **without** incrementing retry_count,
+          but counted against the same per-job auto-resume cap the stuck-job
+          reconciler uses (a process that crash-loops must not re-dispatch
+          the same job on every boot forever), and never for a job whose
+          durable cancel flag is set.
         - A job with no checkpoint (never ran, or stuck in pending) counts as
           a genuine retry and increments retry_count.
         """
@@ -2605,6 +3174,48 @@ class AggregationService:
                 )
 
                 if was_making_progress:
+                    # Bounded, and cancel-aware: the same counter and cap the
+                    # stuck-job reconciler applies, so a crash-looping process
+                    # cannot re-dispatch one job on every boot forever. Redis
+                    # unreachable → fall through to the legacy re-dispatch
+                    # (the dispatcher would fail anyway); never fail startup.
+                    try:
+                        from .redis_client import cancel_flag_key, get_redis
+                        from .reap import reap_job
+                        from .reconciler import (
+                            _MAX_AUTO_RESUMES, count_auto_resume,
+                            mark_auto_resume_exhausted,
+                        )
+                        redis = get_redis()
+                        if await redis.get(cancel_flag_key(job.id)):
+                            # Reaped, not just stamped: the ledger has to
+                            # name the stage this died in and the source has
+                            # to leave "in flight", or the stale-marker
+                            # reconciler defers it forever. See reap.py.
+                            await reap_job(
+                                session, job, status="cancelled",
+                                error_message="Cancelled; executor stopped.",
+                            )
+                            await session.commit()
+                            logger.info(
+                                "Crash recovery: job %s was cancelled — not "
+                                "re-dispatched", job.id,
+                            )
+                            continue
+                        if await count_auto_resume(redis, job.id) > _MAX_AUTO_RESUMES:
+                            await mark_auto_resume_exhausted(session, job, _now())
+                            await session.commit()
+                            logger.warning(
+                                "Crash recovery: job %s exhausted its auto-resume "
+                                "cap — left failed for a hand resume", job.id,
+                            )
+                            continue
+                    except Exception as exc:
+                        logger.warning(
+                            "Crash recovery: auto-resume bookkeeping for %s "
+                            "unavailable (%s) — re-dispatching uncounted",
+                            job.id, exc,
+                        )
                     # Clean crash recovery — resume from checkpoint, no penalty
                     job.status = "pending"
                     job.error_message = None
@@ -2857,6 +3468,15 @@ class AggregationService:
             return None
 
     @staticmethod
+    def _job_live_overrides_dict(job) -> dict | None:
+        try:
+            raw = getattr(job, "live_overrides", None)
+            doc = json.loads(raw) if raw else None
+            return doc if isinstance(doc, dict) else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _job_run_stats_dict(job) -> dict | None:
         try:
             raw = getattr(job, "run_stats", None)
@@ -2865,10 +3485,16 @@ class AggregationService:
             return None
 
     @staticmethod
-    def _to_response(job: AggregationJobORM) -> AggregationJobResponse:
-        """Convert ORM to response model."""
-        # Estimate completion time
-        estimated = _estimate_completion(job)
+    def _to_response(
+        job: AggregationJobORM, prior_steps: Any = None,
+    ) -> AggregationJobResponse:
+        """Convert ORM to response model.
+
+        ``prior_steps`` is the previous completed run's step ledger for this
+        source, when the caller pre-fetched one for the page. Without it the
+        run gets no ETA — see ``_estimate_completion``.
+        """
+        estimated = _estimate_completion(job, prior_steps)
 
         return AggregationJobResponse(
             id=job.id,
@@ -2900,6 +3526,8 @@ class AggregationService:
             tuning=AggregationService._job_tuning_dict(job),
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
+            failure_category=classify_failure(getattr(job, "error_message", None)),
+            live_overrides=AggregationService._job_live_overrides_dict(job),
         )
 
 
@@ -2959,9 +3587,28 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     ``QUERY_MEM_CAPACITY``, a per-query budget — the store is healthy and
     one query asked for too many rows at once, so the fix is to make that
     query read less (or, together with the container limit, to raise the
-    per-query ceiling)."""
+    per-query ceiling).
+
+    ``write_budget`` is checked FIRST: the pipeline refused to write because
+    the owning shard has no room (or the static cap governed), with the
+    numbers in the message. It is a decision, not an error, and the message
+    deliberately avoids every substring below — but a stable marker beats
+    hoping."""
     if not error_message:
         return None
+    stripped = error_message.lstrip()
+    if stripped.startswith("write budget:"):
+        return "write_budget"
+    # The two INFRASTRUCTURE faults, keyed off the stable markers ``reap.py``
+    # writes rather than off its prose. Both used to fall through to
+    # ``unknown`` (or, for the watchdog's wording, to ``timeout``), which is
+    # the least actionable answer there is and, for a dead pod, the wrong
+    # one: no time limit brings a worker back. They are the most common
+    # failures at fleet scale, and nothing the job itself did.
+    if stripped.startswith(_WORKER_LOST):
+        return "worker_lost"
+    if stripped.startswith(_NEVER_DISPATCHED):
+        return "never_dispatched"
     if (
         "OutOfMemoryError" in error_message
         or "used memory > 'maxmemory'" in error_message
@@ -2970,6 +3617,20 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
         return "out_of_memory"
     if "mem consumption exceeded" in error_message.lower():
         return "query_memory"
+    # A node that is not answering, in the wording the client actually
+    # produces. Checked BEFORE the timeout test: redis phrases a refused
+    # connect as "Error 111 connecting to host:port. Connection refused.",
+    # which matches none of the buckets below on its own — it only ever
+    # landed in provider_unavailable because the breaker happened to
+    # prefix it with the word "unavailable".
+    lowered = error_message.lower()
+    if (
+        "connection refused" in lowered
+        or "error 111" in lowered
+        or "did not answer for" in lowered
+        or "unreachable" in lowered
+    ):
+        return "provider_unavailable"
     if "timeout" in error_message or "TimeoutError" in error_message:
         return "timeout"
     if "ontology" in error_message or "OntologyResolution" in error_message:
@@ -2977,9 +3638,8 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     if "conflict" in error_message or "ConflictError" in error_message:
         return "conflict"
     if (
-        "unavailable" in error_message
-        or "unreachable" in error_message
-        or "connection" in error_message
+        "unavailable" in lowered
+        or "connection" in lowered
     ):
         return "provider_unavailable"
     return "unknown"
@@ -3069,6 +3729,10 @@ def _freshness_row_kwargs(
     last_failure_category: Optional[str] = None,
     platform_mastered: bool = False,
     projector_health=None,
+    scope_holds=None,
+    drift_auto_rebuild_global: Optional[bool] = None,
+    rollup_storage_global: Optional[str] = None,
+    rollup_storage_env: Optional[str] = None,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -3078,9 +3742,27 @@ def _freshness_row_kwargs(
     ``cooldownUntil`` the badge reads reflects any global/per-source override.
     ``state_row`` is this source's entry from :func:`_state_map` — the
     reconciliation verdict the SWEEP stamped, read straight off the row so
-    this path never recomputes detection."""
+    this path never recomputes detection. ``scope_holds`` is the fleet/provider
+    hold map (``holds.read_scope_holds``), read once per request by the
+    caller; the row reports the RESOLVED hold, widest scope first, so the
+    operator is pointed at the control that will actually release it."""
     generation, cache_as_of, stale_reason = signals
     st = state_row or {}
+    auto_reconcile = resolve_reconcile_enabled(
+        st.get("reconcile_enabled"), reconcile_enabled_global,
+    )
+    rollup_storage, rollup_storage_source = resolve_rollup_storage(
+        st.get("rollup_storage"), rollup_storage_global, rollup_storage_env,
+    )
+    hold = resolve_hold(
+        scope_holds=scope_holds, provider_id=ds.provider_id,
+        source_paused_until=st.get("paused_until"),
+        source_reconcile_enabled=st.get("reconcile_enabled"),
+        fleet_reconcile_enabled=resolve_reconcile_enabled(
+            None, reconcile_enabled_global,
+        ),
+        drift_auto_rebuild=resolve_drift_auto_rebuild(drift_auto_rebuild_global),
+    )
     return dict(
         data_source_id=ds.id,
         workspace_id=ds.workspace_id,
@@ -3105,10 +3787,11 @@ def _freshness_row_kwargs(
         running_job_id=running_job_id,
         last_event=_event_summary(last_event),
         drift_state=st.get("drift_state"),
-        auto_reconcile=resolve_reconcile_enabled(
-            st.get("reconcile_enabled"), reconcile_enabled_global,
-        ),
+        auto_reconcile=auto_reconcile,
         paused_until=st.get("paused_until"),
+        held_by=hold.scope if hold else None,
+        held_kind=hold.kind if hold else None,
+        held_until=hold.until if hold else None,
         last_checked_at=st.get("last_reconcile_checked_at"),
         last_reconciled_at=st.get("last_reconciled_at"),
         last_reconcile_reason=st.get("last_reconcile_reason"),
@@ -3118,6 +3801,11 @@ def _freshness_row_kwargs(
         last_finding_evidence=st.get("last_finding_evidence"),
         last_failure_reason=last_failure_reason,
         last_failure_category=last_failure_category,
+        # Rollup storage, resolved: the per-source override (None = none),
+        # what this source will actually run with, and where that came from.
+        rollup_storage_override=normalize_rollup_storage(st.get("rollup_storage")),
+        resolved_rollup_storage=rollup_storage,
+        rollup_storage_source=rollup_storage_source,
         # Both stamps are only ever written for a versioned source, so either
         # one still identifies this source as platform-mastered when the live
         # lookup is down. ``projectionStalled`` had to join ``managed`` here:
@@ -3323,6 +4011,9 @@ async def _state_map(
                 S.probe_enabled,
                 S.probe_interval_secs,
                 S.paused_until,
+                S.aggregation_edge_count,
+                S.observed_bytes_per_edge,
+                S.rollup_storage,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -3346,6 +4037,12 @@ async def _state_map(
             "probe_enabled": r[12],
             "probe_interval_secs": r[13],
             "paused_until": r[14],
+            # Capacity: what the graph holds and what the last fresh rebuild
+            # measured per new edge on its shard (None until calibrated).
+            "aggregation_edge_count": r[15],
+            "observed_bytes_per_edge": r[16],
+            # Per-source Rollup storage override (None = inherit).
+            "rollup_storage": r[17],
         }
         for r in rows
     }
@@ -3446,7 +4143,16 @@ async def assemble_fleet_freshness(
     # global + ONE batched query for the per-source overrides, so the
     # ``cooldownUntil`` badge honors both without any per-row reads.
     cadence = await read_global_cadence(session)
+    # Rollup storage: the stored global (same row, identity-map hit) and the
+    # env, read once so every row resolves its override → global → env.
+    rollup_global = await read_global_rollup_storage(session)
+    rollup_env = _env_rollup_storage()
     states = await _state_map(session, ds_ids)
+    # Fleet/provider holds: one PK read for the fleet row plus one per
+    # distinct provider on the page (never per row).
+    scope_holds = await read_scope_holds(
+        session, {ds.provider_id for ds in ds_list},
+    )
     failed_ids = [
         ds.id for ds in ds_list if ds.aggregation_status == "failed"
     ]
@@ -3469,10 +4175,14 @@ async def assemble_fleet_freshness(
             ),
             state_row=states.get(ds.id),
             reconcile_enabled_global=cadence.reconcile_enabled,
+            drift_auto_rebuild_global=cadence.drift_auto_rebuild,
             last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
             last_failure_category=(failures.get(ds.id) or {}).get("category"),
             platform_mastered=ds.id in versioned,
             projector_health=health.get(ds.id),
+            scope_holds=scope_holds,
+            rollup_storage_global=rollup_global,
+            rollup_storage_env=rollup_env,
         ))
         for ds in ds_list
     ]
@@ -3488,6 +4198,8 @@ async def assemble_fleet_freshness(
         provider_names=provider_names,
         states=states,
         health=health,
+        cadence=cadence,
+        scope_holds=scope_holds,
     )
     return FreshnessFleetResponse(
         rows=rows, total=total, summary=summary,
@@ -3508,6 +4220,8 @@ async def _assemble_fleet_summary(
     provider_names: dict,
     states: Optional[dict] = None,
     health: Optional[dict] = None,
+    cadence=None,
+    scope_holds: Optional[dict] = None,
 ) -> tuple[Optional[FreshnessSummary], Optional[list[ProviderFreshnessSummary]]]:
     """Fleet stat-tile counts over the workspace/provider-filtered set,
     BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
@@ -3614,13 +4328,38 @@ async def _assemble_fleet_summary(
     # out entirely would let a whole wedged fleet read as needing nothing.
     stalled_ids = _stalled_ids(full_ids, full_states, health)
 
+    # Operator holds, resolved per row from the same state map plus the
+    # fleet/provider rows — the page's read is reused when the page IS the
+    # full set, exactly as the maps above are. Its OWN bucket: a held source
+    # is one an operator deliberately silenced, so it is NOT folded into
+    # needs_attention, which would re-inflate the amber count the pause
+    # exists to quiet.
+    if cadence is None:
+        cadence = await read_global_cadence(session)
+    if scope_holds is None or not page_is_full_set:
+        scope_holds = await read_scope_holds(
+            session, {row[3] for row in full_rows},
+        )
+    fleet_check = resolve_reconcile_enabled(None, cadence.reconcile_enabled)
+    drift_auto = resolve_drift_auto_rebuild(cadence.drift_auto_rebuild)
+    held_ids = {
+        row[0] for row in full_rows
+        if resolve_hold(
+            scope_holds=scope_holds, provider_id=row[3],
+            source_paused_until=full_states.get(row[0], {}).get("paused_until"),
+            source_reconcile_enabled=full_states.get(row[0], {}).get("reconcile_enabled"),
+            fleet_reconcile_enabled=fleet_check,
+            drift_auto_rebuild=drift_auto,
+        ) is not None
+    }
+
     summary = _summarize_freshness(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
-        stalled_ids,
+        stalled_ids, held_ids,
     )
     provider_summaries = _summarize_by_provider(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
-        stalled_ids,
+        stalled_ids, held_ids, scope_holds, drift_auto,
     )
     return summary, provider_summaries
 
@@ -3670,6 +4409,7 @@ def _summarize_freshness(
     drifting_ids: Optional[set] = None,
     suspended_ids: Optional[set] = None,
     stalled_ids: Optional[set] = None,
+    held_ids: Optional[set] = None,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
     their Redis signals + running-job map into the fleet summary counts
@@ -3684,9 +4424,10 @@ def _summarize_freshness(
     drifting_ids = drifting_ids or set()
     suspended_ids = suspended_ids or set()
     stalled_ids = stalled_ids or set()
+    held_ids = held_ids or set()
     ready = pending = failed = not_built = 0
     recomputing = needs_attention = cache_stamped = drifting = suspended = 0
-    projection_stalled = 0
+    projection_stalled = held = 0
     for row in full_rows:
         ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
@@ -3712,6 +4453,9 @@ def _summarize_freshness(
         is_stalled = ds_id in stalled_ids
         if is_stalled:
             projection_stalled += 1
+        # Deliberately NOT part of the needs_attention OR below.
+        if ds_id in held_ids:
+            held += 1
         # A drifting or suspended source is serving data that no longer
         # matches its graph, so it belongs in the same triage bucket as a
         # failed or marked one. Suspended is the case that needs a person.
@@ -3736,6 +4480,7 @@ def _summarize_freshness(
         drifting=drifting,
         suspended=suspended,
         projection_stalled=projection_stalled,
+        held=held,
     )
 
 
@@ -3744,6 +4489,9 @@ def _summarize_by_provider(
     drifting_ids: Optional[set] = None,
     suspended_ids: Optional[set] = None,
     stalled_ids: Optional[set] = None,
+    held_ids: Optional[set] = None,
+    scope_holds: Optional[dict] = None,
+    drift_auto_rebuild: Optional[bool] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -3758,6 +4506,13 @@ def _summarize_by_provider(
     for (provider_id, provider_name), rows in groups.items():
         s = _summarize_freshness(
             rows, signals, running, drifting_ids, suspended_ids, stalled_ids,
+            held_ids,
+        )
+        # The provider's OWN hold (or the fleet's, which outranks it) — what
+        # the group header renders and what its Pause/Resume control edits.
+        # Per-source holds inside the group are in ``held``, not here.
+        group_hold = resolve_scope_hold(
+            scope_holds, provider_id, drift_auto_rebuild=drift_auto_rebuild,
         )
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
@@ -3766,6 +4521,10 @@ def _summarize_by_provider(
             not_built=s.not_built, needs_attention=s.needs_attention,
             cache_stamped=s.cache_stamped, drifting=s.drifting,
             suspended=s.suspended, projection_stalled=s.projection_stalled,
+            held=s.held,
+            held_by=group_hold.scope if group_hold else None,
+            held_kind=group_hold.kind if group_hold else None,
+            held_until=group_hold.until if group_hold else None,
         ))
     result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
     return result
@@ -3774,14 +4533,38 @@ def _summarize_by_provider(
 # ── Reconciliation: policy read/write + run history ─────────────────
 
 
-def _policy_response(cadence) -> "ReconcilePolicyResponse":
+def _policy_response(cadence, fleet_hold=None) -> "ReconcilePolicyResponse":
     """Persisted policy plus the env defaults behind it, so the editor seeds
     from ``persisted ?? envDefault`` and a no-op save round-trips the real
-    current default instead of pinning a wrong value."""
+    current default instead of pinning a wrong value. ``fleet_hold`` is the
+    fleet's ``automation_holds`` row (or ``None``): its two stamps ride the
+    policy so the Automation modal needs no second read — as does the
+    fleet-level hold exactly as the resolver reports it (``held_by`` …
+    ``held_reason``), so the page's banner and the modal's read-out are the
+    gates' own answer, never a second opinion."""
     from .reconcile import REASONS
     from .schemas import ReconcilePolicyResponse
 
+    fleet_check = resolve_reconcile_enabled(None, cadence.reconcile_enabled)
+    drift_auto = resolve_drift_auto_rebuild(cadence.drift_auto_rebuild)
+    hold = resolve_hold(
+        scope_holds={FLEET_KEY: fleet_hold} if fleet_hold is not None else {},
+        provider_id=None,
+        fleet_reconcile_enabled=fleet_check,
+        drift_auto_rebuild=drift_auto,
+    )
+    # Which control releases it: the two Automation switches outrank the row.
+    reason = None
+    if hold is not None:
+        reason = "act" if not drift_auto else "check" if not fleet_check else "hold"
+
     return ReconcilePolicyResponse(
+        paused_until=getattr(fleet_hold, "paused_until", None),
+        stopped_at=getattr(fleet_hold, "stopped_at", None),
+        held_by=hold.scope if hold is not None else None,
+        held_kind=hold.kind if hold is not None else None,
+        held_until=hold.until if hold is not None else None,
+        held_reason=reason,
         enabled=cadence.reconcile_enabled,
         check_interval_secs=cadence.reconcile_check_interval_secs,
         max_actions_per_run=cadence.reconcile_max_actions_per_run,
@@ -3832,6 +4615,7 @@ async def assemble_reconcile_overview(
     from .schemas import ReconcileOverviewResponse
 
     cadence = await read_global_cadence(session)
+    fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
     runs = []
     try:
         rows = (await session.execute(
@@ -3842,7 +4626,9 @@ async def assemble_reconcile_overview(
         runs = [_run_model(r) for r in rows]
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Reconcile run history read failed: %s", exc)
-    return ReconcileOverviewResponse(policy=_policy_response(cadence), runs=runs)
+    return ReconcileOverviewResponse(
+        policy=_policy_response(cadence, fleet_hold), runs=runs,
+    )
 
 
 def parse_activity_since(raw: Optional[str]) -> datetime:
@@ -3964,7 +4750,7 @@ async def assemble_reconcile_activity(
 
 
 async def save_reconcile_policy(
-    session: AsyncSession, body, *, sent: set,
+    session: AsyncSession, body, *, sent: set, actor: Optional[str] = None,
 ) -> "ReconcilePolicyResponse":
     """Merge the sent fields into ``aggregation_settings.cadence_json``.
 
@@ -3973,8 +4759,15 @@ async def save_reconcile_policy(
     ``driftAutoRebuild`` — hence the merge, and the row lock: two concurrent
     writers merging against the same snapshot would silently drop one
     another's fields (no-op on SQLite, ``FOR UPDATE`` on Postgres).
+
+    The FLEET HOLD (``pausedUntil`` / ``stopped``) rides the same PUT and the
+    same transaction but lives in its own ``automation_holds`` row, never in
+    ``cadence_json`` — see ``AutomationHoldORM`` for why.
+
+    ``resetBreaker`` is an action riding the same PUT, like the per-source
+    PATCH's: every source the breaker suspended starts fresh, fleet-wide.
     """
-    from .models import AggregationSettingsORM
+    from .models import AggregationDataSourceStateORM, AggregationSettingsORM
     from .schemas import AggregationCadence
 
     row = await session.get(
@@ -4005,11 +4798,37 @@ async def save_reconcile_policy(
             else:
                 current[alias] = value
 
+    hold_kwargs = {}
+    if "paused_until" in sent:
+        hold_kwargs["paused_until"] = body.paused_until
+    if "stopped" in sent:
+        hold_kwargs["stopped"] = body.stopped
+    if hold_kwargs:
+        fleet_hold = await set_scope_hold(
+            session, scope="fleet", actor=actor, **hold_kwargs,
+        )
+    else:
+        fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
+
+    if "reset_breaker" in sent and body.reset_breaker:
+        # The two fields ``reset_source_breaker`` zeroes per source, for every
+        # suspended source at once — one statement, so re-enabling after an
+        # incident is not one drawer per source.
+        lifted = await session.execute(
+            update(AggregationDataSourceStateORM)
+            .where(AggregationDataSourceStateORM.drift_state == "suspended")
+            .values(reconcile_consecutive_actions=0, drift_state=None)
+            .execution_options(synchronize_session=False)
+        )
+        logger.info(
+            "Reconcile breaker reset fleet-wide by %s: %s source(s) resumed",
+            actor, getattr(lifted, "rowcount", "?"),
+        )
+
     row.cadence_json = json.dumps(current)
     row.updated_at = _now()
     await session.commit()
-    invalidate_global_cadence_cache()
-    return _policy_response(AggregationCadence(**current))
+    return _policy_response(AggregationCadence(**current), fleet_hold)
 
 
 # ── Custom Exception Classes ────────────────────────────────────────

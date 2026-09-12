@@ -298,7 +298,6 @@ Sizing rationale: `maxmemory 90gb` ≈ 70% of the 128 GB node — the remainder 
 | Setting | Value | Why |
 | :--- | :--- | :--- |
 | `CACHE_REDIS_URL` | dedicated cache Redis (§5) | The provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and logs loudly |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default — do not disable) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory pair accumulation |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | `200000` (default) | Bounds high-fan-in hub pages |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | set per provider ≈ shard `maxmemory` × 0.8 | Turns on cold-graph eviction so residency tracks the working set, not the full 250M corpus |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` (default; raise with worker CPU) | Keeps hundreds of graphs' projections caught up |
@@ -420,6 +419,5 @@ Phased, each gate verifiable before the next:
 | `FALKORDB_TLS_*` | same | per security posture |
 | `CACHE_REDIS_URL` | same | `synodic-redis-cache` |
 | `REDIS_CACHE_URL` / `REDIS_COORDINATION_URL` | per architecture-when-scaling.md | cache / coord instances |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | workers | `true` (default) |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | workers | 200000 (default) |
 | `IMPORT_COMMIT_WINDOW` | import worker | 50000 (default) |

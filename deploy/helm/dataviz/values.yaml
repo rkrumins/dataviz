@@ -33,11 +33,13 @@ config:
     host: REPLACE_ME_FALKORDB_HOST
     port: "6379"
     graphName: nexus_lineage
-    # The FalkorDB server's TIMEOUT_MAX (ms). MUST match the TIMEOUT_MAX
-    # in the server's launch args (stores.falkordb.args when in-cluster,
-    # or your managed instance's config) — the backend clamps every
-    # per-query timeout it sends to this value because the server
-    # REJECTS queries requesting more.
+    # The FalkorDB server's TIMEOUT_MAX (ms) — the fallback the backend
+    # clamps per-query timeouts to until it has read a node's own
+    # TIMEOUT_MAX. Keep it equal to the server's launch args
+    # (stores.falkordb.args when in-cluster, or your managed instance's
+    # config): the server REJECTS queries requesting more. TIMEOUT_MAX can
+    # be raised at runtime from Infrastructure → Memory headroom; the
+    # dialog hands over the launch-args fragment that keeps the change.
     serverTimeoutMaxMs: "180000"
   jwt:
     algorithm: HS256
@@ -157,10 +159,14 @@ stores:
     # query's whole result set before sending it). Raising QUERY_MEM_CAPACITY
     # without raising limits.memory trades a caught query error for an
     # OOM-killed pod. See docs/FALKORDB_DEPLOYMENT.md.
-    args: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
+    args: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50 EFFECTS_THRESHOLD 0"
     # noeviction = writes fail loudly instead of the pod being OOM-killed
     # by data growth.
-    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"
+    # replica-lazy-flush: a replica following a promotion or a full resync
+    # flushes its old dataset first, and doing that synchronously is minutes of
+    # a main thread answering nothing on a large graph — long enough to fail a
+    # health probe and be restarted mid-catch-up.
+    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction --replica-lazy-flush yes --lazyfree-lazy-server-del yes"
     storage: 10Gi
     resources:
       requests: { cpu: "1", memory: 2Gi }

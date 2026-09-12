@@ -488,3 +488,49 @@ def test_an_unknown_projector_reading_is_never_counted_as_stalled():
     )}
 
     assert _stalled_ids(["ds_v"], states, health) == set()
+
+
+# ── the hold the canvas banner needs ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_the_hold_that_would_withhold_the_rebuild(
+    agg_session, stub_health,
+):
+    """The canvas's drift banner is where most people meet a hold: its warning
+    is terminal until something rebuilds the source, and under a hold nothing
+    automatic ever will. It can only say so if readiness reports the hold —
+    and it must be the SAME answer the gates resolve, not one re-derived from
+    the switches, or the banner would explain a hold that is not the one
+    actually withholding the rebuild."""
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    r = await _service().get_readiness("ds_v", agg_session)
+    assert (r.held_by, r.held_kind, r.held_until) == (None, None, None)
+
+    # A fleet stop — the scope no source-level control could release.
+    agg_session.add(AutomationHoldORM(
+        scope="fleet", scope_id="", stopped_at="2026-09-01T00:00:00+00:00",
+    ))
+    await agg_session.commit()
+    r = await _service().get_readiness("ds_v", agg_session)
+    assert (r.held_by, r.held_kind) == ("fleet", "stopped")
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_a_source_pause_at_source_scope(
+    agg_session, stub_health,
+):
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.services.aggregation.models import (
+        AggregationDataSourceStateORM,
+    )
+
+    until = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    state = await agg_session.get(AggregationDataSourceStateORM, "ds_v")
+    state.paused_until = until
+    await agg_session.commit()
+
+    r = await _service().get_readiness("ds_v", agg_session)
+    assert (r.held_by, r.held_kind, r.held_until) == ("source", "paused", until)

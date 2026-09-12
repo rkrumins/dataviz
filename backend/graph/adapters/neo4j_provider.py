@@ -1846,7 +1846,9 @@ class Neo4jProvider(GraphDataProvider):
         self._stats_cache.set(result)
         return result
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         name_field = self._mapping.display_name_field
         tags_field = self._mapping.tags_field
 

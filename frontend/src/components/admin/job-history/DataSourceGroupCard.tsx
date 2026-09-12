@@ -1,13 +1,17 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
+import {
+    jobStage, commonFailureStage, runSharesSeries, STAGE_COLOUR,
+} from './runSteps'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
-    ChevronRight, Play, Trash2, Activity, Server, FolderOpen,
+    ChevronRight, Play, Trash2, Activity, Server, FolderOpen, HardDrive,
     MoreHorizontal, TrendingUp, TrendingDown, Minus,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import type { DataSourceResponse } from '@/services/workspaceService'
+import type { PlacementBrief } from '@/services/graphStoreService'
 import { getProviderLogo } from '../ProviderLogos'
 import { formatDuration, timeAgo, type DataSourceMeta } from './shared'
 import { JobRow } from './JobRow'
@@ -153,6 +157,40 @@ function JobSparkline({ data }: { data: string[] }) {
     )
 }
 
+// ── Where the time went, run over run ────────────────────────────────
+//
+// The sparkline says whether runs passed. This says where each one spent
+// its wall clock, so a stage that is GROWING reads as a trend rather than
+// as one number in one expanded row. Each column is a run, oldest right —
+// the same order the sparkline uses — and each column is scaled to its own
+// duration so the shape is the split, not the length.
+
+function StageTrend({ runs }: { runs: AggregationJobResponse[] }) {
+    const series = useMemo(() => runSharesSeries(runs), [runs])
+    if (series.length < 2) return null
+    return (
+        <span className="inline-flex items-end gap-[3px] h-3" data-testid="stage-trend">
+            {series.map(run => (
+                <span
+                    key={run.id}
+                    className="flex flex-col-reverse w-[5px] h-3 rounded-[1px] overflow-hidden gap-px"
+                    title={`${formatDuration(run.totalS)} \u2014 ${
+                        run.shares.map(sh => `${sh.label} ${Math.round(sh.pct)}%`).join(', ')
+                    }`}
+                >
+                    {run.shares.map(sh => (
+                        <span
+                            key={sh.id}
+                            className={cn('w-full', STAGE_COLOUR[sh.id] ?? 'bg-indigo-500')}
+                            style={{ height: `${sh.pct}%` }}
+                        />
+                    ))}
+                </span>
+            ))}
+        </span>
+    )
+}
+
 // ── Duration Trend ───────────────────────────────────────────────────
 
 function DurationTrend({ trend }: { trend: 'up' | 'down' | 'stable' | null }) {
@@ -179,6 +217,9 @@ interface DataSourceGroupCardProps {
     onTriggerAggregation: (dataSourceId: string) => void
     onPurgeDataSource: (dataSourceId: string) => void
     onShowAllJobs: (dataSourceId: string) => void
+    /** Which shard this source's graph is on, from the page's one batched
+     *  placement call. Absent while it loads, or when nothing knows. */
+    placement?: PlacementBrief | null
     expandedRowId: string | null
     // Stable per-row toggle owned by the parent — same rationale as JobRow.onToggle.
     onToggleRow: (jobId: string) => void
@@ -204,10 +245,13 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
     purgeConfirm,
     setPurgeConfirm,
     actionLoading,
+    placement,
 }: DataSourceGroupCardProps) {
     const [showAll, setShowAll] = useState(false)
 
     const { meta, dsResponse, jobs, totalRuns, successRate, avgDuration, lastRunAt, isActive, sparklineData, durationTrend } = group
+    // Where this source's runs go wrong, off the ledgers already on the rows.
+    const failurePattern = useMemo(() => commonFailureStage(jobs), [jobs])
     const edgeCount = dsResponse?.aggregationEdgeCount ?? 0
     const activeJob = isActive ? jobs.find(j => j.status === 'running' || j.status === 'pending') : undefined
     const visibleJobs = showAll ? jobs : jobs.slice(0, INITIAL_VISIBLE_JOBS)
@@ -286,6 +330,21 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                                 <span className="font-medium truncate max-w-[140px]">{meta.providerName}</span>
                             </span>
                         )}
+                        {/* Which node this source's rollups land on. Comes from
+                            one batched placement call for the whole page, never
+                            one request per row. */}
+                        {placement?.master && (
+                            <span
+                                data-testid={`placement-chip-${group.dataSourceId}`}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]"
+                            >
+                                <HardDrive className="w-2.5 h-2.5 text-ink-muted opacity-60" />
+                                <span className="font-mono truncate max-w-[160px]">
+                                    {placement.shardIndex != null ? `Shard ${placement.shardIndex + 1} · ` : ''}
+                                    {placement.master}
+                                </span>
+                            </span>
+                        )}
                         {/* Workspace badge — skip if same as provider name */}
                         {meta.workspaceName && meta.workspaceName !== meta.providerName && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]">
@@ -305,13 +364,18 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                         )}
                     </div>
 
-                    {/* Active job progress bar */}
-                    {activeJob && activeJob.totalEdges > 0 && (
+                    {/* Active job progress bar. Never gated on an edge count:
+                        EXTRACT has not taken one while the run is still
+                        preparing, and a running job with no bar at all reads
+                        as a job doing nothing. */}
+                    {activeJob && (
                         <div className="mb-2">
                             <div className="flex items-center gap-2 mb-1">
                                 <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-                                <span className="text-[10px] font-semibold text-ink">
-                                    {activeJob.status === 'running' ? 'Processing' : 'Queued'}
+                                <span className="text-[10px] font-semibold text-ink truncate">
+                                    {activeJob.status === 'running'
+                                        ? jobStage(activeJob.runStats?.steps, activeJob.currentPhase).label
+                                        : 'Queued'}
                                 </span>
                                 <span className="text-[10px] font-bold text-indigo-400 tabular-nums ml-auto">
                                     {activeJob.progress}%
@@ -330,6 +394,7 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                     {/* Summary metrics strip */}
                     <div className="flex items-center gap-3 text-[11px] text-ink-muted">
                         <JobSparkline data={sparklineData} />
+                        <StageTrend runs={jobs} />
                         <span className="tabular-nums font-medium">{totalRuns} run{totalRuns !== 1 ? 's' : ''}</span>
                         {successRate != null && (
                             <span className={cn(
@@ -351,6 +416,20 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                             <span className="ml-auto text-ink-muted/60">{timeAgo(lastRunAt)}</span>
                         )}
                     </div>
+
+                    {/* A column of red rows says runs fail. WHERE they fail is
+                        a different problem each time — a source that keeps
+                        dying in Apply is out of room on its shard; one dying
+                        in Extract is a scan it cannot finish. */}
+                    {failurePattern && (
+                        <p
+                            data-testid="failure-pattern"
+                            className="mt-1.5 text-[10px] text-amber-500/90"
+                        >
+                            {`${failurePattern.count} of the last ${failurePattern.considered} runs `}
+                            {`stopped in ${failurePattern.label}`}
+                        </p>
+                    )}
                 </div>
 
                 {/* Actions overflow — Radix dropdown handles portal,

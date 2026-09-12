@@ -38,6 +38,12 @@ def test_tuning_bounds_enforced():
         AggregationTuning(extract_concurrency=9)       # > 4
     with pytest.raises(ValidationError):
         AggregationTuning(write_pacing_ratio=-1)
+    with pytest.raises(ValidationError):
+        AggregationTuning(flushMemPct=95)              # > 90: the worker needs headroom
+    with pytest.raises(ValidationError):
+        AggregationTuning(maxCubeEdges=5_000)          # < 10k
+    with pytest.raises(ValidationError):
+        AggregationTuning(estimateMarginPct=101)       # > 100
     t = AggregationTuning(scanRangeWidth=100_000, extractConcurrency=3)
     assert t.scan_range_width == 100_000
     assert t.extract_concurrency == 3
@@ -176,6 +182,72 @@ def test_effective_tuning_without_settings_row():
     assert merged == {}
 
 
+class _SessionByOrm:
+    """``get`` answers per ORM class: the settings row for one, the state
+    row for the other — the two reads ``_effective_tuning`` makes."""
+
+    def __init__(self, settings_row, state_row):
+        self._settings, self._state = settings_row, state_row
+
+    async def get(self, orm, key):
+        return self._settings if orm.__name__ == "AggregationSettingsORM" else self._state
+
+
+def test_a_source_rollup_override_sits_between_the_request_and_the_global():
+    """Automation triggers carry no request tuning, so the per-source choice
+    must reach the job through the freeze point itself."""
+    import types
+    svc = _make_service()
+    session = _SessionByOrm(_FakeSettingsRow(), types.SimpleNamespace(rollup_storage="auto"))
+
+    merged = _run(svc._effective_tuning(session, None, ds_id="ds-1"))
+    assert merged["materialize_fine_pairs"] == "auto"
+    assert merged["scan_range_width"] == 111_000            # the global still layers under it
+
+    # A per-job request still wins over the source's override.
+    merged = _run(svc._effective_tuning(
+        session, AggregationTuning(materialize_fine_pairs=True), ds_id="ds-1",
+    ))
+    assert merged["materialize_fine_pairs"] is True
+
+
+def test_a_stored_false_freezes_as_a_real_bool_never_the_string():
+    """The pipeline reads ANY truthy value as full detail, so the string
+    "false" on a job would force the cube — the exact opposite of the ask."""
+    import types
+    svc = _make_service()
+    for stored, expected in (("false", False), ("true", True), ("auto", "auto")):
+        session = _SessionByOrm(None, types.SimpleNamespace(rollup_storage=stored))
+        merged = _run(svc._effective_tuning(session, None, ds_id="ds-1"))
+        assert merged["materialize_fine_pairs"] is expected or merged["materialize_fine_pairs"] == expected, stored
+    # No override, no row, junk: the fleet default governs (nothing frozen).
+    for state in (None, types.SimpleNamespace(rollup_storage=None), types.SimpleNamespace(rollup_storage="cube")):
+        assert "materialize_fine_pairs" not in _run(
+            svc._effective_tuning(_SessionByOrm(None, state), None, ds_id="ds-1"),
+        )
+    # The two-argument call keeps working, and never reads a state row.
+    assert _run(svc._effective_tuning(_FakeSession(None), None)) == {}
+
+
+def test_settings_report_the_live_env_default_of_every_knob(monkeypatch):
+    """The editors used to hard-code what "empty" meant; a changed env var
+    still showed the old number. The response now carries every knob's
+    env-resolved default, read live, whether or not a row exists."""
+    monkeypatch.setenv("AGGREGATION_SHARD_RESERVE_PCT", "35")
+    monkeypatch.setenv("AGGREGATION_SCAN_RANGE_WIDTH", "123456")
+    svc = _make_service()
+    for row in (None, _FakeSettingsRow()):
+        res = _run(svc.get_settings(_FakeSession(row)))
+        env = res.env_tuning_defaults
+        assert env is not None
+        assert env.shard_reserve_pct == 35 and env.scan_range_width == 123456
+        assert env.bytes_per_edge == 512 and env.max_cube_edges == 50_000_000
+        assert env.materialize_fine_pairs in ("auto", "true", "false")
+        # Every settable knob has its default on the wire, under its own name.
+        for key in AggregationTuning.model_fields:
+            assert getattr(env, key, "missing") != "missing", key
+
+
 # ── pipeline knob resolution ────────────────────────────────────────────
 
 
@@ -238,11 +310,16 @@ def test_pipeline_defaults_clear_the_large_graph_target(monkeypatch):
     # ~70% of the reference cluster's ~18GB per-shard headroom — covering a
     # graph 6-8x the 1M/2M floor, which is a minimum rather than a ceiling.
     assert mat._max_materialized_edges() == 25_000_000
-    # Separate from the write budget on purpose — see
-    # test_auto_mode_cube_ceiling_is_independent_of_write_budget.
-    assert mat._max_cube_edges() == 8_000_000
-    # A cube the write budget would reject must never be selected.
-    assert mat._max_cube_edges() < mat._max_materialized_edges()
+    # An OPTIONAL appetite ceiling, defaulting to its bound so it does not
+    # bind. It used to default to 8M and was the thing that actually decided
+    # whether a graph got full detail, because when it was written nothing
+    # measured anything. Two measurements do that now: the write budget (can
+    # the owning shard hold the cube) and the apply projection (can this
+    # job's wall clock finish writing it, at the rate the source measured
+    # last run). A fixed cell count answers neither question for any
+    # particular graph — 8M cells is half an hour on a roomy node and a
+    # refusal on a full one.
+    assert mat._max_cube_edges() == 50_000_000
     # Rollup storage ships as FULL DETAIL: every ancestor combination is
     # pre-created, so no canvas granularity can come back thin — including on
     # self-nesting types, where boundary mode's on-demand reader still reasons

@@ -37,6 +37,8 @@ from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import (
+    GraphStoreLimitsPatch,
+    JobLimitsPatch,
     ResumeOverrides,
     SourceChangedRequest,
     SourceChangedResponse,
@@ -312,6 +314,87 @@ async def put_aggregation_settings(
     )
 
 
+# ── GET /aggregation/capacity, /data-sources/{ds_id}/capacity ───────
+#
+# What the write budget measures, for people: every aggregated source mapped
+# to the shard its rollups land on, that shard's used/maxmemory under the
+# fleet reserve, and how many more rollup edges would fit — the same reading
+# a rebuild takes before it writes. Ingestion-read like the settings GET:
+# the Freshness page shows this to the audience that already reads the
+# refusal text (which carries the same endpoints and byte figures) on a
+# failed source; system:admin is one of the ingestion-read permissions, so
+# the Infrastructure page reaches it too.
+
+@router.get(
+    "/aggregation/capacity",
+    summary="Graph-store capacity for rollups: every shard, what fits, the sources on it",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_aggregation_capacity(
+    # Bulkhead pool: the assembly holds this across its SQL.
+    session: AsyncSession = Depends(get_graph_read_db_session),
+    fresh: bool = Query(False),
+):
+    # Served here even in proxy mode: the figures come from the graph store
+    # topology snapshot, which the web tier builds for itself, so forwarding
+    # to the control plane would only add a hop and a second cache.
+    from backend.app.services.aggregation.capacity import assemble_fleet_capacity
+    return await assemble_fleet_capacity(session, fresh=fresh)
+
+
+@router.get(
+    "/data-sources/{ds_id}/capacity",
+    summary="One source's footprint, its shard's headroom, and whether a rebuild would fit",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_data_source_capacity(
+    ds_id: str,
+    session: AsyncSession = Depends(get_graph_read_db_session),
+):
+    # In-process in every mode, like the fleet view above.
+    from backend.app.services.aggregation.capacity import assemble_source_capacity
+    doc = await assemble_source_capacity(session, ds_id)
+    if doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Data source {ds_id} not found",
+        )
+    return doc
+
+
+# ── PATCH /admin/graph-store/{endpoint}/limits ──────────────────────
+#
+# The graph store's own per-query limits — TIMEOUT_MAX and
+# QUERY_MEM_CAPACITY — set at runtime on the node the capacity sweep placed
+# ``endpoint`` on, guarded by the deployment guide's container formula and
+# verified by a fresh read. system:admin, like the settings PUT: this
+# changes the store itself, not a job. The actor is always the
+# authenticated user, never what the client body says.
+
+@router.patch(
+    "/graph-store/{endpoint}/limits",
+    summary="Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY) at runtime",
+)
+async def set_graph_store_limits(
+    endpoint: str,
+    patch: GraphStoreLimitsPatch,
+    admin: User = Depends(_REQUIRE_SYSTEM_ADMIN),
+    session: AsyncSession = Depends(get_graph_read_db_session),
+):
+    patch.actor = str(getattr(admin, "id", None) or getattr(admin, "email", None) or "")[:255] or None
+    # In-process in every mode: the change goes out over a one-node client
+    # built from the instance's own settings, which the web tier has.
+    from backend.app.services.aggregation.graph_store_limits import (
+        GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
+    )
+    try:
+        return await apply_graph_store_limits(session, endpoint, patch)
+    except GraphStoreEndpointNotFound as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GraphStoreLimitsError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────
 
 @router.get(
@@ -373,10 +456,12 @@ async def list_jobs_global(
     # the first paint and the polling-fallback source.
     #
     # Cost analysis: only running/pending rows hit Redis. Terminal
-    # rows fall through to the durable DB values directly. Even at
-    # the limit=100 cap, in practice the active subset is small
-    # (operators don't run more than ~10 jobs concurrently). HSET
-    # reads pipelined for cardinality-resilience.
+    # rows fall through to the durable DB values directly, and the
+    # active subset is bounded by the limit=100 cap. The snapshot
+    # reads are issued CONCURRENTLY: awaited in a loop they were one
+    # serial round trip per running row inside a single request, which
+    # is fine at the handful of concurrent jobs a small install runs
+    # and is not at a few hundred sources with a fleet of workers.
     try:
         active_items = [
             it for it in paginated.items
@@ -385,9 +470,12 @@ async def list_jobs_global(
         if active_items:
             from backend.app.jobs import get_state_store
             store = get_state_store()
-            for it in active_items:
-                snap = await store.get(it.id)
-                if not snap:
+            snaps = await asyncio.gather(
+                *(store.get(it.id) for it in active_items),
+                return_exceptions=True,
+            )
+            for it, snap in zip(active_items, snaps):
+                if not snap or isinstance(snap, BaseException):
                     continue
                 for field in (
                     "processed_edges", "total_edges", "created_edges", "progress",
@@ -399,9 +487,9 @@ async def list_jobs_global(
                         parsed = int(raw)
                     except (TypeError, ValueError):
                         continue
-                    current = getattr(it, field, 0) or 0
-                    if parsed > current:
-                        setattr(it, field, parsed)
+                    # As-is, in either direction — see ``get_job`` above.
+                    # This loop is already restricted to live rows.
+                    setattr(it, field, parsed)
                 last_heartbeat = snap.get("last_heartbeat_at")
                 if last_heartbeat and not it.last_checkpoint_at:
                     it.last_checkpoint_at = last_heartbeat
@@ -693,7 +781,14 @@ async def get_job(
     # TTL expired, or Redis down).
     try:
         from backend.app.jobs import get_state_store
-        snapshot = await get_state_store().get(job_id)
+
+        # ONLY while the job is live. A terminal row is the source of truth
+        # and its HSET can outlive it on the TTL, so overlaying a terminal
+        # job could walk its final numbers back.
+        snapshot = (
+            await get_state_store().get(job_id)
+            if response.status in ("running", "pending") else None
+        )
         if snapshot:
             for field in (
                 "processed_edges", "total_edges", "created_edges", "progress",
@@ -705,13 +800,12 @@ async def get_job(
                     parsed = int(raw)
                 except (TypeError, ValueError):
                     continue
-                # Only overlay when the live value is *ahead* of the
-                # durable one. For terminal jobs, the DB row is the
-                # source of truth and we don't want a stale Redis
-                # snapshot to walk back the final number.
-                current = getattr(response, field, 0) or 0
-                if parsed > current:
-                    setattr(response, field, parsed)
+                # Taken as-is, in EITHER direction. Both are written at the
+                # same checkpoint with PG first, so the snapshot is never
+                # behind — and a forward-only rule pinned ``progress`` to a
+                # high-water mark across a resume, which is the one case the
+                # numbers have to come down.
+                setattr(response, field, parsed)
             last_heartbeat = snapshot.get("last_heartbeat_at")
             if last_heartbeat and not response.last_checkpoint_at:
                 response.last_checkpoint_at = last_heartbeat
@@ -843,6 +937,42 @@ async def resume_job(
     _, _, _, _, NotFoundError = _direct_imports()
     try:
         return await svc.resume(ds_id, job_id, session, overrides=overrides)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── PATCH .../limits ────────────────────────────────────────────────
+
+@router.patch(
+    "/data-sources/{ds_id}/aggregation-jobs/{job_id}/limits",
+    summary="Raise a running job's time limits without cancelling it",
+)
+async def set_job_limits(
+    ds_id: str,
+    job_id: str,
+    patch: JobLimitsPatch,
+    request: Request,
+    user: User = Depends(_REQUIRE_DS_MANAGE),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The stall window, wall clock and per-query timeouts of a pending or
+    running job. The same gate as cancel/resume; the actor is always the
+    authenticated user, never what the client body says."""
+    patch.actor = str(getattr(user, "id", None) or getattr(user, "email", None) or "")[:255] or None
+    if _PROXY_ENABLED:
+        body = patch.model_dump_json(by_alias=True, exclude_none=True).encode()
+        return await _proxy(
+            "PATCH",
+            f"/aggregation/data-sources/{ds_id}/jobs/{job_id}/limits",
+            request,
+            body=body,
+        )
+    _, _, _, _, NotFoundError = _direct_imports()
+    try:
+        return await svc.set_job_limits(ds_id, job_id, session, patch)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

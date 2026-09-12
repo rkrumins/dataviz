@@ -1509,7 +1509,9 @@ class SpannerProvider(GraphDataProvider):
             "graph": self._graph_name,
         }
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         await self._ensure_connected()
         labels = await self._execute_query(
             "SELECT label, COUNT(*) AS n FROM GraphNode GROUP BY label ORDER BY n DESC",

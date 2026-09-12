@@ -1,0 +1,72 @@
+# Test files the REQUIRED backend job runs by name.
+#
+# The job's other step selects with `-k`, on keywords matched against test and
+# file names. That is a denylist by omission: a file whose name and test names
+# happen to miss every keyword is silently ungated, and nothing goes red to say
+# so. It is how the graph store, view cache, replica-read and rollup-capacity
+# work came to contribute 681 ungated tests while the job stayed green.
+#
+# Anything here is a hard gate on merging. Add a file when its subject is one
+# users feel — the read path, the cache, capacity, the store's topology — and
+# do not remove one to get a red build green.
+#
+# Read by `.github/workflows/backend-tests.yml` and by
+# `tests/test_ci_required_list.py`, which fails if an entry stops existing or
+# if the workflow stops reading this file.
+tests/test_additive_migrations_mirror.py
+tests/test_aggregated_read_budget.py
+tests/test_aggregation_admission.py
+tests/test_aggregation_at_scale.py
+tests/test_aggregation_capacity.py
+tests/test_aggregation_capacity_hints.py
+tests/test_aggregation_exec_lock.py
+tests/test_aggregation_job_limits.py
+tests/test_aggregation_live_shape.py
+tests/test_aggregation_overrides.py
+tests/test_aggregation_run_record.py
+tests/test_aggregation_scan_shrink.py
+tests/test_aggregation_settings.py
+tests/test_api_graph.py
+tests/test_automation_holds.py
+tests/test_automation_holds_scope.py
+tests/test_cache_refresh_route.py
+tests/test_canvas_endpoints.py
+tests/test_ci_required_list.py
+tests/test_cleanup_graph_indices.py
+tests/test_concurrency_tuning_doc.py
+tests/test_configmap_matches_manifests.py
+tests/test_cube_estimate_calibration.py
+tests/test_drift_probe_cost.py
+tests/test_falkordb_failloud.py
+tests/test_falkordb_materialize.py
+tests/test_falkordb_ondemand_pairs.py
+tests/test_falkordb_replica_reads.py
+tests/test_falkordb_replication.py
+tests/test_falkordb_store_outage.py
+tests/test_freshness_endpoints.py
+tests/test_freshness_source_doc.py
+tests/test_graph_cache.py
+tests/test_graph_store_api.py
+tests/test_graph_store_fork_settings.py
+tests/test_graph_store_limits.py
+tests/test_graph_store_topology.py
+tests/test_index_ddl_once.py
+tests/test_job_list_overlay.py
+tests/test_job_reaping.py
+tests/test_label_cache_warmup.py
+tests/test_metrics_backend.py
+tests/test_nav_catalogue.py
+tests/test_process_memory.py
+tests/test_projection_stalled_reconcile.py
+tests/test_provider_failover_pause.py
+tests/test_provider_refresh_batch.py
+tests/test_read_pressure_yield.py
+tests/test_reconcile_detectors.py
+tests/test_reconcile_sweeper.py
+tests/test_run_step_ledger.py
+tests/test_seed_memory.py
+tests/test_shard_capacity.py
+tests/test_source_changed_signal.py
+tests/test_store_governor.py
+tests/test_thread_count_assumption.py
+tests/test_top_level_provider_kwargs.py

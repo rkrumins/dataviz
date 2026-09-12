@@ -5,7 +5,7 @@ These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Shared validator helpers ─────────────────────────────────────────
@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field, field_validator
 def _validate_timeout_secs(value: Optional[int]) -> Optional[int]:
     if value is None:
         return value
-    if not (60 <= value <= 86400):
-        raise ValueError("timeout_secs must be between 60 and 86400 (24h)")
+    if not (60 <= value <= 604_800):
+        raise ValueError("timeout_secs must be between 60 and 604800 (7 days)")
     return value
 
 
@@ -127,6 +127,31 @@ class AggregationTuning(BaseModel):
         None, alias="writePacingRatio", ge=0.0, le=10.0,
         description="Sleep after each write for duration x ratio.",
     )
+    write_batch_max: Optional[int] = Field(
+        None, alias="writeBatchMax", ge=10, le=2_000,
+        description="Ceiling on rows per write batch (default 500). A write "
+                    "batch holds the graph's write lock, so this is also the "
+                    "longest stall a reader of the graph sees.",
+    )
+    write_batch_target_s: Optional[float] = Field(
+        None, alias="writeBatchTargetS", ge=0.1, le=10.0,
+        description="What one write batch should take, seconds (default 1.0): "
+                    "the sizer halves a batch that ran longer and grows one "
+                    "that stays well under.",
+    )
+    write_min_gap_ms: Optional[int] = Field(
+        None, alias="writeMinGapMs", ge=0, le=10_000,
+        description="Floor under the pause between write batches, ms (default "
+                    "100), so fast small batches never run back to back.",
+    )
+    write_pacing_min_ratio: Optional[float] = Field(
+        None, alias="writePacingMinRatio", ge=0.0, le=10.0,
+        description="Sleep-after-write ratio on a node with room to spare "
+                    "(default 0.25): no fork, replicas in sync, a quarter of "
+                    "the container free. The pacing ratio is the ceiling; the "
+                    "governor's reading picks between the two, and starving "
+                    "readers still override both.",
+    )
     extract_concurrency: Optional[int] = Field(
         None, alias="extractConcurrency", ge=1, le=4,
         description="Concurrent read-only range scans during extract/reconcile.",
@@ -148,9 +173,95 @@ class AggregationTuning(BaseModel):
                     "global default, then the env default.",
     )
     max_materialized_edges: Optional[int] = Field(
-        None, alias="maxMaterializedEdges", ge=10_000, le=50_000_000,
-        description="Hard write budget: fail the job instead of writing more "
-                    ":AGGREGATED edges than this (~0.5KB RAM each).",
+        None, alias="maxMaterializedEdges", ge=10_000, le=500_000_000,
+        description="Optional explicit ceiling on stored :AGGREGATED edges. "
+                    "The rebuild measures the shard that owns the graph and "
+                    "budgets by its real headroom; set this only to cap the "
+                    "total below what the shard would allow. When the shard "
+                    "cannot be measured (no maxmemory), this — or the env "
+                    "default — is the rule that governs.",
+    )
+    shard_reserve_pct: Optional[int] = Field(
+        None, alias="shardReservePct", ge=0, le=90,
+        description="Share of the owning shard's maxmemory a rebuild must "
+                    "leave free (default 20). A shard is shared: under "
+                    "noeviction, the write that fills it fails every graph's "
+                    "writes on it.",
+    )
+    bytes_per_edge: Optional[int] = Field(
+        None, alias="bytesPerEdge", ge=64, le=16_384,
+        description="Pin the per-edge memory estimate by hand. Overrides the "
+                    "figure the last successful rebuild measured on the shard "
+                    "(and the 512 B default before any run has).",
+    )
+    flush_mem_pct: Optional[int] = Field(
+        None, alias="flushMemPct", ge=30, le=90,
+        description="Share of the worker's cgroup memory limit at which the "
+                    "pipeline flushes its accumulator early (default 60). "
+                    "Fleet-wide; needs at least AGGREGATION_FLUSH_MIN_PAIRS "
+                    "pairs in memory to fire, and both readings to be known.",
+    )
+    max_cube_edges: Optional[int] = Field(
+        None, alias="maxCubeEdges", ge=10_000, le=50_000_000,
+        description="Auto's cube ceiling: the largest full-cube estimate "
+                    "Auto stores in full (default 8,000,000); above it Auto "
+                    "keeps the depth-diagonal. Fleet-wide. Deliberately not "
+                    "the write budget — a cube the shard would refuse is "
+                    "never picked regardless.",
+    )
+    estimate_margin_pct: Optional[int] = Field(
+        None, alias="estimateMarginPct", ge=0, le=100,
+        description="Slack on the pre-compute upper-bound estimate a forced "
+                    "full cube is checked with (default 25): a loose estimate "
+                    "must not refuse a cube the exact post-compute check "
+                    "would pass. Fleet-wide.",
+    )
+    replica_ack_min: Optional[int] = Field(
+        None, alias="replicaAckMin", ge=0, le=5,
+        description="Replicas of the write node that must acknowledge each "
+                    "rollup batch before the next one is sent (default 1). "
+                    "Replicas re-run every write below the store's effects "
+                    "threshold, so this is what keeps a rebuild from outrunning "
+                    "them. 0 waits for none.",
+    )
+    replica_ack_timeout_ms: Optional[int] = Field(
+        None, alias="replicaAckTimeoutMs", ge=500, le=60_000,
+        description="How long one acknowledgement wait may block before the run "
+                    "holds and re-checks (default 5000 ms). Not a failure.",
+    )
+    scan_shrink_floor: Optional[int] = Field(
+        None, alias="scanShrinkFloor", ge=1, le=5_000_000,
+        description="Narrowest scan slice the pressure ladder descends to "
+                    "before a single row is declared too large for the graph "
+                    "store's per-query ceiling. Default 1 — the ladder narrows "
+                    "all the way to one row.",
+    )
+    scan_timeout_s: Optional[float] = Field(
+        None, alias="scanTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for read scans, seconds. Values above "
+                    "the graph store's TIMEOUT_MAX are capped by the store.",
+    )
+    write_timeout_s: Optional[float] = Field(
+        None, alias="writeTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for write and delete batches, seconds. "
+                    "Capped by the graph store's TIMEOUT_MAX like scanTimeoutS.",
+    )
+    stall_timeout_secs: Optional[int] = Field(
+        None, alias="stallTimeoutSecs", ge=60, le=604_800,
+        description="Fleet default for the stall window: how long a job may "
+                    "make no forward progress before the watchdog kills it. A "
+                    "job's own timeoutSecs wins over it.",
+    )
+    max_wall_secs: Optional[int] = Field(
+        None, alias="maxWallSecs", ge=3_600, le=604_800,
+        description="Wall-clock safety net for a job, seconds — never lower "
+                    "than its stall window. Raisable on a running job.",
+    )
+    ignore_observed: Optional[bool] = Field(
+        None, alias="ignoreObserved",
+        description="Start from the knobs as set, ignoring what the last run "
+                    "of this source learned (the narrowed widths, serial reads "
+                    "and strategy it needed).",
     )
 
     class Config:
@@ -191,7 +302,8 @@ class AggregationTriggerRequest(BaseModel):
     timeout_secs: Optional[int] = Field(
         None,
         alias="timeoutSecs",
-        description="Per-job timeout in seconds; 60 \u2264 value \u2264 86400 (24h).",
+        description="Per-job stall window in seconds (no forward progress "
+                    "for this long kills the job); 60 \u2264 value \u2264 604800 (7 days).",
     )
     max_retries: Optional[int] = Field(
         None,
@@ -263,7 +375,8 @@ class InternalTriggerRequest(BaseModel):
     timeout_secs: Optional[int] = Field(
         None,
         alias="timeoutSecs",
-        description="Per-job timeout in seconds; 60 \u2264 value \u2264 86400 (24h).",
+        description="Per-job stall window in seconds (no forward progress "
+                    "for this long kills the job); 60 \u2264 value \u2264 604800 (7 days).",
     )
     max_retries: Optional[int] = Field(
         None,
@@ -309,7 +422,8 @@ class ResumeOverrides(BaseModel):
     timeout_secs: Optional[int] = Field(
         None,
         alias="timeoutSecs",
-        description="Per-job timeout in seconds; 60 \u2264 value \u2264 86400 (24h).",
+        description="Per-job stall window in seconds (no forward progress "
+                    "for this long kills the job); 60 \u2264 value \u2264 604800 (7 days).",
     )
     tuning: Optional[AggregationTuning] = Field(
         None,
@@ -331,6 +445,78 @@ class ResumeOverrides(BaseModel):
     @classmethod
     def _check_max_retries(cls, v: Optional[int]) -> Optional[int]:
         return _validate_max_retries(v)
+
+    @field_validator("timeout_secs")
+    @classmethod
+    def _check_timeout_secs(cls, v: Optional[int]) -> Optional[int]:
+        return _validate_timeout_secs(v)
+
+    class Config:
+        populate_by_name = True
+
+
+class JobLimitsPatch(BaseModel):
+    """What an operator changes on a PENDING or RUNNING job without
+    cancelling it. The time limits — the stall window (the job's
+    ``timeout_secs``), the wall clock, the per-query scan and write budgets
+    — and the scan shape: a pacing ratio (from the next write), a cap on
+    read concurrency (from the next wave) and a cap on the scan width (from
+    the next scan; the ladder may still narrow below it on its own).
+    ``reset`` clears live values — back to the job's settings. ``actor`` is
+    set by the web tier from the authenticated user."""
+    timeout_secs: Optional[int] = Field(
+        None, alias="timeoutSecs",
+        description="Stall window, seconds; 60 \u2264 value \u2264 604800.",
+    )
+    max_wall_secs: Optional[int] = Field(
+        None, alias="maxWallSecs", ge=3_600, le=604_800,
+        description="Wall-clock safety net, seconds — never applied below the stall window.",
+    )
+    scan_timeout_s: Optional[float] = Field(
+        None, alias="scanTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for read scans, seconds (capped by the store's TIMEOUT_MAX).",
+    )
+    write_timeout_s: Optional[float] = Field(
+        None, alias="writeTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for write/delete batches, seconds.",
+    )
+    write_pacing_ratio: Optional[float] = Field(
+        None, alias="writePacingRatio", ge=0.0, le=10.0,
+        description="Sleep-after-write ratio in force from the next write; 0 = no pacing.",
+    )
+    write_batch_max: Optional[int] = Field(
+        None, alias="writeBatchMax", ge=10, le=2_000,
+        description="A cap on rows per write batch from the next batch; never above the job's setting.",
+    )
+    write_batch_target_s: Optional[float] = Field(
+        None, alias="writeBatchTargetS", ge=0.1, le=10.0,
+        description="What one write batch should take, seconds, from the next batch.",
+    )
+    extract_concurrency: Optional[int] = Field(
+        None, alias="extractConcurrency", ge=1, le=4,
+        description="A cap on read concurrency from the next wave.",
+    )
+    scan_width: Optional[int] = Field(
+        None, alias="scanWidth", ge=1, le=5_000_000,
+        description="A cap on the scan width from the next scan; the ladder may narrow below it.",
+    )
+    replica_ack_min: Optional[int] = Field(
+        None, alias="replicaAckMin", ge=0, le=5,
+        description="Replicas that must acknowledge each write, from the next batch; "
+                    "0 releases a run that is waiting on them.",
+    )
+    replica_ack_timeout_ms: Optional[int] = Field(
+        None, alias="replicaAckTimeoutMs", ge=500, le=60_000,
+        description="How long one acknowledgement wait may block, from the next batch.",
+    )
+    reset: Optional[List[Literal[
+        "writePacingRatio", "extractConcurrency", "scanWidth", "scanTimeoutS", "writeTimeoutS",
+        "replicaAckMin", "replicaAckTimeoutMs", "writeBatchMax", "writeBatchTargetS",
+    ]]] = Field(
+        None,
+        description="Live values to clear — back to the job's settings from the next query.",
+    )
+    actor: Optional[str] = Field(None, max_length=255)
 
     @field_validator("timeout_secs")
     @classmethod
@@ -401,6 +587,16 @@ class AggregationJobResponse(BaseModel):
     tuning: Optional[dict] = None
     run_stats: Optional[dict] = Field(None, alias="runStats")
     worker_id: Optional[str] = Field(None, alias="workerId")
+    # ``classify_failure`` over ``error_message`` — the same bucket the
+    # Freshness cockpit shows, so Job History can pre-select the Gentle
+    # profile for a per-query memory or timeout failure without parsing
+    # the message client-side. None when there is no error.
+    failure_category: Optional[str] = Field(None, alias="failureCategory")
+    # Limits raised on the running job — ``max_wall_secs`` /
+    # ``scan_timeout_s`` / ``write_timeout_s`` in force and a bounded
+    # ``history`` of who raised what, from what, to what. The stall window
+    # in force is ``timeout_secs`` above.
+    live_overrides: Optional[dict] = Field(None, alias="liveOverrides")
 
     class Config:
         populate_by_name = True
@@ -441,6 +637,16 @@ class DataSourceReadinessResponse(BaseModel):
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
+    # The operator hold in force for this source, as ``holds.resolve_hold``
+    # reports it (widest scope first). The canvas's drift banner reads it to
+    # explain why a drifting source is not rebuilding itself — that banner is
+    # the only place most people ever see the consequence of a hold, and
+    # without this it can only show the drift and say nothing about why it
+    # persists. ``auto_reconcile`` above is the source's own ② Check chain and
+    # cannot see a provider or fleet hold.
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     # ── Projection health (versioned sources only) ────────────────────
     # THE EVIDENCE BEHIND ``driftState == "projectionStalled"``. A versioned
@@ -512,6 +718,16 @@ class SourceChangedResponse(BaseModel):
     # if the emit failed (audit writes are best-effort — see
     # emit_refresh_event). Reachable by F3/F4 to avoid a duplicate emit.
     event_id: Optional[str] = Field(None, alias="eventId")
+    # True when an AUTOMATION caller (origin drift/reconcile/reconcile-sweep)
+    # was refused a rebuild by an operator hold. Caches were still
+    # invalidated and the stale marker still set — the read path keeps
+    # serving the honest "may be out of date" overlay; only the rebuild is
+    # withheld. ``held_by`` names the scope holding it (fleet/provider/
+    # source) so the operator is sent to the control that will release it.
+    held: bool = False
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     class Config:
         populate_by_name = True
@@ -584,6 +800,13 @@ class RefreshResponse(BaseModel):
     job_id: Optional[str] = Field(None, alias="jobId")
     deferred: bool = False
     event_id: Optional[str] = Field(None, alias="eventId")
+    # The operator hold in force for this source when the verb ran, if any.
+    # A person is never refused by a hold — but a rebuild queued past one is
+    # reported with an ``override`` action, so the UI can say "this ran once;
+    # the pause stays" rather than implying the hold was lifted.
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     class Config:
         populate_by_name = True
@@ -659,10 +882,28 @@ class FreshnessRow(BaseModel):
     # action is suppressed. On FreshnessRow (not just FreshnessDoc) because
     # the fleet table renders a "Paused" chip straight off this field.
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    # The RESOLVED operator hold, most restrictive wins across fleet →
+    # provider → source (``holds.resolve_hold``). ``held_by`` names the scope
+    # that is holding this source — the control that will release it — so a
+    # row held by its provider is not sent to a source-level Resume that
+    # cannot release it. ``paused_until`` above stays the raw source value
+    # the drawer edits. ``held_kind`` is ``stopped`` (indefinite) or
+    # ``paused`` (timed; ``held_until`` is its expiry).
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
     last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     last_reconcile_mode: Optional[str] = Field(None, alias="lastReconcileMode")
+    # Rollup storage, resolved server-side so a ds:manage viewer never needs
+    # the global settings: the per-source override (null = none), what this
+    # source actually runs with ('auto' | 'true' | 'false'), and where that
+    # came from ('custom' | 'global' | 'default'). On the row, not just the
+    # doc, so the fleet table can badge a source that is pinned to Auto.
+    rollup_storage_override: Optional[str] = Field(None, alias="rollupStorageOverride")
+    resolved_rollup_storage: Optional[str] = Field(None, alias="resolvedRollupStorage")
+    rollup_storage_source: Optional[str] = Field(None, alias="rollupStorageSource")
     # Failure surfacing for the fleet table: populated only when
     # aggregation_status is failed and the latest job is failed. Same
     # classifier as the drawer — so the row can name the cause without a
@@ -727,6 +968,10 @@ class FreshnessDoc(FreshnessRow):
     rebuild_interval_source: Optional[str] = Field(
         None, alias="rebuildIntervalSource",
     )
+    # What "Inherit" would resolve to for this source right now (the stored
+    # global, else the env), so the drawer can label the choice while an
+    # override is in force.
+    inherited_rollup_storage: Optional[str] = Field(None, alias="inheritedRollupStorage")
     # Per-source cache footprint: a bounded SCAN of the CURRENT-generation
     # primary cache keys, tallied by endpoint. Doc-only (never on the fleet
     # path) — see ``count_cache_keys_by_endpoint``. ``None`` on a Redis
@@ -817,6 +1062,10 @@ class FreshnessSummary(BaseModel):
     # the data, rebuild it", and a rebuild is not the remedy here. Counted in
     # ``needsAttention``.
     projection_stalled: int = Field(0, alias="projectionStalled")
+    # Sources an operator hold (any scope) is keeping automation off. NOT in
+    # ``needsAttention``: a held source is one somebody deliberately silenced,
+    # and re-inflating the amber count is what the pause exists to avoid.
+    held: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -844,6 +1093,14 @@ class ProviderFreshnessSummary(BaseModel):
     # the data, rebuild it", and a rebuild is not the remedy here. Counted in
     # ``needsAttention``.
     projection_stalled: int = Field(0, alias="projectionStalled")
+    # Same bucket as ``FreshnessSummary.held`` (any scope), per provider.
+    held: int = Field(0)
+    # The hold on the PROVIDER ITSELF (or the fleet's, which outranks it) —
+    # what the group header renders and what its Pause/Resume edits. Null
+    # when only individual sources inside the group are held.
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     class Config:
         populate_by_name = True
@@ -962,9 +1219,65 @@ class AggregationSettingsRequest(BaseModel):
         populate_by_name = True
 
 
+class EnvTuningDefaults(BaseModel):
+    """Every tuning knob's ENV-resolved default, read live on each GET — so
+    an editor can show what "empty" really means and label a value by where
+    it came from, instead of hard-coding a guess that drifts from the
+    deployment. The trailing six are information only: env-only, shown, never
+    settable through ``AggregationTuning``."""
+    scan_range_width: Optional[int] = Field(None, alias="scanRangeWidth")
+    max_pending_pairs: Optional[int] = Field(None, alias="maxPendingPairs")
+    apply_chunk: Optional[int] = Field(None, alias="applyChunk")
+    delete_chunk: Optional[int] = Field(None, alias="deleteChunk")
+    write_pacing_ratio: Optional[float] = Field(None, alias="writePacingRatio")
+    extract_concurrency: Optional[int] = Field(None, alias="extractConcurrency")
+    materialize_leaf_pairs: Optional[bool] = Field(None, alias="materializeLeafPairs")
+    materialize_fine_pairs: Optional[Literal["auto", "true", "false"]] = Field(
+        None, alias="materializeFinePairs",
+    )
+    max_materialized_edges: Optional[int] = Field(None, alias="maxMaterializedEdges")
+    shard_reserve_pct: Optional[int] = Field(None, alias="shardReservePct")
+    bytes_per_edge: Optional[int] = Field(None, alias="bytesPerEdge")
+    scan_shrink_floor: Optional[int] = Field(None, alias="scanShrinkFloor")
+    scan_timeout_s: Optional[float] = Field(None, alias="scanTimeoutS")
+    write_timeout_s: Optional[float] = Field(None, alias="writeTimeoutS")
+    stall_timeout_secs: Optional[int] = Field(None, alias="stallTimeoutSecs")
+    max_wall_secs: Optional[int] = Field(None, alias="maxWallSecs")
+    ignore_observed: Optional[bool] = Field(None, alias="ignoreObserved")
+    estimate_margin_pct: Optional[int] = Field(None, alias="estimateMarginPct")
+    max_cube_edges: Optional[int] = Field(None, alias="maxCubeEdges")
+    replica_ack_min: Optional[int] = Field(None, alias="replicaAckMin")
+    replica_ack_timeout_ms: Optional[int] = Field(None, alias="replicaAckTimeoutMs")
+    write_batch_max: Optional[int] = Field(None, alias="writeBatchMax")
+    write_batch_target_s: Optional[float] = Field(None, alias="writeBatchTargetS")
+    write_min_gap_ms: Optional[int] = Field(None, alias="writeMinGapMs")
+    write_pacing_min_ratio: Optional[float] = Field(None, alias="writePacingMinRatio")
+    budget_recheck_edges: Optional[int] = Field(None, alias="budgetRecheckEdges")
+    # Information only (env-only): how many backoff retries a narrowest
+    # scan gets before an outage is declared, the width at which RECONCILE
+    # switches to keys-only, and the graph store's own per-query cap that
+    # bounds every timeout knob above.
+    scan_timeout_retries: Optional[int] = Field(None, alias="scanTimeoutRetries")
+    reconcile_keys_only_width: Optional[int] = Field(None, alias="reconcileKeysOnlyWidth")
+    server_timeout_max_ms: Optional[int] = Field(None, alias="serverTimeoutMaxMs")
+    # The memory-aware flush: the share of the worker's memory limit it
+    # fires at (a fleet knob) and the pairs it needs in memory first (env).
+    flush_mem_pct: Optional[int] = Field(None, alias="flushMemPct")
+    flush_min_pairs: Optional[int] = Field(None, alias="flushMinPairs")
+
+    class Config:
+        populate_by_name = True
+
+
 class AggregationSettingsResponse(BaseModel):
     tuning: Optional[AggregationTuning] = None
     cadence: Optional[AggregationCadence] = None
+    # What every knob resolves to when nothing overrides it, read live —
+    # the editors show these as the placeholder and the "Environment
+    # default" chip. Present whether or not a row exists.
+    env_tuning_defaults: Optional[EnvTuningDefaults] = Field(
+        None, alias="envTuningDefaults",
+    )
     # Effective ENV defaults (read server-side), so the cadence editor can
     # seed its controls from ``persisted ?? envDefault`` — a no-op save then
     # round-trips the real current default instead of pinning a wrong value.
@@ -1033,6 +1346,22 @@ class FreshnessSettingsRequest(BaseModel):
         description="ISO-8601 instant until which automation is held for this "
                     "source. Null resumes immediately.",
     )
+    rollup_storage: Optional[Literal["auto", "true", "false"]] = Field(
+        None, alias="rollupStorage",
+        description="Per-source Rollup storage: 'auto' stores the full cube "
+                    "only while it fits and the depth-diagonal otherwise; "
+                    "'true' forces full detail (fails loudly when it cannot "
+                    "fit); 'false' forces the diagonal. Null inherits the "
+                    "fleet default. Takes effect at the next rebuild.",
+    )
+    # An ACTION, not a setting: true resets the circuit breaker (zeroes the
+    # consecutive-action count and lifts the ``suspended`` verdict) so
+    # automation resumes on the next sweep. False/absent does nothing.
+    reset_breaker: Optional[bool] = Field(
+        None, alias="resetBreaker",
+        description="True resumes automation on a source the circuit breaker "
+                    "suspended. Not a stored setting.",
+    )
 
     @field_validator("paused_until")
     @classmethod
@@ -1059,6 +1388,273 @@ class FreshnessSettingsResponse(BaseModel):
     probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
     probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    rollup_storage: Optional[str] = Field(None, alias="rollupStorage")
+    # True when this PATCH reset the breaker (echo of the action, not state).
+    reset_breaker: Optional[bool] = Field(None, alias="resetBreaker")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Capacity: what the write budget measures, for people ─────────────
+#
+# The rebuild reads the shard that owns a graph before it writes rollups
+# (``providers.shard_capacity``). These models carry the SAME reading and the
+# SAME arithmetic to the Freshness page, the per-source drawer and the
+# re-trigger dialog, so what an operator sees is what the next run decides.
+
+
+class CapacityLimitValue(BaseModel):
+    """One resolved fleet limit and where it came from: the stored Defaults
+    row (``global``) or the environment (``default``)."""
+    value: Optional[Union[int, float, str, bool]] = None
+    source: Literal["global", "default"] = "default"
+
+
+class CapacityLimits(BaseModel):
+    shard_reserve_pct: CapacityLimitValue = Field(alias="shardReservePct")
+    bytes_per_edge: CapacityLimitValue = Field(alias="bytesPerEdge")
+    # ``value`` None = no ceiling set: the shard governs.
+    max_materialized_edges: CapacityLimitValue = Field(alias="maxMaterializedEdges")
+    # 'auto' | 'true' | 'false' — the fleet-wide Rollup storage.
+    rollup_storage: CapacityLimitValue = Field(alias="rollupStorage")
+    # Fleet knobs (the Defaults row over the environment); ``*_source`` says
+    # which — 'global' or 'default'. Plain ints so the what-ifs consume them.
+    estimate_margin_pct: int = Field(alias="estimateMarginPct")
+    max_cube_edges: int = Field(alias="maxCubeEdges")
+    estimate_margin_pct_source: str = Field("default", alias="estimateMarginPctSource")
+    max_cube_edges_source: str = Field("default", alias="maxCubeEdgesSource")
+    static_cap: int = Field(alias="staticCap")
+    # Environment-only: shown, never settable.
+    budget_recheck_edges: int = Field(alias="budgetRecheckEdges")
+    # The graph store container's memory limit, when the deployment states
+    # it (``FALKORDB_CONTAINER_MEMORY_BYTES``) — the app cannot read it, and
+    # raising the per-query memory ceiling needs it for the sizing formula.
+    container_memory_bytes: Optional[int] = Field(None, alias="containerMemoryBytes")
+
+    class Config:
+        populate_by_name = True
+
+
+class CapacitySource(BaseModel):
+    """One aggregated source as its shard sees it: what it holds today and
+    what the last run learned about it."""
+    data_source_id: str = Field(alias="dataSourceId")
+    label: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    graph_key: Optional[str] = Field(None, alias="graphKey")
+    projection_mode: Optional[str] = Field(None, alias="projectionMode")
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    edge_count: int = Field(0, alias="edgeCount")
+    bytes_per_edge: int = Field(alias="bytesPerEdge")
+    bytes_per_edge_source: Literal["calibrated", "default"] = Field(alias="bytesPerEdgeSource")
+    footprint_bytes: int = Field(alias="footprintBytes")
+    last_cube_estimate: Optional[int] = Field(None, alias="lastCubeEstimate")
+    last_regime: Optional[str] = Field(None, alias="lastRegime")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+
+    class Config:
+        populate_by_name = True
+
+
+class ShardCapacity(BaseModel):
+    """One graph-store node under the fleet reserve. ``measurable`` False
+    means the budget cannot govern here (no ``maxmemory``, or the read
+    failed) and ``whyNot`` says why; the static count rule applies."""
+    endpoint: str
+    used: Optional[int] = None
+    maxmemory: Optional[int] = None
+    policy: Optional[str] = None
+    measurable: bool
+    why_not: Optional[str] = Field(None, alias="whyNot")
+    used_pct: Optional[float] = Field(None, alias="usedPct")
+    reserve_pct: int = Field(alias="reservePct")
+    reserve_bytes: Optional[int] = Field(None, alias="reserveBytes")
+    available_bytes: Optional[int] = Field(None, alias="availableBytes")
+    # How many more rollup edges fit at the fleet bytes-per-edge; None when
+    # the shard cannot be measured.
+    allowed_growth_edges: Optional[int] = Field(None, alias="allowedGrowthEdges")
+    governed_by: str = Field(alias="governedBy")
+    static_cap: int = Field(alias="staticCap")
+    # What running rebuilds hold in the node's reservation ledger — allowed
+    # to write, not yet in ``used`` — already taken off ``availableBytes``.
+    reserved_bytes: int = Field(0, alias="reservedBytes")
+    reserved_by_jobs: int = Field(0, alias="reservedByJobs")
+    # The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes — what
+    # the pressure ladder narrows scans against. None when unlimited or
+    # unreadable.
+    query_mem_capacity: Optional[int] = Field(None, alias="queryMemCapacity")
+    # The node's per-query time cap (TIMEOUT_MAX) and its default, ms — what
+    # every timeout knob is clamped to — and its THREAD_COUNT, which the
+    # container sizing formula multiplies the memory ceiling by. None when
+    # unlimited or unreadable.
+    timeout_max_ms: Optional[int] = Field(None, alias="timeoutMaxMs")
+    timeout_default_ms: Optional[int] = Field(None, alias="timeoutDefaultMs")
+    thread_count: Optional[int] = Field(None, alias="threadCount")
+    # One word for what this row IS, so a chip does not have to be inferred
+    # from three nullable fields: measured (the budget governs here),
+    # ungoverned (no maxmemory — the static count rule applies), unreachable
+    # (the node did not answer; ``whyNot`` says what it said).
+    state: Literal["measured", "ungoverned", "unreachable"] = "measured"
+    sources: List[CapacitySource] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class UnresolvedSource(BaseModel):
+    """A source the sweep could not place on a shard, and why (coarse)."""
+    data_source_id: str = Field(alias="dataSourceId")
+    label: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    why_not: str = Field(alias="whyNot")
+
+    class Config:
+        populate_by_name = True
+
+
+class AggregationCapacityResponse(BaseModel):
+    limits: CapacityLimits
+    shards: List[ShardCapacity] = Field(default_factory=list)
+    unresolved: List[UnresolvedSource] = Field(default_factory=list)
+    sources_total: int = Field(0, alias="sourcesTotal")
+    truncated: bool = False
+    measured_at: str = Field(alias="measuredAt")
+    cache_age_ms: int = Field(0, alias="cacheAgeMs")
+    # The reading behind these figures is the last good one: the most recent
+    # attempt to re-read the graph store failed, and ``lastError`` says how.
+    # The rows are still true as of ``measuredAt`` — which is why they are
+    # shown with a note rather than replaced by an error.
+    stale: bool = False
+    last_error: Optional[str] = Field(None, alias="lastError")
+
+    class Config:
+        populate_by_name = True
+
+
+class FullDetailPreflight(BaseModel):
+    """Would a FORCED full cube fit today? ``unknown`` until a source has
+    one successful run (the cube estimate is persisted on success only);
+    otherwise the pipeline's own verdict on the last run's estimate against
+    the live shard reading, margin included."""
+    estimate_edges: Optional[int] = Field(None, alias="estimateEdges")
+    estimate_source: Optional[Literal["lastRun"]] = Field(None, alias="estimateSource")
+    growth_edges: Optional[int] = Field(None, alias="growthEdges")
+    needed_bytes: Optional[int] = Field(None, alias="neededBytes")
+    verdict: Literal["fits", "short", "unknown"]
+    blocked_by: Optional[str] = Field(None, alias="blockedBy")
+    shortfall_bytes: Optional[int] = Field(None, alias="shortfallBytes")
+    shortfall_edges: Optional[int] = Field(None, alias="shortfallEdges")
+    margin_pct: int = Field(alias="marginPct")
+
+    class Config:
+        populate_by_name = True
+
+
+class AutoPreflight(BaseModel):
+    """Auto is never refused: it stores the cube only while the cube fits
+    both its own ceiling and the shard, and the depth-diagonal otherwise."""
+    never_refused: bool = Field(True, alias="neverRefused")
+    cube_ceiling: int = Field(alias="cubeCeiling")
+    would_store_cube: Optional[bool] = Field(None, alias="wouldStoreCube")
+    fallback: str = "diagonal"
+
+    class Config:
+        populate_by_name = True
+
+
+class SourceCapacityResponse(BaseModel):
+    source: CapacitySource
+    shard: ShardCapacity
+    limits: CapacityLimits
+    full_detail: FullDetailPreflight = Field(alias="fullDetail")
+    auto: AutoPreflight
+    measured_at: str = Field(alias="measuredAt")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── The graph store's own limits, set at runtime ─────────────────────
+
+
+class GraphStoreLimitsPatch(BaseModel):
+    """A change to one graph store node's per-query limits, applied at
+    runtime with ``GRAPH.CONFIG SET`` (lasts until the server restarts; the
+    response hands back the ``FALKORDB_ARGS`` fragment that makes it
+    permanent). At least one of the two limits must be given.
+
+    Raising the memory ceiling needs the container's memory limit — the app
+    cannot read it — so the deployment guide's sizing formula can refuse a
+    change that would turn a caught query error into an OOM-killed pod.
+    ``concurrentQueries`` is that formula's planning figure: how many
+    queries may hold the ceiling at once (at most the node's THREAD_COUNT,
+    which is also the default). ``actor`` is set by the web tier from the
+    authenticated user."""
+    timeout_max_ms: Optional[int] = Field(
+        None, alias="timeoutMaxMs", ge=1_000, le=3_600_000,
+        description="TIMEOUT_MAX, milliseconds (1 s .. 1 h). Never below the node's TIMEOUT_DEFAULT.",
+    )
+    query_mem_capacity: Optional[int] = Field(
+        None, alias="queryMemCapacity", ge=1, le=1024 ** 4,
+        description="QUERY_MEM_CAPACITY, bytes per query (up to 1 TiB). 0 (unlimited) is refused.",
+    )
+    container_memory_bytes: Optional[int] = Field(
+        None, alias="containerMemoryBytes", ge=1,
+        description="The graph store container's memory limit, bytes — required to raise the ceiling.",
+    )
+    concurrent_queries: Optional[int] = Field(
+        None, alias="concurrentQueries", ge=1, le=256,
+        description="Queries that may hold the ceiling at once, for the sizing formula; default THREAD_COUNT.",
+    )
+    effects_threshold_us: Optional[int] = Field(
+        None, alias="effectsThresholdUs", ge=0, le=10_000_000,
+        description="EFFECTS_THRESHOLD, microseconds per modification. Below it a "
+                    "write is REPLICATED BY RE-RUNNING IT on every replica's main "
+                    "thread; 0 always ships a compact change log instead. A rollup "
+                    "batch sits below the 300 µs default, which is what makes a "
+                    "large rebuild stall a shard's replicas.",
+    )
+    apply_to_all_nodes: bool = Field(
+        False, alias="applyToAllNodes",
+        description="Cluster mode: set the same limits on every primary, not only the node named.",
+    )
+    actor: Optional[str] = Field(None, max_length=255)
+
+    @model_validator(mode="after")
+    def _at_least_one_limit(self) -> "GraphStoreLimitsPatch":
+        if (self.timeout_max_ms is None and self.query_mem_capacity is None
+                and self.effects_threshold_us is None):
+            raise ValueError(
+                "Give at least one limit: timeoutMaxMs, queryMemCapacity or "
+                "effectsThresholdUs.")
+        return self
+
+    class Config:
+        populate_by_name = True
+
+
+class GraphStoreLimitsResponse(BaseModel):
+    """What was applied, verified by a fresh read of the node."""
+    shard: ShardCapacity
+    # ``{"TIMEOUT_MAX": ms | None, "QUERY_MEM_CAPACITY": bytes | None}`` as
+    # read before the change (None = unlimited or unreadable), and what
+    # the change set.
+    previous: Dict[str, Optional[int]] = Field(default_factory=dict)
+    applied: Dict[str, int] = Field(default_factory=dict)
+    applied_to: List[str] = Field(default_factory=list, alias="appliedTo")
+    # ``TIMEOUT_MAX 300000 QUERY_MEM_CAPACITY 1073741824`` — paste into
+    # FALKORDB_ARGS to keep the change across a restart.
+    args_fragment: str = Field(alias="argsFragment")
+    # The container memory the sizing formula asks for at the applied
+    # ceiling, and the figures it used; None when maxmemory is unknown.
+    container_needed_bytes: Optional[int] = Field(None, alias="containerNeededBytes")
+    concurrent_queries: Optional[int] = Field(None, alias="concurrentQueries")
+    thread_count_assumed: bool = Field(False, alias="threadCountAssumed")
+    measured_at: str = Field(alias="measuredAt")
 
     class Config:
         populate_by_name = True
@@ -1107,7 +1703,26 @@ class ReconcilePolicyResponse(BaseModel):
     """Resolved global policy plus the env defaults behind it, so the editor
     can seed from ``persisted ?? envDefault`` and a no-op save round-trips the
     real current default instead of pinning a wrong value — the same contract
-    ``AggregationSettingsResponse`` already honours for cadence."""
+    ``AggregationSettingsResponse`` already honours for cadence.
+
+    ``paused_until`` / ``stopped_at`` are the FLEET hold — the whole fleet's
+    automatic rebuilds held by an operator, timed or indefinitely. They ride
+    the policy so the Automation modal needs no second read; they are stored
+    in ``automation_holds``, not in the policy's ``cadence_json``.
+
+    ``held_by`` / ``held_kind`` / ``held_until`` are the fleet-level hold AS
+    THE RESOLVER REPORTS IT (``holds.resolve_hold`` with no provider and no
+    source override): that row, ③ Act off, or an inherited ② Check off — the
+    same trio every fleet row carries, so the page's banner and the modal
+    cannot disagree with the gates. ``held_reason`` names the control that
+    releases it: ``act`` / ``check`` (the Automation switches) or ``hold``
+    (the row; Resume)."""
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    stopped_at: Optional[str] = Field(None, alias="stoppedAt")
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
+    held_reason: Optional[str] = Field(None, alias="heldReason")
     enabled: Optional[bool] = None
     check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
     max_actions_per_run: Optional[int] = Field(None, alias="maxActionsPerRun")
@@ -1184,6 +1799,21 @@ class ReconcilePolicyRequest(BaseModel):
         None, alias="shrinkTolerancePct", ge=0, le=100,
     )
     detectors: Optional[List[str]] = None
+    # The FLEET hold, partial like everything else here: ``pausedUntil`` sets
+    # (or, as null, lifts) the timed pause; ``stopped`` true stops every
+    # automatic rebuild until someone sends false. Same validator as the
+    # per-source snooze, so a "pause" cannot be a permanent hold in disguise.
+    paused_until: Optional[str] = Field(None, alias="pausedUntil", max_length=64)
+    stopped: Optional[bool] = None
+    # An action, not a setting (same as the per-source PATCH): lifts every
+    # source the breaker suspended, fleet-wide, so re-enabling after an
+    # incident is not one drawer per source.
+    reset_breaker: Optional[bool] = Field(None, alias="resetBreaker")
+
+    @field_validator("paused_until")
+    @classmethod
+    def _check_paused_until(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_paused_until(v)
 
     @field_validator("detectors")
     @classmethod
@@ -1191,6 +1821,37 @@ class ReconcilePolicyRequest(BaseModel):
         if v is None:
             return v
         return _validate_detector_names(v)
+
+    class Config:
+        populate_by_name = True
+
+
+class ScopeHoldRequest(BaseModel):
+    """PUT /freshness/holds/provider/{provider_id}. Partial: ``pausedUntil``
+    sets (or, as null, lifts) the timed pause; ``stopped`` true/false sets or
+    lifts the indefinite stop. Sending both nulls/false resumes the provider.
+    The per-source snooze's validator applies, for the same reason."""
+    paused_until: Optional[str] = Field(None, alias="pausedUntil", max_length=64)
+    stopped: Optional[bool] = None
+
+    @field_validator("paused_until")
+    @classmethod
+    def _check_paused_until(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_paused_until(v)
+
+    class Config:
+        populate_by_name = True
+
+
+class ScopeHoldResponse(BaseModel):
+    """The stored hold for one scope after a PUT — both stamps null when the
+    scope is not held (the row is deleted rather than kept empty)."""
+    scope: str
+    scope_id: str = Field("", alias="scopeId")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    stopped_at: Optional[str] = Field(None, alias="stoppedAt")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
 
     class Config:
         populate_by_name = True
@@ -1305,7 +1966,14 @@ class BatchItemResult(BaseModel):
     All three default, because the error branch has no ``RefreshResponse``
     to read and an exception there would strand the batch at "running"."""
     data_source_id: str = Field(alias="dataSourceId")
-    outcome: Literal["done", "error"]
+    # ``held``: an operator hold is in force for this source, so the batch
+    # skipped it and reports it. A provider- or fleet-wide refresh is not a
+    # deliberate per-source override — a person overrides one source at a
+    # time, from that source's own Rebuild.
+    outcome: Literal["done", "error", "held"]
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
     job_id: Optional[str] = Field(None, alias="jobId")
     name: Optional[str] = None
     actions: List[str] = Field(default_factory=list)

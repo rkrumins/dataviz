@@ -40,6 +40,8 @@ import hashlib
 import json
 import logging
 import os
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
@@ -49,7 +51,9 @@ from redis import asyncio as aioredis
 from redis.exceptions import RedisError
 
 from backend.app.services.aggregation.redis_client import get_redis
-from backend.common.adapters import ProviderUnavailable
+from backend.common.adapters import (
+    ProviderBusy, ProviderLoading, ProviderUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +122,18 @@ _LKG_PREFIX = "graphcache:lkg:v1"
 # Bounds rationale:
 #   * lo = 1s — anything shorter is effectively no-cache and would
 #     trigger thundering-herd compute on every render.
-#   * hi = 1 hour — beyond this, ``bump_generation`` on writes is the
-#     only invalidation lever and operators would lose all ability to
-#     see fresh data without restarting.
+#   * hi = 24 hours. This used to be 1 hour, on the reasoning that beyond
+#     it ``bump_generation`` is the only invalidation lever. That reasoning
+#     had it backwards: the gen bump IS the invalidation lever, and it is
+#     event-driven, so a TTL is not what keeps data fresh — it is only what
+#     throws cache away on a clock. An aggregation run completing, failing
+#     mid-write, being purged or skipped all reach
+#     ``invalidate_aggregated_reads`` -> gen bump (event_listener.py:247),
+#     and every app write path bumps too. For an EXTERNAL graph with no
+#     branch and no in-app writes — the common case — the aggregation event
+#     is the only thing that changes the answer, and it invalidates.
+#     Kept finite so a deployment whose writes genuinely bypass the app
+#     still converges without a restart.
 #
 # The long defaults below (5-15 min, up from 30-60s) are SAFE ONLY
 # BECAUSE every APP write path bumps the per-scope generation counter
@@ -137,10 +150,10 @@ _LKG_PREFIX = "graphcache:lkg:v1"
 # an external ingest not routed through the write endpoints) do NOT
 # bump the generation and will be masked for up to the TTL. Route bulk
 # mutations through the app, or bump the generation manually.
-_TTL_LO, _TTL_HI = 1, 3600
+_TTL_LO, _TTL_HI = 1, 86_400
 
-_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
-_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Trace responses are large and expensive; 60s catches repeat navigation
 # inside the lineage preview drawer without serving stale data for long.
 # The same gen counter (bumped on writes) invalidates trace entries.
@@ -149,17 +162,17 @@ _DEFAULT_TRACE_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_EXPAND_TTL_S", 3
 _DEFAULT_TRACE_CLOSURE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_CLOSURE_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
 # Top-level nodes change only when a write inside the workspace shuffles
 # containment — gen counter bumps invalidate. Small payloads, hot path.
-_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 600, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Layer assignment is deterministic for a given (ws, ds, request body)
 # and touches the same node/edge set as a trace. 60s matches /trace.
-_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Batched canvas contract (open/expand). These compose top-level +
 # aggregated + children into one entry; a canvas gesture repeats the
 # exact same request until a write bumps the generation, so a longer
 # TTL amortises the whole bootstrap/expand cost. gen-bump keeps them
 # fresh on edits.
-_DEFAULT_CANVAS_BOOTSTRAP_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
-_DEFAULT_CANVAS_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_EXPAND_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CANVAS_BOOTSTRAP_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CANVAS_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_EXPAND_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Short TTL for empty/404 results — absorbs herds asking for the same
 # missing URN without committing to caching nonsense for long. Floor of
 # 5s keeps the herd-absorption property; ceiling of 5min limits damage
@@ -177,6 +190,16 @@ _LKG_TTL_RAW = _clamped_int_env("GRAPH_CACHE_LKG_TTL_S", 86400, lo=0, hi=2_592_0
 # 0 means "disabled" — keep it as 0; otherwise clamp the lower bound up
 # so a tiny value doesn't make LKG functionally useless.
 _LKG_TTL = _LKG_TTL_RAW if _LKG_TTL_RAW == 0 else max(_LKG_TTL_RAW, 60)
+
+#: Separates an LKG entry's generation stamp from its payload.
+#: ``model_dump_json`` never emits a raw newline — one inside a string value
+#: is escaped — so splitting on the first cannot cut into the payload.
+_LKG_STAMP_SEP = "\n"
+
+#: On a miss, promote a generation-matched mirror back to the primary key
+#: instead of recomputing an answer the generation says has not changed.
+#: Off restores "every expiry is a full recompute".
+_PROMOTE_UNCHANGED = os.getenv("GRAPH_CACHE_PROMOTE_UNCHANGED", "1") != "0"
 
 # Per-payload size cap. A single response larger than this is logged
 # and dropped rather than cached — one huge dump shouldn't crowd out a
@@ -282,6 +305,21 @@ class CacheScope:
     graph_ns: str = ""
 
 
+def _swallow_if_unobserved(fut: "asyncio.Future") -> None:
+    """Mark a failed singleflight future retrieved if nobody attached to it.
+
+    Setting an exception on a future no follower awaits makes asyncio log
+    "Future exception was never retrieved" when it is collected — noise that
+    looks like a leak during exactly the incident someone is reading logs for.
+    Calling ``exception()`` on the done future counts as retrieval.
+    """
+    def _retrieve(f: "asyncio.Future") -> None:
+        if not f.cancelled():
+            f.exception()
+
+    fut.add_done_callback(_retrieve)
+
+
 class GraphCache:
     """Singleton cache wrapper. Get the instance via `get_graph_cache()`."""
 
@@ -340,6 +378,7 @@ class GraphCache:
         unavailability.
         """
         if not self.is_enabled(endpoint):
+            _stats_recorder.record(self, scope, endpoint, "bypass")
             return await compute()
 
         try:
@@ -347,6 +386,7 @@ class GraphCache:
             cache_key = _build_key(scope, gen, endpoint, params)
         except RedisError as exc:
             logger.warning("graph_cache: gen read failed (%s); bypassing cache", exc)
+            _stats_recorder.record(self, scope, endpoint, "bypass")
             return await compute()
 
         # ── 1. Redis cache lookup ─────────────────────────────────────
@@ -354,11 +394,14 @@ class GraphCache:
             cached = await self._cache_redis.get(cache_key)
         except RedisError as exc:
             logger.warning("graph_cache: GET failed (%s); bypassing cache", exc)
+            _stats_recorder.record(self, scope, endpoint, "bypass")
             return await compute()
 
         if cached is not None:
             try:
-                return model_cls.model_validate_json(cached)
+                value = model_cls.model_validate_json(cached)
+                _stats_recorder.record(self, scope, endpoint, "hit")
+                return value
             except Exception as exc:
                 # Bad payload (schema drift?) — log and treat as miss. The
                 # offending key will be overwritten by the compute below.
@@ -382,15 +425,76 @@ class GraphCache:
                         on_stale()
                     except Exception as cb_exc:  # pragma: no cover
                         logger.warning("graph_cache: on_stale callback raised: %s", cb_exc)
+                # A follower rode the leader's compute rather than issuing its
+                # own — from the store's point of view that is work avoided,
+                # which is what the ratio is measuring.
+                _stats_recorder.record(
+                    self, scope, endpoint,
+                    "stale" if outcome.served_stale else "hit",
+                )
                 return outcome.value
+            except (ProviderBusy, ProviderLoading):
+                # FLOW CONTROL, not a failure to retry. The leader was shed so
+                # the store could serve someone else, or it is still warming.
+                # Recomputing here is precisely the load the shed refused —
+                # and a shed key is a key WITH followers, so falling through
+                # turns one refusal into N concurrent computes on the same
+                # key. Every follower gets the leader's answer and retries on
+                # its own Retry-After, as the client already knows how to do.
+                raise
             except Exception:
-                # Leader failed — fall through to recompute below.
+                # The leader failed for a reason a retry might survive — fall
+                # through and compute below.
                 pass
 
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[_SingleflightOutcome] = loop.create_future()
         self._inflight[cache_key] = fut
+        leader_token: Optional[str] = None
         try:
+            # ── 3. Nothing has changed: promote the mirror ────────────
+            # An expiry is not evidence that the answer moved. Every write
+            # bumps the generation, so a generation that has not moved means
+            # a recompute would return the same bytes — and the mirror
+            # already holds them. Reading one small key beats spending ten
+            # seconds of a shard's threads to be told the same thing.
+            if _PROMOTE_UNCHANGED:
+                warm = await self._promote_mirror(
+                    scope, endpoint, params, model_cls,
+                    gen=gen, cache_key=cache_key, ttl_seconds=ttl_seconds,
+                )
+                if warm is not None:
+                    if not fut.done():
+                        fut.set_result(
+                            _SingleflightOutcome(value=warm, served_stale=False),
+                        )
+                    # A hit: no provider work, no wait, and the generation
+                    # says it is the current answer.
+                    _stats_recorder.record(self, scope, endpoint, "hit")
+                    return warm
+
+            # ── 4. Cross-process singleflight ─────────────────────────
+            # We are this pod's leader for the key. Twelve pod-leaders on a
+            # cold view means twelve identical computes unless they agree on
+            # one, so stand for election through the bus. Losing is the good
+            # case: watch for the winner's answer instead of repeating its
+            # work. Every failure here — no bus, a dead leader, a wait that
+            # expires — ends in computing it ourselves, which is the
+            # behaviour that existed before any of this.
+            leader_token = await self._stand_for_election(cache_key)
+            if leader_token is None:
+                peer = await self._await_leader(
+                    cache_key, model_cls, deadline_s=_LEADER_WAIT_S,
+                )
+                if peer is not None:
+                    if not fut.done():
+                        fut.set_result(
+                            _SingleflightOutcome(value=peer, served_stale=False),
+                        )
+                    # Work the fleet did not have to do twice.
+                    _stats_recorder.record(self, scope, endpoint, "hit")
+                    return peer
+
             result = await compute()
             # Serialize ONCE, and off the loop. These two writes each used to
             # call ``model_dump_json`` on the full payload inline, so every
@@ -398,13 +502,43 @@ class GraphCache:
             # other request on it, for every other data source, in proportion
             # to the biggest response any one of them returned.
             payload = await asyncio.to_thread(result.model_dump_json, by_alias=True)
-            await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
-            await self._set_lkg(scope, endpoint, params, result, payload=payload)
+            stored = await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
+            await self._set_lkg(scope, endpoint, params, result, gen, payload=payload)
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
+            _stats_recorder.record(self, scope, endpoint, "miss")
+            if stored == "too_large":
+                # The read was a miss and is counted as one; this says why
+                # the NEXT identical read will be too.
+                _stats_recorder.record(self, scope, endpoint, "too_large")
             return result
+        except (ProviderBusy, ProviderLoading) as exc:
+            # NOT an inability to answer, and both subclass ProviderUnavailable
+            # so the clause below would otherwise swallow them.
+            #
+            # ProviderBusy is flow control: the request was SHED so the store
+            # could serve someone else, and the client is expected to retry in
+            # place after Retry-After. ProviderLoading is a store still reading
+            # its dataset in — seconds to minutes, and it will answer.
+            # Converting either into a 200 carrying a snapshot up to a day old
+            # hides the one fact the client needs to act on, and makes the
+            # shed-early path unreachable on every cached endpoint: the canvas
+            # never retries, because as far as it can tell it got an answer.
+            #
+            # The future MUST be resolved before re-raising. Followers attach
+            # with ``await asyncio.shield(existing)``, and shield means their
+            # own cancellation does not end that await — a future nobody
+            # completes strands every one of them until its request tier
+            # fires. Shedding is exactly when a cache key has followers (a
+            # cold-cache stampede is what the gate sheds), so leaving this out
+            # turns one shed request into a pile of hung ones.
+            if not fut.done():
+                fut.set_exception(exc)
+                _swallow_if_unobserved(fut)
+            raise
         except (ProviderUnavailable, asyncio.TimeoutError) as exc:
-            # Provider can't answer right now. Fall through to the
+            # Provider genuinely can't answer right now (unreachable, failing
+            # over, or one operation past its deadline). Fall through to the
             # last-known-good snapshot if we have one — better to show
             # users slightly stale data with a banner than a hard error.
             stale = await self._get_lkg(scope, endpoint, params, model_cls)
@@ -422,17 +556,24 @@ class GraphCache:
                     # served_stale=True so followers awaiting via
                     # ``shield(existing)`` invoke their own on_stale.
                     fut.set_result(_SingleflightOutcome(value=stale, served_stale=True))
+                _stats_recorder.record(self, scope, endpoint, "stale")
                 return stale
             # No fallback available — propagate.
             if not fut.done():
                 fut.set_exception(exc)
+                _swallow_if_unobserved(fut)
             raise
         except Exception as exc:
             if not fut.done():
                 fut.set_exception(exc)
+                _swallow_if_unobserved(fut)
             raise
         finally:
             self._inflight.pop(cache_key, None)
+            # Hand leadership back at once rather than making the next caller
+            # wait out the TTL — including when we failed, so the retry is
+            # free to try instead of watching a leader that has gone.
+            await self._step_down(cache_key, leader_token)
 
     async def get_top_level_count(
         self, scope: CacheScope, params: dict[str, Any],
@@ -574,6 +715,83 @@ class GraphCache:
             )
         return removed
 
+    async def _stand_for_election(self, cache_key: str) -> Optional[str]:
+        """Try to become the one process in the fleet that computes this key.
+
+        Returns our token when we won, or None when someone else holds it.
+        A bus that cannot answer returns a token too: failing open means
+        everyone computes, which is exactly the behaviour without this.
+
+        Deliberately on the CACHE role, not the coordination role. Losing this
+        key costs one duplicate compute and nothing else, which is the
+        definition of cache-role state — the coordination client is reserved
+        for the generation counter and the markers, whose loss corrupts
+        rather than merely wastes.
+        """
+        if not _LEADER_ENABLED:
+            return "disabled"
+        token = uuid.uuid4().hex
+        try:
+            won = await self._cache_redis.set(
+                f"{_LEADER_PREFIX}:{cache_key}", token, nx=True, px=_LEADER_TTL_MS,
+            )
+        except Exception as exc:                    # noqa: BLE001 — never a hard dep
+            logger.debug("graph_cache: leader election unavailable (%s)", exc)
+            return token
+        return token if won else None
+
+    async def _step_down(self, cache_key: str, token: Optional[str]) -> None:
+        """Release our election so the next caller computes immediately rather
+        than waiting out the TTL. Only ever releases OUR token: the TTL may
+        have expired and passed leadership on while we were still working."""
+        if not token or token == "disabled":
+            return
+        try:
+            await self._cache_redis.eval(
+                _RELEASE_LEADER_LUA, 1, f"{_LEADER_PREFIX}:{cache_key}", token,
+            )
+        except Exception as exc:                    # noqa: BLE001 — the TTL cleans up
+            logger.debug("graph_cache: leader release failed (%s)", exc)
+
+    async def _await_leader(
+        self, cache_key: str, model_cls: type[T], *, deadline_s: float,
+    ) -> Optional[T]:
+        """Watch for the leader's answer. The value if it lands in time, else
+        None and the caller computes its own.
+
+        Polling, not pub/sub, on purpose: one GET on one small key is cheap
+        and has no subscription to leak, no reconnect to handle, and no
+        ordering to get wrong. The cost of the simpler mechanism is ~200 GETs
+        across a full wait, which is nothing next to the compute it replaces.
+        """
+        lock_key = f"{_LEADER_PREFIX}:{cache_key}"
+        started = time.monotonic()
+        while time.monotonic() - started < deadline_s:
+            await asyncio.sleep(_LEADER_POLL_S)
+            try:
+                cached = await self._cache_redis.get(cache_key)
+                if cached is None:
+                    # Nothing yet. Either the leader is still working, or it
+                    # finished without an answer — shed, failed, died. The
+                    # leader releases its election in a ``finally``, so a
+                    # missing lock means there is no longer anyone to wait
+                    # for, and sitting out the rest of the deadline would
+                    # turn ONE refusal into a wait for every follower. Read
+                    # the key once more before giving up: the leader may have
+                    # written and stepped down between our two reads.
+                    if await self._cache_redis.get(lock_key) is not None:
+                        continue
+                    cached = await self._cache_redis.get(cache_key)
+                    if cached is None:
+                        return None
+            except Exception:                       # noqa: BLE001 — go compute
+                return None
+            try:
+                return model_cls.model_validate_json(cached)
+            except Exception:                       # noqa: BLE001 — treat as a miss
+                return None
+        return None
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(self, scope: CacheScope) -> int:
@@ -596,13 +814,18 @@ class GraphCache:
         ttl_seconds: Optional[int],
         endpoint: str,
         payload: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         """Persist `result`, serializing it only if the caller has not already
         (see the single off-loop serialization in ``get_or_compute``). Failures
         are swallowed — the compute already succeeded, so failing the response
-        on a write error would be a self-inflicted regression."""
+        on a write error would be a self-inflicted regression.
+
+        Returns ``"too_large"`` when the answer exceeded the payload cap and
+        was therefore NOT stored, else ``"stored"``. The caller counts the
+        first case, because an endpoint whose answers never fit is
+        indistinguishable from a broken cache unless something says so."""
         ttl = _resolve_ttl(ttl_seconds, endpoint)
-        if _is_empty_result(result):
+        if _is_empty_result(result, endpoint):
             ttl = _NEGATIVE_TTL
         elif _is_incomplete_result(result):
             ttl = _NEGATIVE_TTL
@@ -615,10 +838,11 @@ class GraphCache:
                     endpoint, cache_key, len(payload), _MAX_PAYLOAD_BYTES,
                 )
                 await self._cache_redis.delete(cache_key)
-                return
+                return "too_large"
             await self._cache_redis.set(cache_key, payload, ex=ttl)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: SET failed (%s)", exc)
+        return "stored"
 
     async def _set_lkg(
         self,
@@ -626,9 +850,16 @@ class GraphCache:
         endpoint: str,
         params: dict[str, Any],
         result: BaseModel,
+        gen: int,
         payload: Optional[str] = None,
     ) -> None:
         """Mirror a successful compute into the gen-less LKG snapshot.
+
+        Stamped with the generation it was computed at. The key has to stay
+        gen-less so the mirror survives an invalidation and can still be the
+        outage fallback — but a reader that cares whether the mirror is
+        CURRENT needs to know, and the stamp is how it asks. See
+        ``_promote_mirror``.
 
         Skipped for empty results — a transient empty answer must not
         pin "empty" as the stale fallback during a future outage. Skipped
@@ -636,6 +867,20 @@ class GraphCache:
         must not become the outage fallback either. Skipped when
         ``_LKG_TTL`` is 0 (operator-disabled). Failures are swallowed for
         the same reason as ``_set``.
+
+        The empty rule is asked here WITHOUT the endpoint, so an empty
+        aggregated answer keeps the full TTL on the primary key (see
+        :func:`_is_empty_result`) and is still kept out of the mirror. The
+        asymmetry is deliberate and the two keys answer different
+        questions. The primary key answers "what is true now", and for the
+        aggregated endpoint an empty rollup is true now and stays true
+        until the generation moves. The mirror answers "what do we show
+        when the store cannot be reached", and there "no lineage between
+        these containers" is indistinguishable to the reader from real
+        data — so an outage would quietly present an empty graph as fact.
+        The cost of keeping it out is that such a key recomputes once its
+        TTL expires instead of being promoted, which is the behaviour
+        every endpoint had before promotion existed.
         """
         if _LKG_TTL <= 0:
             return
@@ -653,9 +898,48 @@ class GraphCache:
                 # longer matches reality is worse than none.
                 await self._cache_redis.delete(_build_lkg_key(scope, endpoint, params))
                 return
-            await self._cache_redis.set(_build_lkg_key(scope, endpoint, params), payload, ex=_LKG_TTL)
+            await self._cache_redis.set(
+                _build_lkg_key(scope, endpoint, params),
+                f"{gen}{_LKG_STAMP_SEP}{payload}",
+                ex=_LKG_TTL,
+            )
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: LKG SET failed (%s)", exc)
+
+    async def _read_lkg(
+        self,
+        scope: CacheScope,
+        endpoint: str,
+        params: dict[str, Any],
+        *,
+        at_generation: Optional[int] = None,
+    ) -> Optional[str]:
+        """The raw mirrored payload, or ``None``.
+
+        ``at_generation`` asks for it ONLY if it was computed at that
+        generation — i.e. nothing has written to the source since. An entry
+        written before the stamp existed has no generation to compare, so it
+        answers no; the next real compute rewrites it stamped.
+        """
+        if _LKG_TTL <= 0:
+            return None
+        try:
+            raw = await self._cache_redis.get(_build_lkg_key(scope, endpoint, params))
+        except RedisError as exc:
+            logger.warning("graph_cache: LKG GET failed (%s)", exc)
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        stamp, sep, body = raw.partition(_LKG_STAMP_SEP)
+        try:
+            written_at = int(stamp) if sep else None
+        except ValueError:                          # not a stamp — legacy entry
+            written_at, body = None, raw
+        if at_generation is not None and written_at != at_generation:
+            return None
+        return body if sep and written_at is not None else raw
 
     async def _get_lkg(
         self,
@@ -667,21 +951,60 @@ class GraphCache:
         """Read the gen-less LKG snapshot. Returns ``None`` on miss,
         bad payload, disabled LKG, or Redis error — the caller treats
         ``None`` as "no fallback available" and re-raises the original
-        provider exception."""
-        if _LKG_TTL <= 0:
+        provider exception. Deliberately ignores the generation stamp: when
+        the provider cannot answer at all, an out-of-date snapshot still
+        beats an error."""
+        body = await self._read_lkg(scope, endpoint, params)
+        if body is None:
             return None
         try:
-            raw = await self._cache_redis.get(_build_lkg_key(scope, endpoint, params))
-        except RedisError as exc:
-            logger.warning("graph_cache: LKG GET failed (%s)", exc)
-            return None
-        if raw is None:
-            return None
-        try:
-            return model_cls.model_validate_json(raw)
+            return model_cls.model_validate_json(body)
         except Exception as exc:
             logger.warning("graph_cache: LKG deserialize failed (%s)", exc)
             return None
+
+    async def _promote_mirror(
+        self,
+        scope: CacheScope,
+        endpoint: str,
+        params: dict[str, Any],
+        model_cls: type[T],
+        *,
+        gen: int,
+        cache_key: str,
+        ttl_seconds: Optional[int],
+    ) -> Optional[T]:
+        """Serve an expired entry's mirror when the generation says the
+        answer has not changed, and put it back under the primary key.
+
+        The generation is the platform's own record that something was
+        written; the TTL is a backstop against drift it cannot see. When the
+        generation has not moved, a recompute returns the identical bytes —
+        so the expiry costs a user ten seconds to be told the same thing.
+        The mirror already holds those bytes.
+
+        The mirror's OWN expiry is not extended, so no answer can outlive
+        ``GRAPH_CACHE_LKG_TTL_S`` from when it was actually computed, however
+        many times it is promoted. That is the bound on un-notified drift.
+        """
+        try:
+            body = await self._read_lkg(scope, endpoint, params, at_generation=gen)
+            if body is None:
+                return None
+            warm = model_cls.model_validate_json(body)
+        except Exception as exc:                    # noqa: BLE001 — see below
+            # This read sits on the HAPPY path: before the promotion existed,
+            # the mirror was only ever read after compute had already failed,
+            # so anything the cache client raised could only make a failing
+            # request fail differently. Now it runs before every compute, and
+            # the cache must never become a hard dependency — the rule this
+            # method's own module states and the whole design rests on. Any
+            # failure here means no promotion and the compute below, which is
+            # exactly the behaviour without it.
+            logger.warning("graph_cache: mirror read failed (%s)", exc)
+            return None
+        await self._set(cache_key, warm, ttl_seconds, endpoint, payload=body)
+        return warm
 
 
 # ─── Module-level helpers ──────────────────────────────────────────────
@@ -779,12 +1102,34 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
     return _DEFAULT_CHILDREN_TTL
 
 
-def _is_empty_result(result: BaseModel) -> bool:
-    """Detect "empty" responses worth caching only briefly. Currently:
-    a ChildrenWithEdgesResult with no children, an AggregatedEdgeResult
-    with no aggregated edges, or a TraceResult with no nodes. Returning
-    True shortens the TTL to the negative-cache window so a transient
-    miss doesn't pin the empty answer for 30-60s."""
+def _is_empty_result(result: BaseModel, endpoint: Optional[str] = None) -> bool:
+    """Detect "empty" responses worth caching only briefly — a
+    ChildrenWithEdgesResult with no children, or a TraceResult with no
+    nodes. Returning True shortens the TTL to the negative-cache window so
+    a transient miss does not pin the empty answer.
+
+    ``ENDPOINT_AGGREGATED`` is deliberately exempt, and the reason is that
+    it is the one endpoint with a dedicated invalidation choke point.
+    :func:`invalidate_aggregated_reads` bumps the generation on EVERY event
+    that rewrites the :AGGREGATED layer — a run completing, a run dying
+    mid-write, a purge, a skip — so an empty rollup answer cannot go
+    silently stale the way an empty children answer can. It is the correct
+    answer for this generation, and the generation moves the moment it
+    stops being correct.
+
+    What the five-second window cost instead: a container canvas fans out
+    chunks of container URNs, and on any real graph most chunks have no
+    lineage between them, so MOST aggregated requests are empty. Each one
+    was recomputed every five seconds — a steady stream of provider work
+    for an answer that had not changed and could not change unnoticed, and
+    an aggregated hit ratio that could never rise.
+
+    This is the same argument ``_is_incomplete_result`` already makes for a
+    truncated answer: deterministic for (graph, request), invalidated by
+    the generation, so it keeps the full TTL.
+    """
+    if endpoint == ENDPOINT_AGGREGATED:
+        return False
     children = getattr(result, "children", None)
     if isinstance(children, list) and len(children) == 0:
         return True
@@ -822,20 +1167,43 @@ def _has_unprobed_frontier(result: BaseModel) -> bool:
     return bool(entries) and all(getattr(e, "total_count", None) is None for e in entries)
 
 
-def _is_incomplete_result(result: BaseModel) -> bool:
-    """Truncated/degraded/stale results must not be pinned for the full
-    TTL as if they were complete — cache them only for the negative
-    window. Checks the result itself and its nested AggregatedEdgeResult
-    payloads: ``aggregated`` (canvas bootstrap) and ``aggregated_delta``
-    (canvas expand).
+#: Cut reasons that make a result a PURE FUNCTION of (graph, request): the
+#: same request returns the same rows and the same cursor, so the answer is
+#: complete for what was asked and keeps the full TTL. Every other reason the
+#: walk reports — timeout, seed/nodes/ancestors/descendants failed — means the
+#: read gave up, and a retry may do better.
+_DETERMINISTIC_CUTS = frozenset({"max_nodes", "degree_cap", "orphan", "truncated"})
 
-    ONE EXCEPTION: a closure PAGE cut by ``max_nodes``. The degree-exact
-    walk makes such a page a pure function of (graph, request) — every
-    anchor it ships is whole and the cursor names exactly where the next
-    page starts — so it IS the complete answer to that request and keeps the
-    full TTL. A page whose reason is a FAILURE (timeout, seed/nodes/ancestors
-    failed) is still degraded; the walk reports failures ahead of
-    ``max_nodes`` for exactly this reason.
+
+def _is_incomplete_result(result: BaseModel) -> bool:
+    """True only when the answer might be DIFFERENT if computed again.
+
+    This decides between the full TTL and ``_NEGATIVE_TTL`` (5s), and the
+    distinction that matters is determinism, not perfection:
+
+    * A DEGRADED answer is one the provider gave up on — the read ladder
+      returned the prefix it had, a degree probe was dropped for the
+      deadline. Recomputing may well produce more. Pinning it for an hour
+      makes one slow moment the workspace's answer for an hour, and writing
+      it to last-known-good makes it the answer for an outage. Negative TTL.
+
+    * A STALE answer is complete and correct for the graph as it stands; only
+      the rollup is behind. Recomputing returns the identical bytes. The
+      client is already told (``aggstale`` marker, ``CanvasFreshness``), and
+      the rebuild's completion bumps the generation, which invalidates it for
+      real. Caching it briefly buys nothing and costs a recompute.
+
+    * A TRUNCATED answer hit a cap. It is a pure function of (graph,
+      request): the same request returns the same rows and the same cursor.
+      Full TTL for the same reason a closure page cut by ``max_nodes`` always
+      kept it.
+
+    Treating stale and truncated as degraded created a feedback loop with no
+    hysteresis: saturation produces truncation, truncation dropped that
+    scope's TTL 720-fold and stopped writing its fallback, and the resulting
+    misses produced more saturation. On a large graph — where truncation is
+    the normal case, not the exception — it meant the cache could never hold
+    at all.
     """
     for obj in (
         result,
@@ -844,11 +1212,14 @@ def _is_incomplete_result(result: BaseModel) -> bool:
     ):
         if obj is None:
             continue
-        if getattr(obj, "stale", False):
+        # The read ladder gave up part way and said so.
+        if getattr(obj, "degraded_detail", None):
             return True
+        # A cut whose REASON is a failure, not a cap. The closure walk reports
+        # failures ahead of max_nodes precisely so this is distinguishable.
         if getattr(obj, "truncated", False):
-            is_closure_page = getattr(obj, "frontier_up", None) is not None
-            if not (is_closure_page and getattr(obj, "truncation_reason", None) == "max_nodes"):
+            reason = getattr(obj, "truncation_reason", None)
+            if reason is not None and reason not in _DETERMINISTIC_CUTS:
                 return True
     return _has_unprobed_frontier(result)
 
@@ -933,6 +1304,182 @@ async def invalidate_hierarchy_reads(
             workspace_id, data_source_id, exc,
         )
         return None
+
+
+# ─── Hit-rate telemetry ────────────────────────────────────────────────
+#
+# The cache was the largest lever on read capacity and the only thing nobody
+# could see. "Is it hitting?" was answered by reading TTL constants and
+# inferring — which is how a view that cached for 5 seconds instead of an hour
+# went unnoticed. These counters make the answer observable per data source
+# and per endpoint.
+#
+# Shape: one HASH per (workspace, data source) per time bucket, fields
+# "{endpoint}:{outcome}". Bucketed so the answer is a RATE over a window
+# rather than a lifetime total that flattens every incident into noise, and
+# TTL'd so a deleted source stops costing memory on its own.
+
+# ─── Cross-process singleflight ────────────────────────────────────────
+#
+# The in-process singleflight collapses concurrent callers within ONE worker.
+# The fleet runs 3 pods x 4 gunicorn workers = 12 processes, so a cold view
+# opened by twelve people produced twelve identical computes — and on a
+# million-node graph each of those is ~55 Cypher against the six query threads
+# of one shard replica. Eleven of the twelve were pure waste, and they were
+# the load that made the twelfth slow.
+#
+# So the pod-leaders elect a fleet-leader through the bus: one SET NX. The
+# winner computes; the losers watch the cache key for its answer and take it.
+# Every part of this fails OPEN — a bus that is down, a leader that dies, a
+# wait that expires all end in "compute it yourself", which is exactly the
+# behaviour that existed before.
+
+_LEADER_PREFIX = "graphcache:lead:v1"
+
+def _leader_ttl_ms() -> int:
+    """How long one leader may hold the election before another may take it.
+
+    Must exceed the slowest legitimate compute, or a slow leader loses its
+    lock while still working and a second one starts the same work. Bounded
+    below so a crashed leader cannot strand followers for long.
+    """
+    raw = _clamped_int_env("GRAPH_CACHE_LEADER_TTL_S", 60, lo=5, hi=600)
+    return raw * 1000
+
+
+_LEADER_TTL_MS = _leader_ttl_ms()
+#: How long a follower watches for the leader's answer before computing its
+#: own. Shorter than every ASGI tier, so waiting here can never be the thing
+#: that times a request out — if the leader is slower than this the follower
+#: does the work, which is no worse than the old behaviour.
+_LEADER_WAIT_S = float(_clamped_int_env("GRAPH_CACHE_LEADER_WAIT_S", 10, lo=1, hi=60))
+#: Poll interval while watching. A GET on one small key; 50ms costs a follower
+#: at most ~200 of them across the full wait.
+_LEADER_POLL_S = 0.05
+#: Kill switch. Off falls straight back to per-process computes.
+_LEADER_ENABLED = os.getenv("GRAPH_CACHE_CROSS_PROCESS_SINGLEFLIGHT", "1") != "0"
+
+#: Release only our own election, never a successor's — the TTL may have
+#: expired and handed leadership on while we were still working.
+_RELEASE_LEADER_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+_STATS_PREFIX = "graphcache:stats:v1"
+#: Width of one counter bucket. Five minutes is fine enough to see a cache go
+#: cold during an incident and coarse enough that a busy fleet writes few keys.
+_STATS_BUCKET_S = 300
+#: How many buckets are kept. Two hours of history at the width above.
+_STATS_BUCKETS_KEPT = 24
+_STATS_TTL_S = _STATS_BUCKET_S * _STATS_BUCKETS_KEPT
+
+#: The outcomes worth telling apart. ``stale`` is a hit that served the
+#: last-known-good snapshot — it kept the user moving but it is NOT the cache
+#: working as intended, so it never counts toward the hit ratio.
+CACHE_OUTCOMES = ("hit", "miss", "stale", "bypass", "too_large")
+
+
+def _stats_key(workspace_id: str, data_source_id: str, bucket: int) -> str:
+    return f"{_STATS_PREFIX}:{workspace_id}:{data_source_id or '-'}:{bucket}"
+
+
+def _current_bucket() -> int:
+    return int(time.time()) // _STATS_BUCKET_S
+
+
+class _CacheStatsRecorder:
+    """Fire-and-forget counter writes. Never delays or fails a request."""
+
+    def __init__(self) -> None:
+        self._tasks: set = set()
+
+    def record(self, cache: "GraphCache", scope: CacheScope,
+               endpoint: str, outcome: str) -> None:
+        if outcome not in CACHE_OUTCOMES or not scope.workspace_id:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                       # pragma: no cover — no loop
+            return
+        task = loop.create_task(self._write(cache, scope, endpoint, outcome))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    @staticmethod
+    async def _write(cache: "GraphCache", scope: CacheScope,
+                     endpoint: str, outcome: str) -> None:
+        key = _stats_key(scope.workspace_id, scope.data_source_id, _current_bucket())
+        try:
+            await cache._coord_redis.hincrby(key, f"{endpoint}:{outcome}", 1)
+            await cache._coord_redis.expire(key, _STATS_TTL_S)
+        except Exception:                          # noqa: BLE001 — telemetry
+            pass
+
+
+_stats_recorder = _CacheStatsRecorder()
+
+
+async def read_cache_stats(
+    workspace_id: str,
+    data_source_id: Optional[str] = None,
+    *,
+    buckets: int = _STATS_BUCKETS_KEPT,
+) -> dict[str, Any]:
+    """Hit ratio for a workspace (or one data source) over the recent window.
+
+    Returns per-endpoint counts plus a total. ``hit_ratio`` counts only real
+    hits: a stale-fallback kept the user moving but the provider still could
+    not answer, and folding it in would make an outage look like a cache win.
+
+    ``too_large`` rides alongside rather than inside the ratio. It counts
+    computes whose answer exceeded ``GRAPH_CACHE_MAX_PAYLOAD_BYTES`` and
+    were therefore never stored — the read was a miss and is counted as
+    one, but WHY every repeat of it also misses is a fact about the cap,
+    not about the cache working. Without it a capped endpoint reads as a
+    flat 0% with nothing to point at.
+    Empty rather than raising when the bus is unavailable — this is telemetry.
+    """
+    out: dict[str, Any] = {"endpoints": {}, "totals": {o: 0 for o in CACHE_OUTCOMES}}
+    if not workspace_id:
+        return out
+    try:
+        cache = get_graph_cache()
+        now = _current_bucket()
+        keys = [
+            _stats_key(workspace_id, data_source_id or "", now - i)
+            for i in range(max(1, min(buckets, _STATS_BUCKETS_KEPT)))
+        ]
+        pipe = cache._coord_redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.hgetall(key)
+        for entry in await pipe.execute():
+            for field, count in (entry or {}).items():
+                field = field.decode() if isinstance(field, bytes) else str(field)
+                endpoint, _, outcome = field.rpartition(":")
+                if outcome not in CACHE_OUTCOMES:
+                    continue
+                row = out["endpoints"].setdefault(
+                    endpoint, {o: 0 for o in CACHE_OUTCOMES},
+                )
+                row[outcome] += int(count)
+                out["totals"][outcome] += int(count)
+    except Exception as exc:                       # noqa: BLE001 — telemetry
+        logger.debug("graph_cache: stats read failed: %s", exc)
+        return out
+
+    def _ratio(row: dict[str, int]) -> Optional[float]:
+        served = row["hit"] + row["miss"] + row["stale"]
+        return round(row["hit"] / served, 4) if served else None
+
+    for row in out["endpoints"].values():
+        row["hit_ratio"] = _ratio(row)
+    out["totals"]["hit_ratio"] = _ratio(out["totals"])
+    out["window_seconds"] = _STATS_BUCKET_S * min(buckets, _STATS_BUCKETS_KEPT)
+    return out
 
 
 # ─── Stale-source marker (stale-while-revalidate flag) ─────────────────

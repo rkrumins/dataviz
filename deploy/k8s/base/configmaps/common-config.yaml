@@ -20,13 +20,29 @@ data:
   # FALKORDB_TLS_CA_CERTS: "/certs/falkordb/ca.crt"
   # FALKORDB_SENTINEL_TLS_ENABLED: "true"    # absent → inherit data-plane TLS
   # FALKORDB_ADDRESS_REMAP: "announced:6379=reachable:6379"  # cross-cluster
-  # The FalkorDB server's TIMEOUT_MAX (ms). MUST match the TIMEOUT_MAX in
-  # the FalkorDB statefulset's FALKORDB_ARGS (base: 180000) — the backend
-  # clamps every per-query timeout it sends to this value, because the
-  # server REJECTS (never runs) a query requesting more. A mismatch in
-  # either direction silently breaks long-budget work (e.g. the insights
-  # top-level materialization for very large graphs).
+  # The FalkorDB server's TIMEOUT_MAX (ms) — the FALLBACK the backend clamps
+  # per-query timeouts to until it has read a node's own TIMEOUT_MAX
+  # (GRAPH.CONFIG, on connect and before every rebuild). Keep it equal to the
+  # TIMEOUT_MAX in the FalkorDB statefulset's FALKORDB_ARGS (base: 180000):
+  # the server REJECTS (never runs) a query requesting more, and a mismatch
+  # clamps the first queries after a restart wrong. TIMEOUT_MAX can be raised
+  # at runtime from Infrastructure → Memory headroom; the dialog hands over
+  # the FALKORDB_ARGS fragment that keeps the change across a restart.
   FALKORDB_SERVER_TIMEOUT_MAX_MS: "180000"
+  # Optional: the FalkorDB container's limits.memory, so the "Adjust graph
+  # store limits" dialog is prefilled with it (the app cannot read it).
+  # The graph store container's memory LIMIT, which the application cannot
+  # read for itself. It prefills the container field in Infrastructure →
+  # Memory headroom, and that field is what the sizing guard checks a raised
+  # QUERY_MEM_CAPACITY against. Left unset, an operator has to type the limit
+  # by hand on every raise — and a mistyped limit makes the guard's answer
+  # wrong in the direction that OOM-kills the node.
+  #
+  # MUST equal the deployed limit: 14Gi in the base StatefulSet
+  # (deploy/k8s/base/infrastructure/falkordb/statefulset.yaml). The
+  # production-cluster overlay runs 56Gi shards and overrides this in its
+  # cluster-config patch. 14 * 1024^3 = 15032385536.
+  FALKORDB_CONTAINER_MEMORY_BYTES: "15032385536"
   REDIS_URL: "redis://redis:6379/0"
   # Dedicated cache Redis for the FalkorDB provider's ancestor chain
   # and URN-label caches. Must point at a Redis instance that is NOT

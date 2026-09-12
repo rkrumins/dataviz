@@ -21,7 +21,7 @@ non-canvas consumers (drawers, admin, search).
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,9 @@ class CanvasFreshness(BaseModel):
     regime: Optional[str] = None
     last_materialized_at: Optional[str] = Field(None, alias="lastMaterializedAt")
     materialization_triggered: bool = Field(False, alias="materializationTriggered")
+    # Why part of the read was lost under the store's per-query pressure
+    # (``staleReason`` query_memory / timeout), when it was.
+    degraded_detail: Optional[Dict[str, Any]] = Field(None, alias="degradedDetail")
 
     class Config:
         populate_by_name = True
@@ -60,6 +63,7 @@ class CanvasFreshness(BaseModel):
             regime=getattr(agg, "regime", None),
             lastMaterializedAt=getattr(agg, "last_materialized_at", None),
             materializationTriggered=bool(getattr(agg, "materialization_triggered", False)),
+            degradedDetail=getattr(agg, "degraded_detail", None),
         )
 
 

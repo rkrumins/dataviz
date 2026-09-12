@@ -17,7 +17,9 @@
  * open so the user can retry without losing their overrides.
  */
 import { useEffect, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { createPortal } from 'react-dom'
+import { resumePlan } from './resumePlan'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play, RotateCcw, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -26,6 +28,10 @@ import {
     AggregationOverridesForm,
     type AggregationOverridesValue,
 } from '../shared/AggregationOverridesForm'
+import { RetriggerFitCheck } from './RetriggerFitCheck'
+import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
+import { useSourceCapacity } from '../shared/useAggregationCapacity'
+import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 
 export interface RetriggerDialogProps {
     isOpen: boolean
@@ -43,10 +49,36 @@ export interface RetriggerDialogProps {
     /** What the server resolves for Rollup storage when the request omits it,
      *  so the form can show the mode the job would really run in. */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** When known, the dialog shows whether THIS run would fit the source's
+     *  shard before it is queued — re-decided as the form changes. */
+    dataSourceId?: string
+    /** The server's live env defaults and the stored fleet Defaults, so the
+     *  form's placeholders tell the truth. */
+    envDefaults?: EnvTuningDefaults | null
+    storedGlobal?: AggregationTuning | null
+    /** Why the form opened on a profile the operator did not pick (a Gentle
+     *  retry after a per-query memory or timeout failure). */
+    presetReason?: string | null
+    /** The control that goes with the reason: after a per-query memory
+     *  failure, the way to the node's own limit (system administrators). */
+    presetAction?: 'raise-per-query-limit' | null
     /** Always shown. */
     onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
     onConfirmResume?: (overrides: AggregationOverridesValue) => Promise<void>
+}
+
+type ShardCap = { timeoutMaxMs: number | null }
+
+/** The source's own shard cap, for the per-query timeout notes in the form.
+ *  Mounted only when the dialog knows its source, so the dialog itself stays
+ *  free of query hooks (its unit tests render it without a query client). */
+function ShardCapFor({ dataSourceId, children }: {
+    dataSourceId: string
+    children: (cap: ShardCap) => ReactElement
+}) {
+    const q = useSourceCapacity(dataSourceId, true)
+    return children({ timeoutMaxMs: q.data?.shard.timeoutMaxMs ?? null })
 }
 
 export function RetriggerDialog({
@@ -56,6 +88,11 @@ export function RetriggerDialog({
     title,
     originatingJob,
     defaultFinePairs,
+    dataSourceId,
+    envDefaults,
+    storedGlobal,
+    presetReason,
+    presetAction,
     onConfirmRetrigger,
     onConfirmResume,
 }: RetriggerDialogProps) {
@@ -90,6 +127,11 @@ export function RetriggerDialog({
         && originatingJob.lastCursor !== undefined
         && (originatingJob.status === 'failed' || originatingJob.status === 'cancelled')
         && !!onConfirmResume
+    // What resuming will actually redo. Resume saves the WRITES, not the
+    // SCAN, and without saying so an operator resuming a job that died at
+    // 80% watches the bar go to 0 and climb — correct, and indistinguishable
+    // from the resume not having worked.
+    const plan = canResume ? resumePlan(originatingJob?.lastCursor) : null
 
     const isLoading = loading !== null
 
@@ -150,13 +192,43 @@ export function RetriggerDialog({
                     </div>
 
                     {/* Body — scrollable form */}
-                    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
-                        <AggregationOverridesForm
-                            value={value}
-                            onChange={setValue}
-                            disabled={isLoading}
-                            defaultFinePairs={defaultFinePairs}
-                        />
+                    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
+                        {(() => {
+                            const body = (cap: ShardCap) => (
+                                <>
+                                    {presetReason && (
+                                        <div
+                                            data-testid="retrigger-preset-reason"
+                                            className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300 space-y-1"
+                                        >
+                                            <p>{presetReason}</p>
+                                            {presetAction === 'raise-per-query-limit' && dataSourceId && (
+                                                <RaisePerQueryLimitLink dataSourceId={dataSourceId} />
+                                            )}
+                                        </div>
+                                    )}
+                                    {dataSourceId && (
+                                        <RetriggerFitCheck
+                                            dataSourceId={dataSourceId}
+                                            draftTuning={value.tuning}
+                                            defaultFinePairs={defaultFinePairs}
+                                        />
+                                    )}
+                                    <AggregationOverridesForm
+                                        value={value}
+                                        onChange={setValue}
+                                        disabled={isLoading}
+                                        defaultFinePairs={defaultFinePairs}
+                                        envDefaults={envDefaults}
+                                        storedGlobal={storedGlobal}
+                                        shardTimeoutMaxMs={cap.timeoutMaxMs}
+                                    />
+                                </>
+                            )
+                            return dataSourceId
+                                ? <ShardCapFor dataSourceId={dataSourceId}>{body}</ShardCapFor>
+                                : body({ timeoutMaxMs: null })
+                        })()}
                     </div>
 
                     {/* Footer */}
@@ -168,6 +240,12 @@ export function RetriggerDialog({
                         >
                             Cancel
                         </button>
+
+                        {canResume && plan && (
+                            <p className="mr-auto max-w-[26rem] text-[11px] text-ink-muted leading-relaxed" data-testid="resume-plan">
+                                {plan.detail}
+                            </p>
+                        )}
 
                         {canResume && (
                             <button

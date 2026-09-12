@@ -14,8 +14,7 @@ import { fnv1a64 } from './lib/lineageCache'
 import type {
     AggregatedEdgeInfo,
     AggregatedEdgeResult,
-    GraphEdge
-} from '@/providers/GraphDataProvider'
+    GraphEdge, AggregatedDegradedDetail } from '@/providers/GraphDataProvider'
 
 // ============================================
 // Types
@@ -121,6 +120,13 @@ export interface UseAggregatedLineageResult {
      * First non-null reason across the merged chunks wins.
      */
     staleReason: string | null
+
+    /**
+     * Why part of the read was lost under the graph store's per-query
+     * pressure (staleReason "query_memory" / "timeout"), or null. First
+     * non-null detail across the merged chunks wins.
+     */
+    degradedDetail: AggregatedDegradedDetail | null
 
     /**
      * ISO-8601 timestamp of the last AGGREGATED materialisation, or null if
@@ -241,6 +247,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     const [truncated, setTruncated] = useState(false)
     const [stale, setStale] = useState(false)
     const [staleReason, setStaleReason] = useState<string | null>(null)
+    const [degradedDetail, setDegradedDetail] = useState<AggregatedDegradedDetail | null>(null)
     const [lastMaterializedAt, setLastMaterializedAt] = useState<string | null>(null)
     const [materializationTriggered, setMaterializationTriggered] = useState(false)
 
@@ -274,6 +281,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             setTruncated(cached.result.truncated ?? false)
             setStale(cached.result.stale ?? false)
             setStaleReason(cached.result.staleReason ?? null)
+            setDegradedDetail(cached.result.degradedDetail ?? null)
             setLastMaterializedAt(cached.result.lastMaterializedAt ?? null)
             setMaterializationTriggered(cached.result.materializationTriggered ?? false)
             return
@@ -318,6 +326,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             let mergedTruncated = false
             let mergedStale = false
             let mergedStaleReason: string | null = null
+            let mergedDegradedDetail: AggregatedDegradedDetail | null = null
             let mergedLastMaterializedAt: string | null | undefined = undefined
             let mergedMaterializationTriggered = false
             for (const r of fulfilled) {
@@ -326,6 +335,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 if (r.truncated) mergedTruncated = true
                 if (r.stale) mergedStale = true
                 if (mergedStaleReason === null && r.staleReason != null) mergedStaleReason = r.staleReason
+                if (mergedDegradedDetail === null && r.degradedDetail != null) mergedDegradedDetail = r.degradedDetail
                 if (r.materializationTriggered) mergedMaterializationTriggered = true
                 if (r.lastMaterializedAt !== undefined) {
                     if (mergedLastMaterializedAt === undefined || mergedLastMaterializedAt === null) {
@@ -342,6 +352,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 truncated: mergedTruncated,
                 stale: mergedStale,
                 staleReason: mergedStaleReason,
+                degradedDetail: mergedDegradedDetail,
                 lastMaterializedAt: mergedLastMaterializedAt ?? null,
 
                 materializationTriggered: mergedMaterializationTriggered,
@@ -385,6 +396,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             setTruncated(mergedResult.truncated ?? false)
             setStale(mergedResult.stale ?? false)
             setStaleReason(mergedResult.staleReason ?? null)
+            setDegradedDetail(mergedResult.degradedDetail ?? null)
             setLastMaterializedAt(mergedResult.lastMaterializedAt ?? null)
             setMaterializationTriggered(mergedResult.materializationTriggered ?? false)
 
@@ -629,6 +641,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         truncated,
         stale,
         staleReason,
+        degradedDetail,
         lastMaterializedAt,
         materializationTriggered,
     }

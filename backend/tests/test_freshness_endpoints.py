@@ -206,6 +206,36 @@ def _patch_cadence(monkeypatch, *, global_secs=None, overrides=None,
 # ── Fleet assembly ──────────────────────────────────────────────────────
 
 
+def test_fleet_rows_resolve_rollup_storage_override_then_global_then_env(monkeypatch):
+    """Every row says what Rollup storage it will run with and where that
+    came from, at zero extra queries: the override off the state map, the
+    global off the settings row, the env otherwise."""
+    ds_a, ds_b = _ds(id="ds-a"), _ds(id="ds-b", ws="ws-2")
+    _patch_fleet_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch, states={"ds-a": {"rollup_storage": "auto"}})
+
+    async def _global(session):
+        return "true"
+    monkeypatch.setattr(svc_mod, "read_global_rollup_storage", _global)
+    monkeypatch.setattr(svc_mod, "_env_rollup_storage", lambda: "auto")
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(ds_a, "Prov A"), (ds_b, "Prov B")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+
+    a, b = resp.rows
+    assert (a.rollup_storage_override, a.resolved_rollup_storage, a.rollup_storage_source) == ("auto", "auto", "custom")
+    assert (b.rollup_storage_override, b.resolved_rollup_storage, b.rollup_storage_source) == (None, "true", "global")
+
+    async def _no_global(session):
+        return None
+    monkeypatch.setattr(svc_mod, "read_global_rollup_storage", _no_global)
+    session = _FakeSession([_FakeResult(scalar=1), _FakeResult(rows=[(ds_b, "Prov B")])])
+    row = _run(assemble_fleet_freshness(session, page=1, page_size=50)).rows[0]
+    assert (row.resolved_rollup_storage, row.rollup_storage_source) == ("auto", "default")
+
+
 def test_fleet_assembles_rows_and_total(monkeypatch):
     ds_a, ds_b = _ds(id="ds-a"), _ds(id="ds-b", ws="ws-2")
     _patch_fleet_collaborators(
@@ -919,7 +949,31 @@ def test_source_probe_failure_does_not_write_counts(monkeypatch):
          "consumption exceeded capacity", "query_memory"),
         ("Retry 3/3: Provider 'falkordb:g' unavailable: ResponseError: "
          "Query's mem consumption exceeded capacity", "query_memory"),
+        # The write budget's refusal starts with its marker and carries the
+        # shard's numbers; whatever words follow, it is its own bucket.
+        ("write budget: aggregation would materialize ~30,000,000 :AGGREGATED edges "
+         "(d1→d1: 9) for graph 'g': ~30,000,000 of them new, needing 14.3 GB at "
+         "~512 B/edge (default), but shard 10.0.0.1:6379 has 2.0 GB free of 40.0 GB "
+         "after the 20% reserve — short by 12.3 GB.", "write_budget"),
+        ("write budget: aggregation would materialize ~30,000,000 :AGGREGATED edges, "
+         "exceeding max_materialized_edges=25,000,000. The shard's memory could not be "
+         "measured, so the static cap governed.", "write_budget"),
         ("asyncio.TimeoutError: query timed out after 30s", "timeout"),
+        # The pipeline's own outage verdict after every backoff retry at the
+        # narrowest scan: a TimeoutError with a message, and its bucket.
+        ("scan extract:FLOWS over ID range [0, 64) (width 64) timed out 7 times in a "
+         "row at the narrowest width (query timeout 30s, graph store cap 180s) — "
+         "treating as a graph-store outage; the job resumes from its checkpoint.",
+         "timeout"),
+        # The single-row memory verdict names the scan and the ceiling and
+        # must still land in query_memory, not timeout/out_of_memory.
+        ("scan extract:FLOWS — source edges of type FLOWS (two IDs per row) — over ID "
+         "range [7, 8) exceeded the graph store's per-query memory ceiling "
+         "(QUERY_MEM_CAPACITY (512.0 MB)). The graph store reported: \"Query's mem "
+         "consumption exceeded capacity\". The pipeline had already dropped read "
+         "concurrency to 1, and this slice is 1 row wide: a SINGLE row of this "
+         "projection is larger than the ceiling, so no narrower read exists.",
+         "query_memory"),
         ("OntologyResolutionError: no ontology assigned to this source", "ontology"),
         ("ConflictError: job already active for this source", "conflict"),
         ("ConnectionError: provider unavailable, connection refused", "provider_unavailable"),
@@ -1318,6 +1372,24 @@ def test_settings_read_is_ingestion_read_and_write_stays_admin():
     assert agg_mod._REQUIRE_SYSTEM_ADMIN in put_fns
 
 
+def test_capacity_reads_are_ingestion_read_never_admin_only():
+    """The capacity view shows the audience that already reads a refusal's
+    endpoints and byte figures the same numbers before the refusal — and
+    system:admin is one of the ingestion-read permissions, so the
+    Infrastructure page reaches it too."""
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    for path in ("/aggregation/capacity", "/data-sources/{ds_id}/capacity"):
+        route = next(
+            (r for r in agg_mod.router.routes if r.path == path and "GET" in r.methods),
+            None,
+        )
+        assert route is not None, path
+        fns = _dep_calls(route.dependant)
+        assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns), path
+        assert agg_mod._REQUIRE_SYSTEM_ADMIN not in fns, path
+
+
 # ── F9: per-source rebuild-cadence override PATCH ───────────────────────
 
 
@@ -1348,6 +1420,44 @@ class _FakeSettingsSvc:
         if self._raises:
             raise self._raises
         return {"paused_until": paused_until}
+
+    async def set_source_rollup_storage(self, ds_id, session, value):
+        self.rollup_called_with = (ds_id, value)
+        if self._raises:
+            raise self._raises
+        return value
+
+
+def test_rollup_storage_patch_applies_only_when_sent_and_null_clears(_direct_mode):
+    """The per-source Rollup storage rides the same partial PATCH: absent
+    means untouched, an explicit null clears the override, and the response
+    echoes what was stored."""
+    svc = _FakeSettingsSvc()
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", FreshnessSettingsRequest(rollupStorage="auto"), _FakeRequest(),
+        svc=svc, session=object(),
+    ))
+    assert svc.rollup_called_with == ("ds-1", "auto")
+    assert out.rollup_storage == "auto"
+    assert svc.called_with is None                       # the cadence was not touched
+
+    svc = _FakeSettingsSvc()
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", FreshnessSettingsRequest(rollupStorage=None), _FakeRequest(),
+        svc=svc, session=object(),
+    ))
+    assert svc.rollup_called_with == ("ds-1", None) and out.rollup_storage is None
+
+    svc = _FakeSettingsSvc()
+    _run(fresh_mod.patch_freshness_settings(
+        "ds-1", FreshnessSettingsRequest(rebuildMinIntervalSecs=60), _FakeRequest(),
+        svc=svc, session=object(),
+    ))
+    assert not hasattr(svc, "rollup_called_with")        # absent = untouched
+
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        FreshnessSettingsRequest(rollupStorage="cube")
 
 
 def test_freshness_settings_request_validates_bounds():

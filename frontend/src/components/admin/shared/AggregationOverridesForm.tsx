@@ -17,11 +17,12 @@
 import { useMemo, useState, type JSX } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    ChevronDown, Info, Activity, Shield, Zap, Copy, GitBranch,
+    ChevronDown, Info, Activity, Shield, Snail, Zap, Copy, GitBranch,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
-import type { AggregationTuning } from '@/services/aggregationService'
+import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
+import { TUNING_KNOBS, clampKnob, knobPlaceholder, resolveKnob, serverCapNote, type TuningKnob } from './aggregationKnobs'
 
 // ============================================
 // Public Contract
@@ -49,6 +50,13 @@ export interface AggregationOverridesFormProps {
      * know; `'true'` is then assumed, matching the backend.
      */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** The server's live env defaults — placeholders that tell the truth. */
+    envDefaults?: EnvTuningDefaults | null
+    /** The stored fleet Defaults, so an empty field can say what it inherits. */
+    storedGlobal?: AggregationTuning | null
+    /** TIMEOUT_MAX read from the source's own shard: wins over the env mirror
+     *  in the per-query timeout notes. */
+    shardTimeoutMaxMs?: number | null
 }
 
 // ============================================
@@ -58,7 +66,7 @@ export interface AggregationOverridesFormProps {
 const RETRIES_MIN = 0
 const RETRIES_MAX = 10
 const TIMEOUT_MIN = 1
-const TIMEOUT_MAX = 1440
+const TIMEOUT_MAX = 10_080   // minutes: 7 days, the server's bound
 
 const clampRetries = (n: number) => Math.max(RETRIES_MIN, Math.min(RETRIES_MAX, n))
 const clampTimeout = (n: number) => Math.max(TIMEOUT_MIN, Math.min(TIMEOUT_MAX, n))
@@ -109,55 +117,9 @@ function ImpactMeter({ label, level, max = 5 }: { label: string; level: number; 
 // Advanced Tuning (shared with the admin "Defaults" dialog)
 // ============================================
 
-interface TuningFieldSpec {
-    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency' | 'maxMaterializedEdges'
-    label: string
-    tip: string
-    help: string
-    min: number
-    max: number
-    placeholder: number
-    step?: number
-    float?: boolean
-}
-
-const TUNING_FIELDS: TuningFieldSpec[] = [
-    {
-        key: 'scanRangeWidth',
-        label: 'Scan range width',
-        tip: 'Width of each edge-ID range the extract phase scans per query. The pipeline shrinks this automatically under pressure — this value is the ceiling.',
-        help: 'Edges per scan range (10,000-5,000,000)',
-        min: 10_000, max: 5_000_000, placeholder: 200_000,
-    },
-    {
-        key: 'writePacingRatio',
-        label: 'Write pacing ratio',
-        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
-        help: 'Pause between writes (0-10)',
-        min: 0, max: 10, placeholder: 1.0, step: 0.1, float: true,
-    },
-    {
-        key: 'maxPendingPairs',
-        label: 'Memory cap — max pending pairs',
-        tip: 'Maximum aggregated pairs held in memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles.',
-        help: 'Pairs held in memory (50,000-50,000,000)',
-        min: 50_000, max: 50_000_000, placeholder: 50_000_000,
-    },
-    {
-        key: 'extractConcurrency',
-        label: 'Extract concurrency',
-        tip: 'Number of parallel extract scans. Higher values speed up the extract phase but put more read load on the provider.',
-        help: 'Parallel scans (1-4)',
-        min: 1, max: 4, placeholder: 1,
-    },
-    {
-        key: 'maxMaterializedEdges',
-        label: 'Materialization budget',
-        tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). A backstop, not a sizing guard — forced full detail fails loudly instead of exceeding it. Size it against a SINGLE graph store node: a graph never spans cluster shards, so sharding adds no headroom for one large graph. Auto storage decides cube-vs-diagonal against its own ceiling, so raising this does not change that choice.',
-        help: 'Max stored rollup edges (10,000-50,000,000)',
-        min: 10_000, max: 50_000_000, placeholder: 25_000_000,
-    },
-]
+// The knob catalogue itself lives in ``aggregationKnobs.ts`` — one
+// description per knob, shared with the fleet-wide Defaults dialog.
+const PER_JOB_KNOBS = TUNING_KNOBS.filter(k => !k.fleetOnly)
 
 export interface TuningFieldsProps {
     value: AggregationTuning
@@ -165,31 +127,48 @@ export interface TuningFieldsProps {
     disabled?: boolean
     /** See `AggregationOverridesFormProps.defaultFinePairs`. */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** The server's live env defaults — what an empty field really means. */
+    envDefaults?: EnvTuningDefaults | null
+    /** The stored fleet Defaults, so an empty per-job field can say which
+     *  value it inherits and from where. */
+    storedGlobal?: AggregationTuning | null
+    /** What clearing a field writes: ``delete`` omits the key (per-job:
+     *  inherit), ``null`` sends an explicit null (the Defaults dialog: the
+     *  server MERGES tuning and only an explicit null clears a stored key). */
+    clearMode?: 'delete' | 'null'
+    /** See ``AggregationOverridesFormProps.shardTimeoutMaxMs``. */
+    shardTimeoutMaxMs?: number | null
 }
 
 /**
  * TuningFields — the raw Advanced-tuning inputs, without the collapsible
- * shell, so the workspace dashboard's "Defaults" dialog can reuse them.
- * Empty inputs mean "no override" (the key is omitted from `tuning`).
+ * shell, so the fleet-wide Defaults dialog can reuse them. What an empty
+ * input means depends on ``clearMode``; either way the placeholder shows the
+ * value the empty field resolves to, from the server's own defaults.
  */
 export function TuningFields({
     value,
     onChange,
     disabled = false,
     defaultFinePairs = 'true',
+    envDefaults,
+    storedGlobal,
+    clearMode = 'delete',
+    shardTimeoutMaxMs,
 }: TuningFieldsProps): JSX.Element {
-    const setField = (spec: TuningFieldSpec, raw: string, clamp: boolean) => {
+    const setField = (spec: TuningKnob, raw: string, clamp: boolean) => {
         const next: AggregationTuning = { ...value }
         const parsed = spec.float ? parseFloat(raw) : parseInt(raw)
         if (raw === '' || !Number.isFinite(parsed)) {
             // Cleared (or garbage on blur) → drop the override, fall back to default.
             if (raw === '' || clamp) {
-                delete next[spec.key]
+                if (clearMode === 'null') next[spec.key] = null
+                else delete next[spec.key]
                 onChange(next)
             }
             return
         }
-        next[spec.key] = clamp ? Math.max(spec.min, Math.min(spec.max, parsed)) : parsed
+        next[spec.key] = clamp ? clampKnob(spec, parsed) : parsed
         onChange(next)
     }
 
@@ -252,29 +231,42 @@ export function TuningFields({
                 </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
-                {TUNING_FIELDS.map(spec => (
-                    <div key={spec.key}>
-                        <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                            {spec.label}
-                            <Tip label={spec.tip}>
-                                <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
-                            </Tip>
-                        </label>
-                        <input
-                            type="number"
-                            min={spec.min}
-                            max={spec.max}
-                            step={spec.step}
-                            disabled={disabled}
-                            placeholder={String(spec.placeholder)}
-                            value={value[spec.key] ?? ''}
-                            onChange={e => setField(spec, e.target.value, false)}
-                            onBlur={e => setField(spec, e.target.value, true)}
-                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
-                        />
-                        <p className="text-[10px] text-ink-muted mt-1">{spec.help}</p>
-                    </div>
-                ))}
+                {PER_JOB_KNOBS.map(spec => {
+                    const resolved = resolveKnob(spec, value[spec.key] ?? null, storedGlobal, envDefaults)
+                    return (
+                        <div key={spec.key}>
+                            <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
+                                {spec.label}
+                                <Tip label={spec.tip}>
+                                    <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
+                                </Tip>
+                            </label>
+                            <input
+                                type="number"
+                                min={spec.min}
+                                max={spec.max}
+                                step={spec.step}
+                                disabled={disabled}
+                                placeholder={knobPlaceholder(spec, envDefaults)}
+                                aria-label={spec.label}
+                                value={value[spec.key] ?? ''}
+                                onChange={e => setField(spec, e.target.value, false)}
+                                onBlur={e => setField(spec, e.target.value, true)}
+                                className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
+                            />
+                            <p className="text-[10px] text-ink-muted mt-1">
+                                {spec.help}
+                                {resolved.source === 'global' && resolved.value != null && (
+                                    <span className="text-indigo-500"> {'\u00b7'} inherits {resolved.value.toLocaleString()} from Defaults</span>
+                                )}
+                            </p>
+                            {(() => {
+                                const note = serverCapNote(spec, resolved.value, envDefaults, shardTimeoutMaxMs)
+                                return note ? <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">{note}</p> : null
+                            })()}
+                        </div>
+                    )
+                })}
             </div>
 
             {/* Materialize leaf-to-leaf pairs toggle */}
@@ -322,7 +314,7 @@ export function TuningFields({
 // ============================================
 
 interface ConfigPreset {
-    id: 'conservative' | 'balanced' | 'performance'
+    id: 'gentle' | 'conservative' | 'balanced' | 'performance'
     label: string
     description: string
     icon: typeof Shield
@@ -347,15 +339,18 @@ interface ConfigPreset {
  * `PRESET_MATCH_KEYS` — otherwise a form carrying an explicit `'auto'` could
  * never match a preset that carries nothing, and no profile would ever
  * highlight as active.
+ *
+ * `maxMaterializedEdges` is absent for the same reason, and its absence is
+ * load-bearing: the write budget is MEASURED from the shard that owns the
+ * graph, and an explicit ceiling on the job wins over that measurement. A
+ * preset that pinned 25M here made every UI-triggered rebuild stop at 25M
+ * no matter how much memory the operator added to the shard. So are the
+ * shard reserve and bytes-per-edge: capacity is the shard's, a preset's is
+ * only how hard to lean on it.
  */
 const CAPACITY_FLOOR = {
     // Worker RSS bound — unaffected by the graph store's topology.
     maxPendingPairs: 50_000_000,
-    // Graph-store bound, so sized against ONE SHARD: a graph key never
-    // spans shards, and the reference cluster runs maxmemory 40gb per
-    // shard with ~18GB free. 25M x ~0.5KB ~= 12.5GB, covering a graph
-    // several times the 1M-node / 2M-edge floor.
-    maxMaterializedEdges: 25_000_000,
 } as const
 
 /**
@@ -368,6 +363,21 @@ export const PRESET_TIMEOUT_MINUTES = 180
 export const DEFAULT_TIMEOUT_SECS = PRESET_TIMEOUT_MINUTES * 60
 
 export const CONFIG_PRESETS: ConfigPreset[] = [
+    {
+        id: 'gentle',
+        label: 'Gentle',
+        description: 'Large graph — go slow. Narrow scans, serial reads, generous pacing, a long scan timeout; keeps whatever the last run learned',
+        icon: Snail,
+        maxRetries: 5,
+        timeoutMinutes: PRESET_TIMEOUT_MINUTES,
+        tuning: {
+            ...CAPACITY_FLOOR, scanRangeWidth: 25_000, writePacingRatio: 4.0, extractConcurrency: 1,
+            scanShrinkFloor: 1, scanTimeoutS: 120,
+            // Smaller, shorter write batches: a write batch is the lock window
+            // every reader of the graph waits for.
+            writeBatchMax: 100, writeBatchTargetS: 0.5,
+        },
+    },
     {
         id: 'conservative',
         label: 'Conservative',
@@ -398,13 +408,36 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
 ]
 
 /** The knobs a preset actually sets, and therefore the only ones that can
- *  decide whether the current form IS that preset. `materializeFinePairs` is
- *  excluded on purpose — see CAPACITY_FLOOR above. */
+ *  decide whether the current form IS that preset. `materializeFinePairs`,
+ *  `maxMaterializedEdges`, `shardReservePct` and `bytesPerEdge` are excluded
+ *  on purpose — see CAPACITY_FLOOR above. */
 const PRESET_MATCH_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
-    'maxMaterializedEdges',
+    'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS',
+    'writeBatchMax', 'writeBatchTargetS',
 ]
+
+/** The profile for a graph the store keeps refusing: what a retry after a
+ *  per-query memory or timeout failure starts from. */
+export function gentlePreset(): ConfigPreset {
+    return CONFIG_PRESETS.find(p => p.id === 'gentle')!
+}
+
+/**
+ * Which profile a set of overrides IS, or null for a custom mix. Strict on
+ * purpose: a form that differs from a preset in any knob the preset sets is
+ * not that preset. Shared with Job History's Run settings panel, which asks
+ * the same question of the values a run actually ran with.
+ */
+export function presetIdFor(value: Pick<AggregationOverridesValue, 'maxRetries' | 'timeoutMinutes' | 'tuning'>): ConfigPreset['id'] | null {
+    const tuning = value.tuning ?? {}
+    return CONFIG_PRESETS.find(p =>
+        p.maxRetries === value.maxRetries &&
+        p.timeoutMinutes === value.timeoutMinutes &&
+        PRESET_MATCH_KEYS.every(k => tuning[k] === p.tuning[k])
+    )?.id ?? null
+}
 
 // ============================================
 // Component
@@ -416,17 +449,16 @@ export function AggregationOverridesForm({
     disabled = false,
     hideProjectionMode = false,
     defaultFinePairs,
+    envDefaults,
+    storedGlobal,
+    shardTimeoutMaxMs,
 }: AggregationOverridesFormProps): JSX.Element {
     const [showAdvanced, setShowAdvanced] = useState(false)
 
-    const activePreset = useMemo(() => {
-        const tuning = value.tuning ?? {}
-        return CONFIG_PRESETS.find(p =>
-            p.maxRetries === value.maxRetries &&
-            p.timeoutMinutes === value.timeoutMinutes &&
-            PRESET_MATCH_KEYS.every(k => tuning[k] === p.tuning[k])
-        )?.id ?? null
-    }, [value.maxRetries, value.timeoutMinutes, value.tuning])
+    const activePreset = useMemo(
+        () => presetIdFor({ maxRetries: value.maxRetries, timeoutMinutes: value.timeoutMinutes, tuning: value.tuning }),
+        [value.maxRetries, value.timeoutMinutes, value.tuning],
+    )
 
     const currentTraits = useMemo(() => {
         const mr = value.maxRetries
@@ -647,7 +679,7 @@ export function AggregationOverridesForm({
                                     <div>
                                         <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
                                             Stall timeout (minutes)
-                                            <Tip label="How long the job may make NO forward progress before the watchdog kills it. This is not a cap on total runtime — a job that keeps progressing runs until it finishes (up to a 24h safety net), so a long value here only decides how long a genuinely wedged job holds the graph's write lease.">
+                                            <Tip label="How long the job may make NO forward progress before the watchdog kills it. This is not a cap on total runtime — a job that keeps progressing runs until it finishes (up to the wall-clock safety net in Advanced tuning), so a long value here only decides how long a genuinely wedged job holds the graph's write lease. Narrowed scans and backoff retries count as progress. Can be raised on a running job from Job History.">
                                                 <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
                                             </Tip>
                                         </label>
@@ -688,6 +720,9 @@ export function AggregationOverridesForm({
                                     </div>
                                     <TuningFields
                                         value={value.tuning ?? {}}
+                                        envDefaults={envDefaults}
+                                        storedGlobal={storedGlobal}
+                                        shardTimeoutMaxMs={shardTimeoutMaxMs}
                                         onChange={tuning => update({ tuning })}
                                         disabled={disabled}
                                         defaultFinePairs={defaultFinePairs}

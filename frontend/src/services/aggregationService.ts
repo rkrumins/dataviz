@@ -14,7 +14,38 @@ export interface AggregationTuning {
   applyChunk?: number | null;          // 1,000 .. 200,000
   deleteChunk?: number | null;         // 100 .. 50,000
   writePacingRatio?: number | null;    // 0 .. 10
+  /** Steady load: the ceiling on rows per write batch (10 .. 2,000), what one
+   *  batch should take in seconds (0.1 .. 10 — the lock window a reader of the
+   *  graph waits for), and the floor under the pause between two (0 .. 10,000 ms). */
+  writeBatchMax?: number | null;
+  writeBatchTargetS?: number | null;
+  writeMinGapMs?: number | null;
+  /** The pause on a node with room to spare; writePacingRatio is the ceiling. 0 .. 10 */
+  writePacingMinRatio?: number | null;
   extractConcurrency?: number | null;  // 1 .. 4
+  /** Share of the worker's memory limit at which the pipeline flushes early (fleet-wide). 30 .. 90 */
+  flushMemPct?: number | null;
+  /** Replicas of the write node that must acknowledge each rollup batch before
+   *  the next is sent. Replicas RE-RUN every write below the store's effects
+   *  threshold, so this is what keeps a rebuild from outrunning them. 0 = none. */
+  replicaAckMin?: number | null;
+  /** How long one acknowledgement wait may block before the run holds and re-checks. */
+  replicaAckTimeoutMs?: number | null;
+  /** Fleet knobs: Auto's cube ceiling and the slack on the pre-compute estimate. */
+  maxCubeEdges?: number | null;
+  estimateMarginPct?: number | null;
+  /** Narrowest scan slice the pressure ladder descends to (default 1 row). 1 .. 5,000,000 */
+  scanShrinkFloor?: number | null;
+  /** Per-query budget for read scans, seconds (capped by the store's TIMEOUT_MAX). 5 .. 600 */
+  scanTimeoutS?: number | null;
+  /** Per-query budget for write/delete batches, seconds (capped by the store's TIMEOUT_MAX). 5 .. 600 */
+  writeTimeoutS?: number | null;
+  /** Fleet default for the stall window, seconds; a job's own timeoutSecs wins. 60 .. 604,800 */
+  stallTimeoutSecs?: number | null;
+  /** Wall-clock safety net, seconds — never below the stall window. 3,600 .. 604,800 */
+  maxWallSecs?: number | null;
+  /** Start from the knobs as set, ignoring what the last run of this source learned. */
+  ignoreObserved?: boolean | null;
   materializeLeafPairs?: boolean;
   /**
    * Rollup storage. `true` (the shipped default) pre-creates every
@@ -26,8 +57,16 @@ export interface AggregationTuning {
    * key: omission cannot override a stored `true`.
    */
   materializeFinePairs?: boolean | 'auto';
-  /** Hard write budget: fail the job instead of writing more :AGGREGATED edges than this. */
-  maxMaterializedEdges?: number | null; // 10,000 .. 50,000,000
+  /**
+   * Optional explicit ceiling on stored :AGGREGATED edges, layered over the
+   * measured shard budget. Absent (the norm) means the budget is what the
+   * graph's own shard has free; set it only to hold a graph BELOW that.
+   */
+  maxMaterializedEdges?: number | null; // 10,000 .. 500,000,000
+  /** Share of the owning shard's maxmemory the rebuild must leave free. */
+  shardReservePct?: number | null;      // 0 .. 90
+  /** Bytes one rolled-up edge costs on the shard; overrides the calibrated figure. */
+  bytesPerEdge?: number | null;         // 64 .. 16384
 }
 
 export interface AggregationTriggerRequest {
@@ -99,9 +138,322 @@ export interface AggregationJobResponse {
    * on the self-tuning pipeline.
    */
   tuning?: Record<string, unknown> | null;
-  /** Per-phase run stats (keys: extract_s, compute_s, reconcile_s, apply_s, writes, deletes, pairs, scanned_edges). */
-  runStats?: Record<string, number | string | Record<string, number>> | null;
+  /**
+   * The run's durable record: per-phase seconds and counters on success,
+   * plus — written at the first checkpoint, so a failed or cancelled run has
+   * it too — what the run ran with (`effective_tuning`) and what its pressure
+   * ladder adapted to (`adapted`).
+   */
+  runStats?: AggregationRunStats | null;
   workerId?: string | null;
+  /**
+   * The same coarse bucket the Freshness cockpit shows for a failure
+   * (`query_memory`, `timeout`, `write_budget`, `out_of_memory`, …); null
+   * when there is no error.
+   */
+  failureCategory?: string | null;
+  /**
+   * Limits raised on the running job: the wall clock and per-query budgets in
+   * force, and a bounded history of who raised what, from what, to what. The
+   * stall window in force is `timeoutSecs`.
+   */
+  liveOverrides?: LiveOverrides | null;
+}
+
+export interface LiveLimitChange {
+  at: string;
+  by?: string | null;
+  field:
+    | 'timeout_secs' | 'max_wall_secs' | 'scan_timeout_s' | 'write_timeout_s'
+    | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width' | string;
+  from?: number | null;
+  /** null = cleared, back to the job's setting. */
+  to?: number | null;
+}
+
+export interface LiveOverrides {
+  max_wall_secs?: number;
+  scan_timeout_s?: number;
+  write_timeout_s?: number;
+  /** The scan shape changed on the running job: pacing (0 = none), a read-concurrency cap, a scan-width cap. */
+  write_pacing_ratio?: number;
+  extract_concurrency?: number;
+  scan_width?: number;
+  /** Replication backpressure changed on the running job: replicas that must
+   *  confirm each write (0 releases a run held behind one that is behind). */
+  replica_ack_min?: number;
+  replica_ack_timeout_ms?: number;
+  write_batch_max?: number;
+  write_batch_target_s?: number;
+  history?: LiveLimitChange[];
+}
+
+/** Live values a patch may clear — back to the job's settings. */
+export type LiveResetKey = 'writePacingRatio' | 'extractConcurrency' | 'scanWidth' | 'scanTimeoutS' | 'writeTimeoutS'
+  | 'replicaAckMin' | 'replicaAckTimeoutMs' | 'writeBatchMax' | 'writeBatchTargetS';
+
+/**
+ * What can be changed on a pending or running job without cancelling it: the
+ * four time limits, and the scan shape — pacing from the next write, a
+ * read-concurrency cap from the next wave, a scan-width cap from the next scan
+ * (the ladder may still narrow below it on its own).
+ */
+export interface JobLimitsPatch {
+  /** Stall window, seconds (60 .. 604,800). */
+  timeoutSecs?: number;
+  /** Wall-clock safety net, seconds (3,600 .. 604,800); never applied below the stall window. */
+  maxWallSecs?: number;
+  /** Per-query budget for read scans, seconds (5 .. 600). */
+  scanTimeoutS?: number;
+  /** Per-query budget for write/delete batches, seconds (5 .. 600). */
+  writeTimeoutS?: number;
+  /** Sleep-after-write ratio (0 .. 10; 0 = no pacing), from the next write. */
+  writePacingRatio?: number;
+  /** A cap on read concurrency (1 .. 4), from the next wave. */
+  extractConcurrency?: number;
+  /** A cap on the scan width (1 .. 5,000,000), from the next scan. */
+  scanWidth?: number;
+  replicaAckMin?: number;
+  replicaAckTimeoutMs?: number;
+  /** A cap on rows per write batch (10 .. 2,000), never above the job's
+   *  setting, and what one batch should take (0.1 .. 10 s) — from the next batch. */
+  writeBatchMax?: number;
+  writeBatchTargetS?: number;
+  /** Live values to clear — back to the job's settings. */
+  reset?: LiveResetKey[];
+}
+
+/** Where a knob's value came from for one run. */
+export type RunKnobSource = 'job' | 'hint' | 'env';
+
+/**
+ * Every knob's value for one run (snake_case, as the pipeline stores them)
+ * and, under `sources`, where each came from. `stall_timeout_secs`,
+ * `max_wall_secs` and `max_retries` are the worker's own limits.
+ */
+export interface EffectiveTuningSnapshot {
+  scan_range_width?: number;
+  max_pending_pairs?: number;
+  apply_chunk?: number;
+  delete_chunk?: number;
+  write_pacing_ratio?: number;
+  extract_concurrency?: number;
+  replica_ack_min?: number;
+  replica_ack_timeout_ms?: number;
+  write_batch_max?: number;
+  write_batch_target_s?: number;
+  write_min_gap_ms?: number;
+  write_pacing_min_ratio?: number;
+  materialize_leaf_pairs?: boolean;
+  materialize_fine_pairs?: 'auto' | 'true' | 'false' | string;
+  max_materialized_edges?: number | null;
+  shard_reserve_pct?: number;
+  bytes_per_edge?: number;
+  scan_shrink_floor?: number;
+  scan_timeout_s?: number;
+  write_timeout_s?: number;
+  flush_mem_pct?: number;
+  ignore_observed?: boolean;
+  stall_timeout_secs?: number;
+  max_wall_secs?: number;
+  max_retries?: number;
+  sources?: Record<string, RunKnobSource | string>;
+  [key: string]: unknown;
+}
+
+/** One per-query pressure event the ladder absorbed. */
+export interface PressureEvent {
+  scan: string;
+  kind: 'memory' | 'timeout' | string;
+  lo?: number;
+  hi?: number;
+  size?: number;
+}
+
+/**
+ * What the pressure ladder changed during a run — the current sticky scan
+ * width, the narrowest it needed, how often it shrank, the read concurrency
+ * and reconcile strategy in force, the write batch / delete chunk it settled
+ * on, timeout retries, and (bounded) which scans were under pressure. Absent
+ * on a run that ran at its settings.
+ */
+export interface AdaptedRunState {
+  scan_width?: number | null;
+  scan_width_min?: number;
+  scan_shrinks?: number;
+  extract_concurrency?: number;
+  reconcile_strategy?: 'keys_only' | string;
+  write_batch?: number | null;
+  write_batch_min?: number;
+  write_shrinks?: number;
+  delete_chunk?: number | null;
+  delete_chunk_min?: number;
+  delete_shrinks?: number;
+  timeout_retries?: number;
+  budget_rechecks?: number;
+  /** The memory-aware flush: early flushes and base roll-ups on worker memory pressure, the peak RSS and the limit (MB). */
+  memory_flushes?: number;
+  memory_rollups?: number;
+  rss_high_water_mb?: number;
+  mem_limit_mb?: number;
+  /** Replication backpressure: waits for the write node's replicas, holds when
+   *  they fell behind, and the worst lag seen. */
+  replica_waits?: number;
+  replica_wait_s?: number;
+  replica_holds?: number;
+  replica_max_lag_bytes?: number;
+  /** A graph store node stopped answering mid-run: how many times the run
+   *  waited it out, for how long in total, and any node that came back with a
+   *  new run id (proof it restarted rather than being slow). */
+  store_outage_holds?: number;
+  store_outage_s?: number;
+  node_restarts?: { endpoint: string; at: string; uptime_s?: number | null }[];
+  /** The write governor: batches held while the node was outside the envelope
+   *  a rebuild may write inside — by reason (fork, replica_lost, replica_lag,
+   *  memory, loading), seconds held per reason, and the last hold in full. */
+  store_holds?: Record<string, number>;
+  store_hold_s?: Record<string, number>;
+  store_hold_last?: { kind: string; held_s: number; detail: string };
+  /** How often the run eased off short of a hold, by reason (replica_lag, memory). */
+  eases?: Record<string, number>;
+  /** Batches written at the pacing floor because the node had room to spare. */
+  full_speed_batches?: number;
+  pressure?: PressureEvent[];
+  by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
+  /** What the previous run of this source taught it, applied at the start. */
+  from_last_run?: Record<string, number | string>;
+  /** What an operator changed on the running job, in force now. */
+  live?: Partial<Record<'scan_timeout_s' | 'write_timeout_s' | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width'
+    | 'replica_ack_min' | 'replica_ack_timeout_ms' | 'write_batch_max' | 'write_batch_target_s', number>>;
+}
+
+/**
+ * How the run wrote — a record, not an adaptation, so it sits beside
+ * `adapted`: the last batch's shape, the totals, and the rolling duty cycle
+ * (share of the time spent writing or waiting on the store rather than
+ * pausing) and rate over the last twenty batches.
+ */
+export interface PaceRecord {
+  batch_rows?: number;
+  batch_s?: number;
+  ack_s?: number;
+  sleep_s?: number;
+  batch_max?: number;
+  target_s?: number;
+  ratio?: number;
+  batches?: number;
+  rows?: number;
+  busy_s?: number;
+  idle_s?: number;
+  duty_pct?: number;
+  rows_per_s?: number;
+}
+
+/**
+ * What the full cube would have cost this run in TIME, and — when Auto
+ * chose the depth-diagonal instead — which gate said no. `rate` says where
+ * the figure came from: this run's own measurement, the last run's, or the
+ * shipped default on a source nothing has measured yet.
+ */
+export interface CubeProjection {
+  cells?: number;
+  seconds?: number;
+  wall_budget_s?: number;
+  rate?: 'measured' | 'last run' | 'default' | string;
+}
+
+export interface AggregationRunStats {
+  extract_s?: number;
+  compute_s?: number;
+  reconcile_s?: number;
+  apply_s?: number;
+  writes?: number;
+  deletes?: number;
+  pairs?: number;
+  scanned_edges?: number;
+  fine_merges_skipped?: number;
+  regime?: 'cube' | 'boundary' | string;
+  materialize_budget?: number;
+  cube_estimate?: number;
+  write_budget?: Record<string, unknown>;
+  bytes_per_edge_observed?: number;
+  scan_width_min?: number;
+  scan_shrinks?: number;
+  budget_rechecks?: number;
+  /** The store's per-query ceiling the ladder narrowed against; null when unknown. */
+  query_mem_capacity?: number | null;
+  effective_tuning?: EffectiveTuningSnapshot;
+  adapted?: AdaptedRunState;
+  pace?: PaceRecord;
+  cube_projection?: CubeProjection;
+  degraded_reason?: string;
+  advisories?: Array<{ kind: string; severity?: string; message: string }>;
+  pairs_by_level?: Record<string, number>;
+  /**
+   * The run's six steps, in execution order — what it is on, what it got
+   * through, and how much of the current step is left. Written by the
+   * worker at every step boundary, so it is the live view while the job
+   * runs and the run's history once it is over. Absent on runs from before
+   * the ledger existed; the stepper falls back to deriving four segments
+   * from `currentPhase`.
+   */
+  steps?: RunStep[];
+  /**
+   * Attempts of this run that did NOT succeed, oldest first. A job row is a
+   * run and a run has many attempts; without this, resuming a failed job
+   * erased the record of why you were resuming it. A successful attempt is
+   * never in here — it IS the run record, above.
+   */
+  attempts?: RunAttempt[];
+  [key: string]: unknown;
+}
+
+export interface RunAttempt {
+  /** 1-based, and never renumbered when the log is trimmed. */
+  n: number;
+  /** The stage it stopped in; null when it stopped without saying (a worker
+   *  that vanished mid-stage, captured by the next attempt). */
+  stage?: string | null;
+  status?: string;
+  ended_at?: string;
+  /** Overall percent when it stopped. */
+  progress?: number;
+  error?: string;
+  /** The same typed bucket as `failureCategory` — `write_budget`,
+   *  `query_memory`, `timeout`, … */
+  category?: string;
+  secs?: number;
+  writes?: number;
+  deletes?: number;
+  /** The attempt's ledger, trimmed to what outlives the attempt. */
+  steps?: RunStep[];
+}
+
+export interface RunStep {
+  /** preparing | extracting | computing | reconciling | applying | finalizing */
+  id: string;
+  /**
+   * `pending` before it is entered, `running` while it holds the run,
+   * `waiting` while it holds the run but is parked on something outside it
+   * (a retry backoff, a quiesce park, a failover park), `done` once a later
+   * step opens, and `failed` / `cancelled` when the run ended inside it.
+   */
+  state: 'pending' | 'running' | 'waiting' | 'done' | 'failed' | 'cancelled' | string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  /** Seconds accumulated across every visit. The OPEN step's elapsed time is
+   *  NOT in here — add the difference from `started_at` yourself. */
+  secs: number;
+  /** How many times the step has been entered. >1 means a transient failure
+   *  sent the run back to it. */
+  visits: number;
+  /** The step's OWN unit of work. Null for the steps that have no countable
+   *  unit — inventing one would be worse than saying nothing. */
+  done?: number | null;
+  total?: number | null;
+  unit?: string | null;
+  /** Why the step is parked, when `state` is `waiting`. */
+  waiting_for?: string | null;
 }
 
 export interface ResumeOverrides {
@@ -154,6 +506,11 @@ export interface DataSourceReadinessResponse {
   lastReconcileReason?: string | null;
   /** Resolved per-source → global → env. */
   autoReconcile?: boolean | null;
+  /** The operator hold in force, widest scope first — the control that would
+   *  release it. Null when nothing is holding this source. */
+  heldBy?: 'fleet' | 'provider' | 'source' | null;
+  heldKind?: 'paused' | 'stopped' | null;
+  heldUntil?: string | null;
   /** Is this source's read cache caught up with its published history?
    *  NULL MEANS UNKNOWN, NEVER HEALTHY — null for an unversioned source, for
    *  a versioned graph pinned to no graph target, and when the store could
@@ -195,9 +552,55 @@ export interface AggregationCadence {
   probeIntervalSecs?: number | null;
 }
 
+/**
+ * Every tuning knob's ENV-resolved default, read live by the server — what
+ * "empty" really means in the editors, and where an "Environment default"
+ * chip gets its number. The last three are information only (env-only).
+ */
+export interface EnvTuningDefaults {
+  scanRangeWidth?: number | null;
+  maxPendingPairs?: number | null;
+  applyChunk?: number | null;
+  deleteChunk?: number | null;
+  writePacingRatio?: number | null;
+  extractConcurrency?: number | null;
+  materializeLeafPairs?: boolean | null;
+  materializeFinePairs?: 'auto' | 'true' | 'false' | null;
+  maxMaterializedEdges?: number | null;
+  shardReservePct?: number | null;
+  bytesPerEdge?: number | null;
+  scanShrinkFloor?: number | null;
+  scanTimeoutS?: number | null;
+  writeTimeoutS?: number | null;
+  stallTimeoutSecs?: number | null;
+  maxWallSecs?: number | null;
+  ignoreObserved?: boolean | null;
+  estimateMarginPct?: number | null;
+  maxCubeEdges?: number | null;
+  budgetRecheckEdges?: number | null;
+  /** Information only: backoff retries a narrowest scan gets before an outage is declared. */
+  scanTimeoutRetries?: number | null;
+  /** Information only: the width at or below which RECONCILE switches to keys-only. */
+  reconcileKeysOnlyWidth?: number | null;
+  /** Information only: the graph store's own per-query cap (TIMEOUT_MAX), milliseconds. */
+  serverTimeoutMaxMs?: number | null;
+  /** The memory-aware flush: the share of the worker's memory limit it fires at (a fleet knob). */
+  flushMemPct?: number | null;
+  replicaAckMin?: number | null;
+  replicaAckTimeoutMs?: number | null;
+  writeBatchMax?: number | null;
+  writeBatchTargetS?: number | null;
+  writeMinGapMs?: number | null;
+  writePacingMinRatio?: number | null;
+  /** Information only: pairs the accumulator must hold before a memory-aware flush fires. */
+  flushMinPairs?: number | null;
+}
+
 export interface AggregationSettingsResponse {
   tuning: AggregationTuning | null;
   cadence?: AggregationCadence | null;
+  /** Live env default of every knob (present whether or not a row exists). */
+  envTuningDefaults?: EnvTuningDefaults | null;
   /** Effective ENV defaults (server-read) — the cadence editor seeds from
    *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
   envRebuildMinIntervalSecs?: number | null;
@@ -208,6 +611,179 @@ export interface AggregationSettingsResponse {
   envMaterializeFinePairs?: 'auto' | 'true' | 'false' | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
+}
+
+// ── Capacity: what the write budget measures, for people ───────────────
+//
+// The same reading and arithmetic the rebuild uses before it writes rollups,
+// assembled per shard and per source. Mirrors the backend capacity schemas.
+
+export interface CapacityLimitValue {
+  value: number | string | boolean | null;
+  /** 'global' = the stored Defaults row; 'default' = the environment. */
+  source: 'global' | 'default';
+}
+
+export interface CapacityLimits {
+  shardReservePct: CapacityLimitValue;
+  bytesPerEdge: CapacityLimitValue;
+  /** value null = no explicit ceiling: the shard governs. */
+  maxMaterializedEdges: CapacityLimitValue;
+  /** 'auto' | 'true' | 'false' — the fleet-wide Rollup storage. */
+  rollupStorage: CapacityLimitValue;
+  estimateMarginPct: number;
+  maxCubeEdges: number;
+  /** Where the two came from: the stored Defaults row or the environment. */
+  estimateMarginPctSource?: 'global' | 'default';
+  maxCubeEdgesSource?: 'global' | 'default';
+  staticCap: number;
+  budgetRecheckEdges: number;
+  /** The graph store container's memory limit when the deployment states it
+   *  (FALKORDB_CONTAINER_MEMORY_BYTES); the app cannot read it. */
+  containerMemoryBytes?: number | null;
+}
+
+export interface CapacitySource {
+  dataSourceId: string;
+  label?: string | null;
+  workspaceId?: string | null;
+  providerId?: string | null;
+  providerName?: string | null;
+  graphKey?: string | null;
+  projectionMode?: string | null;
+  aggregationStatus?: string | null;
+  edgeCount: number;
+  bytesPerEdge: number;
+  bytesPerEdgeSource: 'calibrated' | 'default';
+  footprintBytes: number;
+  lastCubeEstimate?: number | null;
+  lastRegime?: string | null;
+  lastFailureCategory?: string | null;
+}
+
+export interface ShardCapacity {
+  endpoint: string;
+  used?: number | null;
+  maxmemory?: number | null;
+  policy?: string | null;
+  measurable: boolean;
+  whyNot?: string | null;
+  usedPct?: number | null;
+  reservePct: number;
+  reserveBytes?: number | null;
+  availableBytes?: number | null;
+  /** How many more rollup edges fit at the fleet bytes-per-edge; null when unmeasurable. */
+  allowedGrowthEdges?: number | null;
+  governedBy: string;
+  staticCap: number;
+  /** What running rebuilds hold in the node's reservation ledger — allowed to
+   *  write, not yet in `used` — already taken off `availableBytes`. */
+  reservedBytes?: number | null;
+  reservedByJobs?: number | null;
+  /** The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes; null when unlimited or unreadable. */
+  queryMemCapacity?: number | null;
+  /** How this node replicates writes: µs per modification below which a write is
+   *  re-run on every replica instead of shipped as a change log. */
+  effectsThresholdUs?: number | null;
+  /** The node's per-query time cap (TIMEOUT_MAX) and its default, ms — what
+   *  every timeout knob is really clamped to; null when unlimited or unreadable. */
+  timeoutMaxMs?: number | null;
+  timeoutDefaultMs?: number | null;
+  /** The node's THREAD_COUNT: the memory ceiling is charged per thread. */
+  threadCount?: number | null;
+  /** What this row IS: the budget governs here, the node set no maxmemory
+   *  so only the static count rule applies, or the node did not answer. */
+  state?: 'measured' | 'ungoverned' | 'unreachable';
+  sources: CapacitySource[];
+}
+
+export interface UnresolvedSource {
+  dataSourceId: string;
+  label?: string | null;
+  workspaceId?: string | null;
+  providerId?: string | null;
+  whyNot: string;
+}
+
+export interface AggregationCapacityResponse {
+  limits: CapacityLimits;
+  shards: ShardCapacity[];
+  unresolved: UnresolvedSource[];
+  sourcesTotal: number;
+  truncated: boolean;
+  measuredAt: string;
+  cacheAgeMs: number;
+  /** The reading is the last good one and the refresh behind it failed;
+   *  ``lastError`` says how. The rows are still true as of measuredAt. */
+  stale?: boolean;
+  lastError?: string | null;
+}
+
+export interface FullDetailPreflight {
+  estimateEdges?: number | null;
+  estimateSource?: 'lastRun' | null;
+  growthEdges?: number | null;
+  neededBytes?: number | null;
+  verdict: 'fits' | 'short' | 'unknown';
+  blockedBy?: string | null;
+  shortfallBytes?: number | null;
+  shortfallEdges?: number | null;
+  marginPct: number;
+}
+
+export interface AutoPreflight {
+  neverRefused: boolean;
+  cubeCeiling: number;
+  wouldStoreCube?: boolean | null;
+  fallback: string;
+}
+
+export interface SourceCapacityResponse {
+  source: CapacitySource;
+  shard: ShardCapacity;
+  limits: CapacityLimits;
+  fullDetail: FullDetailPreflight;
+  auto: AutoPreflight;
+  measuredAt: string;
+}
+
+/**
+ * A change to one graph store node's per-query limits, applied at runtime
+ * with GRAPH.CONFIG SET — it lasts until the server restarts, and the
+ * response hands back the FALKORDB_ARGS fragment that makes it permanent.
+ * At least one of the two limits. Raising the memory ceiling needs the
+ * container's memory limit, which the app cannot read.
+ */
+export interface GraphStoreLimitsPatch {
+  /** TIMEOUT_MAX, milliseconds (1,000 .. 3,600,000); never below the node's TIMEOUT_DEFAULT. */
+  timeoutMaxMs?: number;
+  /** QUERY_MEM_CAPACITY, bytes per query (1 .. 1 TiB); 0 (unlimited) is refused. */
+  queryMemCapacity?: number;
+  /** The graph store container's memory limit, bytes — required to raise the ceiling. */
+  containerMemoryBytes?: number;
+  /** Queries that may hold the ceiling at once, for the sizing formula (at most, and by default, THREAD_COUNT). */
+  concurrentQueries?: number;
+  /** EFFECTS_THRESHOLD, microseconds per modification. Below it a write is
+   *  replicated by RE-RUNNING it on every replica's main thread; 0 always ships
+   *  a compact change log instead. A rollup batch sits below the 300 default. */
+  effectsThresholdUs?: number;
+  /** Cluster mode: set the same limits on every primary, not only the node named. */
+  applyToAllNodes?: boolean;
+}
+
+export interface GraphStoreLimitsResponse {
+  shard: ShardCapacity;
+  /** What the changed names read before (null = unlimited or unreadable), and what was set. */
+  previous: Record<string, number | null>;
+  applied: Record<string, number>;
+  appliedTo: string[];
+  /** e.g. `TIMEOUT_MAX 300000 QUERY_MEM_CAPACITY 1073741824` — paste into FALKORDB_ARGS. */
+  argsFragment: string;
+  /** The container memory the sizing formula asks for at the applied ceiling; null when maxmemory is unknown. */
+  containerNeededBytes?: number | null;
+  concurrentQueries?: number | null;
+  threadCountAssumed: boolean;
+  measuredAt: string;
 }
 
 export interface AggregationWorkerJob {
@@ -287,6 +863,32 @@ class AggregationService {
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/resume`,
       init,
+    );
+  }
+
+  /**
+   * Raise (or lower) a pending or running job's time limits without
+   * cancelling it. The worker re-reads the row within ~30 s; per-query
+   * budgets apply to the next query. 422 on a terminal job — use Resume
+   * with overrides there.
+   */
+  async setJobLimits(dataSourceId: string, jobId: string, patch: JobLimitsPatch): Promise<AggregationJobResponse> {
+    return authFetch<AggregationJobResponse>(
+      `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/limits`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
+  }
+
+  /**
+   * Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY)
+   * at runtime — system administrators only. Verified by a fresh read of the
+   * node; 422 with the numbers when the change is refused, 404 when the
+   * capacity sweep knows no such node.
+   */
+  async setGraphStoreLimits(endpoint: string, patch: GraphStoreLimitsPatch): Promise<GraphStoreLimitsResponse> {
+    return authFetch<GraphStoreLimitsResponse>(
+      `/api/v1/admin/graph-store/${encodeURIComponent(endpoint)}/limits`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
     );
   }
 
@@ -401,6 +1003,21 @@ class AggregationService {
         method: 'PUT',
         body: JSON.stringify({ cadence }),
       }
+    );
+  }
+
+  /** Every shard with rollups on it, what fits, and the sources on each —
+   *  cached briefly server-side; `fresh` forces a new sweep. */
+  async getFleetCapacity(fresh = false): Promise<AggregationCapacityResponse> {
+    return authFetch<AggregationCapacityResponse>(
+      `/api/v1/admin/aggregation/capacity${fresh ? '?fresh=true' : ''}`
+    );
+  }
+
+  /** One source's footprint, its shard's headroom and the pre-flight fit. */
+  async getSourceCapacity(dsId: string): Promise<SourceCapacityResponse> {
+    return authFetch<SourceCapacityResponse>(
+      `/api/v1/admin/data-sources/${encodeURIComponent(dsId)}/capacity`
     );
   }
 
