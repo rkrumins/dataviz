@@ -17,7 +17,8 @@ Three compounding holes:
    only checks sources with `aggregation_schedule IS NOT NULL AND aggregation_status = 'ready'`,
    and nothing in the product ever sets that cron. It also made a live
    `get_schema_stats()` call per source per 60-second tick, which would not have
-   scaled even if it were reachable.
+   scaled even if it were reachable. **That loop has since been removed
+   entirely** — see *The scheduler no longer fingerprints graphs* below.
 3. **Never-aggregated sources were excluded by design.** `_AGG_NOT_APPLICABLE`
    means an onboarded source with zero AGGREGATED edges never got a first build
    from any signal — a documented limitation of the convergence work.
@@ -72,6 +73,54 @@ Plane) resolves policy and enqueues; the stats service executes, because every
 outbound provider call belongs to the tier that owns them. They meet at the
 `insights.jobs.probe` stream, whose SET NX claim means any number of requests
 for one source inside the claim window buy exactly one probe.
+
+## The scheduler no longer fingerprints graphs
+
+`AggregationScheduler._tick()` used to hold a second, older drift detector
+beside the probe lane: for **every** ready source, every 60 seconds, serially,
+it fetched a provider and computed a live graph fingerprint.
+
+The docstring's "for each due schedule" was aspirational: the SQL had no due
+predicate, so `aggregation_schedule` was stored on the row and never consulted
+and a source scheduled daily was probed every minute like all the rest.
+
+Its cost, accurately. `compute_graph_fingerprint` takes the constant-time
+counters first, the same ones the probe lane uses — `4 + labels + types` round
+trips, small per source and a few thousand queries a minute across a few
+hundred of them, serially, on the very threads that serve the canvas, in a
+tick that then cannot finish inside its own 60-second period. And it falls
+back to `get_schema_stats` — three unbounded scans (`MATCH (n) …
+collect(name)`, `MATCH ()-[r]->() RETURN type(r), count(*)`, and a full pass
+over every node's tags) — on any graph whose counters cannot answer
+(multi-label nodes) or whose fast probe errors. That is a cliff, not a tail:
+the client abandons the probe at `SCHEDULER_DRIFT_CHECK_TIMEOUT` (5 s) while
+the query carries its own 30 s server budget, so the node keeps burning one of
+its few query threads on a result nobody will read, once a minute, forever.
+
+The loop is gone. Nothing in `_tick` touches a graph now; it reconciles stale
+markers and, without a job-bus Redis, runs the stale-job watchdog. Drift
+detection lives entirely in the two lanes above, both of which were built for
+it:
+
+* the **probe** enqueues constant-time counts reads on a per-source cadence;
+* the **sweeper** compares those cached counts against `raw_fingerprint`, a
+  baseline that excludes `AGGREGATED` and so does not move on every rebuild —
+  capped at 200 sources and a bounded number of *actions* per tick, so a
+  fleet-wide change cannot queue one rebuild per source at once. The deleted
+  loop had no such cap: it signalled every drifted id it found, in one pass.
+
+**What this costs, stated plainly.** The raw fingerprint is derived from entity-
+and edge-type counts, so a change that leaves every count identical but alters
+something else — node tags, say — is no longer seen as drift. The scan fallback
+was the only thing that could ever see such a change, and only on the graphs it
+could finish. It is picked up by the next real change or a manual rebuild, and
+rollups are idempotent, so a missed drift means slightly stale rollups, never
+wrong ones.
+
+`SCHEDULER_DRIFT_CHECK_TIMEOUT` now has no reader in the scheduler;
+`compute_graph_fingerprint` remains for the callers that take a fingerprint
+once, with a budget, on a path a person is waiting on.
+
 
 ## The design
 

@@ -362,7 +362,7 @@ Nothing here costs capacity; it removes load.
 | Lever | Effect | How to confirm it worked |
 |---|---|---|
 | Remove stale overrides (§4.1) | Often the whole problem | Values in `/health/deps` match the new defaults |
-| Confirm the drift sweep is bounded | Was 3 full scans/source/60s on the read threads | `GRAPH.INFO` query count drops between sweeps |
+| Confirm no scheduler build predates the drift-sweep removal | It fingerprinted every ready source every 60s with no due predicate — counts queries per source per tick, and 3 full scans on any graph the counters cannot answer for | The control plane logs no `compute_graph_fingerprint`; query count no longer spikes on the minute |
 | Retire unused `:AGGREGATED` edge indexes | Every edge write updates every index | `CALL db.indexes()` shows only the ones in `index_policy.py` |
 | Let aggregation yield to reads | Jobs stretch pacing while users are starved | `resilience.read_pressure.signals_sent > 0` under load |
 | Bound AOF rewrite (`--auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb`) | Restart minutes instead of an hour | `INFO persistence` → `aof_current_size` stops growing unboundedly |
@@ -515,10 +515,25 @@ the rebuild and much cheaper for readers.** That is the whole argument for
 | 4 | **Settle** | `replicaAckMin`, `replicaAckTimeoutMs` | The batch is done only when the query has returned AND the replicas have acknowledged it. The sizer judges the batch by the master's time or the wait, whichever was longer — never the sum, which would shrink batches behind a replica that is merely behind and starve the run; the pause is drawn on the master's time alone. |
 | 5 | **Pause** | `writePacingRatio` (1.0) as a CEILING, `writePacingMinRatio` (0.25) as the floor, `writeMinGapMs` (100), `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0) | `duration × ratio`, never below the minimum gap, never above 30 s. The governor's own reading picks where between floor and ceiling: a node with no fork, its replicas in sync and a quarter of its container free is written to at the floor. Stretched to the read-pressure ratio while the web tier reports readers starving (it takes the LARGER, so readers always win), doubled while eased. |
 
-Across jobs: the per-endpoint write slots (`FALKORDB_ENDPOINT_WRITE_SLOTS`, 2)
-bound how many rebuilds write to one node at once, and the per-node reservation
-ledger keeps two rebuilds from both passing on the same headroom. A held run
-holds no slot.
+Across jobs: the per-node write slots (`FALKORDB_ENDPOINT_WRITE_SLOTS`, 2)
+bound how many rebuilds write to one node at once, the per-node **scan** slots
+(`FALKORDB_ENDPOINT_READ_SLOTS`, 4) bound how many of their range scans are in
+flight against it, and the per-node reservation ledger keeps two rebuilds from
+both passing on the same headroom. A held run holds no slot, and a slot is held
+per query rather than per job — a run that is computing in Python holds
+nothing. Both semaphores key on the node the run's own shard reading names, not
+the connection endpoint, which on a cluster is a seed address shared by every
+shard.
+
+The scan cap matters more than it looks. A rebuild reads far more than it
+writes — EXTRACT scans every lineage edge, RECONCILE the whole stored cube —
+and the pipeline runs under `read_from_master_only` by design, because it reads
+what it has just written. So none of that lands on the replicas that absorb
+interactive reads: it all lands on the master, against the same small
+`THREAD_COUNT` the canvas is queued behind. Read pressure only reacts *after*
+users start to starve; this is the preventive half. Keep it above
+`AGGREGATION_EXTRACT_CONCURRENCY`, or one job's own waves fill the node's
+allowance.
 
 ### What the job's progress shows
 

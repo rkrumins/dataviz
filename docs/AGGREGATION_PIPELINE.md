@@ -504,14 +504,22 @@ the **first checkpoint**, before any graph work. Resume rules:
 * **Distributed admission control**
   (`backend/app/services/aggregation/admission.py`, on the job-bus
   Redis): a per-graph write lease (one materializing job per graph across
-  all pods) and a per-endpoint write-slot semaphore
+  all pods); a per-node write-slot semaphore
   (`FALKORDB_ENDPOINT_WRITE_SLOTS`, default 2) so an HPA-scaled worker
-  fleet cannot stampede one FalkorDB, and a per-node reservation ledger
+  fleet cannot stampede one FalkorDB; a per-node **scan**-slot semaphore
+  (`FALKORDB_ENDPOINT_READ_SLOTS`, default 4) capping how many rebuild
+  range scans are in flight against one node — a rebuild reads far more
+  than it writes and does it under `read_from_master_only`, so every scan
+  lands on the master rather than the replicas that absorb interactive
+  reads; and a per-node reservation ledger
   (`agg:reserve:{node}`: what each running rebuild has been allowed to
   write but the node's `used_memory` does not show yet, subtracted from
   every other rebuild's write budget so two rebuilds cannot both pass on
-  the same headroom). Fails **open** to the per-process limits if Redis
-  is down.
+  the same headroom). Both semaphores are held per QUERY, not per job, and
+  key on the node the run's own shard reading names — `endpoint_key` is
+  the connection config's host:port, a seed address on a cluster, which
+  gave the whole cluster one semaphore instead of one per master. Fails
+  **open** to the per-process limits if Redis is down.
 * **Pacing — one batch settled, then a pause, then the next**: a write
   batch is sized by an AIMD sizer against `AGGREGATION_WRITE_BATCH_TARGET_S`
   (default 1.0 s: a batch that ran longer halves the next; five in a row
@@ -761,7 +769,8 @@ pipeline).
 | `FALKORDB_REPLICA_READ_MAX_LAG_BYTES` | 8388608 | How much of the replication stream a replica may still owe and answer a read anyway. Bytes, not the `lag` seconds `INFO` reports, which stay near 0 however far behind it is |
 | `FALKORDB_REPLICA_READ_SETTLE_S` | 30 | How long this process's own write to a graph pins that graph's reads to its master |
 | `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
-| `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
+| `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per graph-store node |
+| `FALKORDB_ENDPOINT_READ_SLOTS` | 4 | Cross-pod SCAN budget per graph-store node: rebuild range scans in flight at once. Every scan-heavy phase runs under `read_from_master_only`, so this is a cap on the master's query threads, not the replicas'. Keep it above `AGGREGATION_EXTRACT_CONCURRENCY` or one job's own waves fill the node's allowance |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. The job's `timeoutSecs` wins; a job that sends none (the machine paths: reconciliation, Refresh rollups, the projector heal hook) takes the fleet Defaults' `stallTimeoutSecs`, then this. Bound 7 days. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS`. Raisable on a running job |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net; per-job / Defaults as `maxWallSecs` (1h-7d), never lower than the job's stall window. Raisable on a running job |

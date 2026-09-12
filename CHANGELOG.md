@@ -129,6 +129,48 @@ idle shard-2 yield for thirty seconds, for nobody's benefit. Both halves key
 by the node that owns the starving graph now, resolved from the client's
 current slot map at no round-trip cost.
 
+**The control plane stopped fingerprinting every graph, every minute.**
+`AggregationScheduler._tick` held a second, older drift detector beside the
+probe lane: for every ready source, every 60 seconds, serially, it fetched a
+provider and fingerprinted the live graph. Its docstring said "for each due
+schedule" but the SQL had no due predicate — `aggregation_schedule` was stored
+on the row and never consulted — so a source scheduled daily was probed every
+minute like all the rest. That is the constant-time counters, `4 + labels +
+types` round trips per source, a few thousand queries a minute across a few
+hundred of them on the very threads that serve the canvas, in a tick that then
+cannot finish inside its own period; and it falls back to three unbounded scans
+(nodes, edges, and a full pass over every node's tags) on any graph whose
+counters cannot answer, where the client gives up after 5 s while the query
+keeps its own 30 s server budget and the node burns a query thread on a result
+nobody will read. None of it bought anything the two lanes built for this do
+not already do on a per-source cadence — the probe (the same constant-time
+counts, deduped by a claim window) and the reconcile sweeper (those cached
+counts against a baseline that excludes `AGGREGATED`, capped at 200 sources and
+a bounded number of actions per tick, where the deleted loop signalled every
+drifted id in one uncapped pass). The loop is gone; nothing in the tick touches
+a graph now. The cost, stated plainly: a change that leaves every entity- and
+edge-type count identical is no longer seen as drift — the scan fallback was
+the only thing that could see it, and only on the graphs it could finish — and
+waits for the next real change or a manual rebuild. Rollups are idempotent, so
+that means slightly stale rollups, never wrong ones.
+
+**Nothing capped what a rebuild READ from a graph store node.** Write slots
+bounded the writes; the scans were unbounded — and a rebuild reads far more
+than it writes (EXTRACT scans every lineage edge, RECONCILE the whole stored
+cube). All of it runs under read-from-master-only, deliberately, because the
+pipeline reads what it has just written, so none of it lands on the replicas
+that absorb interactive reads: it lands on the master, against the same small
+`THREAD_COUNT` the canvas queues behind. With `WORKER_CONCURRENCY` jobs per pod
+across an autoscaled fleet that is tens of concurrent range scans on one
+master, and the read-pressure signal only reacts once users are already
+starving. A per-node scan semaphore (`FALKORDB_ENDPOINT_READ_SLOTS`, default 4,
+separate from the write slots so neither queues behind the other) is the
+preventive half. It is taken around the leaf query only — not the retry loop, so
+a node failing over holds no slots, and not the sub-range walk, so a scan never
+queues for its next slot while holding the last — and keyed by the node the
+run's own shard reading names, taken before the first scan rather than the first
+write, since every scan-heavy phase runs before any write.
+
 **The per-node write-slot cap was per CLUSTER.** The semaphore that keeps
 aggregation writes from taking every query thread on a node was keyed by the
 connection config's host:port — a seed address on a cluster, shared by all

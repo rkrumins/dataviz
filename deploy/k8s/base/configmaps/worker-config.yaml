@@ -19,5 +19,11 @@ data:
   # control plane's stale-job backstop starts failing wedged jobs first.
   AGGREGATION_STALL_TIMEOUT_SECS: "10800"
   AGGREGATION_JOB_MAX_WALL_SECS: "86400"
-  # Cross-pod concurrent aggregation-write budget per FalkorDB endpoint.
+  # Cross-pod concurrent aggregation budget per FalkorDB NODE. Writes and
+  # scans are counted separately; scans get the larger number because a
+  # rebuild reads far more than it writes, and reads from the master (the
+  # pipeline reads what it has just written), so EXTRACT and RECONCILE
+  # compete with the canvas for the master's THREAD_COUNT. Keep the read
+  # limit above AGGREGATION_EXTRACT_CONCURRENCY.
   FALKORDB_ENDPOINT_WRITE_SLOTS: "2"
+  FALKORDB_ENDPOINT_READ_SLOTS: "4"
