@@ -22,22 +22,36 @@ import { AdjustRunningJob } from './AdjustRunningJob'
 // nor about what its evidence means.
 import { REASON_LABEL as RECONCILE_REASON_LABEL } from '../Freshness/DriftStateBadge'
 import { ReconcileWhy } from '../Freshness/reconcileEvidence'
+import { remainingSecsFromLedger } from './runSteps'
 
 /**
- * History-informed ETA: uses the PREVIOUS completed run's per-phase
- * durations (persisted run_stats) for this data source — remaining
- * time = the unfinished fraction of the current phase plus the full
- * duration of every later phase, at the rates this graph actually
- * exhibited last time. Falls back to null (caller uses the backend's
- * linear phase-weighted estimate) when there is no usable history.
+ * History-informed ETA: uses the PREVIOUS completed run's durations
+ * (persisted run_stats) for this data source — remaining time = the
+ * unfinished part of the current stage plus the full duration of every later
+ * stage, at the rates this graph actually exhibited last time. Falls back to
+ * null (caller uses the backend's linear phase-weighted estimate) when there
+ * is no usable history.
+ *
+ * Prefers the two runs' step ledgers when both have one: they carry each
+ * stage's real unit of work, and the two stages either side of the pipeline
+ * that the four-phase projection could not see at all.
  */
 function historicalEta(
     job: AggregationJobResponse,
     previousJob: AggregationJobResponse | undefined,
 ): string | null {
-    if (job.status !== 'running' || !job.currentPhase) return null
+    if (job.status !== 'running') return null
     const stats = previousJob?.status === 'completed' ? previousJob.runStats : null
     if (!stats) return null
+    // A verified/no-change previous run has near-zero reconcile+apply
+    // durations — projecting the CURRENT run from it yields an absurd
+    // "finishing now". Only writing runs are predictive, ledger or not.
+    if (stats.writes === 0 && stats.deletes === 0) return null
+    const fromLedger = remainingSecsFromLedger(job.runStats?.steps, stats.steps, Date.now())
+    if (fromLedger != null) {
+        return new Date(Date.now() + fromLedger * 1000).toISOString()
+    }
+    if (!job.currentPhase) return null
     const idx = PHASES.findIndex(p => p.id === job.currentPhase)
     const band = PHASE_BANDS[job.currentPhase]
     if (idx < 0 || !band) return null
@@ -46,11 +60,6 @@ function historicalEta(
         return acc + (typeof v === 'number' ? v : 0)
     }, 0)
     if (prevTotal < 5) return null   // previous run too fast to be signal
-    // A verified/no-change previous run has near-zero reconcile+apply
-    // durations — projecting the CURRENT run (which may rewrite
-    // everything, e.g. post-purge) from it yields an absurd "finishing
-    // now" estimate. Only writing runs are predictive.
-    if (stats.writes === 0 && stats.deletes === 0) return null
     const cur = stats[PHASES[idx].statKey]
     if (typeof cur !== 'number') return null
     const frac = Math.min(1, Math.max(0, (job.progress - band[0]) / (band[1] - band[0])))
@@ -223,6 +232,19 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     )
     const [showSettings, setShowSettings] = useState(false)
     const presetLabel = useMemo(() => presetForRun(jobFromList.runStats?.effective_tuning), [jobFromList.runStats?.effective_tuning])
+
+    // The stage the run is on, off its own step ledger. ``currentPhase`` can
+    // only ever name the pipeline's four phases — the worker's two bookends
+    // (indexes + identity stamping before the first checkpoint, the
+    // after-fingerprint and state rows after the last) never reach it, and on
+    // a large graph those are minutes at each end of the run.
+    const openStepId = useMemo(
+        () => (jobFromList.runStats?.steps ?? []).find(
+            s => s.state === 'running' || s.state === 'waiting',
+        )?.id,
+        [jobFromList.runStats?.steps],
+    )
+    const hasSteps = (jobFromList.runStats?.steps?.length ?? 0) > 0
 
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
@@ -559,13 +581,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         </div>
 
                                         {/* Progress bar (running / pending) */}
-                                        {(isRunning || isPending) && job.totalEdges > 0 && (
+                                        {(isRunning || isPending) && (job.totalEdges > 0 || hasSteps) && (
                                             <div className="space-y-2">
                                                 <div className="flex items-center justify-between">
                                                     <div className="flex items-center gap-2">
                                                         <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
                                                         <span className="text-[11px] font-semibold text-ink">
-                                                            {isRunning ? phaseLabel(job.currentPhase) : 'Queued'}
+                                                            {isRunning ? phaseLabel(openStepId ?? job.currentPhase) : 'Queued'}
                                                         </span>
                                                     </div>
                                                     <span className="text-[12px] font-bold text-indigo-400 tabular-nums">
@@ -582,10 +604,12 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 </div>
                                                 <div className="flex items-center justify-between text-[10px] text-ink-muted">
                                                     <span className="tabular-nums">
-                                                        {job.currentPhase === 'extracting' || !job.currentPhase ? (
-                                                            <>{job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()} edges scanned</>
-                                                        ) : (
-                                                            <>{job.totalEdges.toLocaleString()} edges scanned</>
+                                                        {job.totalEdges > 0 && (
+                                                            job.currentPhase === 'extracting' || !job.currentPhase ? (
+                                                                <>{job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()} edges scanned</>
+                                                            ) : (
+                                                                <>{job.totalEdges.toLocaleString()} edges scanned</>
+                                                            )
                                                         )}
                                                         {(liveWrites ?? 0) > 0 && (
                                                             <span className="text-emerald-500 ml-1.5">
@@ -616,9 +640,9 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         )
                                                     })()}
                                                 </div>
-                                                {isRunning && (
+                                                {(isRunning || hasSteps) && (
                                                     <PhaseStepper
-                                                        currentPhase={job.currentPhase}
+                                                        currentPhase={openStepId ?? job.currentPhase}
                                                         runStats={job.runStats}
                                                         status={job.status}
                                                     />
@@ -808,9 +832,12 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             </div>
                                         )}
 
-                                        {/* Pipeline phases with per-phase durations */}
-                                        {job.status === 'completed' && job.runStats
-                                            && PHASES.some(p => job.runStats?.[p.statKey] != null) && (
+                                        {/* What the run did, stage by stage. A FAILED or CANCELLED
+                                            run gets this too now: its ledger names the stage it died
+                                            in and what that stage had got through, which is the first
+                                            question anyone asks of a failure. */}
+                                        {isTerminal && job.runStats
+                                            && (hasSteps || PHASES.some(p => job.runStats?.[p.statKey] != null)) && (
                                             <div className="rounded-lg bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2.5">
                                                 <PhaseStepper
                                                     currentPhase={null}

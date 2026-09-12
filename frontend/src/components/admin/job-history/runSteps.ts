@@ -1,0 +1,154 @@
+/**
+ * The run's step ledger, as the operator reads it.
+ *
+ * A run used to report one pair of counters and one percentage, and both
+ * only ever meant "lineage edges scanned during EXTRACT" — so past the
+ * halfway mark the bar moved with its denominator nowhere on the page, and
+ * the minutes at each end of the run (indexes and identity stamping before
+ * the first phase; the after-fingerprint and the state rows after the last)
+ * had no phase at all. The backend now keeps an ordered ledger of the six
+ * real steps with each step's OWN unit of work. This turns it into the
+ * three things an operator asks: which step, what is done, what is left.
+ */
+import type { RunStep } from '../../../services/aggregationService'
+
+export const STEP_LABELS: Record<string, string> = {
+    preparing: 'Prepare',
+    extracting: 'Extract',
+    computing: 'Compute',
+    reconciling: 'Reconcile',
+    applying: 'Apply',
+    finalizing: 'Finish',
+}
+
+/** What the step actually does — the tooltip, not the label. */
+export const STEP_DETAIL: Record<string, string> = {
+    preparing: 'Creating the indexes, stamping node identity, and fingerprinting the graph before the run',
+    extracting: 'Reading the source graph’s lineage edges',
+    computing: 'Rolling that lineage up the containment hierarchy',
+    reconciling: 'Comparing every aggregated edge already stored against what this run computed',
+    applying: 'Writing the aggregated edges that are missing',
+    finalizing: 'Fingerprinting the graph again and recording the result against the data source',
+}
+
+export interface StepView {
+    id: string
+    label: string
+    detailLabel: string
+    state: string
+    /** Open = this step holds the run right now (running or parked). */
+    open: boolean
+    /** Seconds so far, live for the open step. Null when never entered. */
+    elapsedS: number | null
+    /** 0-100 across this step's own unit of work; null when it has none. */
+    pct: number | null
+    /** The right-hand line: what it got through, or what it is waiting for. */
+    detail: string | null
+    visits: number
+}
+
+const _fmt = (n: number) => n.toLocaleString()
+
+/**
+ * One step, read as of `nowMs`.
+ *
+ * The ledger deliberately does NOT bake the open step's elapsed time into
+ * the record (that would mark it dirty on every checkpoint and collapse the
+ * commit cadence into one write per batch), so the elapsed time for the
+ * open step is `secs` plus the time since it was entered.
+ */
+export function describeStep(step: RunStep, nowMs: number): StepView {
+    const open = step.state === 'running' || step.state === 'waiting'
+    const started = step.started_at ? Date.parse(step.started_at) : NaN
+    const live = open && isFinite(started) ? Math.max(0, (nowMs - started) / 1000) : 0
+    const entered = step.state !== 'pending'
+    const total = typeof step.total === 'number' && step.total > 0 ? step.total : null
+    const done = typeof step.done === 'number' ? step.done : null
+
+    let detail: string | null = null
+    if (step.state === 'waiting' && step.waiting_for) {
+        detail = `waiting — ${step.waiting_for}`
+    } else if (done != null && total != null) {
+        detail = open
+            ? `${_fmt(done)} of ${_fmt(total)} ${step.unit ?? ''}`.trim() +
+              (total > done ? ` · ${_fmt(total - done)} left` : '')
+            : `${_fmt(done)} ${step.unit ?? ''}`.trim()
+    } else if (done != null) {
+        detail = `${_fmt(done)} ${step.unit ?? ''}`.trim()
+    }
+
+    return {
+        id: step.id,
+        label: STEP_LABELS[step.id] ?? step.id,
+        detailLabel: STEP_DETAIL[step.id] ?? '',
+        state: step.state,
+        open,
+        elapsedS: entered ? (step.secs ?? 0) + live : null,
+        pct: total != null && done != null
+            ? Math.max(0, Math.min(100, Math.round((done / total) * 100)))
+            : null,
+        detail,
+        visits: step.visits ?? 0,
+    }
+}
+
+export function describeSteps(
+    steps: RunStep[] | undefined | null, nowMs: number,
+): StepView[] {
+    if (!Array.isArray(steps) || steps.length === 0) return []
+    return steps.map(s => describeStep(s, nowMs))
+}
+
+/**
+ * One line for the collapsed row: the step the run is on, and how far into
+ * it. Null when nothing is open — a finished run has no "right now".
+ */
+export function currentStepSentence(views: StepView[]): string | null {
+    const open = views.find(v => v.open)
+    if (!open) return null
+    const head = `Step ${views.indexOf(open) + 1} of ${views.length}: ${open.label}`
+    return open.detail ? `${head} — ${open.detail}` : head
+}
+
+
+/**
+ * How many seconds the run still owes, read off its step ledger against the
+ * previous run's.
+ *
+ * The band-based projection it supersedes could only see the pipeline's four
+ * phases, and took the "fraction of the current phase" from the overall
+ * percentage — which is itself derived from the band, so on a stage whose
+ * band is wide it was little more than a restatement. The ledger carries
+ * each stage's real unit of work AND the two stages either side of the
+ * pipeline, which on a large graph are minutes the old estimate simply
+ * omitted.
+ *
+ * Returns null when either run has no ledger, when nothing is open, or when
+ * the previous run is too fast to be signal — the caller falls back.
+ */
+export function remainingSecsFromLedger(
+    current: RunStep[] | undefined | null,
+    previous: RunStep[] | undefined | null,
+    nowMs: number,
+): number | null {
+    if (!current?.length || !previous?.length) return null
+    const prev = new Map(previous.map(s => [s.id, typeof s.secs === 'number' ? s.secs : 0]))
+    let prevTotal = 0
+    prev.forEach(v => { prevTotal += v })
+    if (prevTotal < 5) return null
+
+    const idx = current.findIndex(s => s.state === 'running' || s.state === 'waiting')
+    if (idx < 0) return null
+    const open = current[idx]
+    const view = describeStep(open, nowMs)
+    const frac = view.pct != null ? view.pct / 100 : 0
+    // What this stage still owes: what it took last time less the part
+    // already through, or — when this run is running slower than that — what
+    // this run's OWN rate says. An estimate that keeps sliding is worse than
+    // one that was pessimistic from the start.
+    const byHistory = (prev.get(open.id) ?? 0) * (1 - frac)
+    const byRate = frac > 0 ? (view.elapsedS ?? 0) * (1 / frac - 1) : 0
+    let remaining = Math.max(byHistory, byRate)
+    for (const later of current.slice(idx + 1)) remaining += prev.get(later.id) ?? 0
+    return isFinite(remaining) && remaining > 0 ? remaining : null
+}

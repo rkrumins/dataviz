@@ -16,6 +16,7 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { JobHistoryFilters } from '@/services/aggregationService'
+import { describeSteps, type StepView } from './runSteps'
 
 // ── DataSourceMeta ──────────────────────────────────────────────────
 
@@ -475,10 +476,16 @@ export function DateRangePicker({
 // values fall back to the generic "Processing lineage edges" string so
 // legacy / non-FalkorDB paths keep the old UX.
 export const PHASE_LABELS: Record<string, string> = {
+    // The pipeline's own four phases, plus the two stages either side of
+    // them that the worker owns. Those two never reach ``current_phase``
+    // (only the pipeline checkpoints set it) — they come off the run's step
+    // ledger, which is the only record that has them at all.
+    preparing: 'Preparing the graph',
     extracting: 'Extracting lineage edges',
     computing: 'Computing rollups',
     reconciling: 'Reconciling existing aggregated edges',
     applying: 'Writing aggregated edges',
+    finalizing: 'Recording the result',
 }
 
 export function phaseLabel(currentPhase: string | null | undefined): string {
@@ -508,6 +515,93 @@ export const PHASE_BANDS: Record<string, [number, number]> = {
 }
 
 /**
+ * The run's steps: which one it is on, what each finished one got through,
+ * and how much of the current one is left.
+ *
+ * Renders the durable step ledger (``runStats.steps``) when the run has
+ * one. That ledger is the only place the two ends of a run are visible at
+ * all — the indexes and identity stamping before the first phase, the
+ * after-fingerprint and state rows after the last — and the only place a
+ * step past EXTRACT has a denominator, because the job's own
+ * processed/total counters stop moving once the extract scan is over.
+ *
+ * Runs from before the ledger existed fall back to ``PhaseStepper``'s
+ * original four segments derived from ``currentPhase``.
+ */
+function StepLedgerView({ views, status }: { views: StepView[]; status: string }) {
+    const running = status === 'running' || status === 'pending'
+    const open = views.find(v => v.open)
+    return (
+        <div className="space-y-1.5" data-testid="step-ledger">
+            <div className="flex items-start gap-1.5">
+                {views.map(v => {
+                    const done = v.state === 'done'
+                    const bad = v.state === 'failed' || v.state === 'cancelled'
+                    const parked = v.state === 'waiting'
+                    // How full THIS stage's bar is: its own unit of work
+                    // while it runs, all the way once it is behind us.
+                    const fill = done ? 100 : v.open ? (v.pct ?? 100) : 0
+                    return (
+                        <div key={v.id} className="flex-1 min-w-0" title={v.detailLabel}>
+                            <div className={cn(
+                                'h-1 rounded-full overflow-hidden',
+                                bad ? 'bg-red-500/20' : 'bg-black/[0.06] dark:bg-white/[0.08]',
+                            )}>
+                                <div
+                                    className={cn(
+                                        'h-full rounded-full transition-[width] duration-700 ease-out',
+                                        bad ? 'bg-red-500'
+                                            : parked ? 'bg-amber-400 animate-pulse'
+                                            : v.open ? 'bg-gradient-to-r from-indigo-500 to-violet-400 animate-pulse'
+                                            : 'bg-indigo-500/70',
+                                    )}
+                                    style={{ width: `${fill}%` }}
+                                />
+                            </div>
+                            <div className="mt-1 flex items-center justify-between gap-1">
+                                <span className={cn(
+                                    'text-[9px] font-bold uppercase tracking-wider truncate',
+                                    bad ? 'text-red-400'
+                                        : parked ? 'text-amber-500'
+                                        : v.open ? 'text-indigo-400'
+                                        : done ? 'text-ink-muted'
+                                        : 'text-ink-muted opacity-40',
+                                )}>{v.label}</span>
+                                {v.elapsedS != null && (
+                                    <span className="text-[9px] tabular-nums text-ink-muted opacity-70 flex-shrink-0">
+                                        {formatDuration(v.elapsedS)}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    )
+                })}
+            </div>
+            {/* What the stage the run is ON actually means, and how far
+                through it is. The stepper says which stage; without this
+                line nothing on the page says what that stage does or what
+                its percentage is counting. */}
+            {open && (
+                <p className={cn(
+                    'text-[10px] leading-relaxed',
+                    open.state === 'waiting' ? 'text-amber-500/90' : 'text-ink-muted',
+                )} data-testid="step-now">
+                    <span className="text-ink-secondary">{open.detailLabel}</span>
+                    {open.detail && <span className="tabular-nums">{` \u00b7 ${open.detail}`}</span>}
+                    {open.visits > 1 && (
+                        <span className="text-amber-500/80">{` \u00b7 restarted \u00d7${open.visits - 1}`}</span>
+                    )}
+                </p>
+            )}
+            {running && !open && (
+                <p className="text-[10px] text-ink-muted opacity-70">{'Starting\u2026'}</p>
+            )}
+        </div>
+    )
+}
+
+
+/**
  * Four-segment EXTRACT → COMPUTE → RECONCILE → APPLY stepper.
  * Running: segments before the current phase are done, the current one
  * pulses, later ones are dormant. Completed: all done, with the
@@ -519,6 +613,19 @@ export function PhaseStepper({ currentPhase, runStats, status }: {
     status: string
 }) {
     const completed = status === 'completed'
+    // Re-read the clock while a step is open so its elapsed time ticks: the
+    // ledger stores when the step started, not how long it has been going
+    // (baking that in would mark the record dirty on every checkpoint).
+    const [now, setNow] = useState(() => Date.now())
+    const views = useMemo(() => describeSteps(runStats?.steps, now), [runStats?.steps, now])
+    const anyOpen = views.some(v => v.open)
+    useEffect(() => {
+        if (!anyOpen) return
+        const t = setInterval(() => setNow(Date.now()), 1000)
+        return () => clearInterval(t)
+    }, [anyOpen])
+    if (views.length > 0) return <StepLedgerView views={views} status={status} />
+
     const currentIdx = currentPhase ? PHASES.findIndex(p => p.id === currentPhase) : -1
     if (!completed && currentIdx < 0) return null
     return (

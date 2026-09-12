@@ -389,7 +389,43 @@ export interface AggregationRunStats {
   degraded_reason?: string;
   advisories?: Array<{ kind: string; severity?: string; message: string }>;
   pairs_by_level?: Record<string, number>;
+  /**
+   * The run's six steps, in execution order — what it is on, what it got
+   * through, and how much of the current step is left. Written by the
+   * worker at every step boundary, so it is the live view while the job
+   * runs and the run's history once it is over. Absent on runs from before
+   * the ledger existed; the stepper falls back to deriving four segments
+   * from `currentPhase`.
+   */
+  steps?: RunStep[];
   [key: string]: unknown;
+}
+
+export interface RunStep {
+  /** preparing | extracting | computing | reconciling | applying | finalizing */
+  id: string;
+  /**
+   * `pending` before it is entered, `running` while it holds the run,
+   * `waiting` while it holds the run but is parked on something outside it
+   * (a retry backoff, a quiesce park, a failover park), `done` once a later
+   * step opens, and `failed` / `cancelled` when the run ended inside it.
+   */
+  state: 'pending' | 'running' | 'waiting' | 'done' | 'failed' | 'cancelled' | string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  /** Seconds accumulated across every visit. The OPEN step's elapsed time is
+   *  NOT in here — add the difference from `started_at` yourself. */
+  secs: number;
+  /** How many times the step has been entered. >1 means a transient failure
+   *  sent the run back to it. */
+  visits: number;
+  /** The step's OWN unit of work. Null for the steps that have no countable
+   *  unit — inventing one would be worse than saying nothing. */
+  done?: number | null;
+  total?: number | null;
+  unit?: string | null;
+  /** Why the step is parked, when `state` is `waiting`. */
+  waiting_for?: string | null;
 }
 
 export interface ResumeOverrides {
