@@ -71,6 +71,16 @@ if "REDIS_CACHE_MAX_CONNECTIONS" not in os.environ:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Control Plane startup / shutdown lifecycle."""
+    # The metrics backend, in every process that emits. The governor,
+    # admission and pacing counters are raised HERE, not in the web tier, so
+    # a worker without this installed counts nothing at all.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+
     from backend.app.db.engine import close_db, get_jobs_session
     from backend.app.providers.manager import ProviderManager
     from .service import AggregationService
@@ -319,6 +329,14 @@ from .service import ConflictError, NotFoundError  # noqa: E402
 
 
 # ── Health ──────────────────────────────────────────────────────────
+
+# The scrape endpoint, on the control plane's own app: this process raises the
+# reconciler, sweeper and probe counters, and nothing else can see them. Same
+# opt-in switch as the web tier's (METRICS_ENABLED), same module.
+from backend.app.api.v1.endpoints import metrics as _metrics_endpoint  # noqa: E402
+
+app.include_router(_metrics_endpoint.router)
+
 
 @app.get("/health", tags=["health"])
 async def health():

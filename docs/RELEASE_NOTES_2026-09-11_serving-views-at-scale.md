@@ -483,7 +483,15 @@ them.
    costs memory and write amplification, not correctness — but until it runs, the index
    half of this release has not landed.
 
-Nothing in steps 3–7 needs a maintenance window. Step 1 is a StatefulSet roll; the app
+8. **Turn the metrics on** (`METRICS_ENABLED=true`, and `METRICS_TOKEN` if your
+   scraper can present one). Every protection in this release was visible only
+   per run until now; scrape the web tier and control plane at
+   `/api/v1/metrics` and each aggregation worker on `METRICS_PORT` (9100).
+   Alert on `aggregation_slot_fail_open_total{reason="deadline"}` — see
+   [`CONCURRENCY_TUNING.md`](CONCURRENCY_TUNING.md) §"What to watch". Nothing
+   is exposed until you set the flag.
+
+Nothing in steps 3–8 needs a maintenance window. Step 1 is a StatefulSet roll; the app
 treats a rotating node as a pause ([§4.3](#43-a-node-rotation-is-a-pause-not-an-outage)).
 
 ---

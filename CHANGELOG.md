@@ -129,6 +129,44 @@ idle shard-2 yield for thirty seconds, for nobody's benefit. Both halves key
 by the node that owns the starving graph now, resolved from the client's
 current slot map at no round-trip cost.
 
+**None of the protections could be seen in production.** The metrics façade
+had been no-op since it was written — nothing ever called `set_backend` — and
+there was no scrape endpoint anywhere. So every counter in the codebase went
+to a DEBUG log, and the write governor, the admission slots, the pacing model
+and the write budget were observable only per run, after the fact, one job at
+a time in Job History. That answers *did this run go badly*. It cannot answer
+*are we trending toward the incident*, which is the version of the question
+that leaves time to act.
+
+A real backend now installs in every process that emits — web tier, control
+plane and the aggregation worker, which raises most of them. No new
+dependency: `prometheus_client` is not in requirements and this does not add
+it, because the text exposition format is a few lines and a metrics layer is
+a poor place to take on supply-chain risk. Cardinality is capped at 500 label
+sets per metric and the overflow is itself counted, because the classic way
+an observability layer takes a service down is one unbounded label — which,
+in a file whose whole purpose is preventing that class of failure, would have
+been its own punchline.
+
+Six signals, at points that already existed:
+`aggregation_slot_fail_open_total` (**the one to alert on** — a rebuild
+waited out the full slot deadline and proceeded anyway, so the cap has
+stopped capping, separated by `reason` into contention and a dead bus),
+`aggregation_slot_waits_total`, `aggregation_governor_holds_total` with hold
+seconds by reason, `aggregation_write_budget_refusals_total`, and
+`aggregation_read_pressure_yields_total`.
+
+The endpoint is **off until an operator turns it on** (`METRICS_ENABLED`,
+optional `METRICS_TOKEN`). It reads internal state — node endpoints, hold
+reasons, fleet load — and this deployment has been bitten before by a surface
+that was open because nobody chose to close it. The backend installs
+regardless, so switching the endpoint on shows real numbers immediately
+rather than starting from zero at the moment you most want history. The
+worker gets a small server of its own on `METRICS_PORT`: it has no HTTP
+surface otherwise, and counted in a registry nobody can reach is the same as
+not counted. Every part of it fails safe — a worker that cannot bind its
+metrics port still processes jobs, and no emit can raise into a caller.
+
 **The identity stamp was the last thing hammering a node flat out.** For any
 source whose nodes are keyed by something other than `urn` — an onboarded
 third-party graph keyed by `id`, say — the conformance stamp is a write pass

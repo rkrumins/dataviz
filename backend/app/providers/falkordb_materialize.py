@@ -982,6 +982,26 @@ class _PairValues:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+def _metric(name: str, **labels: str) -> None:
+    """Emit, and never let emitting fail a rebuild. Every call site below sits
+    inside the governor or a write path."""
+    try:
+        from backend.app.jobs.metrics import increment
+
+        increment(name, **labels)
+    except Exception:  # noqa: BLE001 — a counter is never worth a job
+        pass
+
+
+def _observe(name: str, value: float, **labels: str) -> None:
+    try:
+        from backend.app.jobs.metrics import observe
+
+        observe(name, value, **labels)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class AggregationPipeline:
     """One materialization run against one provider/graph.
 
@@ -1848,7 +1868,14 @@ class AggregationPipeline:
 
     def _record_hold(self, kind: str, held: float, detail: str) -> None:
         """The run's record of a hold: how long by reason, the last one in
-        full, and — when it was long enough to matter — a pressure event."""
+        full, and — when it was long enough to matter — a pressure event.
+
+        Also the fleet's. A hold is the governor finding the node outside the
+        envelope, and per-run it only ever answered "did THIS run wait"; the
+        question an operator has is how often, on which node, and whether it
+        is getting worse."""
+        _metric("aggregation_governor_holds_total", kind=kind, node=self._gov_node() or "unknown")
+        _observe("aggregation_governor_hold_seconds", held, kind=kind)
         self._store_hold_s[kind] = self._store_hold_s.get(kind, 0.0) + held
         self._store_hold_last = {"kind": kind, "held_s": round(held, 1), "detail": detail}
         if held >= 60.0:
@@ -2551,6 +2578,10 @@ class AggregationPipeline:
         if pressure:
             ratio = max(ratio, self._read_pressure_pacing_ratio)
             self._read_pressure_yields += 1
+            # Users are starving NOW. Per-run this was a tally nobody saw
+            # until the run finished.
+            _metric("aggregation_read_pressure_yields_total",
+                    reason=str(pressure)[:32], node=self._gov_node() or "unknown")
         if bool(pressure) != self._yielding_to_reads:
             self._yielding_to_reads = bool(pressure)
             if pressure:
@@ -4160,6 +4191,8 @@ class AggregationPipeline:
             # times too high), and that case returned above without paying
             # for the scan at all.
             if not verdict.ok:
+                _metric('aggregation_write_budget_refusals_total',
+                        node=self._gov_node() or 'unknown')
                 raise MaterializationBudgetExceeded(format_refusal(
                     budget, verdict, graph=self.p._graph_name,
                     composition=(
@@ -4350,6 +4383,8 @@ class AggregationPipeline:
             composition = self._budget_composition()
             if note:
                 composition = f"{composition}; {note}"
+            _metric('aggregation_write_budget_refusals_total',
+                    node=self._gov_node() or 'unknown')
             raise MaterializationBudgetExceeded(format_refusal(
                 budget, verdict, graph=self.p._graph_name, composition=composition,
             ))

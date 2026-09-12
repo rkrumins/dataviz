@@ -249,6 +249,18 @@ class _SlotContext:
             await self._admission._release_slot(self._key, self._member)
 
 
+def _metric(name: str, **labels: str) -> None:
+    """Emit, and never let emitting fail an admission decision. Labels here
+    are bounded by construction — a slot kind, a node endpoint, a fixed
+    reason — which is what keeps the registry a fixed size."""
+    try:
+        from backend.app.jobs.metrics import increment
+
+        increment(name, **labels)
+    except Exception:  # noqa: BLE001 — a counter is never worth a job
+        pass
+
+
 class AggregationAdmission:
     """Shared write budget for aggregation jobs across all worker pods."""
 
@@ -563,7 +575,9 @@ class AggregationAdmission:
         key = f"agg:{'read' if reads else 'write'}slots:{node or endpoint_key(provider)}"
         limit = _READ_SLOT_LIMIT if reads else _SLOT_LIMIT
         member = uuid.uuid4().hex
+        node = node or endpoint_key(provider)
         deadline = time.monotonic() + _SLOT_WAIT_MAX_SECS
+        waited = False
         while True:
             try:
                 got = await self._redis.eval(
@@ -572,16 +586,27 @@ class AggregationAdmission:
                 )
             except Exception as exc:
                 self._warn_fail_open(f"{kind}-slot acquire", exc)
+                _metric("aggregation_slot_fail_open_total", kind=kind, node=node,
+                        reason="bus_error")
                 return None, None
             if int(got or 0) == 1:
+                if waited:
+                    _metric("aggregation_slot_waits_total", kind=kind, node=node)
                 return key, member
             if time.monotonic() >= deadline:
+                # THE signal. Past here the cap is not capping: every waiter
+                # proceeds, which is the state immediately before a node is
+                # over-admitted. It was a rate-limited log line and nothing
+                # else, so nobody could alert on it or see it trending.
                 logger.warning(
                     "aggregation admission: no %s slot on %s after %.0fs — "
                     "proceeding anyway (fail-open bias).",
                     kind, key, _SLOT_WAIT_MAX_SECS,
                 )
+                _metric("aggregation_slot_fail_open_total", kind=kind, node=node,
+                        reason="deadline")
                 return None, None
+            waited = True
             # Jittered wait — doubles as natural pacing under contention.
             await asyncio.sleep(2.0 + random.uniform(0, 3.0))
 

@@ -434,6 +434,18 @@ async def lifespan(_app: FastAPI):
     configure_json_logging()
     _log_auth_fingerprint()
 
+    # Metrics backend FIRST, so anything that counts during startup counts.
+    # Installing it is free and unconditional; the /metrics route that reads
+    # it is opt-in (METRICS_ENABLED). Until this call existed the façade was
+    # no-op in every process, which is why none of the governor, admission or
+    # pacing signals could be seen anywhere but one job's own record.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+
     # Interactive reads first: when the breaker proxy sees FalkorDB starve a
     # read (queue full, server-side or client deadline), stamp the shared
     # read-pressure key so aggregation writers in other pods yield their

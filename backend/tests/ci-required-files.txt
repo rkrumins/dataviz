@@ -54,6 +54,7 @@ tests/test_index_ddl_once.py
 tests/test_job_list_overlay.py
 tests/test_job_reaping.py
 tests/test_label_cache_warmup.py
+tests/test_metrics_backend.py
 tests/test_nav_catalogue.py
 tests/test_process_memory.py
 tests/test_projection_stalled_reconcile.py

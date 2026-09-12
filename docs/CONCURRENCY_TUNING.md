@@ -535,6 +535,28 @@ users start to starve; this is the preventive half. Keep it above
 `AGGREGATION_EXTRACT_CONCURRENCY`, or one job's own waves fill the node's
 allowance.
 
+### What to watch, and the one number that means "stop"
+
+Everything above is visible per run in Job History. That answers *did this
+run go badly*; it cannot answer *are we trending toward the incident*, and
+the second question is the one with time to act on it. With `METRICS_ENABLED`
+the fleet exports these:
+
+| Metric | Read it as |
+|---|---|
+| `aggregation_slot_fail_open_total{kind,node,reason="deadline"}` | **The one that means stop.** A rebuild waited the full `AGGREGATION_SLOT_WAIT_MAX_SECS` for a slot and proceeded anyway — the cap is no longer capping, and the node is being over-admitted. Nonzero and rising is the state immediately before an incident. |
+| `…{reason="bus_error"}` | The job-bus Redis is unreachable, so admission is degraded to per-process limits. Different remedy entirely — fix Redis, not the pacing. |
+| `aggregation_slot_waits_total{kind,node}` | Contention that *resolved*. Healthy in small numbers; a shard climbing here is the one to look at before it starts failing open. |
+| `aggregation_governor_holds_total{kind,node}` / `…_hold_seconds_{count,sum}` | How often the node is outside the envelope a rebuild may write inside, by reason (`fork`, `replica_lag`, `replica_loss`, memory). Sustained `fork` holds mean the store is forking on its own schedule — check the `--save` and AOF settings from §1 of the rollout. |
+| `aggregation_write_budget_refusals_total{node}` | Rebuilds refused before writing because the shard had no room. One is a correct decision; a trend is a shard to grow. |
+| `aggregation_read_pressure_yields_total{reason,node}` | Writers backing off because interactive reads are starving *right now*. |
+
+Scrape every process — each gunicorn worker, each aggregation worker, the
+control plane — and sum in the query. The counters are per process, as
+Prometheus expects; the worker is the one that raises most of them.
+
+**Alert on the first row.** Everything else is context for it.
+
 ### What the job's progress shows
 
 Every heartbeat carries the pace: rows in the last batch, seconds it took, the

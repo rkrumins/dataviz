@@ -7,6 +7,7 @@ from backend.app.api.v1.capability_gate import (
 from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
+    metrics as metrics_endpoint,
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
@@ -38,6 +39,12 @@ api_router = APIRouter()
 #   * auth.router (legacy): /signup, /forgot-password, /reset-password,
 #     /verify-invite — flows that don't issue session cookies. Will follow
 #     into the auth service in a later move.
+# Prometheus scrape, at /api/v1/metrics (this router is mounted under
+# /api/v1). Point the scrape config at that path; the route itself 404s
+# unless METRICS_ENABLED says otherwise (see the module).
+api_router.include_router(
+    metrics_endpoint.router, tags=["metrics"],
+)
 api_router.include_router(
     auth_session_router, prefix="/auth", tags=["auth"],
 )
