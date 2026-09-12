@@ -586,7 +586,16 @@ the **first checkpoint**, before any graph work. Resume rules:
   outage (resumable from the checkpoint); a memory refusal on a single row
   is the one terminal outcome. What a run learned is persisted per source
   (`data_source_state.observed_tuning`) and seeds the next run's ladder
-  where it is stricter than the knobs (`ignoreObserved` opts out).
+  where it is stricter than the knobs (`ignoreObserved` opts out). **A run
+  that did not complete is written too** — it is the run with the most to
+  teach, and its lesson used to be discarded, so an hour spent halving the
+  scan width down to 500 before dying left the retry starting wide and
+  hitting the same wall. The two paths differ in one way that matters: a
+  clean run writes `{}` and so CLEARS the previous lesson, because it proves
+  the narrowing is no longer needed (a hinted run re-grows its width during
+  the run); a failed run proves nothing of the sort, so an empty lesson is
+  not written and a failure for an unrelated reason — a dead node, a missing
+  ontology — cannot erase a valid narrowing.
 
 ### Replication backpressure, outage holds, and failing-over reads
 
@@ -832,6 +841,41 @@ graphs per shard, and a worker that died mid-run. What bounds each of them:
 | Two rebuilds each **pacing as if alone** on one node | The pacing FLOOR is only for a node this run has to itself: the governor reads the node's ledger on its own cadence, and any other holder puts the run back on the configured ceiling. | `_is_roomy` |
 | A worker that **died mid-run** | The exec lock is the liveness signal. The reconciler re-dispatches only when it is gone (≥90 s), by which time the graph lease (60 s) has expired too, so the resumed run does not park on a dead holder's lease. Auto-resumes are capped and the counter never slides. | `reconciler.py` |
 | A **cancel** issued through another pod | A durable Redis flag, polled by the running job's watchdog and checked again at pickup. | `cancel.py`, `worker.py` |
+| A run whose **worker is already gone** leaving a lying record | Every terminal path INSIDE the worker goes through one `finally` — seal the ledger, release the source on both mirrors, emit. Nothing reaches it when the process is gone, so the out-of-process reapers share the same closing: `reap_job` seals the open step (so the run names the stage it died in) and hands the source back (so it stops reading as in-flight). | `reap.py` |
+
+**Ending a run the worker cannot end itself.** An OOM-killed pod, an
+evicted node and a lost dispatch message all leave a row that no `finally`
+will ever close. Those are reaped by the reconciler (or, without a job-bus
+Redis, the scheduler's watchdog) — neither of which holds a ledger, an
+emitter or a provider. Writing only `job.status` there left two records
+lying, and both readings were wrong in ways an operator could not see:
+
+* the **ledger** kept a step marked `running`, and both readers of "where did
+  this die" (`failed_stage`, and the UI's `stoppedStage`) look for `failed`
+  or `cancelled` — so a crash-killed run showed NO failure stage, and the
+  per-source "keeps dying in Apply" tally skipped exactly the runs worth
+  counting;
+* the **source row** kept `aggregation_status` at `running`, which the
+  freshness column reads straight off and the stale-marker reconciler treats
+  as in flight — so a source reaped this way was deferred every tick,
+  forever, and never retried.
+
+`reap_job` is those reapers' equivalent of the worker's `finally`: stamp the
+row, seal the open step (keeping its own counters, so the stage still draws
+how far it got), and release the source on both mirrors under the rule
+`cancel()` already applied — a job that never started on a never-built source
+goes back to `none` so the never-built detector can queue its first build,
+anything else carries its own terminal status. Every read fails open: a
+reaper that raises leaves the row `running`, which is the state it exists to
+clear.
+
+Those two faults get their own failure categories, keyed off stable message
+prefixes rather than prose: **`worker_lost`** (the process vanished — the run
+was healthy, its checkpoint is intact, Resume continues) and
+**`never_dispatched`** (nothing ever claimed the row — check the worker fleet
+before re-triggering, or you just queue another). Both used to read as
+`unknown`, or — for the watchdog's old wording — as `timeout`, which sends an
+operator to raise a stall window that was never the problem.
 
 **Which node a run writes is on the run.** `run_stats.node`, written from the
 first checkpoint with a measured reading and re-read every checkpoint so it

@@ -129,6 +129,55 @@ idle shard-2 yield for thirty seconds, for nobody's benefit. Both halves key
 by the node that owns the starving graph now, resolved from the client's
 current slot map at no round-trip cost.
 
+**A run whose worker died left two records lying.** Every terminal path
+inside the worker passes through one `finally` — seal the step ledger,
+release the source on both mirrors, emit the terminal event. Nothing reaches
+it when the worker itself is gone: an OOM-killed pod, an evicted node, a lost
+dispatch. Those rows are reaped from another process, and those reapers wrote
+`job.status` and little else.
+
+So the **ledger** kept a step marked `running` forever, and both readers of
+"where did this die" — `failed_stage` on the server, `stoppedStage` in Job
+History — look for `failed` or `cancelled`. A crash-killed run therefore
+reported NO failure stage anywhere, and the data-source card's "this source
+keeps dying in Apply" tally skipped it entirely: exactly the runs worth
+counting, invisible. And the **source row** kept `aggregation_status` at
+`running`, which the freshness column reads straight off and the stale-marker
+reconciler treats as in flight — so a source reaped this way was deferred on
+every tick, forever, and never retried. `cancel()` already documented that
+rule and followed it; six other paths did not (the reconciler's four, the
+scheduler's watchdog, and crash recovery's cancelled branch).
+
+All six now close a run the way the worker's own `finally` does. The sealed
+stage keeps its own counters, so the rail still draws "9,000 of 12,000" for
+the stage it stopped in, and the rest of the run record — the writes the
+breaker's converging check reads — is untouched. Every read fails open: a
+reaper that raises would leave the row `running`, which is the state it
+exists to clear.
+
+**"Rebuild failed" is no longer the answer for a dead pod.** Two new failure
+categories, keyed off stable message prefixes rather than prose, in the
+convention `write budget:` established. **Worker died** says the process
+running the rebuild vanished — the run was healthy, everything it wrote is
+durable, the checkpoint is intact, and Resume continues from it. **Never
+started** says nothing ever claimed the queued row, so the fix is the worker
+fleet and re-triggering first just queues another row nothing will claim.
+Both used to read as `unknown`, the least actionable bucket there is — or,
+for the watchdog's old wording, as `timeout`, which sends an operator to
+raise a stall window that was never the problem. No time limit brings back an
+evicted pod.
+
+**A failed run now teaches the next one.** `observed_tuning` — the narrowest
+scan width a run needed, whether it had to read serially, the reconcile
+strategy it switched to — was written only when a run COMPLETED. So a rebuild
+that spent an hour halving its scan width down to 500 under memory pressure
+and then died taught the retry nothing, and the retry started wide and hit
+the same wall. It is the run with the most to teach. The two paths still
+differ where they should: a clean run writes `{}` and clears the previous
+lesson, because it proves the narrowing is no longer needed; a failed run
+writes only a non-empty lesson, so a failure for an unrelated reason — a dead
+node, a missing ontology — cannot erase a valid one.
+
 **The control plane stopped fingerprinting every graph, every minute.**
 `AggregationScheduler._tick` held a second, older drift detector beside the
 probe lane: for every ready source, every 60 seconds, serially, it fetched a

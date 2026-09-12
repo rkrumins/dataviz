@@ -24,7 +24,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
-    "updated": "2026-08-18",
+    "updated": "2026-09-12",
     "path": "docs/architecture-when-scaling.md"
   },
   "aggregation-pipeline": {
@@ -76,7 +76,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/ASSIGNMENTS.md"
   },
   "feature-aggregation-reconciliation": {
-    "updated": "2026-09-07",
+    "updated": "2026-09-12",
     "path": "docs/features/aggregation-reconciliation.md"
   },
   "feature-external-change-notification": {
