@@ -53,19 +53,33 @@ def test_the_list_is_sorted_and_has_no_duplicates() -> None:
 def test_the_required_job_actually_reads_the_list() -> None:
     """The list is not the gate — the workflow step that reads it is. Editing
     that step away leaves a file full of paths that looks exactly like
-    coverage and enforces nothing."""
-    workflow = _WORKFLOW.read_text()
-    # The job body only — the file header discusses both jobs in prose.
-    _, _, body = workflow.partition("  connectivity-suite:")
-    required, _, informational = body.partition("full-suite:")
-    assert _LIST.name in required, (
+    coverage and enforces nothing.
+
+    Read as YAML, not sliced out of the file's text. The text form asked
+    whether ``continue-on-error`` appeared anywhere between the required job's
+    name and ``full-suite:`` — so adding any job between the two (the live
+    FalkorDB job, say, which is informational by design) put ITS
+    ``continue-on-error`` inside the slice and failed this on a workflow that
+    was perfectly correct. The question was always about one job; ask it of
+    that job.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    required = jobs.get("connectivity-suite")
+    assert required is not None, (
+        f"{_WORKFLOW.name} no longer has a `connectivity-suite` job — the one "
+        f"that gates {_LIST.name}."
+    )
+    steps = yaml.safe_dump(required.get("steps", []))
+    assert _LIST.name in steps, (
         f"The REQUIRED job in {_WORKFLOW.name} no longer reads {_LIST.name}. "
         f"Every file it names is ungated until it does."
     )
-    assert "continue-on-error" not in required, (
+    assert not required.get("continue-on-error"), (
         "The job reading the list became informational; it gates nothing now."
     )
-    assert informational, "Expected a `full-suite:` job after the required one."
+    assert "full-suite" in jobs, "Expected the informational full-suite job."
 
 
 def test_the_graph_read_path_is_gated() -> None:
