@@ -149,3 +149,42 @@ describe('JobRow adjust this run', () => {
         expect(screen.queryByRole('button', { name: /Adjust this run/ })).not.toBeInTheDocument()
     })
 })
+
+// ── the whole run, on the clipboard ──────────────────────────────────────
+//
+// Everything in the record is already on this page, spread across the stage
+// rail, the Run settings disclosure, the advisories and the error block —
+// which is exactly why attaching it to a ticket meant five expanders and a
+// screenshot, and screenshots lose the numbers.
+
+describe('copy run record', () => {
+    it('puts the run’s whole record on the clipboard', async () => {
+        // userEvent.setup() installs jsdom's stub clipboard; navigator's own
+        // property is getter-only, so spy on the stub rather than replace it.
+        const user = userEvent.setup()
+        const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+
+        renderRow(job({ id: 'agg_copy1', errorMessage: 'shard had room for 120,000 more edges' }))
+        await user.click(screen.getByTestId('copy-run-record'))
+
+        expect(writeText).toHaveBeenCalledTimes(1)
+        const text = writeText.mock.calls[0][0] as string
+        expect(text).toContain('Aggregation run agg_copy1')
+        expect(text).toContain('Scan range width')
+        expect(text).toContain('shard had room for 120,000 more edges')
+        expect(await screen.findByText('Copied')).toBeInTheDocument()
+    })
+
+    it('does not break the row when the clipboard refuses', async () => {
+        // An insecure origin, or permission denied. The record is not lost —
+        // it is the page the operator is already looking at.
+        const user = userEvent.setup()
+        vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new Error('denied'))
+
+        renderRow(job({ id: 'agg_copy2' }))
+        await user.click(screen.getByTestId('copy-run-record'))
+
+        expect(screen.queryByText('Copied')).toBeNull()
+        expect(screen.getByText('Copy record')).toBeInTheDocument()
+    })
+})

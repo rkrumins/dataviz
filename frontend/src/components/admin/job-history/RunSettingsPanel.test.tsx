@@ -8,7 +8,9 @@ import { describe, expect, it } from 'vitest'
 
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { RunSettingsPanel } from './RunSettingsPanel'
-import { adaptationSentences, presetForRun, runSettingsRows, paceSentence, } from './runSettings'
+import {
+    adaptationSentences, presetForRun, runSettingsRows, paceSentence, tuningDiffRows,
+} from './runSettings'
 
 const EFFECTIVE = {
     scan_range_width: 200_000, max_pending_pairs: 50_000_000, apply_chunk: 20_000, delete_chunk: 10_000,
@@ -173,5 +175,71 @@ describe('adaptationSentences — worker memory', () => {
             .toContain('Flushed 3× on worker memory (peak 2.9 GB of 4.0 GB)')
         expect(adaptationSentences({ memory_rollups: 2, rss_high_water_mb: 512 }))
             .toContain('Rolled up early 2× on worker memory (peak 512 MB)')
+    })
+})
+
+
+// ── what changed since the last run ──────────────────────────────────────
+//
+// "Why is this run slower than the last one" was answerable from two of
+// these panels open side by side, which is to say it was not answerable.
+// Both runs carry every knob AND where it came from, so the interesting
+// half — a knob the pipeline tuned ITSELF versus one a person set — is free.
+
+describe('tuningDiffRows', () => {
+    it('names what moved, from what to what, and who moved it', () => {
+        const changes = tuningDiffRows(
+            { ...EFFECTIVE, scan_range_width: 50_000, sources: { ...EFFECTIVE.sources, scan_range_width: 'hint' } },
+            EFFECTIVE,
+        )
+        expect(changes).toEqual([{
+            key: 'scan_range_width', label: 'Scan range width',
+            from: '200,000', to: '50,000', source: 'hint',
+        }])
+    })
+
+    it('says nothing about a run with nothing to compare against', () => {
+        expect(tuningDiffRows(EFFECTIVE, null)).toEqual([])
+        expect(tuningDiffRows(null, EFFECTIVE)).toEqual([])
+        expect(tuningDiffRows(EFFECTIVE, EFFECTIVE)).toEqual([])
+    })
+
+    it('does not call a knob one run never recorded a change', () => {
+        // That is a diff of the RECORD, not of the settings.
+        const partial = { scan_range_width: 200_000, sources: {} }
+        expect(tuningDiffRows(EFFECTIVE, partial).map(c => c.key)).toEqual([])
+    })
+})
+
+describe('RunSettingsPanel — changed since the last run', () => {
+    it('shows the diff when the previous run recorded its settings', () => {
+        render(
+            <RunSettingsPanel
+                job={job({ runStats: { effective_tuning: EFFECTIVE } } as never)}
+                previousJob={job({
+                    id: 'agg_0',
+                    runStats: { effective_tuning: { ...EFFECTIVE, scan_range_width: 400_000 } },
+                } as never)}
+            />,
+        )
+        const diff = screen.getByTestId('tuning-diff')
+        expect(within(diff).getByText('Scan range width')).toBeInTheDocument()
+        expect(within(diff).getByText('400,000')).toBeInTheDocument()
+        expect(within(diff).getByText('200,000')).toBeInTheDocument()
+    })
+
+    it('shows nothing when the settings did not move', () => {
+        render(
+            <RunSettingsPanel
+                job={job({ runStats: { effective_tuning: EFFECTIVE } } as never)}
+                previousJob={job({ id: 'agg_0', runStats: { effective_tuning: EFFECTIVE } } as never)}
+            />,
+        )
+        expect(screen.queryByTestId('tuning-diff')).toBeNull()
+    })
+
+    it('shows nothing when there is no previous run at all', () => {
+        render(<RunSettingsPanel job={job({ runStats: { effective_tuning: EFFECTIVE } } as never)} />)
+        expect(screen.queryByTestId('tuning-diff')).toBeNull()
     })
 })

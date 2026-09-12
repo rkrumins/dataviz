@@ -56,6 +56,19 @@ describe('describeStep', () => {
         expect(v.open).toBe(false)
     })
 
+    it('a stage the run died in says how far it got of what it owed', () => {
+        // "900 aggregated edges" reads as an achievement; the gap is the point.
+        const v = describeStep(
+            step({
+                id: 'applying', state: 'failed', secs: 90,
+                done: 900, total: 1_200, unit: 'aggregated edges',
+            }),
+            T0,
+        )
+        expect(v.detail).toBe('900 of 1,200 aggregated edges')
+        expect(v.detail).not.toContain('left')   // it is not coming
+    })
+
     it('a parked stage says what it is waiting for instead of its counters', () => {
         const v = describeStep(
             step({

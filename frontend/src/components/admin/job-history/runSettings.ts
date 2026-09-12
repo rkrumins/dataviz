@@ -127,6 +127,52 @@ export function runSettingsRows(
     return rows
 }
 
+/**
+ * What changed between this run's settings and the last one's.
+ *
+ * "Why is this run slower than the last one" is answerable from two Run
+ * settings panels open side by side, which is to say it is not answerable.
+ * Both runs carry every knob's value AND where it came from, so the
+ * interesting half is free: a knob that moved because the LAST run learned
+ * something (`hint`) is the pipeline tuning itself, and reads very
+ * differently from one a person set.
+ */
+export interface TuningChange {
+    key: string
+    label: string
+    from: string
+    to: string
+    /** Where the NEW value came from. */
+    source: RowSource
+}
+
+export function tuningDiffRows(
+    eff: EffectiveTuningSnapshot | null | undefined,
+    prev: EffectiveTuningSnapshot | null | undefined,
+): TuningChange[] {
+    if (!eff || !prev) return []
+    const sources = eff.sources ?? {}
+    const out: TuningChange[] = []
+    for (const spec of ROW_SPECS) {
+        const value = eff[spec.key]
+        const before = prev[spec.key]
+        // A knob absent from either run is not a change — it is a run that
+        // did not record it, and inventing a "—  → 500" row from that is a
+        // diff of the record rather than of the settings.
+        if (value === undefined || before === undefined) continue
+        if (value === before) continue
+        out.push({
+            key: spec.key,
+            label: spec.label,
+            from: spec.fmt(before),
+            to: spec.fmt(value),
+            source: sources[spec.key] === 'hint' ? 'hint'
+                : sources[spec.key] === 'job' ? 'job' : 'env',
+        })
+    }
+    return out
+}
+
 /** Legacy rows: the frozen tuning a job carried before the record existed. */
 export function frozenTuningRows(tuning: Record<string, unknown> | null | undefined): RunSettingRow[] {
     if (!tuning) return []

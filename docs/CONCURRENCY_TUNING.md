@@ -588,6 +588,23 @@ compares them for free.
   one dying in Extract has a scan it cannot finish — the same red rows, two
   different problems.
 
+### What changed since the last run, and getting it into a ticket
+
+*Run settings* shows a **Changed since the last run** list whenever both runs
+recorded their settings: the knob, what it was, what it is, and where the new
+value came from. That last part is the interesting half — `Learned from last
+run` means the pipeline tuned itself (the previous run hit pressure and the
+narrower value was carried forward), which reads very differently from
+`Job override`, where a person did it.
+
+**Copy record** on any row puts the whole run on the clipboard as plain text:
+identity and the node it wrote, every stage with its state, duration, share
+and how far it got, the result and the budget that governed it, what it ran
+with, what the ladder adapted, the advisories and the error verbatim. All of
+it is already on the page — spread across four disclosures — which is exactly
+why attaching it to a ticket used to mean a screenshot, and screenshots lose
+the numbers.
+
 ### Where the wall clock went
 
 A finished run carries a strip under its stage rail showing each stage's

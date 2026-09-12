@@ -13,18 +13,21 @@
  * the job carried, labelled as such.
  */
 import { useMemo } from 'react'
-import { Activity, Sparkles, Wrench } from 'lucide-react'
+import { Activity, ArrowRight, Sparkles, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AdaptedRunState, AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 import {
-    SOURCE_LABEL, SOURCE_TONE, adaptationSentences, frozenTuningRows, paceSentence, presetForRun, runSettingsRows,
+    SOURCE_LABEL, SOURCE_TONE, adaptationSentences, frozenTuningRows, paceSentence, presetForRun,
+    runSettingsRows, tuningDiffRows,
 } from './runSettings'
 
-export function RunSettingsPanel({ job, storedGlobal, live }: {
+export function RunSettingsPanel({ job, storedGlobal, live, previousJob }: {
     job: AggregationJobResponse
     storedGlobal?: AggregationTuning | null
     /** The live overlay's adapted scalars while the job runs; wins over the polled record. */
     live?: Partial<AdaptedRunState> | null
+    /** The run before this one on the same source, for the settings diff. */
+    previousJob?: AggregationJobResponse | null
 }) {
     const eff = job.runStats?.effective_tuning ?? null
     const rows = useMemo(
@@ -44,6 +47,12 @@ export function RunSettingsPanel({ job, storedGlobal, live }: {
     const pace = useMemo(
         () => paceSentence(job.runStats?.pace, adapted?.eases),
         [job.runStats?.pace, adapted?.eases],
+    )
+    // What moved since the last run. "Why is this one slower" is answerable
+    // from two of these panels open side by side, which is to say it is not.
+    const changes = useMemo(
+        () => tuningDiffRows(eff, previousJob?.runStats?.effective_tuning),
+        [eff, previousJob?.runStats?.effective_tuning],
     )
     const running = job.status === 'running'
 
@@ -111,6 +120,27 @@ export function RunSettingsPanel({ job, storedGlobal, live }: {
                     )}
                 </div>
             </div>
+
+            {changes.length > 0 && (
+                <div data-testid="tuning-diff">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5">
+                        Changed since the last run
+                    </p>
+                    <ul className="space-y-1">
+                        {changes.map(change => (
+                            <li key={change.key} className="flex items-center gap-2 text-[11px]">
+                                <span className="text-ink-secondary">{change.label}</span>
+                                <span className="tabular-nums text-ink-muted line-through">{change.from}</span>
+                                <ArrowRight className="w-3 h-3 text-ink-muted flex-shrink-0" aria-hidden="true" />
+                                <span className="tabular-nums font-semibold text-ink">{change.to}</span>
+                                <span className={cn('px-1.5 py-0.5 rounded text-[9px] font-semibold', SOURCE_TONE[change.source])}>
+                                    {SOURCE_LABEL[change.source]}
+                                </span>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
         </section>
     )
 }

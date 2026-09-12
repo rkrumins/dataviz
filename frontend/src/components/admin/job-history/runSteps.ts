@@ -65,13 +65,18 @@ export function describeStep(step: RunStep, nowMs: number): StepView {
     const total = typeof step.total === 'number' && step.total > 0 ? step.total : null
     const done = typeof step.done === 'number' ? step.done : null
 
+    // A stage that ended BADLY reports how far it got of what it owed: the
+    // gap is the point, and "900 aggregated edges" reads as an achievement
+    // rather than as the place the run stopped.
+    const stopped = step.state === 'failed' || step.state === 'cancelled'
+
     let detail: string | null = null
     if (step.state === 'waiting' && step.waiting_for) {
         detail = `waiting — ${step.waiting_for}`
     } else if (done != null && total != null) {
-        detail = open
+        detail = open || stopped
             ? `${_fmt(done)} of ${_fmt(total)} ${step.unit ?? ''}`.trim() +
-              (total > done ? ` · ${_fmt(total - done)} left` : '')
+              (open && total > done ? ` · ${_fmt(total - done)} left` : '')
             : `${_fmt(done)} ${step.unit ?? ''}`.trim()
     } else if (done != null) {
         detail = `${_fmt(done)} ${step.unit ?? ''}`.trim()

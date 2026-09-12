@@ -13,6 +13,17 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**What changed since the last run, and a run you can paste into a ticket.**
+Both runs record every knob AND where its value came from, so *Run settings*
+now lists what moved — and says whether the pipeline tuned itself (`Learned
+from last run`, the previous run hit pressure and carried the narrower value
+forward) or a person did. And **Copy record** puts a run's whole record on
+the clipboard as text: the node it wrote, every stage with its state,
+duration, share and how far it got, the result, the settings, what the ladder
+adapted, the advisories and the error. All of it was already on the page,
+across four disclosures, which is why attaching it to a ticket used to mean a
+screenshot.
+
 **Where a run's wall clock went, and whether one stage is growing.** A
 finished run shows each stage's share of the run under its rail — the
 durations were already there, the share is what reads at a glance, and it is

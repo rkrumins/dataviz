@@ -1,8 +1,9 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
     AlertTriangle, Server, FolderOpen, ShieldCheck, ChevronDown, Gauge,
+    Copy, Check,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
@@ -23,6 +24,7 @@ import { AdjustRunningJob } from './AdjustRunningJob'
 import { REASON_LABEL as RECONCILE_REASON_LABEL } from '../Freshness/DriftStateBadge'
 import { ReconcileWhy } from '../Freshness/reconcileEvidence'
 import { remainingSecsFromLedger, STEP_LABELS } from './runSteps'
+import { runRecordText } from './runRecord'
 
 /**
  * History-informed ETA: uses the PREVIOUS completed run's durations
@@ -147,6 +149,42 @@ export interface JobRowProps {
     storedGlobal?: AggregationTuning | null
     /** Raise a pending or running job's time limits without cancelling it. */
     onExtend?: (job: AggregationJobResponse, patch: JobLimitsPatch) => void | Promise<void>
+}
+
+/**
+ * The whole run, as text, on the clipboard. Everything in it is already on
+ * this page — spread across the stage rail, the Run settings disclosure, the
+ * advisories and the error block — which is exactly why attaching it to a
+ * ticket meant five expanders and a screenshot.
+ */
+function CopyRunRecord({ job, meta }: { job: AggregationJobResponse; meta?: DataSourceMeta }) {
+    const [copied, setCopied] = useState(false)
+    const copy = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(runRecordText(job, meta))
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1800)
+        } catch {
+            // No clipboard permission (or an insecure origin). The record is
+            // not lost — it is the page the operator is looking at.
+            setCopied(false)
+        }
+    }, [job, meta])
+    return (
+        <Tip label="Copy this run's full record — stages, settings, result, advisories — as text">
+            <button
+                type="button"
+                onClick={e => { e.stopPropagation(); void copy() }}
+                data-testid="copy-run-record"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+            >
+                {copied
+                    ? <Check className="w-3 h-3 text-emerald-500" aria-hidden="true" />
+                    : <Copy className="w-3 h-3" aria-hidden="true" />}
+                {copied ? 'Copied' : 'Copy record'}
+            </button>
+        </Tip>
+    )
 }
 
 export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob, storedGlobal, onExtend }: JobRowProps) {
@@ -594,7 +632,10 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     )}
                                                 </div>
                                             </div>
-                                            <span className="font-mono text-[10px] text-ink-muted/50 select-all">{job.id}</span>
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                <CopyRunRecord job={job} meta={meta} />
+                                                <span className="font-mono text-[10px] text-ink-muted/50 select-all">{job.id}</span>
+                                            </div>
                                         </div>
 
                                         {/* Progress bar (running / pending) */}
@@ -846,7 +887,10 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         {/* What this run ran with, and what it adapted to */}
                                         {showSettings && job.triggerSource !== 'purge' && (
                                             <div id={`run-settings-${job.id}`}>
-                                                <RunSettingsPanel job={job} storedGlobal={storedGlobal} live={liveAdapted} />
+                                                <RunSettingsPanel
+                                                    job={job} storedGlobal={storedGlobal}
+                                                    live={liveAdapted} previousJob={previousJob}
+                                                />
                                             </div>
                                         )}
 
