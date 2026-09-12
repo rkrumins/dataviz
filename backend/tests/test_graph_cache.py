@@ -2368,15 +2368,17 @@ async def test_a_stale_fallback_is_not_counted_as_a_hit() -> None:
     assert f"{ENDPOINT_CHILDREN}:hit" not in fields
 
 
-def test_the_ratio_excludes_stale_and_bypass() -> None:
+def test_the_ratio_excludes_stale_bypass_and_too_large() -> None:
     """hit / (hit + miss + stale). A bypass is not a cache outcome at all —
     the endpoint was off or Redis was unreachable — so it must not dilute the
-    denominator and make a disabled cache look like a missing one."""
+    denominator and make a disabled cache look like a missing one. Neither is
+    ``too_large``, which rides alongside its own miss to say WHY the repeat
+    will miss too: counting it again would double the miss."""
     import backend.app.services.graph_cache as gc
 
-    assert gc.CACHE_OUTCOMES == ("hit", "miss", "stale", "bypass")
-    # 3 hits, 1 miss, 1 stale, 10 bypass -> 3/5, not 3/15 and not 4/5.
-    row = {"hit": 3, "miss": 1, "stale": 1, "bypass": 10}
+    assert gc.CACHE_OUTCOMES == ("hit", "miss", "stale", "bypass", "too_large")
+    # 3 hits, 1 miss, 1 stale, 10 bypass, 1 too_large -> 3/5.
+    row = {"hit": 3, "miss": 1, "stale": 1, "bypass": 10, "too_large": 1}
     served = row["hit"] + row["miss"] + row["stale"]
     assert round(row["hit"] / served, 4) == 0.6
 
@@ -2514,3 +2516,130 @@ async def test_a_nested_degraded_payload_still_forces_the_negative_ttl() -> None
     assert _payload_sets(redis)[-1].kwargs["ex"] == graph_cache._NEGATIVE_TTL
     keys = [call.args[0] for call in _payload_sets(redis)]
     assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+
+
+# ─── an empty rollup is an answer, not a transient miss ────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_empty_rollup_answer_keeps_the_full_ttl() -> None:
+    """The reported symptom was an aggregated hit ratio pinned at 0%, and
+    this is the half of it that survives a healthy fingerprint.
+
+    A container canvas fans out chunks of container URNs, and on any real
+    graph most chunks have no lineage between them — so MOST aggregated
+    requests return no edges. Each was cached for five seconds and then
+    recomputed, forever, for an answer that had not changed.
+
+    It cannot change unnoticed either: ``invalidate_aggregated_reads``
+    bumps the generation on every event that rewrites the :AGGREGATED
+    layer, which is more than any other endpoint has.
+    """
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_AggregatedLike(aggregated_edges=[]))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_AGGREGATED,
+        params={"sourceUrns": ["a", "b"]}, compute=compute, model_cls=_AggregatedLike,
+    )
+
+    ttls = [c.kwargs["ex"] for c in _payload_sets(redis)]
+    assert ttls, "the empty answer was not stored at all"
+    assert graph_cache._NEGATIVE_TTL not in ttls, (
+        "an empty rollup is the correct answer for this generation, and the "
+        "generation moves the moment it stops being"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_children_answer_still_takes_the_short_window() -> None:
+    """The exemption is for the endpoint with the invalidation choke point,
+    not for emptiness in general. Nothing bumps the generation when a
+    container gains its first child from outside the app."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN, params={},
+        compute=AsyncMock(return_value=_Result(value=0, children=[])),
+        model_cls=_Result,
+    )
+    assert _payload_sets(redis)[-1].kwargs["ex"] == graph_cache._NEGATIVE_TTL
+
+
+@pytest.mark.asyncio
+async def test_an_empty_rollup_is_still_kept_out_of_the_outage_mirror() -> None:
+    """The two keys answer different questions. "No lineage between these
+    containers" is true now; as an outage fallback it is indistinguishable
+    from real data, so an unreachable store would quietly present an empty
+    graph as fact."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_AGGREGATED, params={},
+        compute=AsyncMock(return_value=_AggregatedLike(aggregated_edges=[])),
+        model_cls=_AggregatedLike,
+    )
+    keys = [c.args[0] for c in _payload_sets(redis)]
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys), keys
+
+
+@pytest.mark.asyncio
+async def test_a_second_identical_rollup_read_is_a_hit() -> None:
+    """The whole point, stated as the operator would: ask twice, compute
+    once."""
+    store: dict = {}
+
+    class _Store(AsyncMock):
+        async def get(self, key):
+            return store.get(key)
+
+        async def set(self, key, value, ex=None, **kw):
+            store[key] = value
+
+    redis = _make_redis()
+    redis.get.side_effect = lambda k: store.get(k)
+
+    async def _set(key, value, ex=None, **kw):
+        store[key] = value
+
+    redis.set.side_effect = _set
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_AggregatedLike(aggregated_edges=[{"a": 1}]))
+    kwargs = dict(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_AGGREGATED,
+        params={"sourceUrns": ["a", "b"]}, compute=compute,
+        model_cls=_AggregatedLike,
+    )
+    await cache.get_or_compute(**kwargs)
+    await cache.get_or_compute(**kwargs)
+    assert compute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_answer_too_large_to_store_says_so_instead_of_reading_as_0_percent(
+    monkeypatch,
+) -> None:
+    """A cache whose answers never fit is indistinguishable from a broken
+    one unless something counts it. The read is still a miss — it was — but
+    ``too_large`` says why every repeat of it will be too, and it stays out
+    of the ratio's denominator so it cannot flatter or distort it."""
+    monkeypatch.setattr(graph_cache, "_MAX_PAYLOAD_BYTES", 16)
+    recorded: list = []
+    monkeypatch.setattr(
+        graph_cache._stats_recorder, "record",
+        lambda cache, scope, endpoint, outcome: recorded.append(outcome),
+    )
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_AGGREGATED, params={},
+        compute=AsyncMock(return_value=_AggregatedLike(
+            aggregated_edges=[{"urn": "x" * 200}],
+        )),
+        model_cls=_AggregatedLike,
+    )
+    assert recorded == ["miss", "too_large"]
+    assert "too_large" in graph_cache.CACHE_OUTCOMES
+    # …and it is not one of the three the ratio divides by.
+    assert "too_large" not in ("hit", "miss", "stale")

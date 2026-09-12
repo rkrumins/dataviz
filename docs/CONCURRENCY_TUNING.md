@@ -240,11 +240,30 @@ signal, a forced refresh — still converges. A failed post-run probe also no
 longer overwrites the stored fingerprint with `""`, which used to poison the
 gate permanently.
 
-To confirm it on a live source: the refresh-event audit rows show
-`gate: "unknown"` for checks that could not measure, and `gate: "changed"` for
-real ones. If the ratio is still 0% with no `changed` rows, the reads genuinely
-differ — the canvas asks for a different set of container URNs each time — and
-the cache key is doing its job.
+The second cause survives a healthy fingerprint and is specific to rollups. An
+answer with **no aggregated edges** used to take the 5-second negative TTL, on
+the general principle that an empty answer may be a transient miss. For this
+endpoint it is not: `invalidate_aggregated_reads` bumps the generation on every
+event that rewrites the `:AGGREGATED` layer — a run completing, a run dying
+mid-write, a purge, a skip — so an empty rollup is the correct answer for its
+generation and cannot go stale unnoticed. And a container canvas fans out chunks
+of container URNs, of which on any real graph *most have no lineage between
+them*, so most aggregated requests are empty. Each was recomputed every five
+seconds. They keep the full TTL now; the mirror still excludes them, because
+"no lineage" as an outage fallback is indistinguishable from real data.
+
+A third cause is a cap rather than a bug, and it used to be invisible: an answer
+larger than `GRAPH_CACHE_MAX_PAYLOAD_BYTES` (4 MiB) is computed and never
+stored, so every repeat misses. That now counts as `too_large` beside its own
+miss — outside the ratio, so it neither flatters nor distorts it — and Admin →
+Graph store shows it. A flat 0% with a non-zero *Too large* is a request that
+needs narrowing or a cap that needs raising, not a broken cache.
+
+To confirm which one you have on a live source: the refresh-event audit rows
+show `gate: "unknown"` for checks that could not measure and `gate: "changed"`
+for real ones; the cache card shows `too_large`. If the ratio is still 0% with
+neither, the reads genuinely differ — the canvas asks for a different set of
+container URNs each time — and the cache key is doing its job.
 
 ### Aggregation runs make the platform unusable
 

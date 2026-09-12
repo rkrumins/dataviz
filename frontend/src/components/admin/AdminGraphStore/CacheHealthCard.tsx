@@ -192,6 +192,24 @@ export function CacheHealthCard({
                                 </div>
                             </HoverTip>
                         )}
+                        {totals && (totals.too_large ?? 0) > 0 && (
+                            <HoverTip
+                                label="Too large to store"
+                                detail={
+                                    'These answers exceeded GRAPH_CACHE_MAX_PAYLOAD_BYTES, so they '
+                                    + 'were computed and never stored — which is why every repeat of '
+                                    + 'them misses as well. Narrow the request or raise the cap. '
+                                    + 'Counted beside its own miss, never inside the percentage.'
+                                }
+                            >
+                                <div>
+                                    <p className="text-[10px] uppercase tracking-wide text-ink-muted">Too large</p>
+                                    <span className="text-sm font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                                        {(totals.too_large ?? 0).toLocaleString()}
+                                    </span>
+                                </div>
+                            </HoverTip>
+                        )}
                         {totals && totals.bypass > 0 && (
                             <HoverTip
                                 label="Cache not consulted"

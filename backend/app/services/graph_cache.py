@@ -502,11 +502,15 @@ class GraphCache:
             # other request on it, for every other data source, in proportion
             # to the biggest response any one of them returned.
             payload = await asyncio.to_thread(result.model_dump_json, by_alias=True)
-            await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
+            stored = await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
             await self._set_lkg(scope, endpoint, params, result, gen, payload=payload)
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             _stats_recorder.record(self, scope, endpoint, "miss")
+            if stored == "too_large":
+                # The read was a miss and is counted as one; this says why
+                # the NEXT identical read will be too.
+                _stats_recorder.record(self, scope, endpoint, "too_large")
             return result
         except (ProviderBusy, ProviderLoading) as exc:
             # NOT an inability to answer, and both subclass ProviderUnavailable
@@ -810,13 +814,18 @@ class GraphCache:
         ttl_seconds: Optional[int],
         endpoint: str,
         payload: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         """Persist `result`, serializing it only if the caller has not already
         (see the single off-loop serialization in ``get_or_compute``). Failures
         are swallowed — the compute already succeeded, so failing the response
-        on a write error would be a self-inflicted regression."""
+        on a write error would be a self-inflicted regression.
+
+        Returns ``"too_large"`` when the answer exceeded the payload cap and
+        was therefore NOT stored, else ``"stored"``. The caller counts the
+        first case, because an endpoint whose answers never fit is
+        indistinguishable from a broken cache unless something says so."""
         ttl = _resolve_ttl(ttl_seconds, endpoint)
-        if _is_empty_result(result):
+        if _is_empty_result(result, endpoint):
             ttl = _NEGATIVE_TTL
         elif _is_incomplete_result(result):
             ttl = _NEGATIVE_TTL
@@ -829,10 +838,11 @@ class GraphCache:
                     endpoint, cache_key, len(payload), _MAX_PAYLOAD_BYTES,
                 )
                 await self._cache_redis.delete(cache_key)
-                return
+                return "too_large"
             await self._cache_redis.set(cache_key, payload, ex=ttl)
         except (RedisError, Exception) as exc:
             logger.warning("graph_cache: SET failed (%s)", exc)
+        return "stored"
 
     async def _set_lkg(
         self,
@@ -857,6 +867,20 @@ class GraphCache:
         must not become the outage fallback either. Skipped when
         ``_LKG_TTL`` is 0 (operator-disabled). Failures are swallowed for
         the same reason as ``_set``.
+
+        The empty rule is asked here WITHOUT the endpoint, so an empty
+        aggregated answer keeps the full TTL on the primary key (see
+        :func:`_is_empty_result`) and is still kept out of the mirror. The
+        asymmetry is deliberate and the two keys answer different
+        questions. The primary key answers "what is true now", and for the
+        aggregated endpoint an empty rollup is true now and stays true
+        until the generation moves. The mirror answers "what do we show
+        when the store cannot be reached", and there "no lineage between
+        these containers" is indistinguishable to the reader from real
+        data — so an outage would quietly present an empty graph as fact.
+        The cost of keeping it out is that such a key recomputes once its
+        TTL expires instead of being promoted, which is the behaviour
+        every endpoint had before promotion existed.
         """
         if _LKG_TTL <= 0:
             return
@@ -1078,12 +1102,34 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
     return _DEFAULT_CHILDREN_TTL
 
 
-def _is_empty_result(result: BaseModel) -> bool:
-    """Detect "empty" responses worth caching only briefly. Currently:
-    a ChildrenWithEdgesResult with no children, an AggregatedEdgeResult
-    with no aggregated edges, or a TraceResult with no nodes. Returning
-    True shortens the TTL to the negative-cache window so a transient
-    miss doesn't pin the empty answer for 30-60s."""
+def _is_empty_result(result: BaseModel, endpoint: Optional[str] = None) -> bool:
+    """Detect "empty" responses worth caching only briefly — a
+    ChildrenWithEdgesResult with no children, or a TraceResult with no
+    nodes. Returning True shortens the TTL to the negative-cache window so
+    a transient miss does not pin the empty answer.
+
+    ``ENDPOINT_AGGREGATED`` is deliberately exempt, and the reason is that
+    it is the one endpoint with a dedicated invalidation choke point.
+    :func:`invalidate_aggregated_reads` bumps the generation on EVERY event
+    that rewrites the :AGGREGATED layer — a run completing, a run dying
+    mid-write, a purge, a skip — so an empty rollup answer cannot go
+    silently stale the way an empty children answer can. It is the correct
+    answer for this generation, and the generation moves the moment it
+    stops being correct.
+
+    What the five-second window cost instead: a container canvas fans out
+    chunks of container URNs, and on any real graph most chunks have no
+    lineage between them, so MOST aggregated requests are empty. Each one
+    was recomputed every five seconds — a steady stream of provider work
+    for an answer that had not changed and could not change unnoticed, and
+    an aggregated hit ratio that could never rise.
+
+    This is the same argument ``_is_incomplete_result`` already makes for a
+    truncated answer: deterministic for (graph, request), invalidated by
+    the generation, so it keeps the full TTL.
+    """
+    if endpoint == ENDPOINT_AGGREGATED:
+        return False
     children = getattr(result, "children", None)
     if isinstance(children, list) and len(children) == 0:
         return True
@@ -1334,7 +1380,7 @@ _STATS_TTL_S = _STATS_BUCKET_S * _STATS_BUCKETS_KEPT
 #: The outcomes worth telling apart. ``stale`` is a hit that served the
 #: last-known-good snapshot — it kept the user moving but it is NOT the cache
 #: working as intended, so it never counts toward the hit ratio.
-CACHE_OUTCOMES = ("hit", "miss", "stale", "bypass")
+CACHE_OUTCOMES = ("hit", "miss", "stale", "bypass", "too_large")
 
 
 def _stats_key(workspace_id: str, data_source_id: str, bucket: int) -> str:
@@ -1388,6 +1434,13 @@ async def read_cache_stats(
     Returns per-endpoint counts plus a total. ``hit_ratio`` counts only real
     hits: a stale-fallback kept the user moving but the provider still could
     not answer, and folding it in would make an outage look like a cache win.
+
+    ``too_large`` rides alongside rather than inside the ratio. It counts
+    computes whose answer exceeded ``GRAPH_CACHE_MAX_PAYLOAD_BYTES`` and
+    were therefore never stored — the read was a miss and is counted as
+    one, but WHY every repeat of it also misses is a fact about the cap,
+    not about the cache working. Without it a capped endpoint reads as a
+    flat 0% with nothing to point at.
     Empty rather than raising when the bus is unavailable — this is telemetry.
     """
     out: dict[str, Any] = {"endpoints": {}, "totals": {o: 0 for o in CACHE_OUTCOMES}}

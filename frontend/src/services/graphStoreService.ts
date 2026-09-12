@@ -230,6 +230,10 @@ export interface CacheEndpointStats {
      *  Kept out of the ratio so a switched-off cache cannot look like a
      *  missing one. */
     bypass: number
+    /** Answers too large for GRAPH_CACHE_MAX_PAYLOAD_BYTES, so never stored.
+     *  Counted beside its own miss rather than inside the ratio: it says why
+     *  every repeat of that read will miss too. */
+    too_large?: number
     /** hit / (hit + miss + stale); null when nothing was served. */
     hit_ratio: number | null
 }

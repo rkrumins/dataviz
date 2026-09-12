@@ -51,6 +51,20 @@ that was merely catching up failed its health probe and was restarted, turning
 one node's trouble into two. A guard test parses the manifests, including all
 three duplicated shard blocks.
 
+**An empty rollup answer is an answer, and a refused one says so.** Two more
+reasons the aggregated cache could not hold. An answer with no aggregated edges
+took the 5-second negative TTL, and on a container canvas most requests are
+exactly that — the fan-out asks about chunks of containers, most of which have
+no lineage between them — so most rollup reads were recomputed every five
+seconds. The aggregated endpoint is the one with a dedicated invalidation choke
+point that fires on every event rewriting the layer, so an empty answer there
+cannot go stale unnoticed and now keeps the full TTL; the outage mirror still
+excludes it, because "no lineage" as a fallback is indistinguishable from real
+data. And an answer larger than `GRAPH_CACHE_MAX_PAYLOAD_BYTES` is computed and
+never stored, which made every repeat miss with nothing to point at — it is
+counted as `too_large` now, beside its own miss and outside the ratio, and shown
+in Admin → Graph store.
+
 **A graph that cannot be fingerprinted is no longer treated as one that
 changed.** `compute_graph_fingerprint` returns an empty string when the fast
 label/relation counters cannot answer for a graph and the fallback scan fails or
