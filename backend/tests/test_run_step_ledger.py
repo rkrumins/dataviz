@@ -754,3 +754,172 @@ def test_a_database_that_cannot_answer_costs_no_estimate_and_no_500():
             raise RuntimeError("connection reset")
 
     assert asyncio.run(_prior_ledgers(_Down(), [_Running()])) == {}
+
+
+# ── the attempt log ─────────────────────────────────────────────────────
+#
+# A job ROW is a run; a run has many ATTEMPTS. Every per-attempt field used
+# to be overwritten in place, so resuming a failed job erased the record of
+# why you were resuming it — with the single click taken BECAUSE it failed.
+
+from backend.app.services.aggregation.steps import (  # noqa: E402
+    archive_attempt, failed_stage, record_attempt,
+)
+
+
+def _died_in(stage: str, *, got=900, owed=1_200):
+    ledger = StepLedger(clock=_Clock())
+    ledger.enter("preparing")
+    ledger.enter(stage)
+    ledger.note(done=got, total=owed, unit="aggregated edges")
+    ledger.seal("failed")
+    return ledger.snapshot()
+
+
+def test_a_failed_attempt_is_archived_with_where_and_why():
+    doc = {"steps": _died_in("applying"), "writes": 400, "deletes": 2}
+    assert record_attempt(
+        doc, status="failed", error="the shard had no room", category="write_budget",
+        progress=62, writes=400, deletes=2,
+    ) is True
+    [attempt] = doc["attempts"]
+    assert attempt["n"] == 1
+    assert attempt["stage"] == "applying"
+    assert attempt["progress"] == 62
+    assert attempt["category"] == "write_budget"
+    assert attempt["error"] == "the shard had no room"
+    assert {s["id"] for s in attempt["steps"]} == {"preparing", "applying"}
+    # …and the live ledger is GONE, which is what makes it idempotent.
+    assert "steps" not in doc
+
+
+def test_archiving_twice_does_not_duplicate_the_attempt():
+    """Both the manual resume path and the worker's attempt start call this
+    without coordinating. Whichever runs first does the work."""
+    doc = {"steps": _died_in("applying")}
+    assert record_attempt(doc, status="failed") is True
+    assert record_attempt(doc, status="failed") is False
+    assert len(doc["attempts"]) == 1
+
+
+def test_a_successful_attempt_is_not_archived():
+    """It IS the run record. Storing it twice doubles every row's payload
+    for nothing, and it is what keeps a healthy row carrying none of this."""
+    ledger = StepLedger(clock=_Clock())
+    for step in ("preparing", "extracting", "computing", "reconciling", "applying", "finalizing"):
+        ledger.enter(step)
+    ledger.seal("completed")
+    doc = {"steps": ledger.snapshot()}
+    assert record_attempt(doc, status="completed") is False
+    assert "attempts" not in doc
+
+
+def test_a_run_that_never_opened_a_stage_leaves_nothing_behind():
+    assert record_attempt({"steps": StepLedger(clock=_Clock()).snapshot()}, status="failed") is False
+    assert record_attempt({}, status="failed") is False
+    assert record_attempt({"steps": "junk"}, status="failed") is False
+
+
+def test_the_log_keeps_the_most_recent_failures(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_ATTEMPTS_KEPT", "3")
+    doc: dict = {}
+    for i in range(6):
+        doc["steps"] = _died_in("applying", got=i)
+        record_attempt(doc, status="failed", progress=i)
+    assert [a["progress"] for a in doc["attempts"]] == [3, 4, 5]
+    assert [a["n"] for a in doc["attempts"]] == [4, 5, 6]   # numbering never restarts
+
+
+def test_an_archived_attempt_drops_what_only_meant_something_live():
+    doc = {"steps": _died_in("applying")}
+    record_attempt(doc, status="failed")
+    step = doc["attempts"][0]["steps"][0]
+    assert set(step) == {"id", "state", "secs", "visits", "done", "total", "unit"}
+    assert "started_at" not in step and "waiting_for" not in step
+
+
+def test_failed_stage_names_the_one_it_stopped_in():
+    assert failed_stage(_died_in("reconciling")) == "reconciling"
+    assert failed_stage([]) is None
+    assert failed_stage("junk") is None
+
+
+# ── the job-row wrapper ─────────────────────────────────────────────────
+
+
+class _JobRow:
+    def __init__(self, **kw):
+        self.run_stats = None
+        self.status = "failed"
+        self.progress = 62
+        self.error_message = "the shard had no room"
+        self.completed_at = "2026-09-12T09:31:00Z"
+        self.updated_at = None
+        self.__dict__.update(kw)
+
+
+def test_the_row_keeps_its_history_across_a_resume():
+    job = _JobRow(run_stats=json.dumps({"steps": _died_in("applying"), "writes": 400}))
+    assert archive_attempt(job, category="write_budget") is True
+    doc = json.loads(job.run_stats)
+    assert doc["attempts"][0]["stage"] == "applying"
+    assert doc["attempts"][0]["writes"] == 400
+    assert "steps" not in doc
+
+
+def test_a_row_whose_record_cannot_be_read_is_left_alone():
+    for bad in (None, "", "{not json", json.dumps([1, 2, 3])):
+        assert archive_attempt(_JobRow(run_stats=bad)) is False
+
+
+def test_a_row_without_the_column_at_all_is_left_alone():
+    class _Legacy:
+        status = "failed"
+
+    assert archive_attempt(_Legacy()) is False
+
+
+# ── the two paths that archive, and the one that must not ───────────────
+
+
+def test_a_manual_resume_keeps_the_record_it_used_to_erase(monkeypatch):
+    """service.resume cleared the error, reset the retry count and let a
+    fresh ledger replace the old one — erasing, with the single click taken
+    BECAUSE a run failed, the whole record of why it failed."""
+    import backend.app.services.aggregation.service as svc
+
+    job = _JobRow(
+        status="failed", retry_count=2,
+        run_stats=json.dumps({"steps": _died_in("applying"), "writes": 400}),
+    )
+    svc.archive_attempt(job, category=svc.classify_failure(job.error_message))
+    job.retry_count, job.error_message = 0, None
+
+    doc = json.loads(job.run_stats)
+    assert doc["attempts"][0]["stage"] == "applying"
+    assert doc["attempts"][0]["error"] == "the shard had no room"
+    assert doc["attempts"][0]["progress"] == 62
+
+
+def test_the_worker_archives_a_previous_attempt_at_its_own_start():
+    """A worker that died without reaching a terminal block leaves the row
+    holding a half-open ledger. The NEXT attempt is what captures it."""
+    stuck = StepLedger(clock=_Clock())
+    stuck.enter("preparing")
+    stuck.enter("applying")           # never sealed — the worker vanished
+    job = _JobRow(status="running", run_stats=json.dumps({"steps": stuck.snapshot()}))
+
+    assert archive_attempt(job, category=None) is True
+    doc = json.loads(job.run_stats)
+    assert doc["attempts"][0]["stage"] is None          # it never said it failed
+    assert {s["id"] for s in doc["attempts"][0]["steps"]} == {"preparing", "applying"}
+
+
+def test_a_run_that_simply_finished_leaves_no_attempt_behind():
+    ledger = StepLedger(clock=_Clock())
+    for step in STEP_IDS:
+        ledger.enter(step)
+    ledger.seal("completed")
+    job = _JobRow(status="completed", run_stats=json.dumps({"steps": ledger.snapshot()}))
+    assert archive_attempt(job) is False
+    assert "attempts" not in json.loads(job.run_stats)

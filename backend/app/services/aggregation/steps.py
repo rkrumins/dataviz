@@ -27,6 +27,8 @@ frontend and ``_progress_pct`` in the pipeline keep meaning what they meant.
 """
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -295,3 +297,116 @@ def remaining_secs(
 
 #: Below this the previous run is too fast to project anything from.
 _SIGNAL_MIN_SECS = 5.0
+
+
+# ── the attempt log ─────────────────────────────────────────────────────
+#
+# A job ROW is a run; a run has many ATTEMPTS. Every per-attempt field —
+# the ledger, the progress, the error, the retry count — used to be
+# overwritten in place, so resuming a failed job erased the record of why
+# you were resuming it. The attempts that did not succeed are archived
+# here first, and the row keeps its history across every resume.
+
+
+def _attempts_kept() -> int:
+    """How many failed attempts a run keeps. Only attempts that did NOT
+    succeed are archived — a successful one IS the run record, and storing
+    it twice doubles every row's payload for nothing — so a healthy row
+    carries none of this at all and the bound only ever binds on a run
+    that is genuinely in trouble."""
+    try:
+        raw = int(os.getenv("AGGREGATION_ATTEMPTS_KEPT", "20"))
+    except ValueError:
+        raw = 20
+    return max(1, min(100, raw))
+
+
+#: What an archived attempt keeps of each stage. The full ledger entry
+#: carries timestamps and a park reason that only mean anything while the
+#: stage is live; dropping them roughly halves what a troubled row stores.
+_ARCHIVED_STEP_FIELDS = ("id", "state", "secs", "visits", "done", "total", "unit")
+
+
+def _archive_steps(steps: Any) -> List[Dict[str, Any]]:
+    return [
+        {k: entry.get(k) for k in _ARCHIVED_STEP_FIELDS}
+        for entry in steps
+        if isinstance(entry, dict) and entry.get("state") != "pending"
+    ]
+
+
+def failed_stage(steps: Any) -> Optional[str]:
+    """The stage an attempt stopped in, or None when it finished them all."""
+    if not isinstance(steps, list):
+        return None
+    for entry in steps:
+        if isinstance(entry, dict) and entry.get("state") in ("failed", "cancelled"):
+            return str(entry.get("id"))
+    return None
+
+
+def record_attempt(doc: Dict[str, Any], **fields: Any) -> bool:
+    """Move the ledger currently on ``doc`` into its attempt log.
+
+    Returns whether anything changed. Idempotent by construction: the
+    ledger is REMOVED from the document as it is archived, so a second call
+    finds nothing to move. That is what lets both the manual resume path
+    and the worker's own attempt start call this without coordinating —
+    whichever runs first does the work, the other no-ops.
+    """
+    steps = doc.get("steps")
+    archived = _archive_steps(steps) if isinstance(steps, list) else []
+    if not archived:
+        doc.pop("steps", None)
+        return False
+    # A run that finished every stage is not an attempt worth keeping: the
+    # row's own record already describes it.
+    stage = failed_stage(steps)
+    if stage is None and all(e.get("state") == "done" for e in archived):
+        doc.pop("steps", None)
+        return False
+
+    log = doc.get("attempts")
+    log = list(log) if isinstance(log, list) else []
+    log.append({
+        # Off the highest number the log has held, not its LENGTH: trimming
+        # must not restart the count, or two different attempts end up
+        # called "3" and the history stops being a history.
+        "n": max((int(a.get("n") or 0) for a in log), default=0) + 1,
+        "stage": stage,
+        "secs": round(sum(float(e.get("secs") or 0) for e in archived), 2),
+        "steps": archived,
+        **{k: v for k, v in fields.items() if v is not None},
+    })
+    # Keep the most recent: the failure being worked is the recent one.
+    doc["attempts"] = log[-_attempts_kept():]
+    doc.pop("steps", None)
+    return True
+
+
+def archive_attempt(job: Any, *, category: Optional[str] = None) -> bool:
+    """``record_attempt`` against a job row's ``run_stats`` column.
+
+    Best-effort like every other ``run_stats`` write: a record that cannot
+    be serialised must never fail a resume or a job.
+    """
+    if not hasattr(job, "run_stats"):
+        return False
+    try:
+        doc = json.loads(getattr(job, "run_stats", None) or "{}")
+        if not isinstance(doc, dict):
+            return False
+        changed = record_attempt(
+            doc,
+            status=getattr(job, "status", None),
+            ended_at=getattr(job, "completed_at", None) or getattr(job, "updated_at", None),
+            progress=getattr(job, "progress", None),
+            error=(getattr(job, "error_message", None) or None),
+            category=category,
+            writes=doc.get("writes"),
+            deletes=doc.get("deletes"),
+        )
+        job.run_stats = json.dumps(doc)
+        return changed
+    except (TypeError, ValueError):
+        return False

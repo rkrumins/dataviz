@@ -44,7 +44,7 @@ from backend.common.adapters import (
     ProviderUnavailable,
 )
 
-from .steps import StepLedger
+from .steps import StepLedger, archive_attempt
 from backend.app.providers.falkordb_materialize import (
     MaterializationBudgetExceeded,
     MaterializationPreconditionFailed,
@@ -368,6 +368,16 @@ class AggregationWorker:
             # before-fingerprint — used to run with no phase at all: on a
             # large graph, minutes of a running job with nothing on the
             # page. It is a step of the run, so it is a step in the record.
+            # Whatever the PREVIOUS attempt left on this row goes into the
+            # attempt log before this one overwrites it. Here rather than at
+            # the previous attempt's terminal block, because a worker that
+            # died without reaching one still has to be captured — and
+            # ``archive_attempt`` removes what it archives, so the manual
+            # resume path having already done it is a no-op, not a duplicate.
+            from .service import classify_failure
+
+            archive_attempt(job, category=classify_failure(job.error_message))
+            job.error_message = None
             ledger = StepLedger()
             ledger.enter("preparing")
             _record_steps(job, ledger)

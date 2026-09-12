@@ -377,6 +377,51 @@ what is left of it. A failed or cancelled run renders it too — it names the
 stage the run died in. Runs from before the ledger existed fall back to the
 four segments derived from `current_phase`.
 
+### The attempt log
+
+A job ROW is a run; a run has many ATTEMPTS. Every per-attempt field — the
+ledger, the progress, the error, the retry count — used to be overwritten in
+place, so **resuming a failed job erased the record of why you were resuming
+it**, with the single click taken because it failed.
+
+`run_stats.attempts` keeps them. Each entry: the attempt number, the stage it
+stopped in, its progress, its error and typed category, its writes and
+deletes, and a trimmed copy of its ledger.
+
+* **Archived at the next attempt's START**, not at the previous one's
+  terminal block — a worker that died without reaching one still has to be
+  captured, and only the next attempt is guaranteed to run.
+* **Idempotent by construction**: `record_attempt` REMOVES the ledger from
+  the document as it archives it, so a second call finds nothing to move.
+  That is what lets `service.resume` and the worker's own start both call it
+  without coordinating — whichever runs first does the work.
+* **Only attempts that did not succeed are kept.** A successful attempt IS
+  the run record; storing it twice doubles every row's payload for nothing.
+  This is what keeps a healthy row carrying none of this at all, so the
+  bound below only ever binds on a run genuinely in trouble.
+* **Bounded** by `AGGREGATION_ATTEMPTS_KEPT` (default 20, 1–100), keeping the
+  most recent — the failure being worked is the recent one. Numbering comes
+  off the highest `n` the log has held, never its length, so trimming does
+  not restart the count.
+* **Trimmed**: an archived stage keeps `id, state, secs, visits, done, total,
+  unit` and drops the timestamps and park reason, which only mean anything
+  while the stage is live. About 500 bytes an attempt, so twenty of them on a
+  troubled row is ~10 KB and a healthy row is unchanged — which is why
+  forensics stay on the list response instead of needing a detail fetch.
+
+So: a failed run shows its failure in `steps` (the live ledger, sealed). A
+resumed-then-failed run shows attempt 1 in `attempts` and attempt 2 in
+`steps`. A resumed-then-succeeded run shows the failure in `attempts` and the
+success in `steps`.
+
+**What resume actually saves.** The cursor's phase decides: `aggregate`
+nothing (a fresh run); `reconcile` the ID ranges already compared; `apply`
+**the writes already landed** — RECONCILE rebuilds `existing`, which includes
+everything the prior attempt wrote. EXTRACT and COMPUTE always re-run. That
+is deliberate: they are deterministic and take minutes, APPLY takes the
+hours, and skipping them would mean spilling and reloading the whole
+accumulator — a large durability surface to save the cheap half.
+
 **Progress is the CURRENT ATTEMPT's position, and it can go down.** A
 transient failure or a resume restarts EXTRACT and COMPUTE from zero, and
 that is work being redone, not work already done. It used to be floored at

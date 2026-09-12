@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .dispatcher import AggregationDispatcher
 from .models import AggregationJobORM
 from .reservation import claim_exclusive
-from .steps import remaining_secs
+from .steps import archive_attempt, remaining_secs
 from .schemas import (
     AggregationCadence,
     AggregationJobResponse,
@@ -1519,10 +1519,15 @@ class AggregationService:
         # Resume inside the flag's hour would be re-cancelled at pickup. The
         # checkpoint (last_cursor) is preserved, so it resumes from where it
         # stopped — not from zero.
+        # Archive what this attempt did before the next one overwrites it.
+        # Resume used to clear the error, reset the retry count and let a
+        # fresh ledger replace the old one — erasing, with the single click
+        # taken BECAUSE a run failed, the whole record of why it failed.
         job.status = "pending"
+        job.updated_at = _now()
+        archive_attempt(job, category=classify_failure(job.error_message))
         job.retry_count = 0
         job.error_message = None
-        job.updated_at = _now()
         await session.commit()
         try:
             from .redis_client import cancel_flag_key, get_redis, redispatch_key
