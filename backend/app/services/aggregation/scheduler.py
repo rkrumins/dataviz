@@ -1,20 +1,26 @@
 """
-AggregationScheduler — cron-like drift detection for aggregated data.
+AggregationScheduler — the stale-marker reconciler, and a watchdog.
 
-Runs periodic fingerprint checks for data sources with configured schedules.
-When drift is detected, it calls AggregationService.signal_source_changed
-(reason="drift") — the change-gated invalidate+rebuild entry point — as a
-backstop for external writers that bypass the app's own write paths, unless
-③ Act (the persisted cadence's driftAutoRebuild, env fallback
-AGGREGATION_DRIFT_AUTO_REBUILD) is off. The same pass reconciles sources
-left marked stale (aggstale:v1) by a rebuild the cooldown deferred or a prior
-attempt that failed, re-signaling each with reason="reconcile" (a marker
-means a rebuild was already requested) — held back by every operator hold
-(③ Act off is a fleet-wide stop, see holds.py) and BOUNDED: after a failed
-or cancelled job the retries stop at the reconciliation breaker cap and the
-source is stamped ``suspended`` until a person resumes it. This is
-schedule-tick-driven only, never read-path-driven — read-path auto-heal was
-removed after it caused backfill storms (commit 110cd431).
+**This loop no longer detects drift and no longer touches a graph.** It used
+to fingerprint every ready source on every 60-second tick — three unbounded
+scans each, with no due predicate — which at a few hundred graphs is a
+continuous scan against the whole fleet on the same nodes that serve the
+canvas. Drift detection lives entirely in the probe scheduler (constant-time
+counts, per-source cadence) and the reconcile sweeper (those cached counts
+against a baseline that excludes AGGREGATED, capped per tick). See _tick.
+
+What it still does, every tick: reconcile sources left marked stale
+(aggstale:v1) by a rebuild the cooldown deferred or a prior attempt that
+failed, re-signaling each with reason="reconcile" (a marker means a rebuild
+was already requested) — held back by every operator hold (③ Act, the
+persisted cadence's driftAutoRebuild with env fallback
+AGGREGATION_DRIFT_AUTO_REBUILD, is a fleet-wide stop; see holds.py) and
+BOUNDED: after a failed or cancelled job the retries stop at the
+reconciliation breaker cap and the source is stamped ``suspended`` until a
+person resumes it. This is schedule-tick-driven only, never
+read-path-driven — read-path auto-heal was removed after it caused backfill
+storms (commit 110cd431). Without a job-bus Redis it also runs the coarse
+stale-job watchdog the lock-aware reconciler otherwise owns.
 
 Uses AggregationDataSourceStateORM (aggregation schema) instead of
 WorkspaceDataSourceORM (public schema) — fully decoupled.
@@ -163,19 +169,19 @@ async def _suspend(session: Any, state: Any, ds: str) -> None:
 
 
 class AggregationScheduler:
-    """Runs periodic change detection checks for data sources with configured schedules.
+    """Runs the stale-marker reconciler on a 60-second tick, and — only
+    without a job-bus Redis — the coarse stale-job watchdog.
 
-    Drift detection auto-queues a change-gated rebuild via
-    ``AggregationService.signal_source_changed`` (reason="drift") unless
-    ③ Act (``driftAutoRebuild``) is off, in which case checks stay
-    non-blocking and notify-only. The marker reconciler re-signals
-    (reason="reconcile") sources left marked stale by a deferred or failed
-    rebuild — a marker means a rebuild was already requested — but it
-    honours every operator hold (③ Act off is a fleet-wide stop) and stops
-    retrying after the breaker cap, stamping the source ``suspended``.
-    Repeat-fire is bounded: a source's status flips out of 'ready' while a job runs
-    (the sweep skips it), the fingerprint-embedded idempotency key
+    The marker reconciler re-signals (reason="reconcile") sources left
+    marked stale by a deferred or failed rebuild — a marker means a rebuild
+    was already requested — but it honours every operator hold (③ Act off is
+    a fleet-wide stop) and stops retrying after the breaker cap, stamping the
+    source ``suspended``. Repeat-fire is bounded: a source's status flips out
+    of 'ready' while a job runs, the fingerprint-embedded idempotency key
     collapses repeat triggers, and an active-job conflict is a no-op.
+
+    It makes no provider call of any kind. The drift sweep that did was
+    removed; see the module docstring and _tick.
     """
 
     def __init__(
@@ -205,23 +211,16 @@ class AggregationScheduler:
         self._running = False
 
     async def _tick(self) -> None:
-        """Check all data sources with aggregation_schedule set.
+        """One tick. Reads the persisted cadence, reconciles the
+        aggstale:v1-marked sources (reason="reconcile", subject to the holds
+        and the breaker — see _reconcile_stale_markers), and without a
+        job-bus Redis sweeps stale 'running' rows to failed.
 
-        For each due schedule:
-        1. Compute current fingerprint
-        2. Compare against stored fingerprint
-        3. If changed: log drift detection, collect the ds_id
-        4. After the sweep: signal_source_changed(reason="drift") for each
-           collected id (gated by ③ Act), then reconcile any
-           aggstale:v1-marked sources (reason="reconcile"), subject to the
-           holds and the breaker (_reconcile_stale_markers)
+        No graph is touched here; the comment below says what was removed
+        and where drift detection lives now.
         """
         from .models import AggregationDataSourceStateORM, AggregationJobORM
-        from .fingerprint import compute_graph_fingerprint, fingerprints_match
-        from .service import (
-            get_active_service, read_global_cadence, resolve_drift_auto_rebuild,
-        )
-        from backend.app.services.graph_cache import get_source_stale_reason
+        from .service import get_active_service, read_global_cadence
 
         async with self._session_factory() as session:
             # F9: resolve the persisted global cadence ONCE per tick (cached
@@ -229,98 +228,62 @@ class AggregationScheduler:
             # drift-auto flag and every cooldown pre-check below resolve
             # through it — persisted value when set, env default otherwise.
             cadence = await read_global_cadence(session)
-            # The same resolver the hold consults, so the drift gate here
-            # and the fleet-wide stop the holds report can never disagree.
-            drift_auto = resolve_drift_auto_rebuild(cadence.drift_auto_rebuild)
-            # Find data sources with schedules configured AND status = 'ready'
-            # Uses aggregation-owned state table (no public schema dependency)
-            result = await session.execute(
-                select(AggregationDataSourceStateORM).where(
-                    AggregationDataSourceStateORM.aggregation_schedule.isnot(None),
-                    AggregationDataSourceStateORM.aggregation_status == "ready",
-                )
-            )
+            # NO DRIFT SWEEP HERE ANY MORE.
+            #
+            # This loop used to fetch a provider and fingerprint the live
+            # graph for EVERY ready source, every 60 seconds, SERIALLY, with
+            # no due predicate — ``aggregation_schedule`` was stored on the
+            # row and never consulted, so a source scheduled daily was probed
+            # every minute like all the rest.
+            #
+            # Its cost, accurately: ``compute_graph_fingerprint`` takes the
+            # constant-time label/relation counters first, which is
+            # ``4 + labels + types`` round trips — small per source, and a few
+            # thousand queries a minute across a few hundred sources, on the
+            # same threads that serve the canvas, in a tick that then cannot
+            # finish inside its own 60s period. And it falls back to
+            # ``get_schema_stats`` — three unbounded scans (nodes, edges,
+            # tags) — whenever the counters cannot answer for a graph
+            # (multi-label nodes) or the fast probe errors, which is a cliff,
+            # not a tail: the client gives up at SCHEDULER_DRIFT_CHECK_TIMEOUT
+            # while the server keeps burning a query thread on its own budget.
+            #
+            # None of it bought anything the two loops beside it do not
+            # already do, on a per-source cadence rather than every tick:
+            #
+            #   * the PROBE scheduler enqueues that same constant-time counts
+            #     read on ``probe_interval_secs``, deduped by a claim window;
+            #   * the RECONCILE sweeper compares the cached counts against
+            #     ``raw_fingerprint`` — a baseline that excludes AGGREGATED
+            #     and so does not move on every rebuild — capped at 200
+            #     sources and a bounded number of ACTIONS per tick, so a
+            #     fleet-wide change cannot queue a rebuild per source at once.
+            #     This loop had no such cap: it signalled every drifted id it
+            #     found, in one pass.
+            #
+            # What removing it costs, stated plainly: the sweeper's baseline
+            # is derived from entity- and edge-type COUNTS, so a change that
+            # leaves every count identical but alters something else (node
+            # tags, say) is no longer seen as drift — the scan fallback was
+            # the only thing that could see it, and only on the graphs it
+            # could finish. It is picked up by the next real change or a
+            # manual rebuild. Rollups are idempotent, so a missed drift means
+            # slightly stale ones, never wrong ones.
 
-            # Per-provider timeout: prevent a slow/hung provider from
-            # blocking the scheduler (and, by extension, the API event loop
-            # when running in-process).
-            _DRIFT_TIMEOUT = float(os.getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5"))
-
-            # Drifted ds_ids are acted on AFTER this loop completes (see
-            # below) — a slow/failing signal must never block the sweep
-            # from checking the remaining sources.
-            drifted_ids: list[str] = []
-
-            for state in result.scalars():
-                try:
-                    provider = await asyncio.wait_for(
-                        self._registry.get_provider_for_workspace(
-                            state.workspace_id, session, data_source_id=state.data_source_id,
-                        ),
-                        timeout=_DRIFT_TIMEOUT,
-                    )
-                    current_fp = await asyncio.wait_for(
-                        compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
-                        timeout=_DRIFT_TIMEOUT,
-                    )
-
-                    if not fingerprints_match(state.graph_fingerprint, current_fp):
-                        logger.info(
-                            "Drift detected for data source %s "
-                            "(stored: %s, current: %s)",
-                            state.data_source_id, state.graph_fingerprint, current_fp,
-                        )
-                        # Note: we do NOT change aggregation_status here.
-                        # The frontend polls for drift via the readiness endpoint.
-                        # The user decides whether to re-aggregate.
-                        #
-                        # I1: a source already carrying a stale marker had its
-                        # full invalidation at the first signal; the reconciler
-                        # below owns its re-signal cadence (cooldown-aware).
-                        # Re-signaling it on the drift path would re-invalidate
-                        # every 60s tick — leave it out of drifted_ids so the
-                        # reconciler picks it up instead. Checked UNCONDITIONALLY
-                        # (no longer gated by drift_auto): the reconciler now
-                        # runs every tick regardless of the flag, so a marked
-                        # source must always be handed to it — otherwise, with
-                        # drift_auto off, a source that is both marked AND
-                        # drifting this tick would be dropped by the reconciler's
-                        # drifted_ids dedup yet never drift-signaled, stranding
-                        # its marker.
-                        if await get_source_stale_reason(
-                            state.workspace_id, state.data_source_id,
-                        ):
-                            continue
-                        drifted_ids.append(state.data_source_id)
-                except (asyncio.TimeoutError, Exception) as e:
-                    logger.warning(
-                        "Drift check failed for data source %s: %s",
-                        state.data_source_id, e,
-                    )
-
-            # R1 — act on drift-detected changes, GATED by ③ Act (off keeps
-            # the historic notify-only sweep). R1b — the marked-stale
-            # reconciler runs every tick and decides per source (see
-            # _reconcile_stale_markers): it honours every operator hold —
-            # ③ Act off is a fleet-wide stop the resolver reports — and the
-            # breaker, and keeps the marker whenever it defers. The signal
-            # itself re-runs the change gate + rebuild cooldown, so nothing
-            # here duplicates that timing logic.
+            # R1b — the marked-stale reconciler runs every tick and decides
+            # per source (see _reconcile_stale_markers): it honours every
+            # operator hold — ③ Act off is a fleet-wide stop the resolver
+            # reports, which is how that switch still binds now that nothing
+            # here signals drift — and the breaker, and keeps the marker
+            # whenever it defers. The signal itself re-runs the change gate +
+            # rebuild cooldown, so nothing here duplicates that timing logic.
             svc = get_active_service()
             if svc is not None:
-                if drift_auto:
-                    for ds_id in drifted_ids:
-                        try:
-                            async with self._session_factory() as s2:
-                                await svc.signal_source_changed(
-                                    ds_id, s2, reason="drift", origin="drift",
-                                )
-                        except Exception as exc:
-                            logger.warning(
-                                "drift auto-rebuild signal failed for "
-                                "data source %s: %s", ds_id, exc,
-                            )
-                await self._reconcile_stale_markers(svc, cadence, drifted_ids)
+                # No drifted ids to hand it: nothing here detects drift any
+                # more. The reconciler took the list to avoid re-signalling a
+                # source this tick had already signalled, and there is now
+                # nothing to collide with.
+                await self._reconcile_stale_markers(svc, cadence, [])
 
             # Stale-job watchdog — catch jobs stuck in 'running' with no
             # checkpoint update (e.g. worker died silently). NO-REDIS

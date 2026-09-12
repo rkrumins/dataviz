@@ -101,7 +101,7 @@ def _run(coro):
 
 def test_watchdog_stands_down_when_reconciler_redis_present():
     job = _stale_job()
-    session = _Session(results=[[], [job]])
+    session = _Session(results=[[job]])
     sched = AggregationScheduler(
         lambda: session, registry=None, redis_client=object(),
     )
@@ -115,7 +115,7 @@ def test_watchdog_stands_down_when_reconciler_redis_present():
 
 def test_watchdog_fallback_still_fails_stale_jobs_without_redis():
     job = _stale_job()
-    session = _Session(results=[[], [job]])
+    session = _Session(results=[[job]])
     sched = AggregationScheduler(lambda: session, registry=None)
     _run(sched._tick())
     assert job.status == "failed"
@@ -123,10 +123,10 @@ def test_watchdog_fallback_still_fails_stale_jobs_without_redis():
 
 
 def test_watchdog_fallback_excludes_purge_rows():
-    session = _Session(results=[[], []])
+    session = _Session(results=[[]])
     sched = AggregationScheduler(lambda: session, registry=None)
     _run(sched._tick())
-    stale_stmt = str(session.statements[1])
+    stale_stmt = str(session.statements[0])
     assert "trigger_source !=" in stale_stmt, (
         "purge rows checkpoint via Redis only — the fallback sweep must "
         "exclude them or every >4h purge gets hijacked to failed"

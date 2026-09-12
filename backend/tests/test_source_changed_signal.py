@@ -755,19 +755,21 @@ def test_emit_failure_does_not_break_noop_signal(monkeypatch):
     assert resp.event_id is None
 
 
-# ── Scheduler: act on drift + reconcile stale markers (Task 4) ──────────
+# ── Scheduler: reconcile stale markers (Task 4) ─────────────────────────
 #
-# The scheduler sweep is the backstop that calls signal_source_changed for
-# external writers that never call it directly. These fakes exercise
-# AggregationScheduler._tick end to end; the collaborator under real test
-# is which ds_id gets signaled, with what reason, and on what session —
-# signal_source_changed itself is a bare recorder here (its own gating is
-# covered above).
+# The scheduler tick re-signals sources left marked stale by a rebuild that
+# was deferred or that failed. It no longer detects drift itself — that loop
+# fingerprinted every ready source against a live graph on every tick and was
+# removed; see the module docstring of scheduler.py and the guard tests at the
+# end of this file. These fakes exercise AggregationScheduler._tick end to
+# end; the collaborator under real test is which ds_id gets signaled, with
+# what reason, and on what session — signal_source_changed itself is a bare
+# recorder here (its own gating is covered above).
 
 
 class _SchedRegistry:
-    """Registry stub for the drift sweep — compute_graph_fingerprint is
-    faked below, so the provider this returns is never actually used."""
+    """Registry stub. The tick asks it for nothing now — handing one in and
+    finding it untouched is part of what the guard tests assert."""
 
     async def get_provider_for_workspace(self, ws, session, data_source_id=None):
         return object()
@@ -801,6 +803,8 @@ class _SchedSession:
     def __init__(self, exec_results=None, status_by_ds=None):
         self._exec_results = list(exec_results or [])
         self._status_by_ds = status_by_ds or {}
+        #: How many queries the tick actually issued.
+        self.executed = 0
 
     async def __aenter__(self):
         return self
@@ -809,6 +813,7 @@ class _SchedSession:
         return False
 
     async def execute(self, stmt):
+        self.executed += 1
         if self._exec_results:
             return self._exec_results.pop(0)
         return _SchedExecResult([])
@@ -831,18 +836,24 @@ def _sched_state(ds_id="ds-1", ws="ws-1", fp="OLD"):
 
 
 def _sched_session_factory(states, status_by_ds=None):
-    """First call returns the sweep session (drift query returns
-    ``states``, the watchdog query after it returns no stale jobs);
-    every later call returns a FRESH throwaway session — asserting a
-    signal call's session is not the sweep's own proves the "fresh
-    session per signal" rule. ``status_by_ds`` seeds the state-row
-    ``aggregation_status`` the reconciler's in-flight pre-check reads."""
+    """First call returns the sweep session (its only query is the
+    no-Redis stale-job watchdog, which returns nothing); every later call
+    returns a FRESH throwaway session — asserting a signal call's session
+    is not the sweep's own proves the "fresh session per signal" rule.
+    ``status_by_ds`` seeds the state-row ``aggregation_status`` the
+    reconciler's in-flight pre-check reads.
+
+    ``states`` is no longer consumed: the tick used to open with a query
+    for drift candidates and fingerprint each one against a live graph.
+    Drift detection belongs to the probe lane and the reconcile sweeper
+    now, neither of which touches a graph. Kept in the signature because
+    every caller passes it and it reads as the fixture's subject."""
     created = []
 
     def factory():
         if not created:
             s = _SchedSession(exec_results=[
-                _SchedExecResult(states), _SchedExecResult([]),
+                _SchedExecResult([]),
             ], status_by_ds=status_by_ds)
         else:
             s = _SchedSession(status_by_ds=status_by_ds)
@@ -909,39 +920,14 @@ def _no_marker(monkeypatch):
     monkeypatch.setattr(graph_cache_mod, "get_source_stale_reason", _reason)
 
 
-# ── Scenario 1: drift + default env → signal awaited (ds_id, "drift", session)
-
-
-def test_scheduler_drift_signals_with_default_env(monkeypatch):
-    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
-    _all_drift(monkeypatch)
-    _no_marker(monkeypatch)
-    _empty_stale(monkeypatch)
-
-    fake_svc = _FakeSchedSvc()
-    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
-
-    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
-    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
-
-    _run(sched._tick())
-
-    assert len(fake_svc.calls) == 1
-    ds_id, reason, session = fake_svc.calls[0]
-    assert ds_id == "ds-1"
-    assert reason == "drift"
-    assert session is not None
-    assert session is not factory.created[0]  # fresh session, not the sweep's own
-    assert fake_svc.origins == ["drift"]
-
-
-# ── Scenario 2: ③ Act off is a FLEET-WIDE STOP. The drift path is notify-
-# only, and the marker reconciler still runs every tick — but it now defers
-# every marked source (the hold resolver reports ③ Act off as a fleet stop)
-# and keeps the marker, so the source stays honestly "out of date" and
-# nothing is rebuilt until ③ Act is back on. Before this, "Automatically
-# rebuild a source when drift is detected" gated one loop of three, which is
-# how an operator switched it off and still watched rebuilds appear.
+# ── ③ Act off is a FLEET-WIDE STOP. The marker reconciler still runs every
+# tick — but it defers every marked source (the hold resolver reports ③ Act
+# off as a fleet stop) and keeps the marker, so the source stays honestly
+# "out of date" and nothing is rebuilt until ③ Act is back on. Before this,
+# "Automatically rebuild a source when drift is detected" gated one loop of
+# three, which is how an operator switched it off and still watched rebuilds
+# appear. It is also the only place the switch still binds, now that nothing
+# in the tick signals drift.
 
 
 def test_scheduler_act_off_holds_marked_sources_too(monkeypatch):
@@ -971,7 +957,7 @@ def test_scheduler_act_off_holds_marked_sources_too(monkeypatch):
 
     _run(sched._tick())
 
-    # DRIFT path is off: the drifted ds-1 is NOT signaled…
+    # Nothing signals drift from here any more…
     assert "drift" not in fake_svc.origins
     # …the reconciler still ran (it must keep deferring, not stop looking)…
     assert list_calls
@@ -980,41 +966,7 @@ def test_scheduler_act_off_holds_marked_sources_too(monkeypatch):
     assert "ds-9" not in cleared
 
 
-# ── Scenario 3: a signal failure must not abort the sweep ───────────────
-
-
-def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
-    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
-    _all_drift(monkeypatch)
-    _no_marker(monkeypatch)
-    _empty_stale(monkeypatch)
-
-    class _FailingThenOkSvc:
-        def __init__(self):
-            self.calls = []
-
-        async def signal_source_changed(
-            self, ds_id, session, *, reason="external_load", force=False,
-            origin="api", actor="internal",
-        ):
-            self.calls.append((ds_id, reason))
-            if ds_id == "ds-1":
-                raise RuntimeError("boom")
-            return types.SimpleNamespace(changed=True)
-
-    fake_svc = _FailingThenOkSvc()
-    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
-
-    states = [_sched_state(ds_id="ds-1"), _sched_state(ds_id="ds-2")]
-    factory = _sched_session_factory(states)
-    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
-
-    _run(sched._tick())  # must not raise despite ds-1's signal raising
-
-    assert [c[0] for c in fake_svc.calls] == ["ds-1", "ds-2"]
-
-
-# ── Scenario 4: no active service → no call, no crash ───────────────────
+# ── no active service → no call, no crash ───────────────────────────────
 
 
 def test_scheduler_no_active_service_is_noop(monkeypatch):
@@ -1036,44 +988,11 @@ def test_scheduler_no_active_service_is_noop(monkeypatch):
 
     _run(sched._tick())  # must not raise
 
-    # svc is None ⇒ neither the drift path nor the reconciler runs.
+    # svc is None ⇒ the reconciler does not run.
     assert list_calls == []
 
 
-# ── Scenario 5: reconciler dedupes against this tick's drift signals ────
-
-
-def test_scheduler_reconciler_dedupes_against_drift_signaled(monkeypatch):
-    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
-    _all_drift(monkeypatch)  # ds-1 (the only swept source) drifts
-    _no_marker(monkeypatch)  # ds-1 has no marker → drift path signals it
-
-    async def _list_stale():
-        return [("ws-1", "ds-1"), ("ws-2", "ds-2")]
-
-    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
-
-    fake_svc = _FakeSchedSvc()
-    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
-
-    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
-    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
-
-    _run(sched._tick())
-
-    reasons_by_ds: dict[str, list[str]] = {}
-    for ds_id, reason, _session in fake_svc.calls:
-        reasons_by_ds.setdefault(ds_id, []).append(reason)
-
-    # ds-1: only the drift signal fires; the reconciler skips it (already
-    # handled this tick). ds-2: only the reconciler signals it.
-    assert reasons_by_ds["ds-1"] == ["drift"]
-    assert reasons_by_ds["ds-2"] == ["reconcile"]
-    # Origins mirror reasons — drift/reconcile carry their own origin.
-    assert fake_svc.origins == ["drift", "reconcile"]
-
-
-# ── Scenario 6: changed=False from a reconcile call clears the marker ───
+# ── changed=False from a reconcile call clears the marker ───────────────
 
 
 def test_scheduler_reconciler_clears_marker_when_unchanged(monkeypatch):
@@ -1106,40 +1025,7 @@ def test_scheduler_reconciler_clears_marker_when_unchanged(monkeypatch):
     assert clear_calls == [("ws-2", "ds-2")]
 
 
-# ── I1: drift path skips already-marked sources; reconciler skips cooldown
-
-
-def test_scheduler_drift_skips_already_marked_source(monkeypatch):
-    # ds-1 drifts AND already carries a stale marker: the drift path must
-    # NOT re-signal it (its invalidation happened at first signal); the
-    # reconciler owns it from here and signals it with reason="reconcile".
-    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
-    _all_drift(monkeypatch)
-
-    async def _reason(ws, ds):
-        return "source_changed" if ds == "ds-1" else None
-
-    monkeypatch.setattr(graph_cache_mod, "get_source_stale_reason", _reason)
-
-    async def _list_stale():
-        return [("ws-1", "ds-1")]
-
-    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
-
-    fake_svc = _FakeSchedSvc()  # ds-1 not in cooldown → reconciler signals it
-    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
-
-    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
-    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
-
-    _run(sched._tick())
-
-    reasons_by_ds: dict[str, list[str]] = {}
-    for ds_id, reason, _session in fake_svc.calls:
-        reasons_by_ds.setdefault(ds_id, []).append(reason)
-
-    # Only the reconciler signaled ds-1 — the drift path skipped it.
-    assert reasons_by_ds == {"ds-1": ["reconcile"]}
+# ── I1: the reconciler skips a marked source still in its cooldown ──────
 
 
 def test_scheduler_reconciler_skips_in_cooldown_marked_source(monkeypatch):
@@ -1861,3 +1747,58 @@ def test_the_worker_never_stores_a_fingerprint_it_could_not_take():
 
     src = inspect.getsource(AggregationWorker.run)
     assert "budget_s=_FINGERPRINT_BUDGET_S) or None" in src
+
+
+# ── the scheduler tick touches no graph ─────────────────────────────────
+#
+# It used to fetch a provider and fingerprint the live graph for EVERY ready
+# source, every 60 seconds, serially, with no due predicate. That is the
+# constant-time counters per source per tick — a few thousand queries a minute
+# across a few hundred sources, in a tick that cannot finish inside its own
+# period — falling back to three unbounded scans on any graph whose counters
+# cannot answer, which the client abandons at 5s while the server keeps going.
+# Drift detection belongs to the probe lane (the same counts, on a per-source
+# cadence) and the reconcile sweeper (those cached counts, capped at 200
+# sources and a bounded number of actions per tick), neither of which opens a
+# graph from here.
+
+
+def test_the_tick_never_asks_a_provider_for_anything(monkeypatch):
+    """The guard that keeps the expensive sweep from coming back: a registry
+    that raises if it is touched at all."""
+    _no_marker(monkeypatch)
+
+    class _Explodes:
+        async def get_provider_for_workspace(self, *a, **kw):
+            raise AssertionError("the scheduler tick must not open a graph")
+
+    async def _none_stale():
+        return []
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _none_stale)
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _Explodes())
+    _run(sched._tick())
+
+    assert fake_svc.calls == []          # …and it signals no drift of its own
+
+
+def test_the_tick_issues_no_candidate_query_either(monkeypatch):
+    """One session, one query — the no-Redis stale-job watchdog. The
+    candidate query that fed the sweep went with it."""
+    _no_marker(monkeypatch)
+
+    async def _none_stale():
+        return []
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _none_stale)
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: _FakeSchedSvc())
+
+    factory = _sched_session_factory([_sched_state(ds_id="ds-1")])
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+    _run(sched._tick())
+
+    assert factory.created[0].executed == 1
