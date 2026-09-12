@@ -24,6 +24,15 @@
 #   STRESS_RUN_TIME   per-tier --run-time              (default $(SWEEP_RUN_TIME))
 #   STRESS_SPAWN_RATE users/sec ramp                   (default $(SWEEP_SPAWN_RATE))
 #
+# Protection gate (sweep only):
+#   SYNODIC_METRICS_URLS   space/comma-separated scrape URLs. When set, each
+#                          tier is bracketed by a counter snapshot and fails on
+#                          a write-admission fail-open — see lib/protection.py.
+#                          Needs METRICS_ENABLED on in the deployment under
+#                          test. Unset means latency gating only, and the sweep
+#                          says so rather than implying the limits held.
+#   SYNODIC_METRICS_TOKEN  bearer token, if the deployment sets METRICS_TOKEN
+#
 # Common knobs:
 #   PYTHON            python interpreter               (default python3)
 #   LOCUST            locust binary                    (default locust)
@@ -46,6 +55,10 @@ STRESS_SPAWN_RATE ?= $(SWEEP_SPAWN_RATE)
 
 PYTHON           ?= python3
 LOCUST           ?= locust
+
+# Presence of a scrape URL is what turns the protection gate on; the module
+# reads the URLs from the environment itself.
+PROTECTION_URLS  ?= $(SYNODIC_METRICS_URLS)
 
 SMOKE_DIR  := results/smoke
 SWEEP_DIR  := results/sweep
@@ -87,6 +100,8 @@ help:
 	@echo "    make sweep                     — run all tiers, gate each on TIER_SLOS"
 	@echo "    make sweep-clean               — remove $(SWEEP_DIR)/"
 	@echo "    Override tiers: SWEEP_TIERS='10 50 200' make sweep"
+	@echo "    Gate on the backend's protection counters too, not just latency:"
+	@echo "      SYNODIC_METRICS_URLS=http://host:8000/api/v1/metrics make sweep"
 	@echo ""
 	@echo "  Stress (per-graph-endpoint concurrency sweep — isolates one query type):"
 	@echo "    make stress                    — trace + walks + children at all tiers"
@@ -176,15 +191,27 @@ smoke-clean:
 
 sweep:
 	@mkdir -p $(SWEEP_DIR)
+	@if [ -z "$(PROTECTION_URLS)" ]; then \
+	    echo "NOTE: SYNODIC_METRICS_URLS is unset — this sweep is gated on latency"; \
+	    echo "      and failure rate only. The cheapest way for a system to be"; \
+	    echo "      fast is to stop enforcing its limits, and nothing here would"; \
+	    echo "      notice. See lib/protection.py."; \
+	fi
 	@set -e; \
 	for tier in $(SWEEP_TIERS); do \
 	    echo ""; echo "=== Sweep tier: $$tier users (run_time=$(SWEEP_RUN_TIME)) ==="; \
 	    mkdir -p $(SWEEP_DIR)/tier_$$tier; \
+	    if [ -n "$(PROTECTION_URLS)" ]; then \
+	        $(PYTHON) -m lib.protection --before $(SWEEP_DIR)/tier_$$tier/protection.json; \
+	    fi; \
 	    $(LOCUST) -f locustfile.py \
 	        --headless --host $(SMOKE_HOST) \
 	        --users $$tier --spawn-rate $(SWEEP_SPAWN_RATE) \
 	        --run-time $(SWEEP_RUN_TIME) --only-summary \
 	        --csv $(SWEEP_DIR)/tier_$$tier/run; \
+	    if [ -n "$(PROTECTION_URLS)" ]; then \
+	        $(PYTHON) -m lib.protection --check $(SWEEP_DIR)/tier_$$tier/protection.json; \
+	    fi; \
 	    $(PYTHON) -m lib.slo --tier $$tier $(SWEEP_DIR)/tier_$$tier/run_stats.csv; \
 	done
 	@echo ""

@@ -13,6 +13,32 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**The capacity harness runs distributed in Kubernetes, and stops
+under-measuring.** Two faults made a run's number untrustworthy. Every
+scenario fired each request once and counted a non-200 a failure, so at
+saturation the harness's offered load went *down* — a real client retries a
+429 or a `Retry-After` 503, and the real system's load goes *up*. It reported
+a ceiling below the real one and could not reproduce retry amplification at
+all; `loadtest/lib/retry.py` now mirrors the frontend's retry model, filing
+retries as their own stat rows so amplification is visible rather than
+averaged away. And a generator co-scheduled with what it measures reports its
+own ceiling as the system's, so `deploy/k8s/loadtest/` schedules one worker
+per node (required, not preferred — a plausible wrong number is worse than a
+pod stuck Pending), away from `viz-service` and `falkordb`, with CPU requests
+and not only limits.
+
+**A load test can now fail because the limits stopped holding, not only
+because it was slow.** The write-admission cap is fail-open by design, so the
+state immediately before a node is over-admitted looks from outside exactly
+like a healthy run: latency fine, failure rate fine, cap not capping. A sweep
+gated on the CSV alone passes it. `make sweep` brackets each tier with a
+counter snapshot when `SYNODIC_METRICS_URLS` is set and fails on any increase
+in `aggregation_slot_fail_open_total`, so a failure names the concurrency at
+which the cap stopped capping. Governor holds, slot waits, read-pressure
+yields and write-budget refusals are reported and never failed — those are
+the protection working, and a gate that goes red when the system defends
+itself is a gate somebody switches off.
+
 **Job History says where a run failed, how far it got, and what earlier
 attempts did.** A run that died in APPLY showed `edgeCoveragePct` on the list
 — `processed / total`, which is ~100% the moment EXTRACT finishes — so a

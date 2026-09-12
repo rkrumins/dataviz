@@ -784,3 +784,65 @@ graph store at all.
 * **A fork every few minutes** → the AOF is rewriting too often; see the
   `auto-aof-rewrite-*` settings in `FALKORDB_DEPLOYMENT.md`. The run holds
   through each one and says so; the cost is time, not safety.
+
+---
+
+## 7. Proving it: the table in §1 is arithmetic, not a measurement
+
+Every capacity number on this page is derived — from pool sizes, thread counts and a
+*mean Cypher service time nobody has measured on your data*. That is the one input the
+answer turns on, and the one no manifest contains. Until a run produces it, §1's user
+counts are a model of the deployment, not a result from it.
+
+`loadtest/` is what closes that gap. Two properties of it decide whether the number it
+produces is worth anything.
+
+### The generator must not be the bottleneck
+
+Run it from outside the cluster or, better, as its own pods with the affinity rules in
+[`deploy/k8s/loadtest/`](../deploy/k8s/loadtest/README.md): one worker per node,
+scheduled away from `viz-service` and `falkordb`, with CPU **requests** and not only
+limits. A generator that shares a node with the thing it measures, or that gets
+throttled by the kubelet under exactly the load it exists to produce, reports its own
+ceiling as the system's. That number is plausible and wrong, which is worse than no
+number.
+
+Check the placement before believing a result:
+
+```
+kubectl -n synodic get pods -o wide -l app.kubernetes.io/part-of=loadtest
+kubectl -n synodic top  pods    -l app.kubernetes.io/name=loadtest-worker
+```
+
+### Latency passing is not the limits holding
+
+The cheapest way for a system to be fast is to stop enforcing its limits, and the
+admission cap in §1 row 2 is **fail-open by design** — when the bus is unreachable or
+no slot frees inside the wait deadline, the caller proceeds without one rather than
+stalling a job forever. So the state immediately before a node is over-admitted looks
+from outside exactly like a healthy run: latency fine, failure rate fine, cap not
+capping. A sweep gated on the CSV alone passes it and reports a capacity figure that
+the system cannot actually sustain.
+
+`aggregation_slot_fail_open_total` is that signal, and `make sweep` gates on it per tier
+when `SYNODIC_METRICS_URLS` is set (`METRICS_ENABLED` must be on in the deployment under
+test). A failure names the concurrency at which the cap stopped capping — which is the
+real ceiling, usually below the latency knee:
+
+```
+export SYNODIC_METRICS_URLS=http://viz-service:8000/api/v1/metrics
+SWEEP_TIERS='10 50 100 200' make sweep
+```
+
+Holds, waits, read-pressure yields and write-budget refusals are **reported and not
+failed** — those are the protection working, and a gate that goes red when the system
+defends itself is a gate somebody switches off. See
+[`loadtest/README.md`](../loadtest/README.md) for the full table, and note that one
+scrape covers one pod: the registry is per-process, so a fleet claim needs every pod's
+URL.
+
+### What a run gives you that this page cannot
+
+Read `mean_service_time` back out of the graph endpoints' own latency, not from the
+aggregate row, and put it into §1's formula. Then the user counts in that table stop
+being arithmetic about your manifests and start being a statement about your data.
