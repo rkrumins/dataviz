@@ -14,6 +14,8 @@ export const FAILURE_CATEGORY_LABEL: Record<FailureCategory, string> = {
     ontology: 'No ontology',
     timeout: 'Timed out',
     conflict: 'Rebuild conflict',
+    worker_lost: 'Worker died',
+    never_dispatched: 'Never started',
     unknown: 'Rebuild failed',
 }
 
@@ -30,6 +32,10 @@ export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
         "This data source has no ontology assigned, so its lineage can't be aggregated.",
     timeout: 'The graph store stopped answering, or the rebuild made no progress for longer than its stall window.',
     conflict: 'Another rebuild for this source was already running.',
+    worker_lost:
+        'The worker process running this rebuild disappeared — an evicted pod, an out-of-memory kill, a lost node. Nothing it had already written was lost, and Resume continues from the last checkpoint.',
+    never_dispatched:
+        'The rebuild was queued but no worker ever picked it up — either none is registered on the job bus, or the dispatch message was lost. Check that the aggregation worker is deployed and can reach Redis.',
     unknown: "The rebuild didn't complete. Open this source for details.",
 }
 

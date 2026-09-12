@@ -1028,6 +1028,26 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         how: 'Wait for the running rebuild to finish, then retry if the lineage is still out of date.',
         showClear: true, showRetry: true, primary: 'retry',
     },
+    worker_lost: {
+        // Infrastructure, not this source. The run itself was healthy up to
+        // the moment its process vanished, everything it had written is
+        // durable, and the checkpoint is intact — so this is a Resume, and
+        // the guidance must not send anyone tuning a rebuild that was fine.
+        why: 'The worker process running this rebuild disappeared — an evicted pod, an out-of-memory kill, a lost node. Nothing about this source is wrong.',
+        how: 'Resume the rebuild: it carries on from its last checkpoint rather than starting over. If workers keep dying mid-rebuild, check the worker deployment for memory limits and evictions — a rebuild holds the run in memory while it computes.',
+        showClear: true, showRetry: true, primary: 'retry',
+        retryLabel: 'Resume rebuild',
+        retryNote: 'Resume continues from the last checkpoint — the work already done is not repeated.',
+    },
+    never_dispatched: {
+        // The row was queued and nothing ever claimed it. Retrying without
+        // fixing the bus just queues another one, so the deployment check
+        // comes first.
+        why: 'The rebuild was queued but no worker ever picked it up — either none is registered on the job bus, or the dispatch message was lost.',
+        how: 'Check that the aggregation worker service is deployed, running and able to reach REDIS_URL. Admin → Aggregation shows the live worker fleet and queue depth. Once a worker is registered, re-trigger the rebuild.',
+        note: 'Re-triggering before a worker is registered just queues another row that nothing will claim.',
+        showClear: false, showRetry: true, primary: 'retry',
+    },
     unknown: {
         why: "The rebuild didn't complete.",
         how: 'Retry the rebuild. If it keeps failing, check the technical details below.',

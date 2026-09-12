@@ -25,6 +25,12 @@ export type FailureCategory =
     | 'ontology'
     | 'timeout'
     | 'conflict'
+    // Infrastructure, not the job: the worker process died mid-run, or the
+    // row was never picked up at all. Both used to read as 'unknown' — or,
+    // worse, as 'timeout', which sends an operator to raise a time limit
+    // that was never the problem.
+    | 'worker_lost'
+    | 'never_dispatched'
     | 'unknown'
 
 /** A reconciliation verdict, stamped by the sweep and read off the state row.
