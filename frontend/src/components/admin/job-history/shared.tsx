@@ -552,7 +552,14 @@ function StepLedgerView({ views, status, deltas, slip, shares }: {
                     const parked = v.state === 'waiting'
                     // How full THIS stage's bar is: its own unit of work
                     // while it runs, all the way once it is behind us.
-                    const fill = done ? 100 : v.open ? (v.pct ?? 100) : 0
+                    // A stage that DIED draws how far it actually got. It used
+                    // to draw zero — the one bar an operator most wants to read,
+                    // blank. Without a countable unit it stays empty and the red
+                    // track marks the stage instead of claiming a figure.
+                    const fill = done ? 100
+                        : v.open ? (v.pct ?? 100)
+                        : bad ? (v.pct ?? 0)
+                        : 0
                     return (
                         <div key={v.id} className="flex-1 min-w-0" title={v.detailLabel}>
                             <div className={cn(

@@ -19,6 +19,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { createPortal } from 'react-dom'
+import { resumePlan } from './resumePlan'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play, RotateCcw, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -126,6 +127,11 @@ export function RetriggerDialog({
         && originatingJob.lastCursor !== undefined
         && (originatingJob.status === 'failed' || originatingJob.status === 'cancelled')
         && !!onConfirmResume
+    // What resuming will actually redo. Resume saves the WRITES, not the
+    // SCAN, and without saying so an operator resuming a job that died at
+    // 80% watches the bar go to 0 and climb — correct, and indistinguishable
+    // from the resume not having worked.
+    const plan = canResume ? resumePlan(originatingJob?.lastCursor) : null
 
     const isLoading = loading !== null
 
@@ -234,6 +240,12 @@ export function RetriggerDialog({
                         >
                             Cancel
                         </button>
+
+                        {canResume && plan && (
+                            <p className="mr-auto max-w-[26rem] text-[11px] text-ink-muted leading-relaxed" data-testid="resume-plan">
+                                {plan.detail}
+                            </p>
+                        )}
 
                         {canResume && (
                             <button

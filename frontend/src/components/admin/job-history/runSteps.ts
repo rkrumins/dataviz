@@ -308,6 +308,14 @@ export interface FailurePattern {
     considered: number
 }
 
+/** The stage a terminal run stopped in, or null when it got through them
+ *  all (or never recorded a ledger). */
+export function stoppedStage(steps: RunStep[] | undefined | null): string | null {
+    if (!Array.isArray(steps)) return null
+    const died = steps.find(s => s.state === 'failed' || s.state === 'cancelled')
+    return died ? died.id : null
+}
+
 export function commonFailureStage(
     runs: Array<{ status: string; runStats?: { steps?: RunStep[] } | null }>,
     limit = 10,
@@ -318,11 +326,9 @@ export function commonFailureStage(
     if (finished.length === 0) return null
     const tally = new Map<string, number>()
     for (const run of finished) {
-        const died = (run.runStats?.steps ?? []).find(
-            s => s.state === 'failed' || s.state === 'cancelled',
-        )
+        const died = stoppedStage(run.runStats?.steps)
         if (!died) continue
-        tally.set(died.id, (tally.get(died.id) ?? 0) + 1)
+        tally.set(died, (tally.get(died) ?? 0) + 1)
     }
     let top: [string, number] | null = null
     tally.forEach((count, id) => {

@@ -13,6 +13,31 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Job History says where a run failed, how far it got, and what earlier
+attempts did.** A run that died in APPLY showed `edgeCoveragePct` on the list
+— `processed / total`, which is ~100% the moment EXTRACT finishes — so a
+failure read as a hundred percent success, in emerald. It says the stage and
+the overall percent it stopped at now. The failed stage draws how far into
+itself it got rather than drawing empty, and the error block carries the
+typed cause the server had already classified and nothing rendered.
+
+**Resuming a failed job no longer erases why it failed.** A job row is a run
+and a run has many attempts, but every per-attempt field was overwritten in
+place: resume cleared the error, reset the retry count, and a fresh ledger
+replaced the sealed one. `run_stats.attempts` keeps the attempts that did not
+succeed — stage, progress, typed cause, error, writes, and a trimmed ledger —
+archived at the next attempt's start so a worker that died without reaching a
+terminal block is captured too. A successful attempt is never stored (it is
+the run record), so a healthy row is unchanged; `AGGREGATION_ATTEMPTS_KEPT`
+(default 20) bounds a troubled one.
+
+**Resume says what it will redo.** What it skips depends on the cursor's
+phase: nothing if the run died scanning, the ranges already compared if it
+died comparing, and every aggregated edge already written if it died writing.
+The scan and the rollup computation always re-run first, so the bar starts
+from zero and climbs back — the resume working, not failing, which is what it
+used to look like.
+
 **A run's progress bar tells the truth about resumes and retries, and the
 estimated finish stops lying on them.** `progress` was floored at the row's
 previous value so the bar never moved backwards. That put it in permanent

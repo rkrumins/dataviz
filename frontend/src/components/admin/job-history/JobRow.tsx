@@ -15,6 +15,7 @@ import {
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
 } from './shared'
 import { RunSettingsPanel } from './RunSettingsPanel'
+import { AttemptLog } from './AttemptLog'
 import { steadyLoadFromSnapshot, steadyLoadLine } from './steadyLoad'
 import { presetForRun } from './runSettings'
 import { AdjustRunningJob } from './AdjustRunningJob'
@@ -23,7 +24,8 @@ import { AdjustRunningJob } from './AdjustRunningJob'
 // nor about what its evidence means.
 import { REASON_LABEL as RECONCILE_REASON_LABEL } from '../Freshness/DriftStateBadge'
 import { ReconcileWhy } from '../Freshness/reconcileEvidence'
-import { remainingSecsFromLedger, STEP_LABELS } from './runSteps'
+import { FAILURE_CATEGORY_LABEL, asFailureCategory } from '../Freshness/failureGuidance'
+import { remainingSecsFromLedger, stoppedStage, STEP_LABELS } from './runSteps'
 import { runRecordText } from './runRecord'
 
 /**
@@ -284,10 +286,23 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     )
     const hasSteps = (jobFromList.runStats?.steps?.length ?? 0) > 0
     const stageLabel = STEP_LABELS[openStepId ?? job.currentPhase ?? ''] ?? 'Working'
+    // Where a terminal run stopped, for the row's own progress cell. Null for
+    // a run that got through every stage — and for one with no ledger, which
+    // falls back to the coverage figure it always showed.
+    const stoppedAt = useMemo(() => {
+        const id = stoppedStage(jobFromList.runStats?.steps)
+        return id ? {
+            label: STEP_LABELS[id] ?? id,
+            progress: Math.max(0, Math.min(100, Math.round(jobFromList.progress ?? 0))),
+        } : null
+    }, [jobFromList.runStats?.steps, jobFromList.progress])
     // Only a COMPLETED previous run is a baseline: one that failed in APPLY
     // spent no time there, and comparing against it reads every run as a
     // catastrophic slowdown.
     const previousRunStats = previousJob?.status === 'completed' ? previousJob.runStats : null
+
+    const failureCat = asFailureCategory(job.failureCategory)
+    const failureLabel = failureCat ? FAILURE_CATEGORY_LABEL[failureCat] : null
 
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
@@ -453,6 +468,27 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                     className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full"
                                     animate={{ width: `${Math.min(100, job.progress)}%` }}
                                     transition={{ duration: 0.6, ease: 'easeOut' }}
+                                />
+                            </div>
+                        </div>
+                    ) : stoppedAt ? (
+                        // A run that died in APPLY used to show edgeCoveragePct
+                        // here — processed/total, which is ~100% the moment
+                        // EXTRACT finishes, in emerald. A failure reading as a
+                        // hundred percent success is worse than no number.
+                        <div className="w-24">
+                            <div className="flex items-center justify-between gap-1">
+                                <span className="text-[9px] font-bold uppercase tracking-wider text-red-400 truncate">
+                                    {stoppedAt.label}
+                                </span>
+                                <span className="text-[10px] font-bold text-red-400 tabular-nums shrink-0">
+                                    {stoppedAt.progress}%
+                                </span>
+                            </div>
+                            <div className="w-full h-1.5 mt-0.5 bg-red-500/15 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-red-500/70 rounded-full"
+                                    style={{ width: `${Math.min(100, stoppedAt.progress)}%` }}
                                 />
                             </div>
                         </div>
@@ -910,6 +946,10 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             </div>
                                         )}
 
+                                        {/* What earlier attempts of this run did. Resuming
+                                            used to overwrite all of it. */}
+                                        <AttemptLog attempts={job.runStats?.attempts} />
+
                                         {/* Conformance advisories — why a run scanned/wrote fewer
                                             edges than expected (identity or edge-type casing gap). */}
                                         {advisories.length > 0 && (
@@ -991,6 +1031,15 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 <div className="flex items-center gap-2 mb-2">
                                                     <AlertCircle className="w-3.5 h-3.5 text-red-400" />
                                                     <span className="text-[10px] font-bold text-red-400/80 uppercase tracking-wider">Error Detail</span>
+                                                    {/* The server already classifies every failure and
+                                                        nothing read it — the block below instead matched
+                                                        substrings of the message. */}
+                                                    {failureLabel && (
+                                                        <span
+                                                            data-testid="failure-category"
+                                                            className="px-1.5 py-0.5 rounded bg-red-500/15 text-[9px] font-bold text-red-400 uppercase tracking-wider"
+                                                        >{failureLabel}</span>
+                                                    )}
                                                 </div>
                                                 <pre className="text-[11px] font-mono text-red-400/80 break-words whitespace-pre-wrap leading-relaxed">
                                                     {job.errorMessage}

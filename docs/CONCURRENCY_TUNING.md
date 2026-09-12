@@ -588,6 +588,35 @@ compares them for free.
   one dying in Extract has a scan it cannot finish — the same red rows, two
   different problems.
 
+### When a run fails, and resuming it
+
+The row says where it stopped and how far it got — *Apply · 62%* — instead
+of the edge-coverage figure it used to show, which was `processed / total`
+and therefore ~100% in green the moment EXTRACT finished, on a run that died
+in APPLY. The failed stage draws how far into itself it got, and the error
+block carries the server's own typed bucket (*Would not fit*, *Query too
+large*, *Timed out*, …) rather than matching substrings of the message.
+
+**Earlier attempts** lists what previous attempts of the same run did: the
+stage each stopped in, how far it got, its typed cause, its error and what it
+wrote. Resuming used to overwrite all of it — the click you make *because* a
+run failed was the click that erased why. A healthy run has no such list.
+`AGGREGATION_ATTEMPTS_KEPT` (default 20) bounds it.
+
+**Resume from cursor** now says what it will redo, because what it skips
+depends on where the run died:
+
+| Died in | Resume skips |
+| --- | --- |
+| the scan | nothing — it starts again from the beginning |
+| the comparison | the ID ranges already compared |
+| the write | **every aggregated edge already written** |
+
+In every case the lineage scan and the rollup computation run again first —
+they are deterministic and take minutes, while the writes take the hours —
+**so the progress bar starts from zero and climbs back**. That is the resume
+working, not failing, and the dialog says so before you click.
+
 ### What changed since the last run, and getting it into a ticket
 
 *Run settings* shows a **Changed since the last run** list whenever both runs

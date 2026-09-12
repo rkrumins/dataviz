@@ -188,3 +188,68 @@ describe('copy run record', () => {
         expect(screen.getByText('Copy record')).toBeInTheDocument()
     })
 })
+
+// ── where it failed, and how far it got ──────────────────────────────────
+
+const died = (stage: string, progress: number) => job({
+    id: 'agg_dead',
+    status: 'failed',
+    progress,
+    failureCategory: 'write_budget',
+    errorMessage: 'The shard had room for 120,000 more edges.',
+    edgeCoveragePct: 100,
+    runStats: {
+        writes: 400,
+        effective_tuning: EFFECTIVE,
+        steps: [
+            { id: 'extracting', state: 'done', started_at: null, ended_at: null, secs: 300, visits: 1, done: 500, total: 500, unit: 'lineage edges', waiting_for: null },
+            { id: stage, state: 'failed', started_at: null, ended_at: null, secs: 900, visits: 1, done: 900, total: 1200, unit: 'aggregated edges', waiting_for: null },
+        ],
+    },
+} as never)
+
+describe('a run that failed', () => {
+    it('says the stage and how far it got, not a green hundred percent', () => {
+        // edgeCoveragePct is processed/total — ~100% the moment EXTRACT
+        // finishes — so a run that died in APPLY used to read as a success.
+        renderRow(died('applying', 62))
+        expect(screen.getByText('62%')).toBeInTheDocument()
+        expect(screen.getAllByText('Apply').length).toBeGreaterThan(0)
+        expect(screen.queryByText('100%')).toBeNull()
+    })
+
+    it('labels the failure with the bucket the server already classified', () => {
+        renderRow(died('applying', 62))
+        expect(screen.getByTestId('failure-category')).toHaveTextContent('Would not fit')
+    })
+
+    it('draws the failed stage at how far it actually got', () => {
+        // It used to draw zero — the one bar an operator most wants to read.
+        const { container } = renderRow(died('applying', 62))
+        const bars = [...container.querySelectorAll('[style*="width: 75%"]')]
+        expect(bars.length).toBeGreaterThan(0)      // 900 of 1,200
+    })
+})
+
+describe('earlier attempts', () => {
+    it('shows what previous attempts of this run did', () => {
+        renderRow(job({
+            id: 'agg_resumed',
+            status: 'running',
+            runStats: {
+                effective_tuning: EFFECTIVE,
+                attempts: [{
+                    n: 1, stage: 'applying', progress: 62, secs: 1_860,
+                    category: 'write_budget', error: 'no room', writes: 400,
+                }],
+            },
+        } as never))
+        expect(screen.getByTestId('attempt-log')).toBeInTheDocument()
+        expect(screen.getByText(/stopped in Apply at 62%/)).toBeInTheDocument()
+    })
+
+    it('shows nothing for a run whose attempts all succeeded', () => {
+        renderRow(job())
+        expect(screen.queryByTestId('attempt-log')).toBeNull()
+    })
+})

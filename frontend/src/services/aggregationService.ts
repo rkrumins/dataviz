@@ -398,7 +398,35 @@ export interface AggregationRunStats {
    * from `currentPhase`.
    */
   steps?: RunStep[];
+  /**
+   * Attempts of this run that did NOT succeed, oldest first. A job row is a
+   * run and a run has many attempts; without this, resuming a failed job
+   * erased the record of why you were resuming it. A successful attempt is
+   * never in here — it IS the run record, above.
+   */
+  attempts?: RunAttempt[];
   [key: string]: unknown;
+}
+
+export interface RunAttempt {
+  /** 1-based, and never renumbered when the log is trimmed. */
+  n: number;
+  /** The stage it stopped in; null when it stopped without saying (a worker
+   *  that vanished mid-stage, captured by the next attempt). */
+  stage?: string | null;
+  status?: string;
+  ended_at?: string;
+  /** Overall percent when it stopped. */
+  progress?: number;
+  error?: string;
+  /** The same typed bucket as `failureCategory` — `write_budget`,
+   *  `query_memory`, `timeout`, … */
+  category?: string;
+  secs?: number;
+  writes?: number;
+  deletes?: number;
+  /** The attempt's ledger, trimmed to what outlives the attempt. */
+  steps?: RunStep[];
 }
 
 export interface RunStep {
