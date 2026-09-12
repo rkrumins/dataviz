@@ -181,9 +181,20 @@ class _ReconRes:
         return iter(self._items)
 
 
+class _ReconState:
+    """The source row the reaper has to release. ``trigger()`` left it
+    ``running``; only a worker ever moved it off, and the worker is gone."""
+
+    def __init__(self, aggregation_status="running", last_aggregated_at="2026-01-01T00:00:00+00:00"):
+        self.data_source_id = "ds"
+        self.aggregation_status = aggregation_status
+        self.last_aggregated_at = last_aggregated_at
+
+
 class _ReconSession:
-    def __init__(self, jobs):
+    def __init__(self, jobs, state=None):
         self._jobs = jobs
+        self.state = _ReconState() if state is None else state
         self.committed = False
 
     async def __aenter__(self):
@@ -195,13 +206,21 @@ class _ReconSession:
     async def execute(self, stmt):
         return _ReconRes(self._jobs)
 
+    async def get(self, orm, key):
+        # Only the aggregation-owned state row exists here; the public
+        # mirror is absent, exactly as in a split-DB topology.
+        return self.state if getattr(orm, "__name__", "") .endswith("StateORM") else None
+
     async def commit(self):
         self.committed = True
 
 
-def _recon_factory(jobs):
+def _recon_factory(jobs, state=None):
+    session = _ReconSession(jobs, state)
+
     def f():
-        return _ReconSession(jobs)
+        return session
+    f.session = session
     return f
 
 
@@ -231,10 +250,14 @@ async def test_reconciler_caps_auto_resume(monkeypatch):
     redis = FakeRedis()
     redis.store["agg:redispatch:J"] = 2  # already at cap; next incr -> 3
     job = _job()
-    n = await recon_mod._reconcile_once(_recon_factory([job]), redis)
+    factory = _recon_factory([job])
+    n = await recon_mod._reconcile_once(factory, redis)
     assert n == 1
     assert redis.xadds == []  # capped — no further re-dispatch
     assert job.status == "failed"
+    # …and the source is handed back. Left "running" it reads as in flight,
+    # and the stale-marker reconciler defers it on every tick, forever.
+    assert factory.session.state.aggregation_status == "failed"
 
 
 @pytest.mark.asyncio
@@ -242,10 +265,12 @@ async def test_reconciler_marks_cancelled_when_flagged():
     redis = FakeRedis()
     redis.store[cancel_flag_key("J")] = "1"  # cancelled + lock absent
     job = _job()
-    n = await recon_mod._reconcile_once(_recon_factory([job]), redis)
+    factory = _recon_factory([job])
+    n = await recon_mod._reconcile_once(factory, redis)
     assert n == 1
     assert job.status == "cancelled"
     assert redis.xadds == []
+    assert factory.session.state.aggregation_status == "cancelled"
 
 
 # ── the auto-resume cap is real: the counter does not slide ─────────
@@ -270,11 +295,14 @@ async def test_reconciler_sixth_resume_fails_the_job_with_a_way_back():
     redis = FakeRedis()
     redis.store["agg:redispatch:J"] = 5  # the default cap, already spent
     job = _job()
-    n = await recon_mod._reconcile_once(_recon_factory([job]), redis)
+    factory = _recon_factory([job])
+    n = await recon_mod._reconcile_once(factory, redis)
     assert n == 1
     assert job.status == "failed"
     assert "resume from cursor=2:10 is still possible" in job.error_message
+    assert job.error_message.startswith(recon_mod.WORKER_LOST)
     assert redis.xadds == []
+    assert factory.session.state.aggregation_status == "failed"
 
 
 # ── crash recovery shares the counter, honours the cancel flag ──────

@@ -38,6 +38,7 @@ from backend.app.jobs.metrics import increment as metrics_increment
 
 from .cancel import get_registry as get_cancel_registry
 from .models import AggregationJobORM
+from .reap import NEVER_DISPATCHED, WORKER_LOST, reap_job
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +105,17 @@ async def count_auto_resume(redis_client: Any, job_id: str) -> int:
     return attempts
 
 
-def mark_auto_resume_exhausted(job: Any, now_iso: str) -> None:
+async def mark_auto_resume_exhausted(session: Any, job: Any, now_iso: str) -> None:
     """Terminal status for a job that died more times than automation may
     resume it. A hand Resume from the cursor is still possible."""
-    job.status = "failed"
-    job.error_message = (
-        f"Auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
-        f"without completing; resume from cursor={job.last_cursor} "
-        f"is still possible."
+    await reap_job(
+        session, job, status="failed", now_iso=now_iso,
+        error_message=(
+            f"{WORKER_LOST} auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
+            f"without completing; resume from cursor={job.last_cursor} "
+            f"is still possible."
+        ),
     )
-    job.completed_at = now_iso
-    job.updated_at = now_iso
     metrics_increment(
         "stuck_jobs_redispatched_total",
         kind="aggregation", outcome="auto_resume_exhausted",
@@ -193,10 +194,10 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
 
                     # Lock gone → executor died. If cancelled, don't resume.
                     if await redis_client.get(cancel_flag_key(job.id)):
-                        job.status = "cancelled"
-                        job.error_message = "Cancelled; executor stopped."
-                        job.completed_at = now_iso
-                        job.updated_at = now_iso
+                        await reap_job(
+                            session, job, status="cancelled", now_iso=now_iso,
+                            error_message="Cancelled; executor stopped.",
+                        )
                         reconciled += 1
                         continue
 
@@ -205,7 +206,7 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                     # slides — see count_auto_resume).
                     attempts = await count_auto_resume(redis_client, job.id)
                     if attempts > _MAX_AUTO_RESUMES:
-                        mark_auto_resume_exhausted(job, now_iso)
+                        await mark_auto_resume_exhausted(session, job, now_iso)
                         reconciled += 1
                         continue
 
@@ -255,14 +256,14 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                 job.id, job.data_source_id, stale_for,
                 job.last_checkpoint_at, job.last_cursor,
             )
-            job.status = "failed"
-            job.error_message = (
-                f"Reconciler: no progress for {int(stale_for)}s "
-                f"(threshold={int(_HEARTBEAT_THRESHOLD_SECS)}s). "
-                f"Worker likely died; resume from last_cursor is possible."
+            await reap_job(
+                session, job, status="failed", now_iso=now_iso,
+                error_message=(
+                    f"{WORKER_LOST} no progress for {int(stale_for)}s "
+                    f"(threshold={int(_HEARTBEAT_THRESHOLD_SECS)}s). "
+                    f"The worker died; resume from last_cursor is possible."
+                ),
             )
-            job.completed_at = now_iso
-            job.updated_at = now_iso
             metrics_increment(
                 "stuck_jobs_redispatched_total",
                 kind="aggregation",
@@ -314,15 +315,15 @@ async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
             age = (now - ref).total_seconds()
             if workers_alive is False and age > _PENDING_NO_WORKER_SECS:
                 reason = (
-                    f"Queued for {int(age)}s with no aggregation worker "
-                    "registered on the job bus. Check that the aggregation "
-                    "worker service is deployed and can reach REDIS_URL, "
-                    "then re-trigger."
+                    f"{NEVER_DISPATCHED} queued for {int(age)}s with no "
+                    "aggregation worker registered on the job bus. Check that "
+                    "the aggregation worker service is deployed and can reach "
+                    "REDIS_URL, then re-trigger."
                 )
             elif age > _PENDING_TIMEOUT_SECS:
                 reason = (
-                    f"Queued for {int(age)}s without being picked up "
-                    f"(threshold={int(_PENDING_TIMEOUT_SECS)}s) — the "
+                    f"{NEVER_DISPATCHED} queued for {int(age)}s without being "
+                    f"picked up (threshold={int(_PENDING_TIMEOUT_SECS)}s) — the "
                     "dispatch message was likely lost. Re-trigger to "
                     "re-enqueue."
                 )
@@ -333,10 +334,10 @@ async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
                 "reconciler: pending job %s ds=%s abandoned: %s",
                 job.id, job.data_source_id, reason,
             )
-            job.status = "failed"
-            job.error_message = reason
-            job.completed_at = now_iso
-            job.updated_at = now_iso
+            await reap_job(
+                session, job, status="failed",
+                error_message=reason, now_iso=now_iso,
+            )
             metrics_increment(
                 "stuck_jobs_redispatched_total",
                 kind="aggregation", outcome="pending_abandoned",

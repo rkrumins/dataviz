@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
 from .models import AggregationJobORM
+from .reap import NEVER_DISPATCHED as _NEVER_DISPATCHED
+from .reap import WORKER_LOST as _WORKER_LOST
 from .reservation import claim_exclusive
 from .steps import archive_attempt, remaining_secs
 from .schemas import (
@@ -3179,16 +3181,21 @@ class AggregationService:
                     # (the dispatcher would fail anyway); never fail startup.
                     try:
                         from .redis_client import cancel_flag_key, get_redis
+                        from .reap import reap_job
                         from .reconciler import (
                             _MAX_AUTO_RESUMES, count_auto_resume,
                             mark_auto_resume_exhausted,
                         )
                         redis = get_redis()
                         if await redis.get(cancel_flag_key(job.id)):
-                            job.status = "cancelled"
-                            job.error_message = "Cancelled; executor stopped."
-                            job.completed_at = _now()
-                            job.updated_at = _now()
+                            # Reaped, not just stamped: the ledger has to
+                            # name the stage this died in and the source has
+                            # to leave "in flight", or the stale-marker
+                            # reconciler defers it forever. See reap.py.
+                            await reap_job(
+                                session, job, status="cancelled",
+                                error_message="Cancelled; executor stopped.",
+                            )
                             await session.commit()
                             logger.info(
                                 "Crash recovery: job %s was cancelled — not "
@@ -3196,7 +3203,7 @@ class AggregationService:
                             )
                             continue
                         if await count_auto_resume(redis, job.id) > _MAX_AUTO_RESUMES:
-                            mark_auto_resume_exhausted(job, _now())
+                            await mark_auto_resume_exhausted(session, job, _now())
                             await session.commit()
                             logger.warning(
                                 "Crash recovery: job %s exhausted its auto-resume "
@@ -3589,8 +3596,19 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     hoping."""
     if not error_message:
         return None
-    if error_message.lstrip().startswith("write budget:"):
+    stripped = error_message.lstrip()
+    if stripped.startswith("write budget:"):
         return "write_budget"
+    # The two INFRASTRUCTURE faults, keyed off the stable markers ``reap.py``
+    # writes rather than off its prose. Both used to fall through to
+    # ``unknown`` (or, for the watchdog's wording, to ``timeout``), which is
+    # the least actionable answer there is and, for a dead pod, the wrong
+    # one: no time limit brings a worker back. They are the most common
+    # failures at fleet scale, and nothing the job itself did.
+    if stripped.startswith(_WORKER_LOST):
+        return "worker_lost"
+    if stripped.startswith(_NEVER_DISPATCHED):
+        return "never_dispatched"
     if (
         "OutOfMemoryError" in error_message
         or "used memory > 'maxmemory'" in error_message

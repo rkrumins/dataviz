@@ -219,7 +219,8 @@ class AggregationScheduler:
         No graph is touched here; the comment below says what was removed
         and where drift detection lives now.
         """
-        from .models import AggregationDataSourceStateORM, AggregationJobORM
+        from .models import AggregationJobORM
+        from .reap import WORKER_LOST, reap_job
         from .service import get_active_service, read_global_cadence
 
         async with self._session_factory() as session:
@@ -312,19 +313,23 @@ class AggregationScheduler:
 
             for stale_job in stale_jobs:
                 elapsed = (datetime.now(tz=timezone.utc) - datetime.fromisoformat(stale_job.updated_at)).total_seconds()
-                stale_job.status = "failed"
-                stale_job.error_message = f"Watchdog timeout: no checkpoint update in {int(elapsed)}s"
-                stale_job.updated_at = datetime.now(tz=timezone.utc).isoformat()
                 logger.warning(
                     "Watchdog marked stale job %s as failed (no update in %ds)",
                     stale_job.id, int(elapsed),
                 )
-                # Update aggregation-owned state table
-                state = await session.get(
-                    AggregationDataSourceStateORM, stale_job.data_source_id,
+                # Reaped through the shared path, not stamped in place: the
+                # ledger must name the stage the run died in (a row left with
+                # a step still "running" reports NO failure stage anywhere),
+                # and the source must leave "in flight" on BOTH mirrors —
+                # this loop used to write the aggregation-owned column and
+                # leave the viz-service's copy saying "running" forever.
+                await reap_job(
+                    session, stale_job, status="failed",
+                    error_message=(
+                        f"{WORKER_LOST} no checkpoint update in {int(elapsed)}s. "
+                        f"The worker died; resume from last_cursor is possible."
+                    ),
                 )
-                if state:
-                    state.aggregation_status = "failed"
 
             if stale_jobs:
                 await session.commit()

@@ -345,6 +345,47 @@ def failed_stage(steps: Any) -> Optional[str]:
     return None
 
 
+def seal_steps(job: Any, status: str, *, now: Optional[str] = None) -> bool:
+    """Seal a PERSISTED ledger — the one on a job row's ``run_stats`` — with
+    the run's terminal state, without a live :class:`StepLedger`.
+
+    ``StepLedger.seal`` covers every path that runs inside the worker's own
+    ``finally``. It covers none of the paths where the worker is already
+    gone: an OOM-killed pod, an evicted node, a lost dispatch. Those are
+    reaped from another process, which holds no ledger — so the row kept a
+    step marked ``running`` forever, and the two readers that answer "where
+    did this die" (``failed_stage`` here, ``stoppedStage`` in the UI) both
+    look for ``failed``/``cancelled`` and found neither. A crash-killed run
+    therefore reported NO failure stage, and the per-source failure-pattern
+    tally skipped it entirely — which is precisely the run an operator most
+    needs named.
+
+    The open step's duration is closed out against ``now`` the same way the
+    live ledger closes it, so the stage timings of a reaped run stay
+    comparable with a clean one. Returns whether anything changed.
+    """
+    if not hasattr(job, "run_stats"):
+        return False
+    try:
+        doc = json.loads(getattr(job, "run_stats", None) or "{}")
+        if not isinstance(doc, dict):
+            return False
+        entry = open_step(doc.get("steps"))
+        if entry is None:
+            return False
+        ended = now or _now()
+        entry["state"] = "done" if status == "completed" else (status or "failed")
+        entry["ended_at"] = ended
+        entry["secs"] = round(
+            (entry.get("secs") or 0.0) + _span_secs(entry.get("started_at"), ended), 3,
+        )
+        entry["waiting_for"] = None
+        job.run_stats = json.dumps(doc)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def record_attempt(doc: Dict[str, Any], **fields: Any) -> bool:
     """Move the ledger currently on ``doc`` into its attempt log.
 

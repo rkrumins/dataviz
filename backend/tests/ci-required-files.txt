@@ -52,6 +52,7 @@ tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_index_ddl_once.py
 tests/test_job_list_overlay.py
+tests/test_job_reaping.py
 tests/test_label_cache_warmup.py
 tests/test_nav_catalogue.py
 tests/test_process_memory.py
