@@ -1,0 +1,224 @@
+"""The run's step ledger — what the aggregation service is doing now, what
+it has already done, and how much of the current step is left.
+
+WHY THIS EXISTS. A run used to report one pair of counters
+(``processed_edges`` / ``total_edges``) and one monotonic percentage. Both
+only ever mean "lineage edges scanned during EXTRACT": the pipeline's
+``_checkpoint`` sends the extract totals whatever phase is running, so from
+RECONCILE onwards the counters are frozen and the percentage is the only
+moving number — with its denominator nowhere on the page. And two stretches
+of the run had no phase at all: the worker's preamble (indices, identity
+stamp) before the pipeline's first checkpoint, and the closing fingerprint
+scan after its last. On a large graph those bookends are minutes of a
+running job with no phase, no bar and no stepper.
+
+WHAT IT IS. An ordered list of the run's six real steps. Each entry carries
+its own state, when it started and ended, the seconds it has accumulated
+across every visit, how many times it has been entered, why it is parked if
+it is, and its OWN unit of work — the numbers the pipeline already computes
+at each checkpoint and used to fold into the percentage and discard.
+
+The ledger is written into ``run_stats["steps"]``, so the same record is the
+live view while the job runs and the run's history once it is over.
+
+STEP IDS are the pipeline's own ``phase_label`` values, unchanged, plus the
+two worker-owned bookends. No new vocabulary: ``PHASE_BANDS`` in the
+frontend and ``_progress_pct`` in the pipeline keep meaning what they meant.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+# Execution order. ``extracting`` … ``applying`` are the pipeline's phase
+# labels; ``preparing`` and ``finalizing`` are the worker's bookends.
+STEP_IDS = (
+    "preparing",
+    "extracting",
+    "computing",
+    "reconciling",
+    "applying",
+    "finalizing",
+)
+
+# A step is ``pending`` until entered, ``running`` while it holds the run,
+# ``waiting`` when it holds the run but is parked on something outside it
+# (a retry backoff, a quiesce park, a failover park), ``done`` once a later
+# step opens, and ``failed`` / ``cancelled`` when the run ends inside it.
+_OPEN = ("running", "waiting")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class StepLedger:
+    """Ordered record of the run's steps. Not thread-safe and not meant to
+    be: one run, one asyncio task, one ledger.
+
+    Every mutator returns True when the snapshot actually changed, so the
+    caller can keep its dirty flag honest and leave the commit cadence to
+    the checkpoint policy that already owns it.
+    """
+
+    __slots__ = ("_steps", "_open", "_clock")
+
+    def __init__(self, *, clock=_now) -> None:
+        self._clock = clock
+        self._open: Optional[str] = None
+        self._steps: Dict[str, Dict[str, Any]] = {
+            step_id: {
+                "id": step_id,
+                "state": "pending",
+                "started_at": None,
+                "ended_at": None,
+                "secs": 0.0,
+                "visits": 0,
+                # Unit of work for THIS step, in its own units. None until
+                # the step reports them; ``computing`` and the two bookends
+                # never do (they have no countable unit, and inventing one
+                # would be worse than saying nothing).
+                "done": None,
+                "total": None,
+                "unit": None,
+                "waiting_for": None,
+            }
+            for step_id in STEP_IDS
+        }
+
+    # ── mutators ────────────────────────────────────────────────────
+
+    def enter(self, step_id: str) -> bool:
+        """Open ``step_id``, closing whatever was open.
+
+        Re-entering a step the run already visited (a transient failure
+        sends the pipeline back to EXTRACT from the cursor) reopens it:
+        the accumulated seconds stand, the visit count rises, and every
+        step AFTER it goes back to pending — because it did.
+        """
+        if step_id not in self._steps:
+            return False
+        if self._open == step_id:
+            # Already here. Re-entering must not re-count the visit or
+            # restart the clock — but it DOES mean the run is moving again,
+            # so it clears a park.
+            entry = self._steps[step_id]
+            if entry["state"] == "waiting":
+                entry["state"] = "running"
+                entry["waiting_for"] = None
+                return True
+            return False
+        now = self._clock()
+        self._close_open(now, "done")
+        entry = self._steps[step_id]
+        entry["state"] = "running"
+        entry["started_at"] = now
+        entry["ended_at"] = None
+        entry["visits"] = int(entry["visits"]) + 1
+        entry["waiting_for"] = None
+        self._open = step_id
+        # Going backwards un-does what came after. Anything else would
+        # claim work that is about to be redone is already finished.
+        for later in STEP_IDS[STEP_IDS.index(step_id) + 1:]:
+            later_entry = self._steps[later]
+            if later_entry["state"] != "pending":
+                later_entry.update(
+                    state="pending", started_at=None, ended_at=None,
+                    done=None, total=None, unit=None, waiting_for=None,
+                )
+        return True
+
+    def note(self, *, done: Any = None, total: Any = None, unit: Any = None) -> bool:
+        """Record the open step's own unit of work. Any report of progress
+        also clears a park — the run is moving again."""
+        if self._open is None:
+            return False
+        entry = self._steps[self._open]
+        changed = False
+        for field, value in (("done", done), ("total", total), ("unit", unit)):
+            if value is None:
+                continue
+            coerced = str(value) if field == "unit" else _as_int(value)
+            if coerced is not None and entry[field] != coerced:
+                entry[field] = coerced
+                changed = True
+        if entry["state"] == "waiting":
+            entry["state"] = "running"
+            entry["waiting_for"] = None
+            changed = True
+        return changed
+
+    def waiting(self, reason: str) -> bool:
+        """The open step is parked on something outside itself. Without
+        this a retry backoff and a quiesce park read exactly like a hang:
+        the same step, the same frozen counters, no explanation."""
+        if self._open is None:
+            return False
+        entry = self._steps[self._open]
+        reason = (reason or "")[:200]
+        if entry["state"] == "waiting" and entry["waiting_for"] == reason:
+            return False
+        entry["state"] = "waiting"
+        entry["waiting_for"] = reason
+        return True
+
+    def seal(self, status: str) -> bool:
+        """Close the open step with the run's terminal state. ``completed``
+        closes it as done; anything else closes it as itself, so the ledger
+        names the step the run died in."""
+        final = "done" if status == "completed" else (status or "failed")
+        changed = self._close_open(self._clock(), final)
+        self._open = None
+        return changed
+
+    # ── readers ─────────────────────────────────────────────────────
+
+    def snapshot(self) -> List[Dict[str, Any]]:
+        """The ledger, in execution order. Stable between real changes:
+        the open step's elapsed time is NOT baked in here — its
+        ``started_at`` is, and the reader adds the difference. Recomputing
+        it on every call would mark the record dirty on every checkpoint
+        and turn the commit cadence into one write per batch."""
+        return [dict(self._steps[step_id]) for step_id in STEP_IDS]
+
+    @property
+    def open_step(self) -> Optional[str]:
+        return self._open
+
+    # ── internals ───────────────────────────────────────────────────
+
+    def _close_open(self, now: str, state: str) -> bool:
+        if self._open is None:
+            return False
+        entry = self._steps[self._open]
+        if entry["state"] not in _OPEN:
+            return False
+        entry["state"] = state
+        entry["ended_at"] = now
+        entry["secs"] = round(
+            float(entry["secs"]) + _span_secs(entry["started_at"], now), 2,
+        )
+        entry["waiting_for"] = None
+        return True
+
+
+def _as_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _span_secs(started_at: Optional[str], ended_at: str) -> float:
+    """Seconds between two ISO instants, never negative. Wall clock rather
+    than a monotonic counter because the ledger is persisted and read back:
+    a resumed worker has no monotonic origin in common with the one that
+    wrote the row."""
+    if not started_at:
+        return 0.0
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(ended_at)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, (end - start).total_seconds())

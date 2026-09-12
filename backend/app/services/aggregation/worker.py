@@ -44,6 +44,7 @@ from backend.common.adapters import (
     ProviderUnavailable,
 )
 
+from .steps import StepLedger
 from backend.app.providers.falkordb_materialize import (
     MaterializationBudgetExceeded,
     MaterializationPreconditionFailed,
@@ -145,6 +146,24 @@ def _adapted_scalars(adapted: Any) -> dict:
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 out[f"adapted_live_{key}"] = value
     return out
+
+
+def _record_steps(job: Any, ledger: "StepLedger") -> None:
+    """Fold the step ledger into the row's ``run_stats``. Called wherever
+    the ledger moves outside the checkpoint callback (the two bookends and
+    the terminal seal), so the record on the row is never behind the run
+    it describes. Best-effort, like every other ``run_stats`` write: a
+    serialization failure must not fail a job."""
+    if not hasattr(job, "run_stats"):
+        return
+    try:
+        doc = json.loads(getattr(job, "run_stats", None) or "{}")
+        if not isinstance(doc, dict):
+            doc = {}
+        doc["steps"] = ledger.snapshot()
+        job.run_stats = json.dumps(doc)
+    except (TypeError, ValueError):
+        pass
 
 
 def _merge_run_doc(existing: Any, incoming: Any) -> dict:
@@ -343,6 +362,15 @@ class AggregationWorker:
             # Which worker executed this job — fleet attribution for the UI.
             if self._worker_id and hasattr(job, "worker_id"):
                 job.worker_id = self._worker_id
+            # Open the run's step ledger on the SAME commit that flips the
+            # row to running. Everything between here and the pipeline's
+            # first checkpoint — the indexes, the identity stamp, the
+            # before-fingerprint — used to run with no phase at all: on a
+            # large graph, minutes of a running job with nothing on the
+            # page. It is a step of the run, so it is a step in the record.
+            ledger = StepLedger()
+            ledger.enter("preparing")
+            _record_steps(job, ledger)
             await session.commit()
 
             # Register a cooperative cancel event before any heavy work so
@@ -632,6 +660,7 @@ class AggregationWorker:
                         scope=scope,
                         progress_marker=progress_marker,
                         limits=limits,
+                        ledger=ledger,
                     )
                 )
                 wall_start = time.monotonic()
@@ -742,7 +771,13 @@ class AggregationWorker:
                         pass
                     raise
 
-                # Success
+                # Success — but not finished. The after-fingerprint is
+                # three full graph scans and the state row, the workspace
+                # row, the audit row and the terminal events all follow.
+                # That stretch used to show as "Applying, 100%", which is
+                # why a run looked wedged at the end on a large graph.
+                ledger.enter("finalizing")
+                _record_steps(job, ledger)
                 job.status = "completed"
                 job.progress = 100
                 job.completed_at = _now()
@@ -764,6 +799,11 @@ class AggregationWorker:
                         )
                     except (TypeError, ValueError):
                         pass
+                    # The pipeline's document has no ``steps`` key, so a
+                    # key-by-key merge would leave the one the checkpoints
+                    # wrote — but it is now a step behind (``finalizing``
+                    # just opened). Re-stamp it.
+                    _record_steps(job, ledger)
                 # An EMPTY fingerprint means the probe could not answer, not
                 # that the graph has no shape. Storing it poisons the change
                 # gate forever: every later signal compares against "" and
@@ -1094,6 +1134,13 @@ class AggregationWorker:
                     )
 
             finally:
+                # Close the open step with the run's terminal state, on the
+                # one commit every path — success, failure, cancel, store
+                # outage — passes through. A failed run's ledger then NAMES
+                # the step it died in, which is the first question anyone
+                # asks of a failure.
+                ledger.seal(job.status)
+                _record_steps(job, ledger)
                 job.updated_at = _now()
                 await session.commit()
                 # Always unregister the cancel event, including on
@@ -1417,6 +1464,7 @@ class AggregationWorker:
         scope: PlatformJobScope,
         progress_marker: Optional[dict] = None,
         limits: Optional[dict] = None,
+        ledger: Optional[StepLedger] = None,
     ) -> dict:
         """Retry wrapper around _materialize_with_checkpoints.
 
@@ -1468,6 +1516,28 @@ class AggregationWorker:
             if progress_marker is not None:
                 progress_marker["at"] = time.monotonic()
 
+        async def _park(reason: str, delay: float) -> None:
+            """Wait, visibly. A retry backoff, a quiesce park and a failover
+            park are real time the run spends NOT running, and they used to
+            read exactly like a hang: the same step, the same frozen
+            counters, nothing said. Mark the open step parked and say what
+            for; the next checkpoint clears it. The pipeline is not running
+            in any of these handlers, so the commit is safe."""
+            if ledger is not None and ledger.waiting(reason):
+                _record_steps(job, ledger)
+                try:
+                    await session.commit()
+                except Exception as park_exc:
+                    logger.debug(
+                        "Aggregation job %s: park not recorded: %s", job.id, park_exc,
+                    )
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+            await asyncio.sleep(delay)
+            _mark_alive()
+
         while True:
             try:
                 return await self._materialize_with_checkpoints(
@@ -1477,6 +1547,7 @@ class AggregationWorker:
                     containment_types=containment_types,
                     lineage_types=lineage_types,
                     cancel_event=cancel_event,
+                    ledger=ledger,
                     emitter=emitter,
                     scope=scope,
                     progress_marker=progress_marker,
@@ -1547,8 +1618,11 @@ class AggregationWorker:
                     job.id, e.endpoint or "?", delay, failover_parks,
                     _FAILOVER_PARKS_MAX, attempt + 1,
                 )
-                await asyncio.sleep(delay)
-                _mark_alive()
+                await _park(
+                    f"the graph store node {e.endpoint or 'holding this graph'} "
+                    f"is failing over ({failover_parks}/{_FAILOVER_PARKS_MAX})",
+                    delay,
+                )
                 continue
             except ProviderBusy as e:
                 # ZOMBIE-LEASE takeover: if the park is a graph-lease
@@ -1598,8 +1672,11 @@ class AggregationWorker:
                     job.id, delay, quiesce_event_count, max_quiesce_events,
                     attempt + 1, e,
                 )
-                await asyncio.sleep(delay)
-                _mark_alive()
+                await _park(
+                    f"the provider is quiesced "
+                    f"({quiesce_event_count}/{max_quiesce_events})",
+                    delay,
+                )
                 # Re-enter the OUTER loop without consuming the retry
                 # budget (``attempt`` is only incremented by the failure
                 # handlers below). The previous nested re-call loop only
@@ -1677,8 +1754,11 @@ class AggregationWorker:
                         "Aggregation job %s: retry %d/%d after %.0fs (provider unavailable) — %s",
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
-                    await asyncio.sleep(delay)
-                    _mark_alive()
+                    await _park(
+                        f"retry {attempt + 1}/{job.max_retries} — "
+                        f"provider {e.provider_name} unavailable",
+                        delay,
+                    )
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it,
@@ -1712,8 +1792,7 @@ class AggregationWorker:
                         "Aggregation job %s: retry %d/%d after %.0fs — %s",
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
-                    await asyncio.sleep(delay)
-                    _mark_alive()
+                    await _park(f"retry {attempt + 1}/{job.max_retries}", delay)
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
@@ -1734,6 +1813,7 @@ class AggregationWorker:
         scope: PlatformJobScope,
         progress_marker: Optional[dict] = None,
         limits: Optional[dict] = None,
+        ledger: Optional[StepLedger] = None,
     ) -> dict:
         """Run batch materialization with coalesced DB checkpointing.
 
@@ -1796,6 +1876,32 @@ class AggregationWorker:
             # keeps the generic UI label working.
             if phase is not None:
                 job.current_phase = phase
+            # Move the step ledger with it. ``enter`` is idempotent for the
+            # step already open, so this costs a dict lookup per checkpoint
+            # and only marks the record dirty when the run actually moved.
+            # ``step`` is the phase's OWN unit of work — extract counts
+            # lineage edges, reconcile counts scan ranges, apply counts
+            # aggregated edges — the numbers each phase already had and
+            # used to fold into the percentage and throw away.
+            step_changed = False
+            if ledger is not None:
+                step_changed = ledger.enter(phase) if phase is not None else False
+                moved = step_changed
+                step_units = (stats or {}).get("step")
+                if isinstance(step_units, dict):
+                    # Read the three keys by name rather than splatting the
+                    # dict: a rolling deploy can pair this worker with a
+                    # pipeline that sends a fourth, and a TypeError here
+                    # would skip the checkpoint's PG commit, not just the
+                    # ledger.
+                    moved = ledger.note(
+                        done=step_units.get("done"),
+                        total=step_units.get("total"),
+                        unit=step_units.get("unit"),
+                    ) or moved
+                if moved:
+                    run_doc["steps"] = ledger.snapshot()
+                    run_doc_dirty = True
             # The pipeline supplies a phase-weighted 0-100 percentage so
             # the bar is monotonic across phases; without it, fall back to
             # the processed/total ratio (clamped — ``total`` can lag when
@@ -1838,6 +1944,12 @@ class AggregationWorker:
             elapsed = time.monotonic() - last_commit_monotonic
             should_commit = (
                 is_first_checkpoint
+                # A step boundary is what the operator is watching for, and
+                # there are five of them in a run. Riding the cadence means
+                # the row can say EXTRACT while the run is a minute into
+                # RECONCILE — one slow scan range is longer than the
+                # two-second window. Land it now; it costs five commits.
+                or step_changed
                 or elapsed >= _CHECKPOINT_MAX_INTERVAL_SECS
                 or batches_since_commit >= _CHECKPOINT_MAX_BATCHES
             )

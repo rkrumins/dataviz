@@ -60,6 +60,7 @@ tests/test_provider_refresh_batch.py
 tests/test_read_pressure_yield.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
+tests/test_run_step_ledger.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py

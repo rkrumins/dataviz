@@ -2339,7 +2339,19 @@ class AggregationPipeline:
                 observed_at=datetime.now(timezone.utc).isoformat(),
             )
 
-    async def _checkpoint(self, phase: str, pos: int, *, phase_label: str) -> None:
+    async def _checkpoint(
+        self, phase: str, pos: int, *, phase_label: str,
+        unit_done: Optional[int] = None,
+        unit_total: Optional[int] = None,
+        unit: Optional[str] = None,
+    ) -> None:
+        """Report a boundary. ``processed``/``total`` are — and have always
+        been — the EXTRACT counters, whatever phase is running; from
+        RECONCILE onwards they are frozen by design and the percentage is
+        the only moving number. ``unit_done``/``unit_total``/``unit`` are
+        this step's OWN unit of work, the numbers each phase already
+        computes for the percentage and used to discard, so the step ledger
+        can say how much of THIS step is left."""
         self._cancel_check()
         if self._progress_cb is None:
             return
@@ -2349,6 +2361,10 @@ class AggregationPipeline:
             self._writes, phase_label,
         )
         live_stats: Dict[str, Any] = {"writes": self._writes, "deletes": self._deletes}
+        if unit_done is not None or unit_total is not None:
+            live_stats["step"] = {
+                "done": unit_done, "total": unit_total, "unit": unit,
+            }
         # ~40 scalars: what the run runs with (sent every checkpoint so the
         # worker needs no acknowledgement) and what the ladder has changed
         # so far (only when it has).
@@ -3168,6 +3184,8 @@ class AggregationPipeline:
                 )
                 await self._checkpoint(
                     PHASE_AGGREGATE, self._scanned, phase_label="extracting",
+                    unit_done=self._scanned, unit_total=self._total,
+                    unit="lineage edges",
                 )
                 if len(base) >= cap or (
                     len(base) >= self._flush_min_pairs and self._memory_pressure()
@@ -4924,7 +4942,11 @@ class AggregationPipeline:
 
             lo = hi
             self._progress_pct = 55 + min(20, int(20 * (lo // width) / total_ranges))
-            await self._checkpoint(PHASE_RECONCILE, lo, phase_label="reconciling")
+            await self._checkpoint(
+                PHASE_RECONCILE, lo, phase_label="reconciling",
+                unit_done=lo // width, unit_total=total_ranges,
+                unit="scan ranges",
+            )
 
         self._progress_pct = 75
         return existing
@@ -5198,6 +5220,7 @@ class AggregationPipeline:
             self._progress_pct = 75 + min(25, int(25 * done / total))
             await self._checkpoint(
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
+                unit_done=done, unit_total=total, unit="aggregated edges",
             )
             # Re-measure the owning shard every N first-touch edges: the
             # post-compute check answered at one instant, and a shard shared
