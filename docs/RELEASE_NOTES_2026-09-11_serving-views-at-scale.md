@@ -461,8 +461,29 @@ them.
    the ConfigMap and the documented ceilings disagree.
 5. **Deploy the backend image**, then the frontend.
 6. **Run one rebuild** on a non-critical source and watch Admin → Graph store.
+7. **Drop the retired edge indexes, when convenient.** This release stops *creating* four
+   `:AGGREGATED` edge indexes no query could ever enter through — but nothing in Redis
+   expires an index, and no code path anywhere issues `DROP INDEX`. **A graph that already
+   has them keeps them after this upgrade**, holding one index document per aggregated
+   edge, updated on every edge write and rebuilt from scratch every time the graph is read
+   back off disk. Deploying does not reclaim that; this step does:
 
-Nothing in steps 3–6 needs a maintenance window. Step 1 is a StatefulSet roll; the app
+   ```
+   # Dry run — the default. Lists what is there and what would go. Changes nothing.
+   python backend/scripts/cleanup_graph_indices.py --all-shards
+
+   # Drop them
+   python backend/scripts/cleanup_graph_indices.py --all-shards --apply
+   ```
+
+   Only the exact `(relationship, property)` pairs this product has RETIRED are ever
+   dropped — node indexes, the `aggKey` index, the two composites and anything somebody
+   else made are left alone, and the script says so rather than assuming. It is
+   cluster-aware: each graph is worked on the node that owns it. **Safe to defer** — it
+   costs memory and write amplification, not correctness — but until it runs, the index
+   half of this release has not landed.
+
+Nothing in steps 3–7 needs a maintenance window. Step 1 is a StatefulSet roll; the app
 treats a rotating node as a pause ([§4.3](#43-a-node-rotation-is-a-pause-not-an-outage)).
 
 ---

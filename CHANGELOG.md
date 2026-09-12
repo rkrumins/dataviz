@@ -129,6 +129,44 @@ idle shard-2 yield for thirty seconds, for nobody's benefit. Both halves key
 by the node that owns the starving graph now, resolved from the client's
 current slot map at no round-trip cost.
 
+**The identity stamp was the last thing hammering a node flat out.** For any
+source whose nodes are keyed by something other than `urn` — an onboarded
+third-party graph keyed by `id`, say — the conformance stamp is a write pass
+over the *whole node ID space*, on every run. It is the heaviest single thing
+a rebuild does, and it went out at full speed: no pacing, no slot, no
+governor, in a preamble that ran **before the admission controller was
+attached**. Every other write path on this branch was rebuilt to stop exactly
+that shape of load taking a master down; this was the one place nothing was
+watching.
+
+The controller is now attached before the preamble rather than after it, which
+gates the ~131 index statements too and changes nothing else — nothing there
+reads it until it writes. Each stamp chunk takes the per-node write slot, and
+the gap after it is a share of the time that chunk took
+(`AGGREGATION_IDENTITY_STAMP_PACING_RATIO`, 0.5; set 0 to restore the old
+flat-out timing exactly). What it writes is untouched: same query, same
+params, same 50,000-wide slices, same per-batch tolerance, same return — pinned
+by tests in both directions, because a change to the slicing would silently
+skip nodes and only surface months later as a lineage edge that never
+attached.
+
+It also heartbeats now. Nothing between a job flipping to `running` and the
+pipeline's first checkpoint touched `last_checkpoint_at`, and the stuck-job
+reconciler reads 300 seconds without one as a dead worker — so pacing this
+pass without a heartbeat would have reaped healthy jobs on precisely the large
+graphs the pacing protects. As a side effect *Preparing* now shows real
+numbers, where an onboarded graph used to sit at nothing for minutes.
+
+**The live pipeline test runs in CI against a real FalkorDB.** Every backend
+job ran `-m "not integration"` and no workflow started an engine, so the whole
+rebuild pipeline was proven against in-memory fakes — our control logic, never
+FalkorDB's actual behaviour. A new job stands up the same engine version
+`docker-compose.yml` ships and runs the live suite: case-fold matching against
+real per-label URN indexes, an unchanged re-run writing nothing rather than
+wiping good edges, a resume past every computed key still creating every
+missing pair, and the `db.indexes()` shape the readiness probe reads.
+Informational until it has a track record, then promote it.
+
 **A run whose worker died left two records lying.** Every terminal path
 inside the worker passes through one `finally` — seal the step ledger,
 release the source on both mirrors, emit the terminal event. Nothing reaches

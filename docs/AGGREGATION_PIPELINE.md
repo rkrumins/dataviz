@@ -781,6 +781,7 @@ pipeline).
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per graph-store node |
 | `FALKORDB_ENDPOINT_READ_SLOTS` | 4 | Cross-pod SCAN budget per graph-store node: rebuild range scans in flight at once. Every scan-heavy phase runs under `read_from_master_only`, so this is a cap on the master's query threads, not the replicas'. Keep it above `AGGREGATION_EXTRACT_CONCURRENCY` or one job's own waves fill the node's allowance |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |
+| `AGGREGATION_IDENTITY_STAMP_PACING_RATIO` | 0.5 | Gap after each conformance-stamp chunk, as a share of the time that chunk took. The stamp is a write pass over the whole node ID space for any source not keyed by `urn`, on every run; it used to go out flat out. 0 restores that exactly
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. The job's `timeoutSecs` wins; a job that sends none (the machine paths: reconciliation, Refresh rollups, the projector heal hook) takes the fleet Defaults' `stallTimeoutSecs`, then this. Bound 7 days. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS`. Raisable on a running job |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net; per-job / Defaults as `maxWallSecs` (1h-7d), never lower than the job's stall window. Raisable on a running job |
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
