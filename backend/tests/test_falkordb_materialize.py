@@ -23,6 +23,7 @@ import types
 import pytest
 
 from backend.app.providers import falkordb_materialize as mat
+from backend.app.providers import falkordb_provider as mat_provider
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 from backend.app.services.aggregation.cancel import JobCancelled
 
@@ -2963,3 +2964,200 @@ def test_the_recheck_charges_only_what_is_still_to_land(monkeypatch):
     n = len(fake.agg)
     assert n > 2
     assert charged == list(range(n - 2, 0, -2))
+
+
+# ── the identity stamp is paced and admitted like every other write ──────
+#
+# For a source not keyed by `urn` this is a write pass over the WHOLE node ID
+# space, on every run — the heaviest single thing the rebuild does — and it
+# used to go out flat out, holding no slot, consulting nothing, in a preamble
+# that ran before the admission controller was even attached. That is the
+# shape of the incident this pipeline was rebuilt to prevent, in the one place
+# nothing was watching.
+#
+# The contract these pin, in both directions: what it WRITES is unchanged
+# (same query, same params, same 50k width, same per-batch tolerance, same
+# return), and what it COSTS the node is now bounded.
+
+
+def _stamp_provider(monkeypatch, *, max_id=120_000, ratio=None):
+    if ratio is not None:
+        monkeypatch.setattr(mat_provider, "_IDENTITY_STAMP_PACING_RATIO", ratio)
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    sent = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[max_id]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        sent.append((cypher, dict(params or {})))
+        r = _Result()
+        r.properties_set = 1
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    return p, sent
+
+
+class _StampSlots:
+    """An admission controller that records every write slot taken, and how
+    many were held at once."""
+
+    def __init__(self):
+        self.nodes = []
+        self.held = 0
+        self.at_once = 0
+
+    def write_slot(self, provider, *, node=None):
+        self.nodes.append(node)
+        outer = self
+
+        class _Slot:
+            async def __aenter__(self_):
+                outer.held += 1
+                outer.at_once = max(outer.at_once, outer.held)
+                return self_
+
+            async def __aexit__(self_, *exc):
+                outer.held -= 1
+                return False
+
+        return _Slot()
+
+
+def test_every_stamp_chunk_takes_a_write_slot(monkeypatch):
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    slots = _StampSlots()
+    p.set_admission_controller(slots)
+
+    assert _run(p.stamp_identity_urns()) == 3        # ceil(120001 / 50000)
+    assert len(sent) == 3
+    assert len(slots.nodes) == 3                     # one slot per chunk…
+    assert slots.at_once == 1                        # …never two at once
+    assert slots.held == 0                           # …and all released
+
+
+def test_the_chunking_and_the_query_are_unchanged(monkeypatch):
+    """The gate is around the query, not instead of it. A caller that changed
+    the slices would silently skip nodes, which is the one failure here that
+    is invisible until a lineage edge fails to attach months later."""
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    p.set_admission_controller(_StampSlots())
+    _run(p.stamp_identity_urns())
+
+    assert [(q[1]["lo"], q[1]["hi"]) for q in sent] == [
+        (0, 50_000), (50_000, 100_000), (100_000, 150_000),
+    ]
+    for cypher, params in sent:
+        assert "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi" in cypher
+        assert params["ident"] == "id" and params["nameProp"] == "name"
+
+
+def test_a_provider_with_no_controller_stamps_exactly_as_before(monkeypatch):
+    """Onboarding, a test, any caller that never attached one."""
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    assert p._admission_controller is None
+    assert _run(p.stamp_identity_urns()) == 3
+    assert len(sent) == 3
+
+
+def test_the_pass_heartbeats_so_it_cannot_be_reaped_mid_stamp(monkeypatch):
+    """Nothing between a job flipping to running and the pipeline's first
+    checkpoint touches ``last_checkpoint_at``, and the stuck-job reconciler
+    reads 300s without one as a dead worker. A pass that now paces itself has
+    to say it is alive, or pacing turns a healthy job into a failed one on
+    exactly the large graphs the pacing protects."""
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    beats = []
+
+    async def _beat(done, total):
+        beats.append((done, total))
+
+    _run(p.stamp_identity_urns(on_batch=_beat))
+    assert len(beats) == 3                           # one per chunk
+    assert beats[-1] == (120_001, 120_001)           # ends at 100%
+    assert [b[0] for b in beats] == sorted(b[0] for b in beats)   # monotonic
+
+
+def test_a_heartbeat_that_raises_never_fails_the_stamp(monkeypatch):
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+
+    async def _bad(done, total):
+        raise RuntimeError("the session went away")
+
+    assert _run(p.stamp_identity_urns(on_batch=_bad)) == 3
+    assert len(sent) == 3
+
+
+def test_the_gap_after_a_chunk_is_a_share_of_what_the_chunk_took(monkeypatch):
+    slept = []
+
+    async def _sleep(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(mat_provider.asyncio, "sleep", _sleep)
+    # A clock that advances 1s across each chunk.
+    ticks = iter([float(i) for i in range(0, 200)])
+    monkeypatch.setattr(mat_provider.time, "monotonic", lambda: next(ticks))
+
+    p, _ = _stamp_provider(monkeypatch, ratio=0.5)
+    _run(p.stamp_identity_urns())
+    assert slept and all(s > 0 for s in slept)
+    assert max(slept) <= mat_provider._IDENTITY_STAMP_PAUSE_MAX_S
+
+
+def test_pacing_off_restores_the_old_flat_out_timing(monkeypatch):
+    slept = []
+
+    async def _sleep(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(mat_provider.asyncio, "sleep", _sleep)
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    _run(p.stamp_identity_urns())
+    assert slept == []                               # not one pause
+    assert len(sent) == 3                            # same work
+
+
+def test_the_worker_attaches_admission_before_the_preamble_runs():
+    """Ordering is the whole fix. The stamp and the ~131 index statements
+    consult ``_admission_controller``; if the worker still attached it after
+    them, both would take no slot and the gate above would be decoration.
+
+    Pinned structurally rather than by behaviour because the failure is
+    silent: everything still works, it just works unbounded, which is how
+    this got missed the first time."""
+    import inspect
+
+    from backend.app.services.aggregation.worker import AggregationWorker
+
+    src = inspect.getsource(AggregationWorker.run)
+    attach = src.index("set_admission_controller")
+    stamp = src.index("stamp_identity_urns")
+    indices = src.index("ensure_indices")
+    assert attach < indices < stamp, (
+        "the admission controller must be attached BEFORE ensure_indices and "
+        "the identity stamp — they are the heaviest unpaced work the run does"
+    )
+
+
+def test_the_worker_passes_the_stamp_a_heartbeat():
+    """Without it, pacing the stamp makes the stuck-job reconciler reap a
+    healthy job on exactly the large graphs the pacing exists to protect."""
+    import inspect
+
+    from backend.app.services.aggregation.worker import AggregationWorker
+
+    src = inspect.getsource(AggregationWorker.run)
+    assert "stamp_identity_urns(\n                                on_batch=" in src
+    assert "job.last_checkpoint_at = _now()" in src
+    assert "except TypeError:" in src, (
+        "a provider that predates the keyword must still be called the old way"
+    )

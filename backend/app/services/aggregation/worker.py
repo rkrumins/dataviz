@@ -573,6 +573,35 @@ class AggregationWorker:
                             "(continuing with default depth): %s", job.id, exc,
                         )
 
+                # Distributed write-admission control FIRST: N workers × M pods
+                # share one write budget per FalkorDB endpoint (per-graph
+                # lease + per-endpoint slots) instead of each pod throttling
+                # only itself.
+                #
+                # It is attached BEFORE the preamble, not after it. The two
+                # steps below are the heaviest unpaced work the run does —
+                # ~131 index statements, and for a non-conforming source a
+                # write pass over the whole node ID space — and they ran
+                # outside every cross-pod gate precisely because this came
+                # last. Attaching earlier gates them and changes nothing
+                # else: nothing here reads the controller until it writes.
+                # Best-effort: without it the provider's per-process gates
+                # still apply.
+                if hasattr(provider, "set_admission_controller"):
+                    try:
+                        from .admission import AggregationAdmission
+                        from .redis_client import get_redis
+                        provider.set_admission_controller(
+                            AggregationAdmission(get_redis())
+                        )
+                        admission_attached = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: admission controller not "
+                            "attached (continuing with per-process limits): %s",
+                            job.id, exc,
+                        )
+
                 # Ensure per-label URN indexes for the ontology's entity
                 # types BEFORE the scan/flush so every MATCH/MERGE on
                 # (label {urn}) is an index seek. Driven by the frozen
@@ -595,33 +624,39 @@ class AggregationWorker:
                 # conforming (urn) sources and dedicated projections; best-effort
                 # (a failure degrades to the directory-only coalesce).
                 if hasattr(provider, "stamp_identity_urns"):
+                    async def _stamp_heartbeat(done: int, total: int) -> None:
+                        """The preamble's only progress signal.
+
+                        Nothing between the row flipping to ``running`` and the
+                        pipeline's first checkpoint touched
+                        ``last_checkpoint_at``, and the stuck-job reconciler
+                        reads 300s without one as a dead worker — so a stamp
+                        that now paces itself could be reaped mid-pass on
+                        exactly the large graphs it protects. It also gives
+                        ``preparing`` real numbers, where the stage used to sit
+                        at nothing for minutes on an onboarded graph.
+                        """
+                        job.last_checkpoint_at = _now()
+                        job.updated_at = job.last_checkpoint_at
+                        ledger.note(done=done, total=total, unit="nodes")
+                        _record_steps(job, ledger)
+                        await session.commit()
+
                     try:
-                        await provider.stamp_identity_urns()
+                        try:
+                            await provider.stamp_identity_urns(
+                                on_batch=_stamp_heartbeat,
+                            )
+                        except TypeError:
+                            # A provider that predates the heartbeat. It paces
+                            # nothing either, so it needs none.
+                            await provider.stamp_identity_urns()
                     except Exception as exc:
                         logger.warning(
                             "Aggregation job %s: identity-urn stamp failed "
                             "(continuing): %s", job.id, exc,
                         )
 
-                # Distributed write-admission control: N workers × M pods
-                # share one write budget per FalkorDB endpoint (per-graph
-                # lease + per-endpoint slots) instead of each pod throttling
-                # only itself. Best-effort: without it the provider's
-                # per-process gates still apply.
-                if hasattr(provider, "set_admission_controller"):
-                    try:
-                        from .admission import AggregationAdmission
-                        from .redis_client import get_redis
-                        provider.set_admission_controller(
-                            AggregationAdmission(get_redis())
-                        )
-                        admission_attached = True
-                    except Exception as exc:
-                        logger.warning(
-                            "Aggregation job %s: admission controller not "
-                            "attached (continuing with per-process limits): %s",
-                            job.id, exc,
-                        )
 
                 # Compute fingerprint before aggregation
                 job.graph_fingerprint_before = await compute_graph_fingerprint(

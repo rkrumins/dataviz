@@ -13,6 +13,7 @@ import os
 import re
 import time
 from collections import defaultdict, deque
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, NamedTuple, Optional, Dict, Any, Set, Tuple
 
@@ -1145,6 +1146,18 @@ _AGGREGATED_EDGE_INDEXES: tuple = tuple(edge_index_ddl())
 #: codebase ever issues DROP INDEX, so the set only grows and the marker could
 #: in principle be permanent — the TTL is the floor under a graph dropped and
 #: rebuilt behind our back, where the indices are gone and nothing says so.
+_IDENTITY_STAMP_PACING_RATIO = float(
+    os.getenv("AGGREGATION_IDENTITY_STAMP_PACING_RATIO", "0.5")
+)
+"""Gap after each conformance-stamp chunk, as a share of the time that chunk
+took. The identity stamp is a write pass over the whole node ID space for any
+source not keyed by ``urn``, on every run, and it used to go out flat out —
+the same shape as the write path that took a master down, in the one place
+nothing was watching. 0.5 leaves the node two thirds of its own time. Set 0
+to restore the old flat-out timing exactly."""
+_IDENTITY_STAMP_PAUSE_MAX_S = 2.0
+"""Ceiling on one such gap, so a single slow chunk cannot stall the pass."""
+
 _INDEX_MARKER_TTL_S = int(os.getenv("FALKORDB_INDEX_MARKER_TTL_S", str(24 * 3600)))
 
 
@@ -3080,7 +3093,9 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception as e:
             logger.error(f"Seed failed: {e}")
 
-    async def stamp_identity_urns(self) -> int:
+    async def stamp_identity_urns(
+        self, *, on_batch: Optional[Any] = None,
+    ) -> int:
         """Stamp per-source CONFORMANCE properties onto every node that lacks them, so the entire
         urn-keyed write / index / read / trace stack works for an onboarded graph that keys nodes
         by e.g. ``id`` and names them under e.g. ``name`` instead of the platform's ``urn`` /
@@ -3109,6 +3124,25 @@ class FalkorDBProvider(GraphDataProvider):
         itself; batched by internal ID range (no property index needed); best-effort per batch.
         Idempotent — a re-run with an unchanged mapping only touches nodes added since the last
         one. Returns properties stamped.
+
+        PACED, and admitted like every other write this product sends. For a
+        non-conforming source this is a write pass over the WHOLE node ID
+        space, on every run — the single heaviest thing the rebuild does — and
+        it used to go out flat out, holding no slot, consulting no governor,
+        in a preamble that runs before the admission controller is even
+        attached. That is the shape of the incident this pipeline was rebuilt
+        to prevent, still live in the one place nothing was watching. Each
+        chunk now takes the per-node write slot when the job has attached a
+        controller, and the gap after it is a share of the time the chunk
+        itself took (``AGGREGATION_IDENTITY_STAMP_PACING_RATIO``; 0 restores
+        the old flat-out timing exactly).
+
+        ``on_batch(done, total)`` is awaited after each chunk. Nothing
+        heartbeats between a job flipping to ``running`` and the pipeline's
+        first checkpoint, and the stuck-job reconciler reads no progress for
+        300s as a dead worker — so a caller that paces this pass MUST pass a
+        heartbeat, or it risks having a healthy job reaped out from under it.
+        Optional, and ``None`` keeps the behaviour every existing caller has.
         """
         ident = str(getattr(self, "_node_identity_property", None) or "urn").replace("`", "")
         name_prop = str(getattr(self, "_name_property", None) or "name").replace("`", "")
@@ -3173,17 +3207,23 @@ class FalkorDBProvider(GraphDataProvider):
         width = 50_000
         stamped = 0
         lo = 0
+        # The per-node write slot, when this job attached a controller. Reached
+        # through getattr so a bare provider — onboarding, a test, a caller
+        # that never set one — behaves exactly as it always has.
+        slot = getattr(getattr(self, "_admission_controller", None), "write_slot", None)
         while lo <= max_id:
             hi = lo + width
+            started = time.monotonic()
             try:
-                r = await self._query(
-                    f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
-                    f"SET {set_clause}",
-                    params={
-                        "lo": lo, "hi": hi, "ident": ident, "nameProp": name_prop,
-                    },
-                    op="identity.stamp",
-                )
+                async with (slot(self) if slot is not None else nullcontext()):
+                    r = await self._query(
+                        f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
+                        f"SET {set_clause}",
+                        params={
+                            "lo": lo, "hi": hi, "ident": ident, "nameProp": name_prop,
+                        },
+                        op="identity.stamp",
+                    )
                 stamped += int(getattr(r, "properties_set", 0) or 0)
             except Exception as exc:
                 logger.warning(
@@ -3191,6 +3231,20 @@ class FalkorDBProvider(GraphDataProvider):
                     self._graph_name, lo, hi, exc,
                 )
             lo = hi
+            if on_batch is not None:
+                # Never let the caller's bookkeeping fail the stamp: this pass
+                # is best-effort per batch by design, and a heartbeat that
+                # raises must not be the thing that ends it.
+                try:
+                    await on_batch(min(lo, max_id + 1), max_id + 1)
+                except Exception as exc:      # noqa: BLE001 — by contract
+                    logger.debug(
+                        "FalkorDB %s: conformance stamp heartbeat failed: %s",
+                        self._graph_name, exc,
+                    )
+            pause = (time.monotonic() - started) * _IDENTITY_STAMP_PACING_RATIO
+            if pause > 0:
+                await asyncio.sleep(min(pause, _IDENTITY_STAMP_PAUSE_MAX_S))
         if stamped:
             logger.info(
                 "FalkorDB %s: conformance stamp set %d propert(y/ies) (urn←%s, displayName←%s).",
