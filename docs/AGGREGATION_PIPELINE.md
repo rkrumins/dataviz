@@ -723,6 +723,45 @@ low-millions of pairs, where flushing costs write round-trips and buys
 nothing; lower it (or raise the worker limit) before aggregating a graph
 expected to exceed ~30M pairs.
 
+### Many workers, one graph store
+
+Four things can be true at once: several pods, several jobs per pod, several
+graphs per shard, and a worker that died mid-run. What bounds each of them:
+
+| Situation | What stops it | Where |
+| --- | --- | --- |
+| Two executors for **one job** | `agg:exec:{job}` — `SET NX PX 90s`, renewed, released by token. A duplicate delivery ACKs and exits. | `__main__.py` |
+| Two jobs writing **one graph** | `agg:graphwrite:{endpoint}:{graph}` lease, held for the job, renewed in the background. Contention raises `ProviderBusy` → park-and-resume, not a retry. | `admission.py` |
+| Two rebuilds spending **the same free memory** on one node | `agg:reserve:{node}` ledger: the write budget subtracts every OTHER job's entry from the node's free memory. | `admission.py` + `_check_write_budget` |
+| Too many write queries in flight **against one node** | `agg:writeslots:{node}` — a Lua sorted-set semaphore, default 2, matched to that node's `THREAD_COUNT` so interactive readers keep a thread. | `admission.py` |
+| Two rebuilds each **pacing as if alone** on one node | The pacing FLOOR is only for a node this run has to itself: the governor reads the node's ledger on its own cadence, and any other holder puts the run back on the configured ceiling. | `_is_roomy` |
+| A worker that **died mid-run** | The exec lock is the liveness signal. The reconciler re-dispatches only when it is gone (≥90 s), by which time the graph lease (60 s) has expired too, so the resumed run does not park on a dead holder's lease. Auto-resumes are capped and the counter never slides. | `reconciler.py` |
+| A **cancel** issued through another pod | A durable Redis flag, polled by the running job's watchdog and checked again at pickup. | `cancel.py`, `worker.py` |
+
+Two of these were wrong until the multi-writer audit:
+
+* **The write slots were keyed by `endpoint_key`** — the connection config's
+  host:port, which on a cluster is a *seed address* shared by every shard. One
+  semaphore therefore covered the whole cluster: two rebuilds on two different
+  masters contended with each other, while nothing bounded either master on
+  its own. They are keyed by the node the caller's shard reading names now —
+  the same identity the reservation ledger already used, and for the same
+  reason.
+* **The pacing floor did not know about other rebuilds.** `writePacingMinRatio`
+  is the floor a run drops to when the node has room to spare. Two runs each
+  read the same healthy node, each concluded the same thing, and the master
+  took twice the write rate either of them believed it was asking for — the
+  incident's shape, reached from two directions instead of one. The ledger's
+  holder count now gates the floor; a shared node gets the configured ceiling
+  from everyone on it. The running job says so (*sharing the node with another
+  rebuild* on the Steady load line), because otherwise it just looks slow.
+
+Still coarse, deliberately: the **read-pressure** signal
+(`agg:readpressure:{endpoint}`) is keyed by the connection endpoint, so on a
+cluster interactive pressure anywhere makes every rebuild yield. That errs
+toward the readers and needs the web tier to agree on a key before it can be
+narrowed.
+
 ## Hardening wave (2026-07-10): what changed, why, and the impact
 
 **12. Type-level boundary broke self-nesting graphs (2026-07-11,

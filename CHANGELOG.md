@@ -13,6 +13,27 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Two rebuilds on one master no longer both decide the node is theirs.**
+`writePacingMinRatio` is the floor a run drops to when the graph store node
+has room to spare. It was decided from the node's own reading, which two
+rebuilds on two graphs of one shard read identically — so both took the floor
+and the master got twice the write rate either of them believed it was asking
+for. That is the memory incident's shape reached from a second direction, and
+neither the per-graph lease (different graphs) nor the reservation ledger
+(memory, not rate) closed it. The floor is now only for a node this run has to
+itself: the governor reads the node's reservation ledger on its own cadence,
+and any other holder puts the run back on the configured ceiling. The running
+job says so on its Steady load line, because a run that is not at the floor
+otherwise just looks slow.
+
+**The per-node write-slot cap was per CLUSTER.** The semaphore that keeps
+aggregation writes from taking every query thread on a node was keyed by the
+connection config's host:port — a seed address on a cluster, shared by all
+three shards. One semaphore covered the whole cluster: two rebuilds on two
+different masters contended with each other while nothing bounded either
+master on its own. It is keyed by the node the caller's shard reading names
+now, the same identity the reservation ledger already used.
+
 **A rebuild says which of its six stages it is on, what each one got through,
 and how much is left.** A run reported one pair of counters and one
 percentage, and both only ever meant "lineage edges scanned during EXTRACT" —

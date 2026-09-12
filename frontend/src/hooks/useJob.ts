@@ -79,6 +79,8 @@ export interface JobLiveOverlay {
         pace_rows_per_s: number
         pace_replica_lag_bytes: number
         pace_headroom_bytes: number
+        /** Other rebuilds holding a reservation on the same graph store node. */
+        pace_sharing: number
         pace_holding: string
         pace_eased: string
         pace_fork: string
@@ -188,6 +190,7 @@ export function useJob(
                 'pace_batch_rows', 'pace_batch_s', 'pace_ack_s', 'pace_sleep_s', 'pace_batch_max',
                 'pace_target_s', 'pace_ratio', 'pace_batches', 'pace_rows', 'pace_duty_pct',
                 'pace_rows_per_s', 'pace_replica_lag_bytes', 'pace_headroom_bytes',
+                'pace_sharing',
             ] as const) {
                 const v = _coerceNumeric(payload[key])
                 if (v !== undefined) next[key] = v

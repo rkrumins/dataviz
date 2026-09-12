@@ -26,6 +26,8 @@ export interface SteadyLoadNow {
     holding?: string
     eased?: string
     fork?: string
+    /** How many OTHER rebuilds hold a reservation on this graph store node. */
+    sharing?: number
 }
 
 const HOLD_TEXT: Record<string, string> = {
@@ -68,6 +70,7 @@ export function steadyLoadFromSnapshot(snap: JobLiveOverlay['snapshot']): Steady
         holding,
         eased: snap.pace_eased || undefined,
         fork: snap.pace_fork || undefined,
+        sharing: snap.pace_sharing,
     }
 }
 
@@ -107,6 +110,17 @@ export function steadyLoadLine(now: SteadyLoadNow): SteadyLoadLine {
     if (typeof now.rowsPerS === 'number') shape.push(`${Math.round(now.rowsPerS).toLocaleString()} rows/s`)
     if (typeof now.replicaLagBytes === 'number' && now.replicaLagBytes > 0) shape.push(`replicas ${bytes(now.replicaLagBytes)} behind`)
     if (typeof now.headroomBytes === 'number') shape.push(`${bytes(Math.max(0, now.headroomBytes))} headroom`)
+    // Why a run on an otherwise healthy node is not at the pacing floor. Two
+    // rebuilds each reading the same free memory would each take the floor,
+    // and the master would get twice the write rate either asked for — so a
+    // shared node gets the configured ceiling from both.
+    if (typeof now.sharing === 'number' && now.sharing > 0) {
+        shape.push(
+            now.sharing === 1
+                ? 'sharing the node with another rebuild'
+                : `sharing the node with ${now.sharing} other rebuilds`,
+        )
+    }
     if (now.eased) {
         return {
             tone: 'eased',

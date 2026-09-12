@@ -1232,6 +1232,11 @@ class AggregationPipeline:
         self._container_env_bytes = container_memory_bytes_env()
         self._gov_reading: Optional[ShardMemory] = None
         self._gov_read_at = 0.0
+        # (bytes, count) other rebuilds hold in the node's reservation
+        # ledger, refreshed with the governor's reading. ``(0, 0)`` means
+        # this run has the node to itself — or that there is no bus to ask,
+        # which admission treats as open everywhere else too.
+        self._gov_others: Tuple[int, int] = (0, 0)
         self._store_holds: Dict[str, int] = {}
         self._store_hold_s: Dict[str, float] = {}
         self._store_hold_last: Optional[Dict[str, Any]] = None
@@ -1609,7 +1614,23 @@ class AggregationPipeline:
         # the CONFIG round trips and the slot-map refresh.
         self._gov_reading = await self._read_shard(include_config=self._node_config is None)
         self._gov_read_at = time.monotonic()
+        # Who ELSE is writing this node, on the same cadence. The pacing
+        # floor below is for a node this run has to itself: N rebuilds each
+        # reading the same free memory each conclude they may write at the
+        # floor, and the master takes N times the rate that none of them
+        # thought they were asking for. The write budget already subtracts
+        # the others' reservations; the pace did not.
+        self._gov_others = await self._reserved_by_others(self._gov_reading)
         return self._gov_reading
+
+    def _gov_node(self) -> Optional[str]:
+        """The node the governor's last reading named, for the write-slot
+        key. ``None`` when nothing has been measured — the slot then falls
+        back to the connection's endpoint, exactly as before."""
+        reading = self._gov_reading
+        if reading is None or reading.source != "measured":
+            return None
+        return reading.endpoint or None
 
     def _write_hold_reason(self, shard: ShardMemory) -> Optional[Tuple[str, str]]:
         """Why the next batch must wait, if it must. ``replicaAckMin`` 0 —
@@ -1720,9 +1741,10 @@ class AggregationPipeline:
         return None
 
     def _is_roomy(self, shard: ShardMemory) -> bool:
-        """True when the node has room to spare: measured, no fork, every
-        replica the run started with attached and barely behind, and a
-        quarter of the container still free.
+        """True when the node has room to spare AND this run has it to
+        itself: measured, no fork, every replica the run started with
+        attached and barely behind, a quarter of the container still free,
+        and no other rebuild holding a reservation on it.
 
         This is the band the configured pacing ratio is NOT for. That ratio
         is a ceiling on the pause — what a rebuild owes a node that is
@@ -1733,6 +1755,13 @@ class AggregationPipeline:
         if shard.source != "measured" or shard.loading:
             return False
         if shard.fork_in_progress:
+            return False
+        # Another rebuild is writing this node. Its reading says the same
+        # thing ours does, so without this both take the floor and the
+        # master gets twice the write rate either of them asked for. The
+        # ceiling — the configured pacing ratio — is what a shared node
+        # gets, and it is the documented safe default.
+        if self._gov_others[1]:
             return False
         attached = shard.connected_replicas
         if (
@@ -1791,6 +1820,10 @@ class AggregationPipeline:
         out["holding"] = self._holding or ""
         out["eased"] = self._eased or ""
         out["roomy"] = 1 if self._roomy else 0
+        # How many OTHER rebuilds hold this node. It is why a run on an
+        # otherwise empty node is not at the pacing floor, and without it
+        # that reads as the run being needlessly slow.
+        out["sharing"] = int(self._gov_others[1])
         shard = self._gov_reading
         if shard is not None and shard.source == "measured":
             if shard.replica_max_lag_bytes is not None:
@@ -2460,7 +2493,7 @@ class AggregationPipeline:
         admission = getattr(self.p, "_admission_controller", None)
         t0 = time.monotonic()
         if admission is not None:
-            async with admission.write_slot(self.p):
+            async with admission.write_slot(self.p, node=self._gov_node()):
                 result = await coro_factory()
         else:
             result = await coro_factory()

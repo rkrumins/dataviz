@@ -565,6 +565,22 @@ stage — at the larger of last run's rate for that stage and this run's own
 the previous run wrote nothing (a no-change re-run is not predictive of one
 that rewrites the cube) or when either run has no stage record.
 
+### When more than one rebuild shares a graph store node
+
+A shard holds many graphs, so two rebuilds can be writing one master at once
+even though each holds its own graph's lease. Three things bound them, and
+each answers a different question: the **reservation ledger** stops both
+spending the same free memory, the **write-slot semaphore** (2 per node) stops
+them taking every query thread, and the **pacing floor** — `writePacingMinRatio`
+— is given only to a run that has the node to itself. A run that is sharing
+writes at the configured `writePacingRatio` instead, and says so on its Steady
+load line: *sharing the node with another rebuild*.
+
+That costs throughput on purpose. Two runs each reading the same healthy node
+would each conclude they may write at the floor, and the master would take
+twice the rate either of them asked for — which is how a node gets taken down
+by two jobs that were each individually well behaved.
+
 ### How long a rebuild takes, and why "too gentle" never finishes
 
 Throughput is `batch_rows ÷ (batch_s × (1 + ratio))`. On a node with room to

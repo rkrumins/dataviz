@@ -319,7 +319,7 @@ def test_the_governor_holds_before_the_slot_and_the_gate_runs_after(sleeps):
     events = []
 
     class _Admission:
-        def write_slot(self, provider):
+        def write_slot(self, provider, *, node=None):
             class _Slot:
                 async def __aenter__(self_):
                     events.append("slot")
@@ -567,7 +567,7 @@ def test_starving_readers_still_override_the_floor(sleeps, monkeypatch):
     monkeypatch.setattr(mat, "time", _Clock(step=0.5))
 
     class _Admission:
-        def write_slot(self, provider):
+        def write_slot(self, provider, *, node=None):
             class _Slot:
                 async def __aenter__(self_):
                     return self_
@@ -588,3 +588,96 @@ def test_starving_readers_still_override_the_floor(sleeps, monkeypatch):
     _run(pipe._paced_write(_write, rows=500))
     assert pipe._roomy is True                     # the node is fine …
     assert sleeps[-1] == pytest.approx(2.0)        # … and the readers are not
+
+
+# ── two rebuilds on one master ───────────────────────────────────────────
+#
+# The graph lease serialises two jobs on the SAME graph, and the reservation
+# ledger stops two jobs both spending the same free memory. Neither says
+# anything about RATE, and a shard holds many graphs: two rebuilds on two
+# graphs of one master each read the same healthy node, each conclude they
+# may write at the pacing FLOOR, and the master takes twice the write rate
+# that either of them thought it was asking for. That is the shape of the
+# incident, arrived at from two directions instead of one.
+
+
+class _SharedNode:
+    """An admission controller that reports N other rebuilds holding the
+    node, and records the key each write slot was taken against."""
+
+    def __init__(self, *, others=(0, 0)):
+        self._others = others
+        self.slot_nodes: list = []
+
+    def write_slot(self, provider, *, node=None):
+        self.slot_nodes.append(node)
+
+        class _Slot:
+            async def __aenter__(self_):
+                return self_
+
+            async def __aexit__(self_, *exc):
+                return False
+
+        return _Slot()
+
+    async def reserved_by_others(self, endpoint, job_id):
+        return self._others
+
+
+def _roomy_pipeline(monkeypatch, admission):
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(56 * GB))
+    monkeypatch.setattr(mat, "time", _Clock(step=0.5))
+    pipe = _pipeline(_Conn(_picture()))
+    pipe.p._admission_controller = admission
+    pipe._pacing_ratio = 1.0
+    pipe._pacing_min_ratio = 0.25
+    return pipe
+
+
+def test_a_run_alone_on_a_roomy_node_writes_at_the_floor(sleeps, monkeypatch):
+    pipe = _roomy_pipeline(monkeypatch, _SharedNode(others=(0, 0)))
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._roomy is True
+    assert pipe._full_speed_batches == 1
+
+
+def test_a_second_rebuild_on_the_node_takes_the_floor_away(sleeps, monkeypatch):
+    """Not "slow down" — back to the CEILING, which is the configured
+    pacing ratio and the documented safe default for a node that is
+    working. The cost is this run's throughput; the alternative is a
+    master taking N times the rate nobody asked for."""
+    pipe = _roomy_pipeline(monkeypatch, _SharedNode(others=(2 * GB, 1)))
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._roomy is False
+    assert pipe._full_speed_batches == 0
+
+
+def test_the_write_slot_is_taken_against_the_node_not_the_seed_address():
+    """``endpoint_key`` is the connection config's host:port — a SEED on a
+    cluster, shared by every shard. Keyed by it, one semaphore covered the
+    whole cluster: two rebuilds on two different masters contended with each
+    other while nothing bounded either master on its own."""
+    admission = _SharedNode()
+    pipe = _pipeline(_Conn(_picture()))
+    pipe.p._admission_controller = admission
+    _run(pipe._paced_write(_write, rows=500))
+    assert admission.slot_nodes == ["10.0.0.1:6379"]
+
+
+def test_an_unmeasured_node_falls_back_to_the_connection_endpoint():
+    """No reading, no node identity — the slot key is the connection's, the
+    way it always was. Admission must never be the thing that blocks."""
+    pipe = _pipeline(_Conn(_picture()))
+    admission = _SharedNode()
+    pipe.p._admission_controller = admission
+    pipe._gov_reading = None
+    pipe._govern_write = _noop_govern(pipe)
+    _run(pipe._paced_write(_write, rows=500))
+    assert admission.slot_nodes == [None]
+
+
+def _noop_govern(pipe):
+    async def _govern():
+        return 0.0
+    return _govern

@@ -16,13 +16,18 @@ flags, so no new dependency):
    Contention raises ``ProviderBusy`` so the worker's existing
    park-and-resume path (not the retry budget) handles it.
 
-2. **Per-endpoint write slots** — ``agg:writeslots:{endpoint}``. A Lua
+2. **Per-node write slots** — ``agg:writeslots:{node}``. A Lua
    sorted-set semaphore capping how many aggregation write queries are
-   in flight against one FalkorDB endpoint across all pods (default 2 —
-   matched to the endpoint's worker THREAD_COUNT so interactive readers
-   always have a thread). Held per write query, not per job: a job that
-   is scanning or computing in Python holds no slot. Stale holders
-   (crashed mid-write) are pruned by score.
+   in flight against one FalkorDB NODE across all pods (default 2 —
+   matched to that node's worker THREAD_COUNT so interactive readers
+   always have a thread). Keyed by the node the caller's shard reading
+   names, for the same reason the ledger below is: ``endpoint_key`` is
+   the connection config's host:port, a seed address on a cluster, so
+   keying by it gave the whole cluster ONE semaphore — two rebuilds on
+   two different masters contending with each other while nothing
+   bounded either master on its own. Held per write query, not per job:
+   a job that is scanning or computing in Python holds no slot. Stale
+   holders (crashed mid-write) are pruned by score.
 
 3. **Per-node reservation ledger** — ``agg:reserve:{node}``. One HASH per
    graph-store node: field = job id, value = the bytes that job has been
@@ -202,14 +207,20 @@ class ShardReservation:
 class _SlotContext:
     """Async context manager for one write-query admission slot."""
 
-    def __init__(self, admission: "AggregationAdmission", provider: Any) -> None:
+    def __init__(
+        self, admission: "AggregationAdmission", provider: Any,
+        node: Optional[str] = None,
+    ) -> None:
         self._admission = admission
         self._provider = provider
+        self._node = node
         self._member: Optional[str] = None
         self._key: Optional[str] = None
 
     async def __aenter__(self) -> "_SlotContext":
-        self._key, self._member = await self._admission._acquire_slot(self._provider)
+        self._key, self._member = await self._admission._acquire_slot(
+            self._provider, self._node,
+        )
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
@@ -497,12 +508,20 @@ class AggregationAdmission:
 
     # -- per-endpoint write slots -------------------------------------------------
 
-    def write_slot(self, provider: Any) -> _SlotContext:
-        """Async context manager gating one write query."""
-        return _SlotContext(self, provider)
+    def write_slot(self, provider: Any, *, node: Optional[str] = None) -> _SlotContext:
+        """Async context manager gating one write query.
 
-    async def _acquire_slot(self, provider: Any) -> tuple:
-        key = f"agg:writeslots:{endpoint_key(provider)}"
+        ``node`` is the graph-store node the caller's shard reading names —
+        the SAME identity the reservation ledger is keyed by, and the thing
+        the cap is actually about. Without it the key falls back to the
+        connection config's host:port, which on a cluster is a seed address
+        shared by every shard: one semaphore for the whole cluster rather
+        than one per master, so two rebuilds on two different masters
+        contend while nothing bounds either master on its own."""
+        return _SlotContext(self, provider, node)
+
+    async def _acquire_slot(self, provider: Any, node: Optional[str] = None) -> tuple:
+        key = f"agg:writeslots:{node or endpoint_key(provider)}"
         member = uuid.uuid4().hex
         deadline = time.monotonic() + _SLOT_WAIT_MAX_SECS
         while True:

@@ -2647,7 +2647,7 @@ class _Ledger:
     async def release_graph_lease(self, lease):
         pass
 
-    def write_slot(self, provider):
+    def write_slot(self, provider, *, node=None):
         return contextlib.nullcontext()
 
     async def reserved_by_others(self, endpoint, job_id):

@@ -218,7 +218,7 @@ class _Admission:
     def __init__(self, pressure: str | None = None) -> None:
         self.pressure = pressure
 
-    def write_slot(self, provider):
+    def write_slot(self, provider, *, node=None):
         class _Slot:
             async def __aenter__(self):
                 return self

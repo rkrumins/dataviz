@@ -48,3 +48,24 @@ describe('steadyLoadLine', () => {
         expect(line.detail).toBe('batches of at most 250 rows and twice the pause until the reading is back · 250-row batches · 500 ms each · 1.0 s pause')
     })
 })
+
+describe('a node shared with another rebuild', () => {
+    it('says so, because it is why the run is not at the pacing floor', () => {
+        const line = steadyLoadLine({
+            batchRows: 500, batchS: 0.4, sleepS: 0.4, batches: 20,
+            dutyPct: 50, rowsPerS: 620, sharing: 1,
+        })
+        expect(line.tone).toBe('steady')
+        expect(line.detail).toContain('sharing the node with another rebuild')
+    })
+
+    it('counts them when there is more than one', () => {
+        const line = steadyLoadLine({ batches: 3, sharing: 2 })
+        expect(line.detail).toContain('sharing the node with 2 other rebuilds')
+    })
+
+    it('says nothing when the run has the node to itself', () => {
+        const line = steadyLoadLine({ batches: 3, sharing: 0 })
+        expect(line.detail).not.toContain('sharing')
+    })
+})
