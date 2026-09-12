@@ -13,6 +13,27 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**A rebuild says which of its six stages it is on, what each one got through,
+and how much is left.** A run reported one pair of counters and one
+percentage, and both only ever meant "lineage edges scanned during EXTRACT" —
+so past the halfway mark the bar moved with its denominator nowhere on the
+page. Every stage already computed that denominator and folded it into the
+percentage; it is kept now, in the stage's own units (lineage edges, scan
+ranges, aggregated edges). Two stretches of a run had no stage at all: the
+indexes, the identity stamp and the fingerprint before the pipeline's first
+checkpoint, and the fingerprint and state rows after its last — minutes at
+each end of a large graph, during which the row said nothing. Both are stages
+now. The run keeps an ordered ledger of all six in `run_stats.steps` — state,
+duration across every visit, how many times it was entered, what it is
+waiting for — so the same record is the live view and the run's history. A
+retry backoff, a quiesce park and a failover park say they are waiting and
+what for, instead of reading like a hang. A failed or cancelled run keeps its
+ledger: it names the stage the run died in. The stepper in Job History is
+unchanged in shape — each segment now fills with its own stage's progress,
+carries its duration while the run is still going, and explains what the
+stage does; `est. finish` projects from the previous run's ledger, the two
+new stages included.
+
 **A rebuild never writes through a fork, and holds for the replicas it started with.**
 Before every write batch the pipeline reads the node it writes to — RSS, BGSAVE and
 AOF-rewrite state, attached and resyncing replicas, the furthest replica's lag, what

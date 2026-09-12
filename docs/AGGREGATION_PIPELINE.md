@@ -302,6 +302,86 @@ enumerating the unmapped subtree.
 In steady state a re-run after small source changes writes only the
 diff — near-zero load. Full recompute *is* the incremental strategy.
 
+## What the run reports about itself
+
+The four phases above are the pipeline's. A *run* has six stages, and the
+two the pipeline does not own used to be invisible:
+
+| Stage | Owner | What happens | Its unit of work |
+| --- | --- | --- | --- |
+| `preparing` | worker | `set_entity_type_levels`, `ensure_indices` (~131 `CREATE INDEX` on a 20-type ontology), `stamp_identity_urns` over the whole node ID space, and the **before**-fingerprint (three full graph scans) | none countable |
+| `extracting` | pipeline | EXTRACT | lineage edges scanned |
+| `computing` | pipeline | COMPUTE | none countable |
+| `reconciling` | pipeline | RECONCILE | ID-range scans of the stored cube |
+| `applying` | pipeline | APPLY | aggregated edges written of those found missing |
+| `finalizing` | worker | the **after**-fingerprint, the data-source state row, the workspace row, the audit row, the terminal events | none countable |
+
+**Why the two bookends matter.** On a large graph they are minutes at each
+end of the run, and before the ledger the row said nothing during either:
+`current_phase` is set only by the pipeline's checkpoints, and the UI's
+whole progress block was gated on `total_edges > 0`, which EXTRACT has not
+set yet. A run looked idle at the start and wedged at "Applying, 100%" at
+the end.
+
+**Why per-stage units matter.** `_checkpoint` sends `processed` / `total`
+= the EXTRACT counters *whatever phase is running* — by design, because
+that is what the resume cursor and the coverage figure are about. So from
+RECONCILE onwards those counters are frozen and `progress` (a
+phase-weighted 0-100) is the only moving number, with its denominator
+nowhere. Each phase already computed that denominator one line above its
+checkpoint call and folded it into the percentage; it is now passed as
+`unit_done` / `unit_total` / `unit` and kept.
+
+### The step ledger
+
+`backend/app/services/aggregation/steps.py`. One ordered record per run,
+written into **`run_stats["steps"]`** — so the same document is the live
+view while the job runs and the run's history once it is over. Per stage:
+
+* `state` — `pending` before it is entered, `running` while it holds the
+  run, `waiting` while it holds the run but is parked on something outside
+  it, `done` once a later stage opens, `failed` / `cancelled` when the run
+  ended inside it.
+* `started_at` / `ended_at` / `secs` — seconds accumulated across **every**
+  visit. The open stage's elapsed time is deliberately *not* baked in
+  (that would mark the document dirty on every checkpoint and collapse the
+  commit cadence into one PG write per batch); readers add the difference
+  from `started_at` themselves.
+* `visits` — >1 means a transient failure sent the run back to this stage.
+* `done` / `total` / `unit` — the stage's own unit of work, `null` for the
+  stages that have none. Inventing one would be worse than saying nothing.
+* `waiting_for` — why it is parked.
+
+**Re-entry is honest.** Going back to an earlier stage (a transient
+failure resumes from the cursor, and EXTRACT+COMPUTE always re-run) resets
+every later stage to `pending` while keeping the seconds it already
+accumulated. Nothing claims work that is about to be redone is finished.
+
+**Waiting is a state, not a silence.** A retry backoff, a quiesce park and
+a failover park are real time the run spends not running, and they used to
+read exactly like a hang: the same stage, the same frozen counters, nothing
+said. Each now marks the open stage `waiting` with its reason; the next
+checkpoint clears it.
+
+**Commit cadence.** Checkpoints coalesce their PG commit (2s or 5 batches),
+but a **stage boundary commits immediately** — there are five per run and
+it is the thing an operator is watching. One slow RECONCILE range is longer
+than the two-second window, so riding the cadence could leave the row
+saying EXTRACT a minute into RECONCILE.
+
+**Reading it in the UI.** `frontend/src/components/admin/job-history/runSteps.ts`
+turns the ledger into the stepper's segments: each segment fills with its
+own `done/total` while it runs, carries its duration live, and explains
+itself; one line under the stepper says what the running stage does and
+what is left of it. A failed or cancelled run renders it too — it names the
+stage the run died in. Runs from before the ledger existed fall back to the
+four segments derived from `current_phase`.
+
+**The estimated finish** (`historicalEta` in `JobRow.tsx`) projects from
+the previous run's ledger when both runs have one: the unfinished part of
+the current stage, at the larger of last run's rate and this run's own, plus
+the full duration of every later stage — the two bookends included.
+
 ## Resume
 
 The job cursor is `v3:{run_start_ms}:{phase}:{pos}` and is persisted from

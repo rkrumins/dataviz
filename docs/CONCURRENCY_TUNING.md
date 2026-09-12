@@ -531,6 +531,40 @@ job and keeps the batch record (`run_stats.pace`) and the easing count
 (`run_stats.adapted.eases`) on the finished run. "Smaller batches" on a running
 job halves `writeBatchMax` live; the sizer re-grows only toward the new ceiling.
 
+### Which stage the run is on, what it has done, and what is left
+
+The stepper on a job in Job History has six stages, not four. The pipeline
+owns `Extract`, `Compute`, `Reconcile` and `Apply`; the worker owns `Prepare`
+(the indexes, the identity stamp, the fingerprint it takes *before* the run)
+and `Finish` (the fingerprint after, and the rows that record the result).
+On a large graph those two are minutes at each end, and until they became
+stages the row said nothing at all during either — a run looked idle at the
+start and wedged at "Applying, 100%" at the end.
+
+Each segment fills with **its own** unit of work, not the overall
+percentage: lineage edges for Extract, ID-range scans for Reconcile,
+aggregated edges for Apply. Compute, Prepare and Finish have no countable
+unit and say so rather than showing a made-up zero. Under the stepper, one
+line names what the running stage actually does and how much of it is left
+("3 of 12 scan ranges · 9 left"), and per-stage durations appear **while**
+the run is going, not only once it is over.
+
+Three states worth recognising:
+
+* **Waiting** (amber). A retry backoff, a quiesce park or a failover park.
+  Real time the run spends not running; before it was a state it read
+  exactly like a hang. The line says what it is waiting for.
+* **Restarted ×N.** A transient failure resumed from the cursor, which
+  re-runs EXTRACT and COMPUTE. The earlier attempt's seconds still count.
+* **Red segment on a failed run.** The stage the run died in, and what that
+  stage had got through. A failed run keeps its full stage record.
+
+`est. finish` reads the same record: the unfinished part of the current
+stage — at the larger of last run's rate for that stage and this run's own
+— plus every later stage at last run's durations. It declines to guess when
+the previous run wrote nothing (a no-change re-run is not predictive of one
+that rewrites the cube) or when either run has no stage record.
+
 ### How long a rebuild takes, and why "too gentle" never finishes
 
 Throughput is `batch_rows ÷ (batch_s × (1 + ratio))`. On a node with room to

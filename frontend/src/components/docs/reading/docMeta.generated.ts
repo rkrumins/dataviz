@@ -20,7 +20,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-09-07",
+    "updated": "2026-09-12",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -28,7 +28,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/architecture-when-scaling.md"
   },
   "aggregation-pipeline": {
-    "updated": "2026-09-07",
+    "updated": "2026-09-12",
     "path": "docs/AGGREGATION_PIPELINE.md"
   },
   "technical-debt": {
@@ -116,7 +116,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/SIGNUP_USER_SERVICE_PLAN.md"
   },
   "deployment": {
-    "updated": "2026-08-26",
+    "updated": "2026-09-11",
     "path": "docs/DEPLOYMENT.md"
   },
   "migrations": {
@@ -124,23 +124,27 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/MIGRATIONS.md"
   },
   "falkordb-deployment": {
-    "updated": "2026-09-07",
+    "updated": "2026-09-11",
     "path": "docs/FALKORDB_DEPLOYMENT.md"
+  },
+  "concurrency-tuning": {
+    "updated": "2026-09-12",
+    "path": "docs/CONCURRENCY_TUNING.md"
   },
   "falkordb-dr": {
     "updated": "2026-08-18",
     "path": "docs/FALKORDB_DR_RUNBOOK.md"
   },
   "infra-launch-scale": {
-    "updated": "2026-09-07",
+    "updated": "2026-09-10",
     "path": "docs/INFRASTRUCTURE_LAUNCH_SCALE.md"
   },
   "infra-scaling-250m": {
-    "updated": "2026-08-18",
+    "updated": "2026-09-08",
     "path": "docs/INFRASTRUCTURE_SCALING_250M.md"
   },
   "read-path-performance": {
-    "updated": "2026-08-18",
+    "updated": "2026-09-09",
     "path": "docs/read-path-performance/README.md"
   }
 }
@@ -221,8 +225,12 @@ export const guideMeta: Record<string, DocMeta> = {
     "updated": "2026-08-18",
     "path": "docs/guide/GOVERNANCE_OPS.md"
   },
+  "graph-store-topology": {
+    "updated": "2026-09-10",
+    "path": "docs/guide/GRAPH_STORE_TOPOLOGY.md"
+  },
   "rollup-capacity": {
-    "updated": "",
+    "updated": "2026-09-10",
     "path": "docs/guide/ROLLUP_CAPACITY.md"
   },
   "ways-of-working": {
@@ -234,7 +242,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/GLOSSARY.md"
   },
   "troubleshooting": {
-    "updated": "2026-08-18",
+    "updated": "2026-09-10",
     "path": "docs/guide/TROUBLESHOOTING.md"
   }
 }
