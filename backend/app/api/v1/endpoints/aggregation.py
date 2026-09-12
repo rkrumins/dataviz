@@ -456,10 +456,12 @@ async def list_jobs_global(
     # the first paint and the polling-fallback source.
     #
     # Cost analysis: only running/pending rows hit Redis. Terminal
-    # rows fall through to the durable DB values directly. Even at
-    # the limit=100 cap, in practice the active subset is small
-    # (operators don't run more than ~10 jobs concurrently). HSET
-    # reads pipelined for cardinality-resilience.
+    # rows fall through to the durable DB values directly, and the
+    # active subset is bounded by the limit=100 cap. The snapshot
+    # reads are issued CONCURRENTLY: awaited in a loop they were one
+    # serial round trip per running row inside a single request, which
+    # is fine at the handful of concurrent jobs a small install runs
+    # and is not at a few hundred sources with a fleet of workers.
     try:
         active_items = [
             it for it in paginated.items
@@ -468,9 +470,12 @@ async def list_jobs_global(
         if active_items:
             from backend.app.jobs import get_state_store
             store = get_state_store()
-            for it in active_items:
-                snap = await store.get(it.id)
-                if not snap:
+            snaps = await asyncio.gather(
+                *(store.get(it.id) for it in active_items),
+                return_exceptions=True,
+            )
+            for it, snap in zip(active_items, snaps):
+                if not snap or isinstance(snap, BaseException):
                     continue
                 for field in (
                     "processed_edges", "total_edges", "created_edges", "progress",
