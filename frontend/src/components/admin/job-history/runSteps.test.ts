@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { RunStep } from '@/services/aggregationService'
 import {
     describeStep, describeSteps, currentStepSentence, remainingSecsFromLedger, jobStage,
+    compareStages, stageSlip, commonFailureStage,
 } from './runSteps'
 
 const T0 = Date.parse('2026-09-12T00:00:00.000Z')
@@ -171,7 +172,7 @@ describe('jobStage', () => {
             step({ id: 'applying' }),
             step({ id: 'finalizing' }),
         ]
-        expect(jobStage(steps, 'reconciling', T0)).toEqual({
+        expect(jobStage(steps, 'reconciling')).toEqual({
             label: 'Reconcile',
             detail: '3 of 12 scan ranges · 9 left',
             position: '4/6',
@@ -179,7 +180,7 @@ describe('jobStage', () => {
     })
 
     it('falls back to the pipeline phase for a run with no ledger', () => {
-        expect(jobStage(undefined, 'applying', T0)).toEqual({
+        expect(jobStage(undefined, 'applying')).toEqual({
             label: 'Apply', detail: null, position: null,
         })
     })
@@ -187,12 +188,140 @@ describe('jobStage', () => {
     it('never goes blank — a running job with nothing to go on is Working', () => {
         // A blank here reads as a job doing nothing, which is the opposite of
         // what a running row means.
-        expect(jobStage(undefined, null, T0).label).toBe('Working')
-        expect(jobStage([], undefined, T0).label).toBe('Working')
+        expect(jobStage(undefined, null).label).toBe('Working')
+        expect(jobStage([], undefined).label).toBe('Working')
     })
 
     it('says nothing about progress once every stage is closed', () => {
         const finished = [step({ id: 'applying', state: 'done', secs: 5 })]
-        expect(jobStage(finished, 'applying', T0).position).toBeNull()
+        expect(jobStage(finished, 'applying').position).toBeNull()
+    })
+})
+
+
+describe('compareStages', () => {
+    const previous: RunStep[] = [
+        step({ id: 'preparing', state: 'done', secs: 20 }),
+        step({ id: 'extracting', state: 'done', secs: 100 }),
+        step({ id: 'applying', state: 'done', secs: 200 }),
+    ]
+
+    it('flags a stage that got materially slower', () => {
+        const current: RunStep[] = [
+            step({ id: 'preparing', state: 'done', secs: 21 }),
+            step({ id: 'extracting', state: 'done', secs: 100 }),
+            step({ id: 'applying', state: 'done', secs: 600 }),
+        ]
+        const byId = Object.fromEntries(compareStages(current, previous).map(d => [d.id, d]))
+        expect(byId.applying.deltaPct).toBe(200)
+        expect(byId.applying.material).toBe(true)
+        expect(byId.extracting.deltaPct).toBe(0)
+        expect(byId.extracting.material).toBe(false)
+    })
+
+    it('does not colour a stage that doubled from one second to two', () => {
+        // Big in percent, nothing in seconds — the case that would cry wolf
+        // on every run.
+        const current = [step({ id: 'preparing', state: 'done', secs: 2 })]
+        const [delta] = compareStages(current, [step({ id: 'preparing', state: 'done', secs: 1 })])
+        expect(delta.deltaPct).toBe(100)
+        expect(delta.material).toBe(false)
+    })
+
+    it('has nothing to say about a stage the previous run never entered', () => {
+        const [delta] = compareStages(
+            [step({ id: 'applying', state: 'done', secs: 60 })],
+            [step({ id: 'applying' })],
+        )
+        expect(delta.prevSecs).toBeNull()
+        expect(delta.deltaPct).toBeNull()
+        expect(delta.material).toBe(false)
+    })
+
+    it('leaves out stages this run has not reached', () => {
+        const ids = compareStages(
+            [step({ id: 'extracting', state: 'done', secs: 5 }), step({ id: 'applying' })],
+            previous,
+        ).map(d => d.id)
+        expect(ids).toEqual(['extracting'])
+    })
+})
+
+describe('stageSlip', () => {
+    const previous: RunStep[] = [
+        step({ id: 'extracting', state: 'done', secs: 100 }),
+        step({ id: 'applying', state: 'done', secs: 200 }),
+    ]
+    const openApply = (elapsedS: number): RunStep[] => [
+        step({ id: 'extracting', state: 'done', secs: 90 }),
+        step({
+            id: 'applying', state: 'running',
+            started_at: new Date(T0 - elapsedS * 1000).toISOString(), secs: 0,
+        }),
+    ]
+
+    it('says nothing while a stage is merely running', () => {
+        expect(stageSlip(openApply(200), previous, T0)).toBeNull()
+        expect(stageSlip(openApply(280), previous, T0)).toBeNull()  // under 1.5x
+    })
+
+    it('speaks once the stage is well past what it took last time', () => {
+        const slip = stageSlip(openApply(520), previous, T0)
+        expect(slip?.label).toBe('Apply')
+        expect(slip?.expectedS).toBe(200)
+        expect(Math.round(slip!.overBy * 10) / 10).toBe(2.6)
+    })
+
+    it('ignores a slip measured in seconds on a stage that takes seconds', () => {
+        // 4s against 2s is 2x and still nothing anyone needs told.
+        const short = [
+            step({ id: 'preparing', state: 'running', started_at: new Date(T0 - 4000).toISOString(), secs: 0 }),
+        ]
+        expect(stageSlip(short, [step({ id: 'preparing', state: 'done', secs: 2 })], T0)).toBeNull()
+    })
+
+    it('declines when the previous run never entered the stage', () => {
+        expect(stageSlip(openApply(9_999), [step({ id: 'applying' })], T0)).toBeNull()
+    })
+
+    it('declines when nothing is open', () => {
+        expect(stageSlip(previous, previous, T0)).toBeNull()
+    })
+})
+
+describe('commonFailureStage', () => {
+    const died = (id: string) => ({
+        status: 'failed',
+        runStats: { steps: [step({ id, state: 'failed', secs: 10 })] },
+    })
+
+    it('names the stage most recent failures died in', () => {
+        const pattern = commonFailureStage([
+            died('applying'), { status: 'completed', runStats: { steps: [] } },
+            died('applying'), died('extracting'),
+        ])
+        expect(pattern).toEqual({ label: 'Apply', count: 2, considered: 4 })
+    })
+
+    it('one failure is an incident, not a pattern', () => {
+        expect(commonFailureStage([died('applying'), { status: 'completed' }])).toBeNull()
+    })
+
+    it('says nothing when the runs carry no ledger', () => {
+        expect(commonFailureStage([
+            { status: 'failed' }, { status: 'failed' },
+        ])).toBeNull()
+    })
+
+    it('ignores runs that are still going', () => {
+        expect(commonFailureStage([
+            { status: 'running' }, { status: 'pending' },
+        ])).toBeNull()
+    })
+
+    it('looks only at the most recent runs', () => {
+        const old = [died('extracting'), died('extracting')]
+        const recent = Array.from({ length: 10 }, () => ({ status: 'completed' as const }))
+        expect(commonFailureStage([...recent, ...old], 10)).toBeNull()
     })
 })

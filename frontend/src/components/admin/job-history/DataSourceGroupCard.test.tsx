@@ -118,3 +118,81 @@ describe('DataSourceGroupCard actions menu', () => {
         expect(document.body.style.pointerEvents).not.toBe('none')
     })
 })
+
+// ── where a source's runs go wrong ───────────────────────────────────────
+//
+// A column of red rows says runs fail. WHERE they fail is a different
+// problem each time: a source that keeps dying in Apply is out of room on
+// its shard, one dying in Extract has a scan it cannot finish.
+
+type Job = DataSourceGroup['jobs'][number]
+
+const failedIn = (id: string, at: string): Job => ({
+    id: `job-${id}-${at}`,
+    dataSourceId: 'ds-1',
+    status: 'failed',
+    triggerSource: 'manual',
+    progress: 40,
+    totalEdges: 0,
+    processedEdges: 0,
+    createdEdges: 0,
+    batchSize: 1000,
+    resumable: true,
+    retryCount: 0,
+    createdAt: at,
+    startedAt: at,
+    runStats: {
+        steps: [{
+            id, state: 'failed', started_at: at, ended_at: at,
+            secs: 10, visits: 1, done: null, total: null, unit: null, waiting_for: null,
+        }],
+    },
+}) as unknown as Job
+
+function renderWithJobs(jobs: Job[]) {
+    return render(
+        <DataSourceGroupCard
+            group={{ ...group, jobs }}
+            expanded={false}
+            onToggle={vi.fn()}
+            onCancel={vi.fn()}
+            onResume={vi.fn()}
+            onRetrigger={vi.fn()}
+            onDelete={vi.fn()}
+            onPurge={vi.fn()}
+            onTriggerAggregation={vi.fn()}
+            onPurgeDataSource={vi.fn()}
+            onShowAllJobs={vi.fn()}
+            expandedRowId={null}
+            onToggleRow={vi.fn()}
+            purgeConfirm={null}
+            setPurgeConfirm={vi.fn()}
+            actionLoading={null}
+        />,
+    )
+}
+
+describe('where a source keeps stopping', () => {
+    it('names the stage most recent failures died in', () => {
+        renderWithJobs([
+            failedIn('applying', '2026-09-12T03:00:00Z'),
+            failedIn('applying', '2026-09-12T02:00:00Z'),
+            failedIn('extracting', '2026-09-12T01:00:00Z'),
+        ])
+        expect(screen.getByTestId('failure-pattern').textContent)
+            .toBe('2 of the last 3 runs stopped in Apply')
+    })
+
+    it('stays quiet for a single failure — that is an incident, not a pattern', () => {
+        renderWithJobs([failedIn('applying', '2026-09-12T03:00:00Z')])
+        expect(screen.queryByTestId('failure-pattern')).toBeNull()
+    })
+
+    it('stays quiet for runs from before the ledger existed', () => {
+        renderWithJobs([
+            { ...failedIn('applying', '2026-09-12T03:00:00Z'), runStats: null },
+            { ...failedIn('applying', '2026-09-12T02:00:00Z'), runStats: null },
+        ])
+        expect(screen.queryByTestId('failure-pattern')).toBeNull()
+    })
+})

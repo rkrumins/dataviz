@@ -246,6 +246,10 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     )
     const hasSteps = (jobFromList.runStats?.steps?.length ?? 0) > 0
     const stageLabel = STEP_LABELS[openStepId ?? job.currentPhase ?? ''] ?? 'Working'
+    // Only a COMPLETED previous run is a baseline: one that failed in APPLY
+    // spent no time there, and comparing against it reads every run as a
+    // catastrophic slowdown.
+    const previousRunStats = previousJob?.status === 'completed' ? previousJob.runStats : null
 
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
@@ -658,6 +662,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         currentPhase={openStepId ?? job.currentPhase}
                                                         runStats={job.runStats}
                                                         status={job.status}
+                                                        previousRunStats={previousRunStats}
                                                     />
                                                 )}
                                                 {isRunning && steady && (
@@ -856,6 +861,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     currentPhase={null}
                                                     runStats={job.runStats}
                                                     status={job.status}
+                                                    previousRunStats={previousRunStats}
                                                 />
                                             </div>
                                         )}

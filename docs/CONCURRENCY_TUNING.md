@@ -565,6 +565,29 @@ stage — at the larger of last run's rate for that stage and this run's own
 the previous run wrote nothing (a no-change re-run is not predictive of one
 that rewrites the cube) or when either run has no stage record.
 
+### Reading a run against the last one
+
+Two runs of the same source carry the same stage ledger, so Job History
+compares them for free.
+
+* **A stage that moved.** On a finished run each segment carries an arrow
+  beside its duration — `12m ↑200%` — against the same stage on the last
+  *completed* run. Only when the change is big in percent AND in seconds: a
+  stage that went from one second to two doubled and means nothing. A failed
+  run is never the baseline, because it spent no time in the stages it never
+  reached.
+* **Stuck, or just slow.** While a run is going, a stage well past its own
+  last time says so: *Apply has been running 8m 40s — last run's took 3m 20s,
+  so this one is 2.6× longer so far.* Silent below 1.5× and below thirty
+  seconds, so it only speaks when there is something to say. This is the
+  question during an incident, and the overall percentage cannot answer it.
+* **Where a source keeps stopping.** The data-source card reads the ledgers
+  of its recent runs and names the stage most of them died in: *3 of the last
+  10 runs stopped in Apply.* One failure is an incident; a pattern needs at
+  least two. A source dying repeatedly in Apply is out of room on its shard;
+  one dying in Extract has a scan it cannot finish — the same red rows, two
+  different problems.
+
 ### When more than one rebuild shares a graph store node
 
 A shard holds many graphs, so two rebuilds can be writing one master at once

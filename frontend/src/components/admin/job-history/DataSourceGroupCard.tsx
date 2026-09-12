@@ -1,5 +1,5 @@
-import { memo, useState } from 'react'
-import { jobStage } from './runSteps'
+import { memo, useMemo, useState } from 'react'
+import { jobStage, commonFailureStage } from './runSteps'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
@@ -214,6 +214,8 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
     const [showAll, setShowAll] = useState(false)
 
     const { meta, dsResponse, jobs, totalRuns, successRate, avgDuration, lastRunAt, isActive, sparklineData, durationTrend } = group
+    // Where this source's runs go wrong, off the ledgers already on the rows.
+    const failurePattern = useMemo(() => commonFailureStage(jobs), [jobs])
     const edgeCount = dsResponse?.aggregationEdgeCount ?? 0
     const activeJob = isActive ? jobs.find(j => j.status === 'running' || j.status === 'pending') : undefined
     const visibleJobs = showAll ? jobs : jobs.slice(0, INITIAL_VISIBLE_JOBS)
@@ -336,7 +338,7 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                                 <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
                                 <span className="text-[10px] font-semibold text-ink truncate">
                                     {activeJob.status === 'running'
-                                        ? jobStage(activeJob.runStats?.steps, activeJob.currentPhase, Date.now()).label
+                                        ? jobStage(activeJob.runStats?.steps, activeJob.currentPhase).label
                                         : 'Queued'}
                                 </span>
                                 <span className="text-[10px] font-bold text-indigo-400 tabular-nums ml-auto">
@@ -377,6 +379,20 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                             <span className="ml-auto text-ink-muted/60">{timeAgo(lastRunAt)}</span>
                         )}
                     </div>
+
+                    {/* A column of red rows says runs fail. WHERE they fail is
+                        a different problem each time — a source that keeps
+                        dying in Apply is out of room on its shard; one dying
+                        in Extract is a scan it cannot finish. */}
+                    {failurePattern && (
+                        <p
+                            data-testid="failure-pattern"
+                            className="mt-1.5 text-[10px] text-amber-500/90"
+                        >
+                            {`${failurePattern.count} of the last ${failurePattern.considered} runs `}
+                            {`stopped in ${failurePattern.label}`}
+                        </p>
+                    )}
                 </div>
 
                 {/* Actions overflow — Radix dropdown handles portal,

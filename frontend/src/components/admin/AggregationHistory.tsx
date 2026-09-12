@@ -69,7 +69,7 @@ export function AggregationHistory({ dataSourceId }: AggregationHistoryProps) {
 
 const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) {
     const progressPercent = Math.round(job.progress || 0)
-    const stage = jobStage(job.runStats?.steps, job.currentPhase, Date.now())
+    const stage = jobStage(job.runStats?.steps, job.currentPhase)
     
     // Status visual mapping
     let icon, statusColor, bgColor, statusText;

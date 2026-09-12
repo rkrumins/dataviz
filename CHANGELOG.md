@@ -13,6 +13,18 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Job History compares a run to the last one, stage by stage.** Per-stage
+durations answered "how long did this take"; the question an operator has is
+"is this getting worse", and both runs carry the same ledger. A finished run's
+segments now carry an arrow against the same stage on the last completed run
+(only when the change is big in percent AND in seconds — a stage that went
+from 1s to 2s doubled and means nothing). A running stage well past its own
+last time says so outright, which is the "stuck or just slow" question the
+overall percentage cannot answer. And a data-source card names the stage its
+recent runs keep dying in: a source failing in Apply is out of room on its
+shard, one failing in Extract has a scan it cannot finish — the same red rows,
+two different problems.
+
 **Two rebuilds on one master no longer both decide the node is theirs.**
 `writePacingMinRatio` is the floor a run drops to when the graph store node
 has room to spare. It was decided from the node's own reading, which two

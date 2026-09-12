@@ -166,9 +166,12 @@ export function remainingSecsFromLedger(
 export function jobStage(
     steps: RunStep[] | undefined | null,
     currentPhase: string | null | undefined,
-    nowMs: number,
 ): { label: string; detail: string | null; position: string | null } {
-    const views = describeSteps(steps, nowMs)
+    // No clock: none of the three fields this returns depends on one — the
+    // stage's own counters and its place in the flow are as of the last
+    // checkpoint. Taking `Date.now()` here would make every caller impure
+    // during render for a value nothing reads.
+    const views = describeSteps(steps, 0)
     const open = views.find(v => v.open)
     if (open) {
         return {
@@ -184,5 +187,146 @@ export function jobStage(
         label: STEP_LABELS[currentPhase ?? ''] ?? 'Working',
         detail: null,
         position: null,
+    }
+}
+
+
+// ── this run against the last one ────────────────────────────────────────
+//
+// Per-stage durations only answer "how long did this take". The question an
+// operator actually has is "is this getting worse", and both runs carry the
+// same ledger, so the comparison is free.
+
+/** A stage change is worth colouring only when it is big in BOTH senses —
+ *  a stage that went from 1s to 2s doubled and means nothing. */
+const _MATERIAL_PCT = 25
+const _MATERIAL_SECS = 5
+
+export interface StageDelta {
+    id: string
+    label: string
+    secs: number
+    /** The same stage in the previous run; null when it did not run it. */
+    prevSecs: number | null
+    /** Percent change against the previous run, null when incomparable. */
+    deltaPct: number | null
+    /** Big enough in both percent and seconds to be worth saying. */
+    material: boolean
+}
+
+export function compareStages(
+    current: RunStep[] | undefined | null,
+    previous: RunStep[] | undefined | null,
+): StageDelta[] {
+    if (!Array.isArray(current) || current.length === 0) return []
+    const prev = new Map(
+        (Array.isArray(previous) ? previous : [])
+            .filter(s => s.state !== 'pending')
+            .map(s => [s.id, typeof s.secs === 'number' ? s.secs : 0]),
+    )
+    return current
+        .filter(s => s.state !== 'pending')
+        .map(s => {
+            const secs = typeof s.secs === 'number' ? s.secs : 0
+            const prevSecs = prev.has(s.id) ? prev.get(s.id)! : null
+            const deltaPct = prevSecs && prevSecs > 0
+                ? Math.round(((secs - prevSecs) / prevSecs) * 100)
+                : null
+            return {
+                id: s.id,
+                label: STEP_LABELS[s.id] ?? s.id,
+                secs,
+                prevSecs,
+                deltaPct,
+                material: deltaPct != null
+                    && Math.abs(deltaPct) >= _MATERIAL_PCT
+                    && Math.abs(secs - (prevSecs ?? 0)) >= _MATERIAL_SECS,
+            }
+        })
+}
+
+// ── is this one stuck, or just slow? ─────────────────────────────────────
+//
+// The question during an incident, and the one a percentage cannot answer.
+// A stage well past what the same stage took last time is the signal; a
+// stage merely running is not, so this says nothing until it is.
+
+/** Below these the stage is just running, and saying so is noise. */
+const _SLIP_RATIO = 1.5
+const _SLIP_SECS = 30
+
+export interface StageSlip {
+    label: string
+    elapsedS: number
+    expectedS: number
+    /** How many times longer than last time, e.g. 2.6. */
+    overBy: number
+}
+
+export function stageSlip(
+    current: RunStep[] | undefined | null,
+    previous: RunStep[] | undefined | null,
+    nowMs: number,
+): StageSlip | null {
+    if (!Array.isArray(current) || !Array.isArray(previous)) return null
+    const open = current.find(s => s.state === 'running' || s.state === 'waiting')
+    if (!open) return null
+    const was = previous.find(s => s.id === open.id)
+    const expectedS = was && typeof was.secs === 'number' ? was.secs : 0
+    if (expectedS <= 0) return null
+    const elapsedS = describeStep(open, nowMs).elapsedS ?? 0
+    if (elapsedS < expectedS * _SLIP_RATIO || elapsedS - expectedS < _SLIP_SECS) {
+        return null
+    }
+    return {
+        label: STEP_LABELS[open.id] ?? open.id,
+        elapsedS,
+        expectedS,
+        overBy: elapsedS / expectedS,
+    }
+}
+
+// ── where a source's runs go wrong ───────────────────────────────────────
+//
+// A column of red rows says runs fail. The ledger says WHERE, and one stage
+// accounting for most of them is a different problem from failures spread
+// across all of them.
+
+/** One failure is an incident; a pattern needs at least two. */
+const _PATTERN_MIN = 2
+
+export interface FailurePattern {
+    /** The stage most failures died in. */
+    label: string
+    count: number
+    /** Finished runs considered (completed + failed + cancelled). */
+    considered: number
+}
+
+export function commonFailureStage(
+    runs: Array<{ status: string; runStats?: { steps?: RunStep[] } | null }>,
+    limit = 10,
+): FailurePattern | null {
+    const finished = runs
+        .filter(r => r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled')
+        .slice(0, limit)
+    if (finished.length === 0) return null
+    const tally = new Map<string, number>()
+    for (const run of finished) {
+        const died = (run.runStats?.steps ?? []).find(
+            s => s.state === 'failed' || s.state === 'cancelled',
+        )
+        if (!died) continue
+        tally.set(died.id, (tally.get(died.id) ?? 0) + 1)
+    }
+    let top: [string, number] | null = null
+    tally.forEach((count, id) => {
+        if (!top || count > top[1]) top = [id, count]
+    })
+    if (!top || top[1] < _PATTERN_MIN) return null
+    return {
+        label: STEP_LABELS[top[0]] ?? top[0],
+        count: top[1],
+        considered: finished.length,
     }
 }

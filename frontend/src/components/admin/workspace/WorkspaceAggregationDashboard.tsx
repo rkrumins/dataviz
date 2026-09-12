@@ -328,7 +328,7 @@ export function WorkspaceAggregationDashboard({
                         // What that job is doing right now, in the stage's own
                         // terms — the same line Job History shows.
                         const stage = jobStage(
-                            activeJob?.runStats?.steps, activeJob?.currentPhase, Date.now(),
+                            activeJob?.runStats?.steps, activeJob?.currentPhase,
                         )
                         const isExpanded = expandedId === ds.id
                         const isTriggering = triggering === ds.id

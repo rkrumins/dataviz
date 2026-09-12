@@ -120,3 +120,85 @@ describe('PhaseStepper over a step ledger', () => {
         expect(screen.getByTestId('step-now').textContent).toContain('waiting — retry 1/3')
     })
 })
+
+
+// ── this run against the last one ────────────────────────────────────────
+
+describe('PhaseStepper against a previous run', () => {
+    const ledger = (over: Record<string, unknown>[] = []) => [
+        _step({ id: 'preparing', state: 'done', secs: 12 }),
+        _step({ id: 'extracting', state: 'done', secs: 100 }),
+        _step({ id: 'computing', state: 'done', secs: 10 }),
+        _step({ id: 'reconciling', state: 'done', secs: 40 }),
+        _step({ id: 'applying', state: 'done', secs: 600 }),
+        _step({ id: 'finalizing', state: 'done', secs: 8 }),
+        ...(over as never[]),
+    ]
+    const previous = {
+        steps: [
+            _step({ id: 'preparing', state: 'done', secs: 12 }),
+            _step({ id: 'extracting', state: 'done', secs: 100 }),
+            _step({ id: 'computing', state: 'done', secs: 10 }),
+            _step({ id: 'reconciling', state: 'done', secs: 40 }),
+            _step({ id: 'applying', state: 'done', secs: 200 }),
+            _step({ id: 'finalizing', state: 'done', secs: 8 }),
+        ],
+    }
+
+    it('marks the stage that got materially slower', () => {
+        render(
+            <PhaseStepper
+                currentPhase={null} status="completed"
+                runStats={{ steps: ledger() }} previousRunStats={previous}
+            />,
+        )
+        expect(screen.getByText('↑200%')).toBeInTheDocument()
+        // …and says nothing about the five stages that did not move.
+        expect(screen.queryByText('↑0%')).toBeNull()
+    })
+
+    it('says nothing at all without a previous run to compare against', () => {
+        render(
+            <PhaseStepper
+                currentPhase={null} status="completed" runStats={{ steps: ledger() }}
+            />,
+        )
+        expect(screen.queryByText(/↑|↓/)).toBeNull()
+    })
+
+    it('warns when the running stage is well past its own last time', () => {
+        const running = [
+            _step({ id: 'extracting', state: 'done', secs: 100 }),
+            _step({
+                id: 'applying', state: 'running', secs: 0,
+                started_at: new Date(Date.now() - 520_000).toISOString(),
+            }),
+        ]
+        render(
+            <PhaseStepper
+                currentPhase="applying" status="running"
+                runStats={{ steps: running }} previousRunStats={previous}
+            />,
+        )
+        const slip = screen.getByTestId('stage-slip')
+        expect(slip.textContent).toContain('Apply has been running')
+        expect(slip.textContent).toContain('last run\u2019s took 3m 20s')
+        expect(slip.textContent).toContain('2.6× longer')
+    })
+
+    it('stays quiet while the running stage is merely running', () => {
+        const running = [
+            _step({
+                id: 'applying', state: 'running', secs: 0,
+                started_at: new Date(Date.now() - 180_000).toISOString(),
+            }),
+        ]
+        render(
+            <PhaseStepper
+                currentPhase="applying" status="running"
+                runStats={{ steps: running }} previousRunStats={previous}
+            />,
+        )
+        expect(screen.queryByTestId('stage-slip')).toBeNull()
+    })
+})

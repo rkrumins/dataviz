@@ -16,7 +16,7 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { JobHistoryFilters } from '@/services/aggregationService'
-import { describeSteps, type StepView } from './runSteps'
+import { describeSteps, compareStages, stageSlip, type StepView } from './runSteps'
 
 // ── DataSourceMeta ──────────────────────────────────────────────────
 
@@ -528,7 +528,14 @@ export const PHASE_BANDS: Record<string, [number, number]> = {
  * Runs from before the ledger existed fall back to ``PhaseStepper``'s
  * original four segments derived from ``currentPhase``.
  */
-function StepLedgerView({ views, status }: { views: StepView[]; status: string }) {
+function StepLedgerView({ views, status, deltas, slip }: {
+    views: StepView[]
+    status: string
+    /** Percent change per stage against the previous run on this source. */
+    deltas: Map<string, number>
+    /** Set when the stage the run is ON is well past its own last time. */
+    slip: { label: string; elapsedS: number; expectedS: number; overBy: number } | null
+}) {
     const running = status === 'running' || status === 'pending'
     const open = views.find(v => v.open)
     return (
@@ -568,8 +575,20 @@ function StepLedgerView({ views, status }: { views: StepView[]; status: string }
                                         : 'text-ink-muted opacity-40',
                                 )}>{v.label}</span>
                                 {v.elapsedS != null && (
-                                    <span className="text-[9px] tabular-nums text-ink-muted opacity-70 flex-shrink-0">
-                                        {formatDuration(v.elapsedS)}
+                                    <span className="text-[9px] tabular-nums flex-shrink-0 flex items-center gap-1">
+                                        <span className="text-ink-muted opacity-70">{formatDuration(v.elapsedS)}</span>
+                                        {/* Against the same stage last time. Only when it
+                                            is big in percent AND in seconds — a stage that
+                                            went from 1s to 2s doubled and means nothing. */}
+                                        {deltas.has(v.id) && (
+                                            <span className={cn(
+                                                'font-bold',
+                                                deltas.get(v.id)! > 0 ? 'text-amber-500' : 'text-emerald-500',
+                                            )}>
+                                                {deltas.get(v.id)! > 0 ? '\u2191' : '\u2193'}
+                                                {Math.abs(deltas.get(v.id)!)}%
+                                            </span>
+                                        )}
                                     </span>
                                 )}
                             </div>
@@ -593,6 +612,16 @@ function StepLedgerView({ views, status }: { views: StepView[]; status: string }
                     )}
                 </p>
             )}
+            {/* Stuck, or just slow? The question during an incident, and the
+                one a percentage cannot answer. Silent until the stage is well
+                past what the same stage took on the last run. */}
+            {slip && (
+                <p className="text-[10px] text-amber-500/90 leading-relaxed" data-testid="stage-slip">
+                    {`${slip.label} has been running ${formatDuration(slip.elapsedS)} \u2014 `}
+                    {`last run\u2019s took ${formatDuration(slip.expectedS)}, `}
+                    {`so this one is ${slip.overBy.toFixed(1)}\u00d7 longer so far.`}
+                </p>
+            )}
             {running && !open && (
                 <p className="text-[10px] text-ink-muted opacity-70">{'Starting\u2026'}</p>
             )}
@@ -607,10 +636,13 @@ function StepLedgerView({ views, status }: { views: StepView[]; status: string }
  * pulses, later ones are dormant. Completed: all done, with the
  * per-phase durations from ``runStats`` under each segment.
  */
-export function PhaseStepper({ currentPhase, runStats, status }: {
+export function PhaseStepper({ currentPhase, runStats, status, previousRunStats }: {
     currentPhase: string | null | undefined
     runStats: AggregationRunStats | null | undefined
     status: string
+    /** The last completed run on this data source. Both runs carry the same
+     *  ledger, so "is this getting worse" costs nothing to answer. */
+    previousRunStats?: AggregationRunStats | null
 }) {
     const completed = status === 'completed'
     // Re-read the clock while a step is open so its elapsed time ticks: the
@@ -624,7 +656,20 @@ export function PhaseStepper({ currentPhase, runStats, status }: {
         const t = setInterval(() => setNow(Date.now()), 1000)
         return () => clearInterval(t)
     }, [anyOpen])
-    if (views.length > 0) return <StepLedgerView views={views} status={status} />
+    const deltas = useMemo(() => {
+        const out = new Map<string, number>()
+        for (const d of compareStages(runStats?.steps, previousRunStats?.steps)) {
+            if (d.material && d.deltaPct != null) out.set(d.id, d.deltaPct)
+        }
+        return out
+    }, [runStats?.steps, previousRunStats?.steps])
+    const slip = useMemo(
+        () => stageSlip(runStats?.steps, previousRunStats?.steps, now),
+        [runStats?.steps, previousRunStats?.steps, now],
+    )
+    if (views.length > 0) {
+        return <StepLedgerView views={views} status={status} deltas={deltas} slip={slip} />
+    }
 
     const currentIdx = currentPhase ? PHASES.findIndex(p => p.id === currentPhase) : -1
     if (!completed && currentIdx < 0) return null
