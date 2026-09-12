@@ -608,6 +608,9 @@ class _SharedNode:
     def __init__(self, *, others=(0, 0)):
         self._others = others
         self.slot_nodes: list = []
+        self.read_nodes: list = []
+        self.reads_held = 0
+        self.reads_at_once = 0
 
     def write_slot(self, provider, *, node=None):
         self.slot_nodes.append(node)
@@ -617,6 +620,22 @@ class _SharedNode:
                 return self_
 
             async def __aexit__(self_, *exc):
+                return False
+
+        return _Slot()
+
+    def read_slot(self, provider, *, node=None):
+        self.read_nodes.append(node)
+        outer = self
+
+        class _Slot:
+            async def __aenter__(self_):
+                outer.reads_held += 1
+                outer.reads_at_once = max(outer.reads_at_once, outer.reads_held)
+                return self_
+
+            async def __aexit__(self_, *exc):
+                outer.reads_held -= 1
                 return False
 
         return _Slot()
@@ -681,3 +700,76 @@ def _noop_govern(pipe):
     async def _govern():
         return 0.0
     return _govern
+
+
+# ── scan slots: what the rebuild READS is capped too ─────────────────────
+#
+# The write slots cap what a rebuild writes to a node. Nothing capped what
+# it reads — and a rebuild reads far more than it writes (EXTRACT scans
+# every lineage edge, RECONCILE the whole stored cube), all of it under
+# ``read_from_master_only``, so none of it lands on the replicas that absorb
+# interactive reads. N rebuilds on one master is N unbounded range scans
+# against a small ``THREAD_COUNT``, and the read-pressure signal only reacts
+# once users are already starving.
+
+
+async def _rows(lo, hi):
+    return [(lo, hi)]
+
+
+def _scan_pipeline(admission):
+    pipe = _pipeline(_Conn(_picture()))
+    pipe.p._admission_controller = admission
+    return pipe
+
+
+def test_a_range_scan_takes_a_read_slot_on_the_node():
+    admission = _SharedNode()
+    pipe = _scan_pipeline(admission)
+    assert _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS")) == [(0, 10)]
+    assert admission.read_nodes == ["10.0.0.1:6379"]
+
+
+def test_the_scan_slot_is_keyed_by_the_node_before_the_first_write():
+    """Every scan-heavy phase runs BEFORE the first write batch, which is
+    what used to take the governor's reading. Keyed by the connection
+    endpoint instead, a cluster got ONE scan semaphore for the whole fleet
+    rather than one per master — so the fix has to hold from the first
+    scan, not from the first write."""
+    admission = _SharedNode()
+    pipe = _scan_pipeline(admission)
+    assert pipe._gov_reading is None
+    _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS"))
+    assert admission.read_nodes == ["10.0.0.1:6379"]
+    assert admission.slot_nodes == []          # no write slot taken by a scan
+
+
+def test_each_sub_range_takes_its_own_slot_and_never_two_at_once():
+    """The ladder walks a wide range in sticky-width slices. Each slice is
+    its own query and takes its own slot; holding one across the walk would
+    have a scan queuing for its next slot while holding the last."""
+    admission = _SharedNode()
+    pipe = _scan_pipeline(admission)
+    pipe._scan_subwidth = 4
+    rows = _run(pipe._fetch_range(_rows, 0, 12, label="extract:FLOWS"))
+    assert rows == [(0, 4), (4, 8), (8, 12)]
+    assert admission.read_nodes == ["10.0.0.1:6379"] * 3
+    assert admission.reads_at_once == 1
+    assert admission.reads_held == 0
+
+
+def test_a_controller_without_scan_slots_still_scans():
+    """Version skew: a worker pod running against an older controller must
+    read exactly as it did before, not fail."""
+    class _OldController:
+        def write_slot(self, provider, *, node=None):
+            raise AssertionError("a scan must not take a write slot")
+
+    pipe = _scan_pipeline(_OldController())
+    assert _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS")) == [(0, 10)]
+
+
+def test_no_controller_at_all_still_scans():
+    pipe = _pipeline(_Conn(_picture()))
+    pipe.p._admission_controller = None
+    assert _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS")) == [(0, 10)]

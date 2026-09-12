@@ -3008,6 +3008,40 @@ class AggregationPipeline:
             out["live"] = live
         return out
 
+    async def _slotted_scan(
+        self, run_one: Callable[[int, int], Awaitable[list]], lo: int, hi: int,
+    ) -> list:
+        """One range scan, holding a per-node READ slot while it is in flight.
+
+        The write slots cap what rebuilds WRITE to a node; nothing capped
+        what they READ, and a rebuild reads far more than it writes — and
+        does it under ``read_from_master_only``, so every scan lands on the
+        master rather than the replicas that absorb interactive reads.
+
+        The slot is taken around the LEAF query only: not around
+        ``_through_outage``'s retry loop (a node that is failing over would
+        hold slots nobody can use) and not around the sub-range walk in
+        ``_fetch_range`` (one scan would hold a slot while queuing for the
+        next). Held per query, exactly like the write slot — a job halving
+        its way down the ladder holds nothing between attempts.
+        """
+        admission = getattr(self.p, "_admission_controller", None)
+        # getattr, not a version check: a controller that predates read
+        # slots simply does not gate reads, which is what it did before.
+        slot = getattr(admission, "read_slot", None)
+        if slot is None:
+            return await run_one(lo, hi)
+        if self._gov_reading is None:
+            # The node's identity, once. Every scan-heavy phase runs BEFORE
+            # the first write batch, so without this the slot would key on
+            # the connection endpoint for all of EXTRACT and RECONCILE —
+            # a seed address on a cluster, i.e. one semaphore for the whole
+            # fleet instead of one per master. The reading is memoised and
+            # never raises; the write path refreshes it per batch after.
+            await self._governor_reading()
+        async with slot(self.p, node=self._gov_node()):
+            return await run_one(lo, hi)
+
     async def _fetch_range(
         self, run_one: Callable[[int, int], Awaitable[list]],
         lo: int, hi: int, *, label: str,
@@ -3052,7 +3086,9 @@ class AggregationPipeline:
                 cur = min(cur + sticky, hi)
             return rows
         try:
-            rows = await self._through_outage(lambda: run_one(lo, hi), op=label)
+            rows = await self._through_outage(
+                lambda: self._slotted_scan(run_one, lo, hi), op=label,
+            )
         except Exception as exc:
             kind = _pressure_kind(exc)
             if kind is None:

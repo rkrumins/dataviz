@@ -336,3 +336,64 @@ def test_the_ledger_fails_open_when_redis_is_down():
             await adm.read_reservations(_DownRedis(), "n1")           # the raw read raises; callers fail open
 
     _run(scenario())
+
+
+def test_read_slots_cap_scans_separately_from_writes():
+    """Rebuild SCANS get their own, larger semaphore. A rebuild reads far
+    more than it writes and — running under ``read_from_master_only`` — reads
+    from the MASTER, so the writes-only cap left the thing that actually
+    saturates a node's query threads unbounded. Separate keys, because a
+    scan waiting behind a write (or the reverse) is not the trade either
+    limit was chosen for."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+        reads = f"agg:readslots:{adm.endpoint_key(provider)}"
+        writes = f"agg:writeslots:{adm.endpoint_key(provider)}"
+
+        held = [a.read_slot(provider) for _ in range(adm._READ_SLOT_LIMIT)]
+        for slot in held:
+            await slot.__aenter__()
+        assert len(redis.zsets[reads]) == adm._READ_SLOT_LIMIT
+        assert not redis.zsets.get(writes)
+
+        # A write still admits while every read slot is taken.
+        async with a.write_slot(provider):
+            assert len(redis.zsets[writes]) == 1
+
+        orig = adm._SLOT_WAIT_MAX_SECS
+        adm._SLOT_WAIT_MAX_SECS = 0.0
+        try:
+            extra = a.read_slot(provider)
+            await extra.__aenter__()
+            assert len(redis.zsets[reads]) == adm._READ_SLOT_LIMIT  # over-admitted, not added
+            await extra.__aexit__(None, None, None)
+        finally:
+            adm._SLOT_WAIT_MAX_SECS = orig
+
+        for slot in held:
+            await slot.__aexit__(None, None, None)
+        assert len(redis.zsets[reads]) == 0
+
+    _run(scenario())
+
+
+def test_a_read_slot_is_keyed_by_the_node_not_the_seed():
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+        async with a.read_slot(provider, node="10.0.0.7:6379"):
+            assert list(redis.zsets) == ["agg:readslots:10.0.0.7:6379"]
+
+    _run(scenario())
+
+
+def test_read_slots_fail_open_when_redis_is_down():
+    async def scenario():
+        a = adm.AggregationAdmission(_DownRedis())
+        async with a.read_slot(_FakeProvider()):
+            pass          # a bus outage must never stop a scan
+
+    _run(scenario())

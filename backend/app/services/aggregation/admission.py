@@ -64,12 +64,31 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _SLOT_LIMIT = int(os.getenv("FALKORDB_ENDPOINT_WRITE_SLOTS", "2"))
+_READ_SLOT_LIMIT = int(os.getenv("FALKORDB_ENDPOINT_READ_SLOTS", "4"))
+"""How many rebuild SCANS may be in flight against one node at once.
+
+The write slots above cap what rebuilds WRITE to a node. Nothing capped what
+they READ, and a rebuild reads far more than it writes: EXTRACT scans every
+lineage edge, RECONCILE scans the stored cube. Worse, the pipeline runs
+entirely under ``read_from_master_only`` — deliberately, because it reads
+what it has just written — so those scans do NOT go to the replicas that
+absorb interactive reads. They go to the master.
+
+With ``WORKER_CONCURRENCY`` jobs per pod across an autoscaled fleet, that is
+tens of concurrent unbounded range scans against one master's small
+``THREAD_COUNT``, and the read-pressure signal only reacts AFTER interactive
+users have started to starve. This is the preventive half: leave threads for
+the readers rather than apologise to them.
+
+Deliberately larger than the write limit — scans are the bulk of a rebuild's
+work and each is short, so too small a cap starves rebuilds fleet-wide to
+protect threads that were never contended."""
 _SLOT_STALE_SECS = float(os.getenv("AGGREGATION_SLOT_STALE_SECS", "660"))
 """Holders older than this are pruned. Must exceed the longest single
-write query the pipeline may send — the write-timeout knob's maximum
+query the pipeline may send, write or scan — the timeout knobs' maximum
 (600 s; the store's TIMEOUT_MAX can be raised to it at runtime from
-Infrastructure) plus slot-wait/event-loop jitter — or an in-flight write's
-slot could be reclaimed and the endpoint over-admitted."""
+Infrastructure) plus slot-wait/event-loop jitter — or an in-flight query's
+slot could be reclaimed and the node over-admitted."""
 _SLOT_WAIT_MAX_SECS = float(os.getenv("AGGREGATION_SLOT_WAIT_MAX_SECS", "120"))
 """Upper bound on waiting for a slot before proceeding anyway (fail-open
 bias: local gates still apply, and an indefinitely-starved job is worse
@@ -205,21 +224,23 @@ class ShardReservation:
 
 
 class _SlotContext:
-    """Async context manager for one write-query admission slot."""
+    """Async context manager for one query admission slot — a write batch
+    (``kind="write"``) or a rebuild scan (``kind="read"``)."""
 
     def __init__(
         self, admission: "AggregationAdmission", provider: Any,
-        node: Optional[str] = None,
+        node: Optional[str] = None, kind: str = "write",
     ) -> None:
         self._admission = admission
         self._provider = provider
         self._node = node
+        self._kind = kind
         self._member: Optional[str] = None
         self._key: Optional[str] = None
 
     async def __aenter__(self) -> "_SlotContext":
         self._key, self._member = await self._admission._acquire_slot(
-            self._provider, self._node,
+            self._provider, self._node, self._kind,
         )
         return self
 
@@ -514,7 +535,14 @@ class AggregationAdmission:
         self._read_pressure_memo[key] = (now, reason)
         return reason
 
-    # -- per-endpoint write slots -------------------------------------------------
+    # -- per-node write and scan slots --------------------------------------------
+
+    def read_slot(self, provider: Any, *, node: Optional[str] = None) -> _SlotContext:
+        """Async context manager gating one rebuild SCAN — see
+        ``_READ_SLOT_LIMIT``. Same key discipline as ``write_slot``: the node
+        the caller's shard reading names, falling back to the connection
+        endpoint when nothing has been measured."""
+        return _SlotContext(self, provider, node, kind="read")
 
     def write_slot(self, provider: Any, *, node: Optional[str] = None) -> _SlotContext:
         """Async context manager gating one write query.
@@ -526,28 +554,32 @@ class AggregationAdmission:
         shared by every shard: one semaphore for the whole cluster rather
         than one per master, so two rebuilds on two different masters
         contend while nothing bounds either master on its own."""
-        return _SlotContext(self, provider, node)
+        return _SlotContext(self, provider, node, kind="write")
 
-    async def _acquire_slot(self, provider: Any, node: Optional[str] = None) -> tuple:
-        key = f"agg:writeslots:{node or endpoint_key(provider)}"
+    async def _acquire_slot(
+        self, provider: Any, node: Optional[str] = None, kind: str = "write",
+    ) -> tuple:
+        reads = kind == "read"
+        key = f"agg:{'read' if reads else 'write'}slots:{node or endpoint_key(provider)}"
+        limit = _READ_SLOT_LIMIT if reads else _SLOT_LIMIT
         member = uuid.uuid4().hex
         deadline = time.monotonic() + _SLOT_WAIT_MAX_SECS
         while True:
             try:
                 got = await self._redis.eval(
                     _ACQUIRE_SLOT_LUA, 1, key,
-                    time.time(), _SLOT_STALE_SECS, _SLOT_LIMIT, member,
+                    time.time(), _SLOT_STALE_SECS, limit, member,
                 )
             except Exception as exc:
-                self._warn_fail_open("write-slot acquire", exc)
+                self._warn_fail_open(f"{kind}-slot acquire", exc)
                 return None, None
             if int(got or 0) == 1:
                 return key, member
             if time.monotonic() >= deadline:
                 logger.warning(
-                    "aggregation admission: no write slot on %s after %.0fs — "
+                    "aggregation admission: no %s slot on %s after %.0fs — "
                     "proceeding anyway (fail-open bias).",
-                    key, _SLOT_WAIT_MAX_SECS,
+                    kind, key, _SLOT_WAIT_MAX_SECS,
                 )
                 return None, None
             # Jittered wait — doubles as natural pacing under contention.
@@ -558,4 +590,4 @@ class AggregationAdmission:
             await self._redis.zrem(key, member)
         except Exception as exc:
             # Score-based pruning reclaims it after _SLOT_STALE_SECS.
-            self._warn_fail_open("write-slot release", exc)
+            self._warn_fail_open("slot release", exc)
