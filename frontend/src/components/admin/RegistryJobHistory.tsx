@@ -37,6 +37,7 @@ import { ConfirmDialog } from './job-history/ConfirmDialog'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
 import { JobHistoryFilterBar } from './job-history/JobHistoryFilterBar'
 import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
+import { NodeLoadPanel } from './job-history/NodeLoadPanel'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
 import { gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import { extendStallPatch } from './job-history/timeLimits'
@@ -678,6 +679,11 @@ export function RegistryJobHistory() {
                         allDataSources={allDataSources}
                         onShowFailed={handleShowFailed}
                     />
+
+                    {/* Which graph store node each running rebuild is writing.
+                        Renders only while something is running and has named
+                        its node, so a quiet page is unchanged. */}
+                    <NodeLoadPanel jobs={data?.items ?? []} dsLookup={dsLookup} />
 
                     {/* Filters */}
                     <JobHistoryFilterBar

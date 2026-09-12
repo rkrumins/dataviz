@@ -404,3 +404,60 @@ def test_the_ledger_keeps_a_count_with_no_denominator():
     ledger.note(done=1_200, total=None, unit="lineage edges")
     step = {s["id"]: s for s in ledger.snapshot()}["extracting"]
     assert (step["done"], step["total"]) == (1_200, None)
+
+
+# ── which node a run is writing ──────────────────────────────────────────
+#
+# "What else is on this shard right now" is asked about RUNNING jobs, long
+# before the write-budget check puts the node inside its own record, and it
+# has to follow a failover. So the node is on the run's record from the
+# first checkpoint that has a measured reading.
+
+
+def test_a_checkpoint_names_the_node_the_run_is_writing():
+    pipe, seen = _recording_pipeline()
+    pipe._gov_reading = _measured("10.0.0.4:6379")
+    asyncio.run(pipe._checkpoint(mat.PHASE_APPLY, 0, phase_label="applying"))
+    assert seen[0]["stats"]["node"] == "10.0.0.4:6379"
+
+
+def test_an_unmeasured_reading_names_no_node_rather_than_a_wrong_one():
+    pipe, seen = _recording_pipeline()
+    pipe._gov_reading = None
+    asyncio.run(pipe._checkpoint(mat.PHASE_APPLY, 0, phase_label="applying"))
+    assert "node" not in seen[0]["stats"]
+
+
+def test_the_node_lands_on_the_row_and_follows_a_failover(monkeypatch):
+    # On the checkpoint cadence, like every other run_stats field: a promoted
+    # replica is named on the next commit, not the next batch.
+    import backend.app.services.aggregation.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_CHECKPOINT_MAX_BATCHES", 1)
+    job, ledger = rec._Job(), StepLedger()
+    _materialize_with(job, _NodeProvider(["10.0.0.4:6379", "10.0.0.9:6379"]), ledger)
+    assert json.loads(job.run_stats)["node"] == "10.0.0.9:6379"
+
+
+class _NodeProvider:
+    """Checkpoints that name a node — the second one a different node, the
+    way a promoted replica answers after a failover."""
+
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    async def materialize_aggregated_edges_batch(self, **kw):
+        cb = kw["progress_callback"]
+        for i, node in enumerate(self._nodes):
+            await cb(
+                10 * (i + 1), 100, f"v3:{i}", 0, "applying",
+                progress_pct=10 * (i + 1),
+                stats={"writes": 0, "deletes": 0, "node": node},
+            )
+        return {"aggregated_edges_affected": 0, "run_stats": {"writes": 0}}
+
+
+def _measured(endpoint: str):
+    from backend.app.providers.shard_capacity import ShardMemory
+
+    return ShardMemory(endpoint, 1 << 30, 40 << 30, "noeviction", 0.0, "measured")

@@ -13,6 +13,17 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Job History answers "what else is writing this shard right now".** The
+first question during the memory incident, and no page could answer it: the
+Graph store page knew nodes, Job History knew jobs, and the two never met. A
+run now records the node it writes (`run_stats.node`) from its first
+checkpoint with a measured reading, re-read every checkpoint so it follows a
+failover. Job History groups the running rebuilds by it and flags a master
+more than one is writing — bounded by the reservation ledger, two write slots
+per node and the pacing floor neither of them gets, but each still slower
+than it would be alone, which is usually the answer to "why is this run
+slow".
+
 **Job History compares a run to the last one, stage by stage.** Per-stage
 durations answered "how long did this take"; the question an operator has is
 "is this getting worse", and both runs carry the same ledger. A finished run's

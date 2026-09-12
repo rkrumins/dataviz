@@ -1834,6 +1834,8 @@ class AggregationPipeline:
         # that reads as the run being needlessly slow.
         out["sharing"] = int(self._gov_others[1])
         shard = self._gov_reading
+        if shard is not None and shard.source == "measured" and shard.endpoint:
+            out["node"] = shard.endpoint
         if shard is not None and shard.source == "measured":
             if shard.replica_max_lag_bytes is not None:
                 out["replica_lag_bytes"] = int(shard.replica_max_lag_bytes)
@@ -2409,6 +2411,15 @@ class AggregationPipeline:
             self._writes, phase_label,
         )
         live_stats: Dict[str, Any] = {"writes": self._writes, "deletes": self._deletes}
+        # Which graph store node this run is writing. It is on the run's own
+        # record rather than only inside ``write_budget`` because it is the
+        # answer to "what else is on this shard right now", which is asked
+        # about RUNNING jobs — long before the budget check happens — and
+        # because it follows a failover, where the budget's copy is the node
+        # as it was at the check.
+        node = self._gov_node()
+        if node:
+            live_stats["node"] = node
         if unit_done is not None or unit_total is not None:
             live_stats["step"] = {
                 "done": unit_done, "total": unit_total, "unit": unit,

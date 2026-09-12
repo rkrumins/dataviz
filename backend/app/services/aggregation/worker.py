@@ -1921,6 +1921,14 @@ class AggregationWorker:
             # far. The stall window and wall clock are the worker's, not
             # the pipeline's, so they are added here with their sources.
             if isinstance(stats, dict):
+                # Which graph store node this run writes. Durable on the row
+                # so Job History can group the running jobs by node without
+                # asking the store, and re-read every checkpoint so it
+                # follows a failover.
+                node = stats.get("node")
+                if isinstance(node, str) and node and run_doc.get("node") != node:
+                    run_doc["node"] = node
+                    run_doc_dirty = True
                 effective = stats.get("effective_tuning")
                 if isinstance(effective, dict) and run_doc.get("effective_tuning") != effective:
                     doc = dict(effective)

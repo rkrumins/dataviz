@@ -738,6 +738,15 @@ graphs per shard, and a worker that died mid-run. What bounds each of them:
 | A worker that **died mid-run** | The exec lock is the liveness signal. The reconciler re-dispatches only when it is gone (≥90 s), by which time the graph lease (60 s) has expired too, so the resumed run does not park on a dead holder's lease. Auto-resumes are capped and the counter never slides. | `reconciler.py` |
 | A **cancel** issued through another pod | A durable Redis flag, polled by the running job's watchdog and checked again at pickup. | `cancel.py`, `worker.py` |
 
+**Which node a run writes is on the run.** `run_stats.node`, written from the
+first checkpoint with a measured reading and re-read every checkpoint so it
+follows a failover — earlier and more current than the copy inside
+`write_budget.shard`, which is the node as it was at the budget check. Job
+History groups the running jobs by it (*Graph store nodes being written*), so
+"what else is on this shard right now" — the first question during the
+incident — is a group-by over rows the page already has, not a question for
+the store.
+
 Two of these were wrong until the multi-writer audit:
 
 * **The write slots were keyed by `endpoint_key`** — the connection config's
