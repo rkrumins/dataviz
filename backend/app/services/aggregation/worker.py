@@ -1902,18 +1902,26 @@ class AggregationWorker:
                 if moved:
                     run_doc["steps"] = ledger.snapshot()
                     run_doc_dirty = True
-            # The pipeline supplies a phase-weighted 0-100 percentage so
-            # the bar is monotonic across phases; without it, fall back to
-            # the processed/total ratio (clamped — ``total`` can lag when
-            # driven off a stale estimate). Clamped monotonic per job row:
-            # a transient-failure retry restarts the (cheap) extract phase
-            # from zero, and without the floor the UI bar would snap from
-            # 45% back to 0% on every retry.
+            # The pipeline supplies a phase-weighted 0-100 percentage;
+            # without it, fall back to the processed/total ratio (clamped —
+            # ``total`` can lag when driven off a stale estimate).
+            #
+            # This is the CURRENT ATTEMPT's position, and it can go DOWN: a
+            # transient failure or a resume restarts EXTRACT and COMPUTE
+            # from zero, and that is work being redone, not work already
+            # done. It used to be floored at the row's previous value so the
+            # bar never moved backwards — which put it in permanent
+            # disagreement with ``processed_edges`` on the line below, which
+            # was never floored and does reset. A resumed run showed a bar
+            # at 75% beside "0 / 500,000 edges scanned", and the ETA divided
+            # by the inflated figure and promised minutes for hours of work.
+            # The stage rail says "restarted x1" now, so a bar that moves
+            # back is explained where it used to be unexplainable.
             if progress_pct is not None:
                 computed_pct = max(0, min(100, int(progress_pct)))
             else:
                 computed_pct = min(100, int((processed / total) * 100)) if total > 0 else 0
-            job.progress = max(job.progress or 0, computed_pct)
+            job.progress = computed_pct
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
             # What the run ran with (once is enough, but it is ~40 scalars
@@ -2123,11 +2131,6 @@ class AggregationWorker:
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,
             should_cancel=should_cancel,
-            # Resume baselines so a resumed job's progress continues from its
-            # last checkpoint instead of resetting the bar to 0% (the streaming
-            # rebuild applies these only when last_cursor parses).
-            resume_processed=job.processed_edges or 0,
-            resume_created=job.created_edges or 0,
         )
 
         return result

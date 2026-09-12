@@ -377,10 +377,51 @@ what is left of it. A failed or cancelled run renders it too — it names the
 stage the run died in. Runs from before the ledger existed fall back to the
 four segments derived from `current_phase`.
 
-**The estimated finish** (`historicalEta` in `JobRow.tsx`) projects from
-the previous run's ledger when both runs have one: the unfinished part of
-the current stage, at the larger of last run's rate and this run's own, plus
-the full duration of every later stage — the two bookends included.
+**Progress is the CURRENT ATTEMPT's position, and it can go down.** A
+transient failure or a resume restarts EXTRACT and COMPUTE from zero, and
+that is work being redone, not work already done. It used to be floored at
+the row's previous value (`max(job.progress, computed)`) so the bar never
+moved backwards — which put it in permanent disagreement with
+`processed_edges`, which was never floored and does reset. A resumed run
+showed a bar at 75% beside "0 / 500,000 edges scanned". The API's live-state
+overlay carried a second copy of the same rule (`if parsed > current`); both
+are gone, and the overlay now applies only to non-terminal rows, since a
+terminal row is the source of truth and its HSET can outlive it on the TTL.
+
+`resume_processed` / `resume_created` were the reason the floor existed.
+They were passed by the worker, forwarded by the provider, accepted by
+`materialize_aggregated_edges` — and never given to the pipeline. The
+documented behaviour ("a resumed job's progress continues from its last
+checkpoint") never happened; the floor was covering for it. All three layers
+are deleted: a resumed run's counters are its own attempt's, which is what
+the stage rail already shows.
+
+**The estimated finish** projects from the previous COMPLETED run's ledger,
+on both sides:
+
+* Job History's own (`historicalEta` in `JobRow.tsx`) uses the `previousJob`
+  the page already holds.
+* The API's `estimatedCompletionAt` (`_estimate_completion` +
+  `_prior_ledgers`) is what every other surface shows — the explorer banner,
+  Freshness, the workspace dashboard. It pre-fetches the baseline ONCE per
+  page for the running rows only, never per row.
+
+Both use the same rule: the unfinished part of the current stage, at the
+larger of last run's rate and this run's own, plus the full duration of
+every later stage — the two bookends included. Both refuse the same
+baselines: a run that failed (it spent no time in the stages it never
+reached) and a run that wrote and deleted nothing (it found everything
+already there, so its reconcile and apply took seconds).
+
+**No comparable run means no time at all**, rather than a fallback to
+guessing. What the API did before was `elapsed * (100 - pct) / pct`, which
+is only right if every stage runs at the same rate — EXTRACT is a scan,
+APPLY is paced writes, the bookends are fingerprints. On a resumed run it
+was wrong twice over: `pct` was held up by the floor above and `elapsed` ran
+from the FIRST attempt's `started_at`, so a job redoing two hours of work
+reported forty minutes left. The running stage's own "3 of 12 scan ranges, 9
+left" answers "how much is left" better than a clock time nobody can stand
+behind.
 
 ## Resume
 

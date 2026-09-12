@@ -222,3 +222,76 @@ def _span_secs(started_at: Optional[str], ended_at: str) -> float:
     except (TypeError, ValueError):
         return 0.0
     return max(0.0, (end - start).total_seconds())
+
+
+# ── how much of a run is left ───────────────────────────────────────────
+
+
+def open_step(steps: Any) -> Optional[Dict[str, Any]]:
+    """The step holding the run, or None. Tolerates anything: the ledger is
+    read back out of a JSON column written by some other process."""
+    if not isinstance(steps, list):
+        return None
+    for entry in steps:
+        if isinstance(entry, dict) and entry.get("state") in _OPEN:
+            return entry
+    return None
+
+
+def remaining_secs(
+    current: Any, previous: Any, *, now: Optional[datetime] = None,
+) -> Optional[float]:
+    """Seconds this run still owes, read off its ledger against the previous
+    completed run's on the same source.
+
+    What it replaces extrapolated ``elapsed * (100 - pct) / pct`` from one
+    percentage. That is only right if every stage runs at the same rate,
+    which is exactly false — EXTRACT is a scan, APPLY is paced writes, and
+    the two bookends are fingerprints. It was also wrong twice over on a
+    RESUMED run, where the percentage was held up by a monotonic clamp and
+    ``elapsed`` ran from the first attempt's start.
+
+    Returns None when either run has no ledger, when nothing is open, or
+    when the previous run is too fast to be signal. **None is the honest
+    answer, not a fallback to guessing**: without a comparable run there is
+    no basis for a whole-run figure, and the stage's own "3 of 12 scan
+    ranges, 9 left" is a better answer to "how much is left" than a
+    confidently wrong clock time.
+    """
+    if not isinstance(current, list) or not isinstance(previous, list):
+        return None
+    prior: Dict[str, float] = {}
+    for entry in previous:
+        if isinstance(entry, dict) and isinstance(entry.get("secs"), (int, float)):
+            prior[str(entry.get("id"))] = float(entry["secs"])
+    if sum(prior.values()) < _SIGNAL_MIN_SECS:
+        return None
+
+    open_ = open_step(current)
+    if open_ is None:
+        return None
+    idx = STEP_IDS.index(open_["id"]) if open_.get("id") in STEP_IDS else -1
+    if idx < 0:
+        return None
+
+    done, total = _as_int(open_.get("done")), _as_int(open_.get("total"))
+    frac = 0.0
+    if done is not None and total and total > 0:
+        frac = max(0.0, min(1.0, done / total))
+    elapsed = float(open_.get("secs") or 0.0) + _span_secs(
+        open_.get("started_at"), (now or datetime.now(timezone.utc)).isoformat(),
+    )
+    # What this stage still owes: what it took last time less the part
+    # already through, or — when this run is already slower than that —
+    # what this run's OWN rate says. An estimate that keeps sliding is
+    # worse than one that was pessimistic from the start.
+    by_history = prior.get(open_["id"], 0.0) * (1.0 - frac)
+    by_rate = elapsed * (1.0 / frac - 1.0) if frac > 0 else 0.0
+    remaining = max(by_history, by_rate)
+    for later in STEP_IDS[idx + 1:]:
+        remaining += prior.get(later, 0.0)
+    return remaining if remaining > 0 else None
+
+
+#: Below this the previous run is too fast to project anything from.
+_SIGNAL_MIN_SECS = 5.0

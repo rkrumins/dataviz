@@ -461,3 +461,296 @@ def _measured(endpoint: str):
     from backend.app.providers.shard_capacity import ShardMemory
 
     return ShardMemory(endpoint, 1 << 30, 40 << 30, "noeviction", 0.0, "measured")
+
+
+# ── how much of a run is left ───────────────────────────────────────────
+#
+# The ETA this replaces extrapolated ``elapsed * (100 - pct) / pct`` from
+# one phase-weighted percentage. That is only right if every stage runs at
+# the same rate, which is exactly false — EXTRACT is a scan, APPLY is paced
+# writes, and the two bookends are fingerprints. On a RESUMED run it was
+# wrong twice over: the percentage was held up by a monotonic clamp while
+# the run redid its early stages, and elapsed ran from the FIRST attempt's
+# start, so a job redoing two hours of work reported forty minutes left.
+
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: E402
+
+from backend.app.services.aggregation.steps import (  # noqa: E402
+    open_step, remaining_secs,
+)
+
+_NOW = _dt(2026, 9, 12, 12, 0, 0, tzinfo=_tz.utc)
+
+
+def _done(step_id: str, secs: float) -> dict:
+    return {"id": step_id, "state": "done", "secs": secs,
+            "started_at": None, "ended_at": None, "visits": 1,
+            "done": None, "total": None, "unit": None, "waiting_for": None}
+
+
+def _open(step_id: str, *, ago: float, done=None, total=None) -> dict:
+    return {"id": step_id, "state": "running", "secs": 0.0,
+            "started_at": (_NOW - _td(seconds=ago)).isoformat(),
+            "ended_at": None, "visits": 1,
+            "done": done, "total": total, "unit": "rows", "waiting_for": None}
+
+
+_PREVIOUS = [
+    _done("preparing", 20), _done("extracting", 100), _done("computing", 40),
+    _done("reconciling", 60), _done("applying", 200), _done("finalizing", 30),
+]
+
+
+def test_it_owes_the_rest_of_this_stage_plus_every_stage_after_it():
+    left = remaining_secs(
+        [_done("preparing", 18), _done("extracting", 90), _done("computing", 30),
+         _open("reconciling", ago=10, done=5, total=10)],
+        _PREVIOUS, now=_NOW,
+    )
+    assert left == 30 + 200 + 30       # half of reconcile, then apply + finish
+
+
+def test_it_counts_the_two_stages_the_percentage_could_never_see():
+    # A run sitting in PREPARE owes the WHOLE of the last run. The old
+    # estimate had no term for either bookend.
+    left = remaining_secs([_open("preparing", ago=5)], _PREVIOUS, now=_NOW)
+    assert left == 20 + 100 + 40 + 60 + 200 + 30
+
+
+def test_a_run_slower_than_last_time_is_projected_from_its_own_rate():
+    # A tenth through apply after 300s: this run says 2,700s to go, which
+    # beats history's 180s. An estimate that keeps sliding is worse than one
+    # that was pessimistic from the start.
+    left = remaining_secs(
+        [_done("preparing", 20), _done("extracting", 100), _done("computing", 40),
+         _done("reconciling", 60), _open("applying", ago=300, done=100, total=1000)],
+        _PREVIOUS, now=_NOW,
+    )
+    assert left == 2_700 + 30
+
+
+def test_a_resumed_run_is_projected_from_where_it_actually_is():
+    """THE case the old estimate got wrong. The run is back in EXTRACT after
+    a resume; it owes extract, compute, reconcile, apply and finish again —
+    not the sliver its inflated percentage implied."""
+    left = remaining_secs([_open("extracting", ago=10)], _PREVIOUS, now=_NOW)
+    assert left == 100 + 40 + 60 + 200 + 30
+
+
+def test_no_comparable_run_means_no_estimate_rather_than_a_guess():
+    assert remaining_secs([_open("applying", ago=10)], None, now=_NOW) is None
+    assert remaining_secs(None, _PREVIOUS, now=_NOW) is None
+    assert remaining_secs([_open("applying", ago=10)], [], now=_NOW) is None
+    trivial = [_done(s["id"], 0.2) for s in _PREVIOUS]
+    assert remaining_secs([_open("applying", ago=10)], trivial, now=_NOW) is None
+
+
+def test_a_run_with_nothing_open_owes_nothing_it_can_name():
+    assert remaining_secs(_PREVIOUS, _PREVIOUS, now=_NOW) is None
+
+
+def test_a_ledger_read_back_as_junk_does_not_raise():
+    # It comes out of a JSON column written by another process.
+    assert remaining_secs("not a list", _PREVIOUS, now=_NOW) is None
+    assert remaining_secs([{"id": "teleporting", "state": "running"}], _PREVIOUS, now=_NOW) is None
+    assert open_step([1, 2, 3]) is None
+    assert open_step(None) is None
+
+
+def test_a_parked_stage_still_counts_as_the_open_one():
+    # Waiting is time the run is spending; it still owes what comes after.
+    parked = dict(_open("applying", ago=10), state="waiting", waiting_for="retry 1/3")
+    assert remaining_secs([parked], _PREVIOUS, now=_NOW) == 200 + 30
+
+
+# ── progress is this ATTEMPT's position, not a high-water mark ───────────
+#
+# It used to be floored at the row's previous value so the bar never moved
+# backwards. That put it in permanent disagreement with processed_edges on
+# the line below, which was never floored and does reset: a resumed run
+# showed a bar at 75% beside "0 / 500,000 edges scanned". The stage rail
+# says "restarted x1" now, so a bar that moves back is explained where it
+# used to be unexplainable.
+
+
+class _RestartingProvider:
+    """Checkpoints that go FORWARD and then back to the start, the way a
+    transient failure or a resume sends the pipeline back to EXTRACT."""
+
+    def __init__(self, pcts):
+        self._pcts = pcts
+
+    async def materialize_aggregated_edges_batch(self, **kw):
+        cb = kw["progress_callback"]
+        for i, (pct, phase, processed) in enumerate(self._pcts):
+            await cb(
+                processed, 100, f"v3:{i}", 0, phase,
+                progress_pct=pct, stats={"writes": 0, "deletes": 0},
+            )
+        return {"aggregated_edges_affected": 0, "run_stats": {"writes": 0}}
+
+
+def test_progress_comes_back_down_when_the_run_goes_back_a_stage(monkeypatch):
+    import backend.app.services.aggregation.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_CHECKPOINT_MAX_BATCHES", 1)
+    job = rec._Job()
+    _materialize_with(job, _RestartingProvider([
+        (75, "applying", 500),
+        (3, "extracting", 20),        # a retry from the cursor: EXTRACT again
+    ]), StepLedger())
+    assert job.progress == 3
+    assert job.processed_edges == 20   # …and the counters agree with it
+
+
+def test_the_two_numbers_on_the_row_no_longer_contradict_each_other(monkeypatch):
+    import backend.app.services.aggregation.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_CHECKPOINT_MAX_BATCHES", 1)
+    job = rec._Job()
+    job.progress, job.processed_edges = 75, 500_000     # what a resume inherits
+    _materialize_with(job, _RestartingProvider([(0, "extracting", 0)]), StepLedger())
+    assert (job.progress, job.processed_edges) == (0, 0)
+
+
+def test_a_run_that_only_moves_forward_is_unaffected(monkeypatch):
+    import backend.app.services.aggregation.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_CHECKPOINT_MAX_BATCHES", 1)
+    job = rec._Job()
+    _materialize_with(job, _RestartingProvider([
+        (10, "extracting", 100), (45, "extracting", 450), (75, "applying", 450),
+    ]), StepLedger())
+    assert job.progress == 75
+
+
+# ── the ETA the API ships ───────────────────────────────────────────────
+
+from backend.app.services.aggregation.service import _estimate_completion  # noqa: E402
+
+
+class _Row:
+    def __init__(self, **kw):
+        self.status = "running"
+        self.run_stats = None
+        self.started_at = "2026-09-12T10:00:00+00:00"
+        self.progress = 50
+        self.__dict__.update(kw)
+
+
+def _ledger(steps):
+    return json.dumps({"steps": steps})
+
+
+def _open_now(step_id: str, *, ago: float, done=None, total=None) -> dict:
+    """An open step anchored to the REAL clock — ``_estimate_completion``
+    takes no ``now``, so the fixed-clock helper above cannot be used here."""
+    return {"id": step_id, "state": "running", "secs": 0.0,
+            "started_at": (_dt.now(_tz.utc) - _td(seconds=ago)).isoformat(),
+            "ended_at": None, "visits": 1,
+            "done": done, "total": total, "unit": "rows", "waiting_for": None}
+
+
+def test_the_api_projects_the_finish_off_the_two_ledgers():
+    row = _Row(run_stats=_ledger([_open_now("applying", ago=10, done=1, total=2)]))
+    at = _estimate_completion(row, _PREVIOUS)
+    assert at is not None
+    owed = (_dt.fromisoformat(at) - _dt.now(_tz.utc)).total_seconds()
+    assert 120 < owed < 140          # half of apply (100) + finish (30)
+
+
+def test_no_comparable_previous_run_means_no_time_at_all():
+    """Better than the confidently wrong one it replaces: the stage's own
+    "3 of 12 scan ranges, 9 left" answers "how much is left" without
+    inventing a clock time nobody can stand behind."""
+    row = _Row(run_stats=_ledger([_open_now("applying", ago=10)]))
+    assert _estimate_completion(row, None) is None
+
+
+def test_a_resumed_run_is_no_longer_told_it_is_nearly_done():
+    """The case that made this worth changing. Old rule: elapsed (from the
+    FIRST attempt's start) x (100 - pct) / pct, with pct held high by the
+    clamp — two hours of work reported as forty minutes. The ledger says the
+    run is back in EXTRACT and owes almost everything."""
+    row = _Row(
+        progress=75,                                  # what the clamp used to hold
+        started_at=(_dt.now(_tz.utc) - _td(hours=2)).isoformat(),
+        run_stats=_ledger([_open_now("extracting", ago=30)]),
+    )
+    owed = (_dt.fromisoformat(_estimate_completion(row, _PREVIOUS)) - _dt.now(_tz.utc)).total_seconds()
+    assert owed > 400                                 # 100+40+60+200+30, not minutes
+
+
+def test_a_job_that_is_not_running_gets_no_estimate():
+    for status in ("completed", "failed", "cancelled", "pending"):
+        assert _estimate_completion(_Row(status=status, run_stats=_ledger(_PREVIOUS)), _PREVIOUS) is None
+
+
+def test_a_run_with_no_ledger_at_all_gets_no_estimate():
+    assert _estimate_completion(_Row(run_stats=None), _PREVIOUS) is None
+    assert _estimate_completion(_Row(run_stats="{not json"), _PREVIOUS) is None
+
+
+# ── which previous run is the baseline ──────────────────────────────────
+
+from backend.app.services.aggregation.service import _prior_ledgers  # noqa: E402
+
+
+class _Session:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, _query):
+        return self._rows
+
+
+class _Running:
+    def __init__(self, ds_id="ds-1", status="running"):
+        self.data_source_id, self.status = ds_id, status
+
+
+def _row(ds_id, *, writes=0, deletes=0, steps=None, at="2026-09-12T11:00:00Z"):
+    return (ds_id, json.dumps({"writes": writes, "deletes": deletes, "steps": steps or _PREVIOUS}), at)
+
+
+def test_a_no_change_previous_run_is_not_the_baseline():
+    """It found everything already there, so its reconcile and apply took
+    seconds. Projecting a real rebuild from it promises a finish that was
+    never possible — the same guard Job History's own projection has."""
+    out = asyncio.run(_prior_ledgers(_Session([_row("ds-1")]), [_Running()]))
+    assert out == {}
+
+
+def test_the_newest_run_that_actually_wrote_is_the_baseline():
+    older = [_done("applying", 999)]
+    rows = [
+        _row("ds-1", at="2026-09-12T11:00:00Z"),                       # no-change
+        _row("ds-1", writes=9_000, steps=older, at="2026-09-12T09:00:00Z"),
+    ]
+    assert asyncio.run(_prior_ledgers(_Session(rows), [_Running()])) == {"ds-1": older}
+
+
+def test_a_deleting_run_counts_as_one_that_wrote():
+    rows = [_row("ds-1", deletes=40)]
+    assert asyncio.run(_prior_ledgers(_Session(rows), [_Running()])) == {"ds-1": _PREVIOUS}
+
+
+def test_a_previous_run_from_before_the_ledger_is_no_baseline():
+    rows = [("ds-1", json.dumps({"writes": 9_000}), "2026-09-12T11:00:00Z")]
+    assert asyncio.run(_prior_ledgers(_Session(rows), [_Running()])) == {}
+
+
+def test_nothing_running_costs_no_query_at_all():
+    class _Explodes:
+        async def execute(self, _query):
+            raise AssertionError("should not have been queried")
+
+    assert asyncio.run(_prior_ledgers(_Explodes(), [_Running(status="completed")])) == {}
+
+
+def test_a_database_that_cannot_answer_costs_no_estimate_and_no_500():
+    class _Down:
+        async def execute(self, _query):
+            raise RuntimeError("connection reset")
+
+    assert asyncio.run(_prior_ledgers(_Down(), [_Running()])) == {}

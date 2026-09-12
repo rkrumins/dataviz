@@ -5392,8 +5392,6 @@ async def materialize_aggregated_edges(
     progress_callback: Optional[Any] = None,
     intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
-    resume_processed: int = 0,
-    resume_created: int = 0,
     tuning: Optional[Dict[str, Any]] = None,
     job_id: Optional[str] = None,
     capacity_hints: Optional[Dict[str, Any]] = None,

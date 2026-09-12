@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .dispatcher import AggregationDispatcher
 from .models import AggregationJobORM
 from .reservation import claim_exclusive
+from .steps import remaining_secs
 from .schemas import (
     AggregationCadence,
     AggregationJobResponse,
@@ -419,29 +420,86 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
-def _estimate_completion(job) -> Optional[str]:
-    """ETA extrapolated from PHASE-WEIGHTED progress (0-100, monotonic
-    across EXTRACT→COMPUTE→RECONCILE→APPLY). The previous
-    processed/total extrapolation saturated the moment the extract scan
-    finished (~45%% of real work) and promised completion 'now' while
-    reconcile/apply were still running."""
-    if job.status != "running" or not job.started_at:
-        return None
-    pct = job.progress or 0
-    if pct <= 0:
+def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
+    """When this run should finish, projected off its STEP LEDGER against
+    the previous completed run's on the same source.
+
+    What it replaced extrapolated ``elapsed * (100 - pct) / pct`` from the
+    one phase-weighted percentage. That is only right if every stage runs
+    at the same rate, which is exactly false: EXTRACT is a scan, APPLY is
+    paced writes, and the two bookends are fingerprints. On a RESUMED run
+    it was wrong twice over — the percentage was held up by a monotonic
+    clamp while the run redid its early stages, and ``elapsed`` ran from
+    the FIRST attempt's start, so a job redoing two hours of work reported
+    forty minutes left.
+
+    ``None`` when there is no comparable previous run. That is the honest
+    answer rather than a fallback to guessing: without one there is no
+    basis for a whole-run figure, and the running stage's own "3 of 12
+    scan ranges, 9 left" answers "how much is left" better than a
+    confidently wrong clock time.
+    """
+    if job.status != "running":
         return None
     try:
-        started = datetime.fromisoformat(job.started_at)
-        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-        if elapsed < 5:
-            return None
-        pct = min(99, max(1, int(pct)))
-        remaining = elapsed * (100 - pct) / pct
-        return (
-            datetime.now(timezone.utc) + timedelta(seconds=remaining)
-        ).isoformat()
-    except Exception:
+        steps = (json.loads(getattr(job, "run_stats", None) or "{}") or {}).get("steps")
+    except (TypeError, ValueError):
         return None
+    remaining = remaining_secs(steps, prior_steps)
+    if remaining is None:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
+
+
+async def _prior_ledgers(
+    session: AsyncSession, jobs: Any,
+) -> Dict[str, Any]:
+    """The last COMPLETED run's step ledger per data source, for the running
+    jobs in ``jobs`` — one query for the page, never one per row.
+
+    Only running jobs have an ETA, and a fleet rarely has many at once, so
+    this is a handful of ids. A failed previous run is never the baseline:
+    it spent no time in the stages it never reached, and projecting from it
+    reads every run as a catastrophic slowdown.
+    """
+    ds_ids = {j.data_source_id for j in jobs if j.status == "running" and j.data_source_id}
+    if not ds_ids:
+        return {}
+    try:
+        rows = await session.execute(
+            select(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.run_stats,
+                AggregationJobORM.completed_at,
+            )
+            .where(
+                AggregationJobORM.data_source_id.in_(ds_ids),
+                AggregationJobORM.status == "completed",
+            )
+            .order_by(AggregationJobORM.completed_at.desc())
+        )
+    except Exception as exc:                      # noqa: BLE001 — an ETA is not worth a 500
+        logger.debug("prior ledgers unavailable: %s", exc)
+        return {}
+    out: Dict[str, Any] = {}
+    for ds_id, run_stats, _completed_at in rows:
+        if ds_id in out:
+            continue                              # newest first; the first that qualifies wins
+        try:
+            doc = json.loads(run_stats or "{}") or {}
+        except (TypeError, ValueError):
+            continue
+        # A run that wrote and deleted NOTHING is not predictive of one that
+        # rewrites the cube: it found everything already there, so its
+        # reconcile and apply stages took seconds. Projecting a real rebuild
+        # from it promises a finish that was never possible. Keep looking
+        # back for one that actually wrote.
+        if not (doc.get("writes") or doc.get("deletes")):
+            continue
+        steps = doc.get("steps")
+        if steps:
+            out[ds_id] = steps
+    return out
 
 
 def _is_resumable(job) -> bool:
@@ -1017,7 +1075,9 @@ class AggregationService:
             query = query.where(AggregationJobORM.status == status)
 
         result = await session.execute(query)
-        return [self._to_response(j) for j in result.scalars()]
+        jobs = list(result.scalars())
+        prior = await _prior_ledgers(session, jobs)
+        return [self._to_response(j, prior.get(j.data_source_id)) for j in jobs]
 
     # ── Global summary (KPI stats) ─────────────────────────────────
 
@@ -1134,10 +1194,11 @@ class AggregationService:
         jobs = result.scalars().all()
 
         why = await _reconcile_reason_map(session, jobs)
+        prior = await _prior_ledgers(session, jobs)
         items = [
             self._to_global_response(
                 job, job.workspace_id, None, job.data_source_label,
-                why=why.get(job.id),
+                why=why.get(job.id), prior_steps=prior.get(job.data_source_id),
             )
             for job in jobs
         ]
@@ -1151,8 +1212,13 @@ class AggregationService:
         workspace_name: str,
         data_source_label: Optional[str],
         why: Optional[dict] = None,
+        prior_steps: Any = None,
     ) -> AggregationJobResponse:
-        """Convert ORM to enriched response for the global listing."""
+        """Convert ORM to enriched response for the global listing.
+
+        ``prior_steps`` is the previous completed run's step ledger for this
+        source, pre-fetched once for the page — the ETA is projected off it.
+        """
         # Compute duration
         duration = None
         if job.started_at:
@@ -1172,7 +1238,7 @@ class AggregationService:
             coverage = round(job.processed_edges / job.total_edges * 100, 1)
 
         # Estimate completion (same logic as _to_response)
-        estimated = _estimate_completion(job)
+        estimated = _estimate_completion(job, prior_steps)
 
         return AggregationJobResponse(
             id=job.id,
@@ -3407,10 +3473,16 @@ class AggregationService:
             return None
 
     @staticmethod
-    def _to_response(job: AggregationJobORM) -> AggregationJobResponse:
-        """Convert ORM to response model."""
-        # Estimate completion time
-        estimated = _estimate_completion(job)
+    def _to_response(
+        job: AggregationJobORM, prior_steps: Any = None,
+    ) -> AggregationJobResponse:
+        """Convert ORM to response model.
+
+        ``prior_steps`` is the previous completed run's step ledger for this
+        source, when the caller pre-fetched one for the page. Without it the
+        run gets no ETA — see ``_estimate_completion``.
+        """
+        estimated = _estimate_completion(job, prior_steps)
 
         return AggregationJobResponse(
             id=job.id,

@@ -482,9 +482,9 @@ async def list_jobs_global(
                         parsed = int(raw)
                     except (TypeError, ValueError):
                         continue
-                    current = getattr(it, field, 0) or 0
-                    if parsed > current:
-                        setattr(it, field, parsed)
+                    # As-is, in either direction — see ``get_job`` above.
+                    # This loop is already restricted to live rows.
+                    setattr(it, field, parsed)
                 last_heartbeat = snap.get("last_heartbeat_at")
                 if last_heartbeat and not it.last_checkpoint_at:
                     it.last_checkpoint_at = last_heartbeat
@@ -776,7 +776,14 @@ async def get_job(
     # TTL expired, or Redis down).
     try:
         from backend.app.jobs import get_state_store
-        snapshot = await get_state_store().get(job_id)
+
+        # ONLY while the job is live. A terminal row is the source of truth
+        # and its HSET can outlive it on the TTL, so overlaying a terminal
+        # job could walk its final numbers back.
+        snapshot = (
+            await get_state_store().get(job_id)
+            if response.status in ("running", "pending") else None
+        )
         if snapshot:
             for field in (
                 "processed_edges", "total_edges", "created_edges", "progress",
@@ -788,13 +795,12 @@ async def get_job(
                     parsed = int(raw)
                 except (TypeError, ValueError):
                     continue
-                # Only overlay when the live value is *ahead* of the
-                # durable one. For terminal jobs, the DB row is the
-                # source of truth and we don't want a stale Redis
-                # snapshot to walk back the final number.
-                current = getattr(response, field, 0) or 0
-                if parsed > current:
-                    setattr(response, field, parsed)
+                # Taken as-is, in EITHER direction. Both are written at the
+                # same checkpoint with PG first, so the snapshot is never
+                # behind — and a forward-only rule pinned ``progress`` to a
+                # high-water mark across a resume, which is the one case the
+                # numbers have to come down.
+                setattr(response, field, parsed)
             last_heartbeat = snapshot.get("last_heartbeat_at")
             if last_heartbeat and not response.last_checkpoint_at:
                 response.last_checkpoint_at = last_heartbeat

@@ -13,6 +13,33 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**A run's progress bar tells the truth about resumes and retries, and the
+estimated finish stops lying on them.** `progress` was floored at the row's
+previous value so the bar never moved backwards. That put it in permanent
+disagreement with `processed_edges`, which was never floored and does reset:
+a resumed run showed a bar at 75% beside "0 / 500,000 edges scanned". The
+floor was covering for a bug — `resume_processed` / `resume_created` were
+passed by the worker, forwarded by the provider, accepted by the pipeline's
+entry point and then **discarded**, so the documented "a resumed job's
+progress continues from its last checkpoint" never happened. All three
+layers of dead plumbing are deleted and both copies of the floor (the
+worker's and the API live-state overlay's) are gone: progress is the current
+attempt's position and can move down, which the stage rail already explains
+with "restarted ×1".
+
+`estimatedCompletionAt` — what the explorer banner, Freshness and the
+workspace dashboard show — no longer extrapolates `elapsed × (100 − pct) /
+pct` from one percentage. That is only right if every stage runs at the same
+rate, which is exactly false, and on a resumed run it was wrong twice over:
+the percentage was held up by the floor and `elapsed` ran from the FIRST
+attempt's start, so a job redoing two hours of work reported forty minutes
+left. It projects off the step ledger against the previous completed run
+now, the same rule Job History already used, with the baseline pre-fetched
+once per page for the running rows only. **A run with no comparable previous
+run gets no estimate at all** — the honest answer, and the running stage's
+own "3 of 12 scan ranges, 9 left" is better than a clock time nobody can
+stand behind.
+
 **What changed since the last run, and a run you can paste into a ticket.**
 Both runs record every knob AND where its value came from, so *Run settings*
 now lists what moved — and says whether the pipeline tuned itself (`Learned
