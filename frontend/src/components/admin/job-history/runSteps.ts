@@ -330,3 +330,73 @@ export function commonFailureStage(
         considered: finished.length,
     }
 }
+
+
+// ── where the wall clock went ────────────────────────────────────────────
+//
+// Per-stage durations are a list of numbers. The share each stage took is
+// the thing that reads at a glance, and it is where the surprise usually
+// is: on a graph with a slow fingerprint, Prepare and Finish together can
+// be most of the run, and until they were stages nothing said so.
+
+export interface StageShare {
+    id: string
+    label: string
+    secs: number
+    /** Percent of the run's total stage time. */
+    pct: number
+}
+
+export function stageShares(steps: RunStep[] | undefined | null): StageShare[] {
+    if (!Array.isArray(steps)) return []
+    const entered = steps
+        .filter(s => s.state !== 'pending' && typeof s.secs === 'number' && s.secs > 0)
+        .map(s => ({ id: s.id, label: STEP_LABELS[s.id] ?? s.id, secs: s.secs }))
+    const total = entered.reduce((acc, s) => acc + s.secs, 0)
+    if (total <= 0) return []
+    return entered.map(s => ({ ...s, pct: (s.secs / total) * 100 }))
+}
+
+/**
+ * The same shares for a series of runs, oldest last — the order Job History
+ * already holds them in. Runs with no ledger are dropped rather than drawn
+ * as a gap, so a bar that is there is a bar that means something.
+ */
+export interface RunShares {
+    id: string
+    status: string
+    totalS: number
+    shares: StageShare[]
+}
+
+export function runSharesSeries(
+    runs: Array<{ id: string; status: string; runStats?: { steps?: RunStep[] } | null }>,
+    limit = 10,
+): RunShares[] {
+    const out: RunShares[] = []
+    for (const run of runs) {
+        if (out.length >= limit) break
+        if (run.status === 'running' || run.status === 'pending') continue
+        const shares = stageShares(run.runStats?.steps)
+        if (shares.length === 0) continue
+        out.push({
+            id: run.id,
+            status: run.status,
+            totalS: shares.reduce((acc, s) => acc + s.secs, 0),
+            shares,
+        })
+    }
+    return out
+}
+
+/** The stage colours, shared by the timeline strip and the trend bars so
+ *  one reading transfers to the other. Real palette colours, never a
+ *  CSS-variable token with an alpha suffix (those emit no rule at all). */
+export const STAGE_COLOUR: Record<string, string> = {
+    preparing: 'bg-sky-500',
+    extracting: 'bg-indigo-500',
+    computing: 'bg-violet-500',
+    reconciling: 'bg-fuchsia-500',
+    applying: 'bg-emerald-500',
+    finalizing: 'bg-teal-500',
+}

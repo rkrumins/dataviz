@@ -16,7 +16,10 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { JobHistoryFilters } from '@/services/aggregationService'
-import { describeSteps, compareStages, stageSlip, type StepView } from './runSteps'
+import {
+    describeSteps, compareStages, stageSlip, stageShares, STAGE_COLOUR,
+    type StepView,
+} from './runSteps'
 
 // ── DataSourceMeta ──────────────────────────────────────────────────
 
@@ -528,9 +531,11 @@ export const PHASE_BANDS: Record<string, [number, number]> = {
  * Runs from before the ledger existed fall back to ``PhaseStepper``'s
  * original four segments derived from ``currentPhase``.
  */
-function StepLedgerView({ views, status, deltas, slip }: {
+function StepLedgerView({ views, status, deltas, slip, shares }: {
     views: StepView[]
     status: string
+    /** Each stage's share of the run's total stage time. */
+    shares: ReturnType<typeof stageShares>
     /** Percent change per stage against the previous run on this source. */
     deltas: Map<string, number>
     /** Set when the stage the run is ON is well past its own last time. */
@@ -625,6 +630,34 @@ function StepLedgerView({ views, status, deltas, slip }: {
             {running && !open && (
                 <p className="text-[10px] text-ink-muted opacity-70">{'Starting\u2026'}</p>
             )}
+
+            {/* Where the wall clock actually went. The per-stage durations
+                above are a list of numbers; the SHARE each stage took is the
+                thing that reads at a glance, and it is where the surprise
+                usually is — on a graph with a slow fingerprint, Prepare and
+                Finish together can be most of the run. */}
+            {!running && shares.length > 1 && (
+                <div className="space-y-1" data-testid="stage-shares">
+                    <div className="flex h-1.5 rounded-full overflow-hidden gap-px">
+                        {shares.map(sh => (
+                            <span
+                                key={sh.id}
+                                className={cn('h-full', STAGE_COLOUR[sh.id] ?? 'bg-indigo-500')}
+                                style={{ width: `${sh.pct}%` }}
+                                title={`${sh.label} \u2014 ${formatDuration(sh.secs)} (${Math.round(sh.pct)}% of the run)`}
+                            />
+                        ))}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-ink-muted">
+                        {shares.filter(sh => sh.pct >= 5).map(sh => (
+                            <span key={sh.id} className="inline-flex items-center gap-1">
+                                <span className={cn('w-1.5 h-1.5 rounded-sm', STAGE_COLOUR[sh.id] ?? 'bg-indigo-500')} />
+                                {`${sh.label} ${Math.round(sh.pct)}%`}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
@@ -667,8 +700,13 @@ export function PhaseStepper({ currentPhase, runStats, status, previousRunStats 
         () => stageSlip(runStats?.steps, previousRunStats?.steps, now),
         [runStats?.steps, previousRunStats?.steps, now],
     )
+    const shares = useMemo(() => stageShares(runStats?.steps), [runStats?.steps])
     if (views.length > 0) {
-        return <StepLedgerView views={views} status={status} deltas={deltas} slip={slip} />
+        return (
+            <StepLedgerView
+                views={views} status={status} deltas={deltas} slip={slip} shares={shares}
+            />
+        )
     }
 
     const currentIdx = currentPhase ? PHASES.findIndex(p => p.id === currentPhase) : -1

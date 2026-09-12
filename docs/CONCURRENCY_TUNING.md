@@ -588,6 +588,22 @@ compares them for free.
   one dying in Extract has a scan it cannot finish — the same red rows, two
   different problems.
 
+### Where the wall clock went
+
+A finished run carries a strip under its stage rail showing each stage's
+SHARE of the run, not its duration. The durations are already above it; the
+share is the thing that reads at a glance, and it is where the surprise
+usually is — on a graph with a slow fingerprint, Prepare and Finish together
+can be most of the run, and until they were stages nothing said so. Stages
+under 5% are in the strip but not the legend.
+
+The data-source card carries the same split as one thin column per run,
+oldest on the right, beside the pass/fail sparkline. Each column is scaled to
+its own duration, so the shape is the split rather than the length: a stage
+that is GROWING shows as a band widening across the columns. Two runs with
+ledgers are the minimum; runs from before the ledger existed are left out
+rather than drawn as gaps.
+
 ### When more than one rebuild shares a graph store node
 
 A shard holds many graphs, so two rebuilds can be writing one master at once

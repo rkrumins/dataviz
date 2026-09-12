@@ -202,3 +202,42 @@ describe('PhaseStepper against a previous run', () => {
         expect(screen.queryByTestId('stage-slip')).toBeNull()
     })
 })
+
+
+describe('where the wall clock went', () => {
+    const finished = [
+        _step({ id: 'preparing', state: 'done', secs: 100 }),
+        _step({ id: 'extracting', state: 'done', secs: 300 }),
+        _step({ id: 'computing', state: 'done', secs: 20 }),
+        _step({ id: 'applying', state: 'done', secs: 580 }),
+    ]
+
+    it('shows each stage\u2019s share of a finished run', () => {
+        render(<PhaseStepper currentPhase={null} status="completed" runStats={{ steps: finished }} />)
+        const strip = screen.getByTestId('stage-shares')
+        expect(strip.textContent).toContain('Prepare 10%')
+        expect(strip.textContent).toContain('Extract 30%')
+        expect(strip.textContent).toContain('Apply 58%')
+        // Two percent is not worth a legend entry.
+        expect(strip.textContent).not.toContain('Compute')
+    })
+
+    it('says nothing while the run is still going', () => {
+        const running = [
+            _step({ id: 'extracting', state: 'done', secs: 300 }),
+            _step({ id: 'applying', state: 'running', secs: 0, started_at: new Date().toISOString() }),
+        ]
+        render(<PhaseStepper currentPhase="applying" status="running" runStats={{ steps: running }} />)
+        expect(screen.queryByTestId('stage-shares')).toBeNull()
+    })
+
+    it('says nothing for a run that only ever reached one stage', () => {
+        render(
+            <PhaseStepper
+                currentPhase={null} status="failed"
+                runStats={{ steps: [_step({ id: 'preparing', state: 'failed', secs: 9 })] }}
+            />,
+        )
+        expect(screen.queryByTestId('stage-shares')).toBeNull()
+    })
+})

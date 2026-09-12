@@ -196,3 +196,39 @@ describe('where a source keeps stopping', () => {
         expect(screen.queryByTestId('failure-pattern')).toBeNull()
     })
 })
+
+
+describe('where the time went, run over run', () => {
+    const ran = (id: string, extractS: number, applyS: number) => ({
+        ...failedIn('applying', `2026-09-12T0${id}:00:00Z`),
+        id: `run-${id}`,
+        status: 'completed',
+        runStats: {
+            steps: [
+                { id: 'extracting', state: 'done', started_at: null, ended_at: null, secs: extractS, visits: 1, done: null, total: null, unit: null, waiting_for: null },
+                { id: 'applying', state: 'done', started_at: null, ended_at: null, secs: applyS, visits: 1, done: null, total: null, unit: null, waiting_for: null },
+            ],
+        },
+    }) as unknown as Job
+
+    it('draws a column per run so a growing stage reads as a trend', () => {
+        renderWithJobs([ran('1', 10, 20), ran('2', 10, 40), ran('3', 10, 90)])
+        const trend = screen.getByTestId('stage-trend')
+        expect(trend.children).toHaveLength(3)
+        // Each column is titled with its own total and split.
+        expect(trend.children[2].getAttribute('title')).toContain('Extract 10%')
+    })
+
+    it('needs at least two runs to be a trend at all', () => {
+        renderWithJobs([ran('1', 10, 20)])
+        expect(screen.queryByTestId('stage-trend')).toBeNull()
+    })
+
+    it('draws nothing for runs from before the ledger existed', () => {
+        renderWithJobs([
+            { ...ran('1', 10, 20), runStats: null },
+            { ...ran('2', 10, 40), runStats: null },
+        ] as Job[])
+        expect(screen.queryByTestId('stage-trend')).toBeNull()
+    })
+})

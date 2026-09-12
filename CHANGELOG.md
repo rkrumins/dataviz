@@ -13,6 +13,15 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Where a run's wall clock went, and whether one stage is growing.** A
+finished run shows each stage's share of the run under its rail — the
+durations were already there, the share is what reads at a glance, and it is
+where the surprise usually is: on a graph with a slow fingerprint, Prepare
+and Finish together can be most of the run. The data-source card draws the
+same split as one column per run beside the sparkline, each scaled to its own
+duration, so a stage that is growing shows as a band widening across the
+columns instead of as one number in one expanded row.
+
 **Job History answers "what else is writing this shard right now".** The
 first question during the memory incident, and no page could answer it: the
 Graph store page knew nodes, Job History knew jobs, and the two never met. A

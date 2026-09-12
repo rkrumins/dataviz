@@ -1,5 +1,7 @@
 import { memo, useMemo, useState } from 'react'
-import { jobStage, commonFailureStage } from './runSteps'
+import {
+    jobStage, commonFailureStage, runSharesSeries, STAGE_COLOUR,
+} from './runSteps'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
@@ -152,6 +154,40 @@ function JobSparkline({ data }: { data: string[] }) {
                 />
             ))}
         </svg>
+    )
+}
+
+// ── Where the time went, run over run ────────────────────────────────
+//
+// The sparkline says whether runs passed. This says where each one spent
+// its wall clock, so a stage that is GROWING reads as a trend rather than
+// as one number in one expanded row. Each column is a run, oldest right —
+// the same order the sparkline uses — and each column is scaled to its own
+// duration so the shape is the split, not the length.
+
+function StageTrend({ runs }: { runs: AggregationJobResponse[] }) {
+    const series = useMemo(() => runSharesSeries(runs), [runs])
+    if (series.length < 2) return null
+    return (
+        <span className="inline-flex items-end gap-[3px] h-3" data-testid="stage-trend">
+            {series.map(run => (
+                <span
+                    key={run.id}
+                    className="flex flex-col-reverse w-[5px] h-3 rounded-[1px] overflow-hidden gap-px"
+                    title={`${formatDuration(run.totalS)} \u2014 ${
+                        run.shares.map(sh => `${sh.label} ${Math.round(sh.pct)}%`).join(', ')
+                    }`}
+                >
+                    {run.shares.map(sh => (
+                        <span
+                            key={sh.id}
+                            className={cn('w-full', STAGE_COLOUR[sh.id] ?? 'bg-indigo-500')}
+                            style={{ height: `${sh.pct}%` }}
+                        />
+                    ))}
+                </span>
+            ))}
+        </span>
     )
 }
 
@@ -358,6 +394,7 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                     {/* Summary metrics strip */}
                     <div className="flex items-center gap-3 text-[11px] text-ink-muted">
                         <JobSparkline data={sparklineData} />
+                        <StageTrend runs={jobs} />
                         <span className="tabular-nums font-medium">{totalRuns} run{totalRuns !== 1 ? 's' : ''}</span>
                         {successRate != null && (
                             <span className={cn(

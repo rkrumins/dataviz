@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest'
 import type { RunStep } from '@/services/aggregationService'
 import {
     describeStep, describeSteps, currentStepSentence, remainingSecsFromLedger, jobStage,
-    compareStages, stageSlip, commonFailureStage,
+    compareStages, stageSlip, commonFailureStage, stageShares, runSharesSeries,
+    STAGE_COLOUR, STEP_LABELS,
 } from './runSteps'
 
 const T0 = Date.parse('2026-09-12T00:00:00.000Z')
@@ -323,5 +324,81 @@ describe('commonFailureStage', () => {
         const old = [died('extracting'), died('extracting')]
         const recent = Array.from({ length: 10 }, () => ({ status: 'completed' as const }))
         expect(commonFailureStage([...recent, ...old], 10)).toBeNull()
+    })
+})
+
+
+describe('stageShares', () => {
+    it('says what share of the run each stage took', () => {
+        const shares = stageShares([
+            step({ id: 'preparing', state: 'done', secs: 25 }),
+            step({ id: 'extracting', state: 'done', secs: 50 }),
+            step({ id: 'finalizing', state: 'done', secs: 25 }),
+        ])
+        expect(shares.map(s => [s.label, s.pct])).toEqual([
+            ['Prepare', 25], ['Extract', 50], ['Finish', 25],
+        ])
+    })
+
+    it('leaves out stages that never ran or took no time', () => {
+        const ids = stageShares([
+            step({ id: 'preparing', state: 'done', secs: 10 }),
+            step({ id: 'computing', state: 'done', secs: 0 }),
+            step({ id: 'applying' }),
+        ]).map(s => s.id)
+        expect(ids).toEqual(['preparing'])
+    })
+
+    it('has nothing to draw for a run that recorded no time', () => {
+        expect(stageShares([])).toEqual([])
+        expect(stageShares(undefined)).toEqual([])
+        expect(stageShares([step({ id: 'applying', state: 'done', secs: 0 })])).toEqual([])
+    })
+
+    it('gives every stage a colour that actually paints', () => {
+        // A CSS-variable token with an alpha suffix emits no rule at all in
+        // this app; these have to be real palette colours.
+        for (const id of Object.keys(STEP_LABELS)) {
+            expect(STAGE_COLOUR[id]).toMatch(/^bg-[a-z]+-\d+$/)
+        }
+    })
+})
+
+describe('runSharesSeries', () => {
+    const finished = (id: string, secs: number) => ({
+        id,
+        status: 'completed',
+        runStats: {
+            steps: [
+                step({ id: 'extracting', state: 'done', secs }),
+                step({ id: 'applying', state: 'done', secs: secs * 2 }),
+            ],
+        },
+    })
+
+    it('keeps each run with its own total and split', () => {
+        const series = runSharesSeries([finished('a', 10), finished('b', 30)])
+        expect(series.map(r => r.totalS)).toEqual([30, 90])
+        expect(series[0].shares.map(s => Math.round(s.pct))).toEqual([33, 67])
+    })
+
+    it('leaves out what is still going', () => {
+        expect(runSharesSeries([
+            { id: 'a', status: 'running', runStats: { steps: [step({ id: 'applying', state: 'running', secs: 5 })] } },
+            { id: 'b', status: 'pending' },
+        ])).toEqual([])
+    })
+
+    it('drops a run with no ledger rather than drawing a gap', () => {
+        const series = runSharesSeries([
+            { id: 'legacy', status: 'completed', runStats: null },
+            finished('b', 10),
+        ])
+        expect(series.map(r => r.id)).toEqual(['b'])
+    })
+
+    it('stops at the limit', () => {
+        const many = Array.from({ length: 20 }, (_, i) => finished(`r${i}`, 10))
+        expect(runSharesSeries(many, 6)).toHaveLength(6)
     })
 })
