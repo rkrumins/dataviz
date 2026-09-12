@@ -756,11 +756,15 @@ Two of these were wrong until the multi-writer audit:
   from everyone on it. The running job says so (*sharing the node with another
   rebuild* on the Steady load line), because otherwise it just looks slow.
 
-Still coarse, deliberately: the **read-pressure** signal
-(`agg:readpressure:{endpoint}`) is keyed by the connection endpoint, so on a
-cluster interactive pressure anywhere makes every rebuild yield. That errs
-toward the readers and needs the web tier to agree on a key before it can be
-narrowed.
+The **read-pressure** signal (`agg:readpressure:{node}`) was the third one
+keyed by the connection endpoint: pressure on one shard made a rebuild on a
+different, idle shard yield. Both halves now key by the owning node — the web
+tier resolves it from the client's current slot map (no round trip once the
+map is there), the writer asks about the node its governor last read. Outside
+cluster mode the two strings are the same. Across one rolling deploy the two
+halves can briefly disagree and a cluster's reads lose the yield; that is the
+same fail-open direction the rest of admission takes, and both halves ship in
+one image.
 
 ## Hardening wave (2026-07-10): what changed, why, and the impact
 

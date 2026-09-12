@@ -26,6 +26,14 @@ and any other holder puts the run back on the configured ceiling. The running
 job says so on its Steady load line, because a run that is not at the floor
 otherwise just looks slow.
 
+**Interactive-read pressure on one shard slowed rebuilds on every shard.**
+The web tier stamps a key when a read starves and the writers stretch their
+pause while it lives. It was keyed by the connection config's host:port — a
+seed address on a cluster — so a queue-full on shard-0 made a rebuild on an
+idle shard-2 yield for thirty seconds, for nobody's benefit. Both halves key
+by the node that owns the starving graph now, resolved from the client's
+current slot map at no round-trip cost.
+
 **The per-node write-slot cap was per CLUSTER.** The semaphore that keeps
 aggregation writes from taking every query thread on a node was keyed by the
 connection config's host:port — a seed address on a cluster, shared by all

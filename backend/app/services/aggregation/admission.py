@@ -486,13 +486,21 @@ class AggregationAdmission:
 
     # -- read pressure: interactive reads first -----------------------------------
 
-    async def read_pressure(self, provider: Any) -> Optional[str]:
-        """Why the web tier last reported interactive reads starving on this
-        provider's endpoint (``queue_full``, ``server_timeout``, ``deadline``),
-        or None. The materializer's pacing loop stretches its sleep-after-
-        write while this is set. Memoised for ``_READ_PRESSURE_POLL_SECS``;
-        fails open to None like everything else here."""
-        key = read_pressure_key(endpoint_key(provider))
+    async def read_pressure(
+        self, provider: Any, *, node: Optional[str] = None,
+    ) -> Optional[str]:
+        """Why the web tier last reported interactive reads starving on the
+        node this run writes (``queue_full``, ``server_timeout``,
+        ``deadline``), or None. The materializer's pacing loop stretches its
+        sleep-after-write while this is set. Memoised for
+        ``_READ_PRESSURE_POLL_SECS``; fails open to None like everything
+        else here.
+
+        ``node`` is the graph-store node the caller's shard reading names,
+        as for ``write_slot``. Without it the key falls back to the
+        connection endpoint, which on a cluster is a seed shared by every
+        shard — pressure on one shard then slowed rebuilds on idle ones."""
+        key = read_pressure_key(node or endpoint_key(provider))
         now = time.monotonic()
         memo = self._read_pressure_memo.get(key)
         if memo is not None and now - memo[0] < _READ_PRESSURE_POLL_SECS:

@@ -21,6 +21,9 @@ never yielded. These tests pin the cross-tier signal that fixes that:
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+
+from backend.app.providers import shard_capacity as sc
 
 import pytest
 
@@ -270,6 +273,7 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     p._container_env_bytes = None
     p._gov_reading = None
     p._gov_read_at = 0.0
+    p._gov_others = (0, 0)
     p._store_holds = {}
     p._store_hold_s = {}
     p._store_hold_last = None
@@ -358,3 +362,129 @@ async def test_paced_write_is_unchanged_without_the_check(monkeypatch) -> None:
     await pipeline._paced_write(_write)
     assert sleeps == [0.5]
     assert pipeline._yielding_to_reads is False
+
+
+# ── the signal lands on the shard that is starving ───────────────────────
+#
+# The key used to be the connection config's host:port — a SEED address on a
+# cluster, shared by every shard. Pressure on shard-0 therefore slowed a
+# rebuild on shard-2, which was idle. Both halves now key by the node that
+# owns the graph, the same identity the reservation ledger and the write
+# slots use.
+
+
+class _AskingAdmission:
+    """Records the node each read-pressure check was made against."""
+
+    def __init__(self) -> None:
+        self.asked: list = []
+
+    def write_slot(self, provider, *, node=None):
+        class _Slot:
+            async def __aenter__(self_):
+                return self_
+
+            async def __aexit__(self_, *exc):
+                return False
+
+        return _Slot()
+
+    async def read_pressure(self, provider, *, node=None):
+        self.asked.append(node)
+        return None
+
+
+class _OlderAdmission(_AskingAdmission):
+    """One that predates the keyword — a rolling deploy pairs the two."""
+
+    async def read_pressure(self, provider):     # type: ignore[override]
+        self.asked.append("no-keyword")
+        return "queue_full"
+
+
+async def test_the_writer_asks_about_the_node_it_writes(monkeypatch) -> None:
+    monkeypatch.setattr(mat.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(mat, "time", _Clock())
+    admission = _AskingAdmission()
+    pipeline = _pipeline(admission)
+    # A healthy measured reading of one node, reused inside the governor's
+    # one-second window — so the write path asks about THAT node.
+    pipeline._gov_reading = sc.ShardMemory(
+        "10.0.0.7:6379", 1 << 30, 40 << 30, "noeviction", 0.0, "measured",
+    )
+
+    async def _write():
+        return "ok"
+
+    await pipeline._paced_write(_write)
+    assert admission.asked == ["10.0.0.7:6379"]
+
+
+async def test_an_unmeasured_node_asks_about_the_connection_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(mat.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(mat, "time", _Clock())
+    admission = _AskingAdmission()
+    pipeline = _pipeline(admission)
+
+    async def _write():
+        return "ok"
+
+    await pipeline._paced_write(_write)
+    assert admission.asked == [None]    # the controller falls back for us
+
+
+async def test_a_controller_without_the_keyword_still_answers(monkeypatch) -> None:
+    """Losing the yield on a version skew is the one direction this must
+    not fail in: the readers are what it protects."""
+    monkeypatch.setattr(mat.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(mat, "time", _Clock())
+    admission = _OlderAdmission()
+    pipeline = _pipeline(admission)
+
+    async def _write():
+        return "ok"
+
+    await pipeline._paced_write(_write)
+    assert admission.asked == ["no-keyword"]
+    assert pipeline._read_pressure_yields == 1
+
+
+def test_the_web_tier_stamps_the_owning_node_on_a_cluster(monkeypatch) -> None:
+    import backend.app.providers.shard_capacity as sc
+
+    async def _owner(db, *, mode, graph_key, timeout):
+        assert graph_key == "g" and mode == "cluster"
+        return "10.0.0.3:6379"
+
+    monkeypatch.setattr(sc, "owner_endpoint", _owner)
+    target = SimpleNamespace(
+        _db=object(), _graph_name="g",
+        _conn_cfg=SimpleNamespace(mode="cluster", host="seed", port=6379),
+    )
+    assert asyncio.run(rp._owning_node(target)) == "10.0.0.3:6379"
+
+
+def test_a_standalone_node_is_already_named_by_the_endpoint() -> None:
+    target = SimpleNamespace(
+        _db=object(), _graph_name="g",
+        _conn_cfg=SimpleNamespace(mode="standalone", host="h", port=6379),
+    )
+    assert asyncio.run(rp._owning_node(target)) is None
+
+
+def test_an_owner_the_client_cannot_name_falls_back_to_the_endpoint(monkeypatch) -> None:
+    import backend.app.providers.shard_capacity as sc
+
+    async def _owner(db, *, mode, graph_key, timeout):
+        return "unknown"
+
+    monkeypatch.setattr(sc, "owner_endpoint", _owner)
+    target = SimpleNamespace(
+        _db=object(), _graph_name="g",
+        _conn_cfg=SimpleNamespace(mode="cluster", host="seed", port=6379),
+    )
+    assert asyncio.run(rp._owning_node(target)) is None
+
+
+async def _noop_sleep(seconds: float) -> None:
+    return None

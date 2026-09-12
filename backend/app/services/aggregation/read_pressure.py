@@ -15,10 +15,15 @@ other pods. This module carries the signal across:
 
 * **Web tier** (``ReadPressureSignal``, registered as a breaker capacity
   listener at startup): stamps ``agg:readpressure:{endpoint}`` on the
-  shared job-bus Redis with a short TTL. Keyed by FalkorDB endpoint
-  exactly like the write-admission budget, so it lands on the writers of
-  the instance that is actually starving. At most one stamp per endpoint
-  per ``_SIGNAL_MIN_INTERVAL_S`` per process — a 504 storm costs one SET.
+  shared job-bus Redis with a short TTL. Keyed by the NODE that owns the
+  graph whose read starved — the same identity the reservation ledger and
+  the write slots use — so it lands on the writers of the shard that is
+  actually starving and not on every writer in the cluster. (The previous
+  key was the connection config's host:port, a seed address on a cluster:
+  pressure on one shard made a rebuild on a different, idle shard yield.)
+  Outside cluster mode there is one node and the two are the same string.
+  At most one stamp per provider per ``_SIGNAL_MIN_INTERVAL_S`` per
+  process — a 504 storm costs one SET.
 * **Worker** (``AggregationAdmission.read_pressure``): the materializer's
   pacing loop reads the key (memoised for a couple of seconds) and, while
   it lives, stretches its sleep-after-write to
@@ -27,6 +32,13 @@ other pods. This module carries the signal across:
 
 Fail-open both ways: no Redis, no signal, no slowdown. Never raises into
 a request or a job.
+
+Rolling deploy: for the length of one rollout a web pod may stamp the node
+key while a worker still reads the endpoint key (or the reverse), and a
+cluster's reads lose the yield until both sides are new. Both halves ship in
+one image, the window is minutes, and the failure is "aggregation does not
+slow down for a few minutes", which is the same direction every other
+fail-open in this module takes.
 """
 from __future__ import annotations
 
@@ -90,11 +102,12 @@ class ReadPressureSignal:
             loop = asyncio.get_running_loop()
         except RuntimeError:  # pragma: no cover — listeners fire inside a request
             return
-        task = loop.create_task(self._stamp(endpoint, kind))
+        task = loop.create_task(self._stamp(endpoint, kind, target))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _stamp(self, endpoint: str, kind: str) -> None:
+    async def _stamp(self, endpoint: str, kind: str, target: Any = None) -> None:
+        endpoint = await _owning_node(target) or endpoint
         try:
             await self._redis_factory().set(read_pressure_key(endpoint), kind, ex=_TTL_S)
         except Exception as exc:  # noqa: BLE001 — fail open
@@ -106,3 +119,31 @@ class ReadPressureSignal:
             "read pressure on %s (%s): aggregation writers yield for the next %ds",
             endpoint, kind, _TTL_S,
         )
+
+
+_OWNER_LOOKUP_TIMEOUT_S = 2.0
+
+
+async def _owning_node(target: Any) -> str | None:
+    """``host:port`` of the node that owns the starving graph, or None when
+    the client cannot say (standalone, no slot map, anything at all going
+    wrong). Off the client's CURRENT slot map — the one its own reads route
+    by — so it costs no round trip once the map is there."""
+    db = getattr(target, "_db", None)
+    graph = getattr(target, "_graph_name", None)
+    if db is None or not graph:
+        return None
+    cfg = getattr(target, "_conn_cfg", None)
+    if getattr(cfg, "mode", None) != "cluster":
+        # One node: ``endpoint_key`` already names it.
+        return None
+    try:
+        from backend.app.providers.shard_capacity import owner_endpoint
+
+        owner = await owner_endpoint(
+            db, mode="cluster", graph_key=graph, timeout=_OWNER_LOOKUP_TIMEOUT_S,
+        )
+    except Exception as exc:                          # noqa: BLE001 — fail open
+        logger.debug("read-pressure owner lookup failed for %s: %s", graph, exc)
+        return None
+    return owner if owner and owner != "unknown" else None

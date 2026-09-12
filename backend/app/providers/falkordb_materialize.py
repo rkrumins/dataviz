@@ -326,6 +326,15 @@ _APPLY_WALL_SHARE = 0.6
 _CLOSURE_MEMO_MAX = 400_000
 
 
+async def _pressure(check: Any, provider: Any, node: Optional[str]) -> Optional[str]:
+    """``read_pressure`` against the owning node, tolerating a controller
+    that predates the keyword (a rolling deploy pairs the two)."""
+    try:
+        return await check(provider, node=node)
+    except TypeError:
+        return await check(provider)
+
+
 def _read_pressure_pacing_ratio() -> float:
     """Pacing ratio used INSTEAD of ``AGGREGATION_WRITE_PACING_RATIO`` while
     the web tier reports interactive reads starving on this endpoint (see
@@ -2523,7 +2532,11 @@ class AggregationPipeline:
             ratio = self._pacing_min_ratio
             self._full_speed_batches += 1
         check = getattr(admission, "read_pressure", None)
-        pressure = await check(self.p) if check is not None else None
+        # Keyed by the node this run writes, like the slot and the ledger:
+        # on a cluster the connection endpoint is a seed shared by every
+        # shard, so pressure on one shard used to slow a rebuild on an idle
+        # one. An older controller without the keyword still answers.
+        pressure = await _pressure(check, self.p, self._gov_node()) if check else None
         if pressure:
             ratio = max(ratio, self._read_pressure_pacing_ratio)
             self._read_pressure_yields += 1
