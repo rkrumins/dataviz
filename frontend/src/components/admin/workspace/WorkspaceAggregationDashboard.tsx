@@ -10,6 +10,7 @@
  */
 
 import { useState, useMemo, useEffect, useCallback } from 'react'
+import { jobStage } from '../job-history/runSteps'
 import {
     Database, Settings2, Trash2, AlertTriangle, Loader2,
     CheckCircle2, Clock, AlertCircle, XCircle, SkipForward, CircleDot,
@@ -324,6 +325,11 @@ export function WorkspaceAggregationDashboard({
                         const behind = readiness?.projectionCommitsBehind ?? null
                         const needsRebuild = readiness?.needsRebuild ?? false
                         const activeJob = readiness?.activeJob
+                        // What that job is doing right now, in the stage's own
+                        // terms — the same line Job History shows.
+                        const stage = jobStage(
+                            activeJob?.runStats?.steps, activeJob?.currentPhase, Date.now(),
+                        )
                         const isExpanded = expandedId === ds.id
                         const isTriggering = triggering === ds.id
                         const isPurging = purging === ds.id
@@ -396,7 +402,10 @@ export function WorkspaceAggregationDashboard({
                                                     ) : (
                                                         <Clock className="w-3 h-3" />
                                                     )}
-                                                    {status === 'running' ? 'Aggregation in progress' : 'Job queued'}
+                                                    {status === 'running' ? stage.label : 'Job queued'}
+                                                    {status === 'running' && stage.position && (
+                                                        <span className="opacity-60 tabular-nums">{`(${stage.position})`}</span>
+                                                    )}
                                                 </span>
                                                 <span className={cn('font-bold tabular-nums', cfg.textColor)}>
                                                     {Math.round(activeJob.progress || 0)}%
@@ -411,9 +420,18 @@ export function WorkspaceAggregationDashboard({
                                                     style={{ width: `${Math.min(100, Math.round(activeJob.progress || 0))}%` }}
                                                 />
                                             </div>
-                                            {activeJob.processedEdges > 0 && (
+                                            {/* The stage's OWN unit of work. The
+                                                processed/total pair here used to
+                                                read "500,000 / 500,000 edges
+                                                processed" through the whole of
+                                                APPLY — those are the EXTRACT
+                                                counters and they stop moving when
+                                                the extract scan ends. */}
+                                            {(stage.detail ?? (activeJob.totalEdges > 0 && activeJob.processedEdges > 0
+                                                ? `${activeJob.processedEdges.toLocaleString()} / ${activeJob.totalEdges.toLocaleString()} lineage edges scanned`
+                                                : null)) && (
                                                 <div className="text-[10px] text-ink-muted">
-                                                    {activeJob.processedEdges.toLocaleString()} / {activeJob.totalEdges.toLocaleString()} edges processed
+                                                    {stage.detail ?? `${activeJob.processedEdges.toLocaleString()} / ${activeJob.totalEdges.toLocaleString()} lineage edges scanned`}
                                                 </div>
                                             )}
                                         </div>

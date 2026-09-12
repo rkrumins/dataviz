@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, memo } from 'react'
+import { jobStage } from './job-history/runSteps'
 import { aggregationService, type AggregationJobResponse } from '@/services/aggregationService'
 import { Loader2, CheckCircle2, AlertCircle, Clock, PlayCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -68,6 +69,7 @@ export function AggregationHistory({ dataSourceId }: AggregationHistoryProps) {
 
 const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) {
     const progressPercent = Math.round(job.progress || 0)
+    const stage = jobStage(job.runStats?.steps, job.currentPhase, Date.now())
     
     // Status visual mapping
     let icon, statusColor, bgColor, statusText;
@@ -120,18 +122,31 @@ const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) 
                 </div>
             </div>
 
-            {/* Running exact Progress Tracking */}
+            {/* Running exact Progress Tracking. The percentage alone never said
+                which of the run's stages it was in, so two jobs at 60% could be
+                doing entirely different work. */}
             {job.status === 'running' && (
-                <div className="mt-1 flex items-center justify-between gap-3">
-                    <div className="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden">
-                        <div
-                            className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-                            style={{ width: `${Math.min(100, progressPercent)}%` }}
-                        />
+                <div className="mt-1 space-y-1">
+                    <div className="flex items-center justify-between gap-2 text-[10px]">
+                        <span className="font-semibold text-ink-secondary truncate">
+                            {stage.label}
+                            {stage.position && <span className="text-ink-muted ml-1 tabular-nums">{stage.position}</span>}
+                        </span>
+                        {stage.detail && (
+                            <span className="text-ink-muted tabular-nums truncate">{stage.detail}</span>
+                        )}
                     </div>
-                    <span className="text-[10px] font-bold text-indigo-500 w-8 text-right">
-                        {progressPercent}%
-                    </span>
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="w-full h-1.5 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden">
+                            <div
+                                className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                                style={{ width: `${Math.min(100, progressPercent)}%` }}
+                            />
+                        </div>
+                        <span className="text-[10px] font-bold text-indigo-500 w-8 text-right">
+                            {progressPercent}%
+                        </span>
+                    </div>
                 </div>
             )}
             
@@ -139,7 +154,8 @@ const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
                 {job.totalEdges > 0 && (
                     <span className="text-[10px] text-ink-muted">
-                        <strong className="text-ink-secondary font-medium">Edges:</strong> {job.processedEdges} / {job.totalEdges}
+                        <strong className="text-ink-secondary font-medium">Lineage edges scanned:</strong>{' '}
+                        {job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()}
                     </span>
                 )}
                 {job.errorMessage && (

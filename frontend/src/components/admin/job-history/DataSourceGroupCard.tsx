@@ -1,4 +1,5 @@
 import { memo, useState } from 'react'
+import { jobStage } from './runSteps'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
@@ -325,13 +326,18 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                         )}
                     </div>
 
-                    {/* Active job progress bar */}
-                    {activeJob && activeJob.totalEdges > 0 && (
+                    {/* Active job progress bar. Never gated on an edge count:
+                        EXTRACT has not taken one while the run is still
+                        preparing, and a running job with no bar at all reads
+                        as a job doing nothing. */}
+                    {activeJob && (
                         <div className="mb-2">
                             <div className="flex items-center gap-2 mb-1">
                                 <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-                                <span className="text-[10px] font-semibold text-ink">
-                                    {activeJob.status === 'running' ? 'Processing' : 'Queued'}
+                                <span className="text-[10px] font-semibold text-ink truncate">
+                                    {activeJob.status === 'running'
+                                        ? jobStage(activeJob.runStats?.steps, activeJob.currentPhase, Date.now()).label
+                                        : 'Queued'}
                                 </span>
                                 <span className="text-[10px] font-bold text-indigo-400 tabular-nums ml-auto">
                                     {activeJob.progress}%

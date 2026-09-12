@@ -22,7 +22,7 @@ import { AdjustRunningJob } from './AdjustRunningJob'
 // nor about what its evidence means.
 import { REASON_LABEL as RECONCILE_REASON_LABEL } from '../Freshness/DriftStateBadge'
 import { ReconcileWhy } from '../Freshness/reconcileEvidence'
-import { remainingSecsFromLedger } from './runSteps'
+import { remainingSecsFromLedger, STEP_LABELS } from './runSteps'
 
 /**
  * History-informed ETA: uses the PREVIOUS completed run's durations
@@ -245,6 +245,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
         [jobFromList.runStats?.steps],
     )
     const hasSteps = (jobFromList.runStats?.steps?.length ?? 0) > 0
+    const stageLabel = STEP_LABELS[openStepId ?? job.currentPhase ?? ''] ?? 'Working'
 
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
@@ -394,10 +395,16 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                 <td className={cn('px-4', compact ? 'py-2' : 'py-3')}>
                     {job.triggerSource === 'purge' ? (
                         <span className="text-[11px] text-ink-muted/40">{'\u2014'}</span>
-                    ) : isRunning && job.totalEdges > 0 ? (
-                        <div className="w-20">
-                            <div className="flex items-center justify-between mb-0.5">
-                                <span className="text-[10px] font-bold text-indigo-400 tabular-nums">{job.progress}%</span>
+                    ) : isRunning ? (
+                        // Never gated on an edge count: EXTRACT has not taken
+                        // one during PREPARE, and a running job that shows a
+                        // dash for its progress reads as a job doing nothing.
+                        <div className="w-24">
+                            <div className="flex items-center justify-between gap-1 mb-0.5">
+                                <span className="text-[9px] font-bold uppercase tracking-wider text-ink-muted truncate">
+                                    {stageLabel}
+                                </span>
+                                <span className="text-[10px] font-bold text-indigo-400 tabular-nums shrink-0">{job.progress}%</span>
                             </div>
                             <div className="w-full h-1.5 bg-indigo-500/10 rounded-full overflow-hidden">
                                 <motion.div
@@ -426,7 +433,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                     ) : (
                         <div className="space-y-0.5">
                             <span className="text-[11px] text-ink tabular-nums font-medium block">
-                                {job.processedEdges.toLocaleString()}{job.totalEdges > 0 ? ` / ${job.totalEdges.toLocaleString()}` : ''}
+                                {job.totalEdges > 0
+                                    ? `${job.processedEdges.toLocaleString()} / ${job.totalEdges.toLocaleString()}`
+                                    : job.processedEdges > 0
+                                        ? job.processedEdges.toLocaleString()
+                                        // Not "0 edges" — the scan has not counted
+                                        // any yet, which is not the same claim.
+                                        : <span className="text-ink-muted opacity-40">{'\u2014'}</span>}
                             </span>
                             {job.status === 'completed' && (
                                 statWrites != null || statDeletes != null ? (

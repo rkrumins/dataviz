@@ -1108,6 +1108,12 @@ class AggregationPipeline:
         self._deletes = 0
         self._scanned = 0                    # source lineage edges scanned
         self._total = 0                      # total source lineage edges
+        # Whether ``_total`` is a real pre-count or just the running scan
+        # tally. ``_count_type`` returns 0 both for "no edges of this type"
+        # and for a ``count(r)`` that timed out, and the extract loop then
+        # keeps ``_total`` equal to ``_scanned`` — a denominator drawn from
+        # that reads 100% complete for the whole scan.
+        self._total_counted = False
         self._progress_pct = 0
         self._max_applied_key = 0
 
@@ -3149,6 +3155,16 @@ class AggregationPipeline:
         for etype in self._effective_types:
             totals += await self._count_type(_sanitize_label(etype))
         self._total = totals
+        self._total_counted = totals > 0
+        # Everything above — the containment load, the mode decision, the
+        # non-leaf ids, these counts — happens inside EXTRACT with no
+        # checkpoint between the one that opened it and the first scan
+        # batch. On a large graph that is minutes reporting nothing. Say the
+        # denominator the moment it is known; the scan then fills it in.
+        await self._checkpoint(
+            PHASE_AGGREGATE, 0, phase_label="extracting",
+            unit_done=0, unit_total=totals or None, unit="lineage edges",
+        )
 
         # ---- stream lineage edges → base map → lattice roll-ups ----
         values = self._values
@@ -3184,7 +3200,14 @@ class AggregationPipeline:
                 )
                 await self._checkpoint(
                     PHASE_AGGREGATE, self._scanned, phase_label="extracting",
-                    unit_done=self._scanned, unit_total=self._total,
+                    unit_done=self._scanned,
+                    # Only when the pre-count actually answered. A timed-out
+                    # ``count(r)`` returns 0, the clamp above then keeps
+                    # ``_total`` equal to ``_scanned``, and a bar drawn from
+                    # that reads 100% complete for the whole scan. Without a
+                    # denominator the stage reports the edges it has read,
+                    # which is true.
+                    unit_total=self._total if self._total_counted else None,
                     unit="lineage edges",
                 )
                 if len(base) >= cap or (

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { RunStep } from '@/services/aggregationService'
 import {
-    describeStep, describeSteps, currentStepSentence, remainingSecsFromLedger,
+    describeStep, describeSteps, currentStepSentence, remainingSecsFromLedger, jobStage,
 } from './runSteps'
 
 const T0 = Date.parse('2026-09-12T00:00:00.000Z')
@@ -154,5 +154,45 @@ describe('remainingSecsFromLedger', () => {
 
     it('declines when nothing is open', () => {
         expect(remainingSecsFromLedger(previous, previous, T0)).toBeNull()
+    })
+})
+
+
+describe('jobStage', () => {
+    it('names the stage and where it sits in the flow', () => {
+        const steps = [
+            step({ id: 'preparing', state: 'done', secs: 12 }),
+            step({ id: 'extracting', state: 'done', secs: 200 }),
+            step({ id: 'computing', state: 'done', secs: 10 }),
+            step({
+                id: 'reconciling', state: 'running', started_at: '2026-09-12T00:00:00.000Z',
+                done: 3, total: 12, unit: 'scan ranges',
+            }),
+            step({ id: 'applying' }),
+            step({ id: 'finalizing' }),
+        ]
+        expect(jobStage(steps, 'reconciling', T0)).toEqual({
+            label: 'Reconcile',
+            detail: '3 of 12 scan ranges · 9 left',
+            position: '4/6',
+        })
+    })
+
+    it('falls back to the pipeline phase for a run with no ledger', () => {
+        expect(jobStage(undefined, 'applying', T0)).toEqual({
+            label: 'Apply', detail: null, position: null,
+        })
+    })
+
+    it('never goes blank — a running job with nothing to go on is Working', () => {
+        // A blank here reads as a job doing nothing, which is the opposite of
+        // what a running row means.
+        expect(jobStage(undefined, null, T0).label).toBe('Working')
+        expect(jobStage([], undefined, T0).label).toBe('Working')
+    })
+
+    it('says nothing about progress once every stage is closed', () => {
+        const finished = [step({ id: 'applying', state: 'done', secs: 5 })]
+        expect(jobStage(finished, 'applying', T0).position).toBeNull()
     })
 })

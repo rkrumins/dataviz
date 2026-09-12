@@ -265,14 +265,12 @@ def test_every_counted_phase_hands_its_denominator_to_the_checkpoint():
     import inspect
 
     src = inspect.getsource(mat.AggregationPipeline._extract_and_compute)
-    scan_ck = src.split('phase_label="extracting"')[1].split(")")[0]
-    assert "unit_done=self._scanned" in scan_ck
-    assert "unit_total=self._total" in scan_ck
+    assert "unit_done=self._scanned," in src
+    assert "unit_total=self._total if self._total_counted else None" in src
 
     src = inspect.getsource(mat.AggregationPipeline._reconcile)
-    range_ck = src.split('phase_label="reconciling"')[1].split(")")[0]
-    assert "unit_done=lo // width" in range_ck
-    assert "unit_total=total_ranges" in range_ck
+    assert "unit_done=lo // width," in src
+    assert "unit_total=total_ranges," in src
 
 
 # ── the worker folds the ledger into the row's run_stats ────────────────
@@ -357,3 +355,52 @@ def test_a_run_with_no_ledger_still_checkpoints():
     _materialize_with(job, _PhasedProvider([("extracting", {"done": 1, "total": 2})]), None, session)
     assert session.commits >= 1
     assert "steps" not in json.loads(job.run_stats or "{}")
+
+
+# ── the extract stage tells the truth about its denominator ─────────────
+
+
+def test_extract_announces_its_count_before_it_starts_scanning():
+    """Everything before the first scan batch — the containment load, the
+    mode decision, the non-leaf ids, the per-type counts — runs inside
+    EXTRACT with no checkpoint between the one that opened the stage and the
+    first batch of rows. On a large graph that is minutes reporting nothing,
+    when the denominator is known part-way through."""
+    import inspect
+
+    src = inspect.getsource(mat.AggregationPipeline._extract_and_compute)
+    after_count = src.split("self._total_counted = totals > 0")[1]
+    assert 'phase_label="extracting"' in after_count.split("# ---- stream")[0]
+    assert "unit_total=totals or None" in after_count
+
+
+def test_the_scan_reports_no_denominator_when_the_count_could_not_answer():
+    """``_count_type`` returns 0 for a ``count(r)`` that timed out as well as
+    for a type with no edges, and the scan loop then keeps ``_total`` equal
+    to ``_scanned`` — a bar drawn from that reads 100% complete for the whole
+    scan. Without a denominator the stage reports the edges it has read,
+    which is true."""
+    import inspect
+
+    src = inspect.getsource(mat.AggregationPipeline._extract_and_compute)
+    assert "unit_total=self._total if self._total_counted else None" in src
+    assert "unit_total=self._total," not in src   # the unguarded form
+
+
+def test_a_step_with_a_count_but_no_denominator_still_reports_the_count():
+    pipe, seen = _recording_pipeline()
+    asyncio.run(pipe._checkpoint(
+        mat.PHASE_AGGREGATE, 0, phase_label="extracting",
+        unit_done=1_200, unit_total=None, unit="lineage edges",
+    ))
+    assert seen[0]["stats"]["step"] == {
+        "done": 1_200, "total": None, "unit": "lineage edges",
+    }
+
+
+def test_the_ledger_keeps_a_count_with_no_denominator():
+    ledger = StepLedger(clock=_Clock())
+    ledger.enter("extracting")
+    ledger.note(done=1_200, total=None, unit="lineage edges")
+    step = {s["id"]: s for s in ledger.snapshot()}["extracting"]
+    assert (step["done"], step["total"]) == (1_200, None)

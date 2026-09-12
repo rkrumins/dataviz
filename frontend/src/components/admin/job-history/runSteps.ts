@@ -152,3 +152,37 @@ export function remainingSecsFromLedger(
     for (const later of current.slice(idx + 1)) remaining += prev.get(later.id) ?? 0
     return isFinite(remaining) && remaining > 0 ? remaining : null
 }
+
+
+/**
+ * The one line every surface uses to say what a running job is doing:
+ * the stage, where it sits in the flow, and that stage's own progress.
+ *
+ * Deliberately NOT `processedEdges / totalEdges` — those are the EXTRACT
+ * counters and stop moving once the extract scan ends, so a job three
+ * quarters of the way through APPLY reported "500,000 / 500,000 edges
+ * processed" and looked finished.
+ */
+export function jobStage(
+    steps: RunStep[] | undefined | null,
+    currentPhase: string | null | undefined,
+    nowMs: number,
+): { label: string; detail: string | null; position: string | null } {
+    const views = describeSteps(steps, nowMs)
+    const open = views.find(v => v.open)
+    if (open) {
+        return {
+            label: open.label,
+            detail: open.detail,
+            position: `${views.indexOf(open) + 1}/${views.length}`,
+        }
+    }
+    return {
+        // A run with no ledger (or one that has not opened its first stage)
+        // still has the pipeline's phase, and failing that it is working —
+        // never a blank, which reads as a job doing nothing.
+        label: STEP_LABELS[currentPhase ?? ''] ?? 'Working',
+        detail: null,
+        position: null,
+    }
+}
