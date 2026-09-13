@@ -305,11 +305,13 @@ def test_pipeline_defaults_clear_the_large_graph_target(monkeypatch):
     assert mat._max_pending_pairs() == 50_000_000
     assert mat._pacing_ratio() == 1.0
     assert mat._extract_concurrency() == 1
-    # Sized against ONE SHARD: a graph key lives entirely on one node, so
-    # cluster mode gives a single graph no extra room. 25M x ~0.5KB ~= 12.5GB,
-    # ~70% of the reference cluster's ~18GB per-shard headroom — covering a
-    # graph 6-8x the 1M/2M floor, which is a minimum rather than a ceiling.
-    assert mat._max_materialized_edges() == 25_000_000
+    # The CLOCK, not a memory figure: the most rows an apply could write
+    # inside one job's wall clock at the shipped rate. It used to be a flat
+    # 25M, which the pipeline's own projection said could never land — a
+    # backstop that cannot fire. Sized against ONE SHARD either way: a graph
+    # key lives entirely on one node, so cluster mode gives a single graph
+    # no extra room.
+    assert mat._max_materialized_edges() == mat._wall_clock_edges() == 15_552_000
     # An OPTIONAL appetite ceiling, defaulting to its bound so it does not
     # bind. It used to default to 8M and was the thing that actually decided
     # whether a graph got full detail, because when it was written nothing

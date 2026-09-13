@@ -20,6 +20,7 @@ import types
 
 import pytest
 
+from backend.app.providers.falkordb_materialize import _wall_clock_edges
 from backend.app.providers.shard_capacity import ShardMemory
 from backend.app.services.aggregation import capacity as cap
 
@@ -45,7 +46,9 @@ def test_limits_prefer_the_stored_defaults_and_label_where_each_came_from(monkey
     assert (limits.bytes_per_edge.value, limits.bytes_per_edge.source) == (512, "default")
     assert (limits.max_materialized_edges.value, limits.max_materialized_edges.source) == (None, "default")
     assert (limits.rollup_storage.value, limits.rollup_storage.source) == ("true", "global")
-    assert limits.static_cap == 25_000_000          # env default: no ceiling set
+    # Env default, no ceiling set: what the apply could write inside one
+    # job's wall clock, rather than a memory figure the clock contradicts.
+    assert limits.static_cap == _wall_clock_edges()
     # The appetite ceiling defaults to its BOUND: it no longer decides whether
     # a graph gets full detail — the write budget and the apply projection do.
     assert limits.max_cube_edges == 50_000_000 and limits.budget_recheck_edges == 1_000_000
@@ -99,7 +102,7 @@ def test_an_unmeasurable_shard_row_says_why_and_falls_to_the_static_rule():
     row = cap.shard_row(_reading(maxmemory=0), limits)
     assert not row.measurable and row.governed_by == "static"
     assert row.why_not == "the shard reports no maxmemory"
-    assert row.allowed_growth_edges is None and row.static_cap == 25_000_000
+    assert row.allowed_growth_edges is None and row.static_cap == _wall_clock_edges()
 
 
 def test_a_source_row_uses_the_calibrated_figure_when_the_last_run_measured_one():

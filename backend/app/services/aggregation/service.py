@@ -426,13 +426,19 @@ def _liveness_is_stale(job) -> bool:
     """True when nothing has been heard from this run's worker for longer than
     the stuck-job reconciler's own threshold.
 
-    The same number the reaper uses, deliberately: a run this side of it is
+    The same threshold the reaper uses, deliberately: a run this side of it is
     one the platform still believes in, and a run past it is one the platform
-    is about to end. Anything unparsable counts as fresh — a missing timestamp
-    is not evidence of death, and treating it as such would blank the estimate
-    for every run that has not checkpointed yet.
+    is about to end.
+
+    Only ``last_checkpoint_at`` counts. ``started_at`` never advances, so a
+    run that legitimately takes hours — the ordinary case on a large graph,
+    and every resumed run — would read as dead from its second hour onward,
+    which is precisely when its estimate is worth the most. A missing
+    checkpoint is not evidence of death either: a run that has not reached
+    its first one yet has nothing to be stale about, and the reaper's own
+    staleness path is what covers a job that dies before it.
     """
-    stamp = getattr(job, "last_checkpoint_at", None) or getattr(job, "started_at", None)
+    stamp = getattr(job, "last_checkpoint_at", None)
     if not stamp:
         return False
     try:

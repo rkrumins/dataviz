@@ -85,8 +85,8 @@ def test_what_other_rebuilds_hold_comes_off_the_free_memory_and_is_named():
     v = b.verdict(projected=2_000_000, growth_edges=2_000_000)     # needs ~1 GB
     assert not v.ok and v.blocked_by == "shard"
     msg = sc.format_refusal(b, v, graph="g", composition="x")
-    assert "512.0 MB free of 40.0 GB" in msg
-    assert "30.0 GB used, 1.5 GB held by 1 other rebuild still writing" in msg
+    assert "512.0 MiB free of 40.0 GiB" in msg
+    assert "30.0 GiB used, 1.5 GiB held by 1 other rebuild still writing" in msg
     for word in _FORBIDDEN:
         assert word not in msg, word
     from backend.app.services.aggregation.service import classify_failure
@@ -199,7 +199,7 @@ def test_a_shard_refusal_carries_every_number_a_person_needs():
     _, b, v = next(_refusals())
     msg = sc.format_refusal(b, v, graph="g", composition="d1→d1: 9")
     assert "10,000,000" in msg and "10.0.0.1:6379" in msg
-    assert "2.0 GB free of 40.0 GB" in msg and "20% reserve" in msg
+    assert "2.0 GiB free of 40.0 GiB" in msg and "20% reserve" in msg
     assert "short by" in msg and "512 B/edge (default)" in msg
     assert "shardReservePct" in msg and "bytesPerEdge" in msg
 

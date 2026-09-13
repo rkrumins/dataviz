@@ -627,8 +627,15 @@ def hold_reason(
     fork and the memory line are about the master's own survival, and no
     knob waves them through.
 
-    An unmeasured reading never holds: the store not answering is the
-    outage path's business, and ignorance is not a reason to wait.
+    An unmeasured reading returns None because there is nothing here to
+    decide from — NOT because ignorance is safe. It is the caller that
+    owns that policy, and it must not read None as permission: a node
+    that stops answering ``INFO`` is very often a node mid-fork, since a
+    ``fork()`` over a multi-GB RSS stalls the main thread that would have
+    answered — the exact condition the ``fork`` hold exists for. See
+    ``_write_hold_reason`` in ``falkordb_materialize``, which re-asks this
+    function against its last measured reading while that is still fresh
+    and holds on the silence itself past it.
     """
     if shard.source != "measured":
         return None
@@ -795,11 +802,13 @@ async def read_shard_memory(
     One round trip says how full the node is, whether it is the same
     process it was a minute ago, whether it is forked or about to be, and
     how its replicas are keeping up — everything the write governor holds
-    on. ``include_config`` adds the two ``CONFIG GET`` round trips for the
-    replica drop limits, and ``refresh`` the cluster slot-map fetch that
-    follows a failover; a per-batch reading passes False for both and
-    reuses the values the run read at its start (the client keeps its own
-    map fresh on any ``MOVED``).
+    on. ``include_config`` adds the config round trips — the node's own
+    limits (one ``GRAPH.CONFIG GET *``, or five sequential GETs on a
+    server that will not answer the wildcard) and the two ``CONFIG GET``s
+    for the replica drop limits — and ``refresh`` the cluster slot-map
+    fetch that follows a failover; a per-batch reading passes False for
+    both and reuses the values the run read at its start (the client keeps
+    its own map fresh on any ``MOVED``).
 
     * standalone / sentinel: one node; the sentinel client follows failover
       inside its pool.
@@ -834,8 +843,11 @@ async def read_shard_memory(
             # clamped to, the thread count the container formula needs —
             # read beside the memory so run_stats, the capacity view and the
             # provider's clamp can name them. Their own guard: a failure
-            # here costs nothing above.
-            limits = await _read_server_limits(conn, node)
+            # here costs nothing above. Gated with the drop limits because
+            # they change as rarely: five more sequential round trips inside
+            # a per-batch reading spend the budget that reading needs to
+            # notice a fork, for answers the run already has.
+            limits = await _read_server_limits(conn, node) if include_config else {}
             node_cfg = await _read_node_config(conn, node) if include_config else {}
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("shard memory for %r via %s unavailable: %s",
@@ -1064,14 +1076,21 @@ REFUSAL_MARKER = "write budget:"
 
 
 def human_bytes(n: Optional[int]) -> str:
+    """Bytes for a person, in the units the arithmetic is actually in.
+
+    Every figure these messages carry is measured against a power-of-two
+    limit — ``maxmemory``, the container limit, a replica output buffer —
+    and the division below has always been by 1024. Labelling that "GB"
+    understated every refusal by 7.4% at GB scale: an operator reading
+    "short by 12.3 GB" went looking for 12.3 decimal gigabytes."""
     if n is None:
         return "?"
     value = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(value) < 1024 or unit == "TB":
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(value) < 1024 or unit == "TiB":
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
-    return f"{value:.1f} TB"
+    return f"{value:.1f} TiB"
 
 
 def format_refusal(

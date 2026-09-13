@@ -222,7 +222,20 @@ def test_no_finish_time_is_promised_for_a_run_nobody_is_running():
 
 
 def test_a_run_that_has_not_checkpointed_yet_is_not_called_dead():
-    """A missing timestamp is not evidence of death, and reading it as such
-    would blank the estimate for every run in its first stage."""
+    """A missing checkpoint is not evidence of death — a run that has not
+    reached its first one has nothing to be stale about, and the reaper's own
+    staleness path is what covers a job that dies before it."""
     assert _liveness_is_stale(_Row(status="running")) is False
-    assert _liveness_is_stale(_Row(status="running", started_at="nonsense")) is False
+    assert _liveness_is_stale(
+        _Row(status="running", last_checkpoint_at="nonsense")
+    ) is False
+
+
+def test_a_long_run_is_judged_on_its_checkpoints_not_its_start():
+    """started_at never advances, so judging liveness by it would read every
+    run as dead from its second hour onward — which on a large graph, and on
+    every resumed run, is exactly when the estimate is worth the most."""
+    long_ago = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    alive = _Row(status="running", started_at=long_ago, last_checkpoint_at=recent)
+    assert _liveness_is_stale(alive) is False

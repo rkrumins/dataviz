@@ -261,6 +261,32 @@ def test_auto_steps_off_a_cube_the_job_could_not_finish_writing():
     assert proj["rate"] == "last run" and proj["seconds"] > proj["wall_budget_s"]
 
 
+def test_the_edge_cap_cannot_drift_past_what_the_clock_allows(monkeypatch):
+    """The cap and the projection answer the same question, so they may not
+    contradict each other.
+
+    25M was a count the apply provably could not reach: it needs a 500-row
+    batch to cost ≤ 0.839 s at pacing ratio 1.0, against the 1.0 s the AIMD
+    sizer steers toward — and ≤ 0.336 s once the read-pressure ratio is in
+    force, which with hundreds of concurrent readers is the steady state,
+    not the exception. A backstop that cannot fire is not a backstop.
+    """
+    monkeypatch.delenv("AGGREGATION_MAX_MATERIALIZED_EDGES", raising=False)
+
+    def _reachable():
+        return mat._APPLY_ROWS_PER_S_DEFAULT * mat._APPLY_WALL_SHARE * mat._max_wall_secs()
+
+    assert mat._max_materialized_edges() <= _reachable()
+    # And it tracks the clock rather than sitting at a number that happens
+    # to be under it today: halve the wall clock, halve what may be written.
+    monkeypatch.setenv("AGGREGATION_JOB_MAX_WALL_SECS", "43200")
+    assert mat._max_materialized_edges() <= _reachable()
+    # An operator who has measured a faster apply still overrides it — the
+    # derivation is the DEFAULT, not a bound on the knob.
+    monkeypatch.setenv("AGGREGATION_MAX_MATERIALIZED_EDGES", "40000000")
+    assert mat._max_materialized_edges() == 40_000_000
+
+
 def test_the_appetite_ceiling_defaults_to_its_bound_so_it_does_not_decide(monkeypatch):
     monkeypatch.delenv("AGGREGATION_MAX_CUBE_EDGES", raising=False)
     assert mat._max_cube_edges() == 50_000_000

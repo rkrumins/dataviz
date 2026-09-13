@@ -1752,8 +1752,9 @@ def test_auto_mode_materializes_full_cube_within_budget():
     # fallback must never be a silent log line.
     assert result["run_stats"]["regime"] == "cube"
     assert result["run_stats"]["cube_estimate"] >= len(agg)
-    # The DEFAULT budget (no tuning override here) — sized per shard.
-    assert result["run_stats"]["materialize_budget"] == 25_000_000
+    # The DEFAULT budget (no tuning override here) — what the apply could
+    # write inside the job's wall clock, per shard.
+    assert result["run_stats"]["materialize_budget"] == mat._wall_clock_edges()
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.
@@ -2707,7 +2708,7 @@ def test_another_rebuilds_hold_on_the_node_counts_as_used_memory(monkeypatch):
         _run(_materialize(p, tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}, job_id="job-2"))
 
     msg = str(exc.value)
-    assert "49.5 KB held by 1 other rebuild still writing" in msg and "short by" in msg
+    assert "49.5 KiB held by 1 other rebuild still writing" in msg and "short by" in msg
     assert fake.agg == {}
     assert not any(c[0] in ("reserve", "update", "release") for c in ledger.calls)
 
