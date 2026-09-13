@@ -427,6 +427,10 @@ class AggregationWorker:
             admission_attached = False
             # Set only by the eviction path, which settles the row itself.
             terminal_written = False
+            # Properties the identity stamp wrote onto NODES this run. Carried
+            # on the completion event so the read caches know whether the
+            # hierarchy answers moved or only the rollup layer did.
+            self._identity_stamped = 0
 
             # Platform JobEmitter — the only path for live progress
             # updates. Seed its per-job sequence counter from the
@@ -679,18 +683,34 @@ class AggregationWorker:
 
                     try:
                         try:
-                            await provider.stamp_identity_urns(
+                            identity_stamped = await provider.stamp_identity_urns(
                                 on_batch=_stamp_heartbeat,
                             )
                         except TypeError:
                             # A provider that predates the heartbeat. It paces
                             # nothing either, so it needs none.
-                            await provider.stamp_identity_urns()
+                            identity_stamped = await provider.stamp_identity_urns()
+                        # How many properties it wrote decides how much of the
+                        # read cache this run has to invalidate. Stamping puts
+                        # ``urn`` and ``displayName`` on the NODES, which the
+                        # hierarchy endpoints render — so a run that stamped
+                        # anything has changed more than the rollup layer. A
+                        # conforming source stamps nothing and returns 0, which
+                        # is the common case and the one the narrowed
+                        # invalidation is for.
+                        try:
+                            self._identity_stamped = int(identity_stamped or 0)
+                        except (TypeError, ValueError):
+                            # A provider that returns something else has not
+                            # told us it stamped nothing. Assume it did.
+                            self._identity_stamped = 1
                     except Exception as exc:
                         logger.warning(
                             "Aggregation job %s: identity-urn stamp failed "
                             "(continuing): %s", job.id, exc,
                         )
+                        # It may have written some before it failed.
+                        self._identity_stamped = 1
 
 
                 # Compute fingerprint before aggregation
@@ -989,6 +1009,7 @@ class AggregationWorker:
                             fingerprint=job.graph_fingerprint_after,
                             completed_at=job.completed_at,
                             workspace_id=job.workspace_id,
+                            identity_stamped=self._identity_stamped,
                         )
 
                     # Aggregated-edge materialization changed the graph's edge

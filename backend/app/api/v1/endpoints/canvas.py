@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.endpoints.graph import (
     _bounded_compute,
     _cache_scope,
+    _compute_budget,
     _enforce_fair_share,
     _provider_health_header,
     get_context_engine,
@@ -199,6 +200,7 @@ async def canvas_bootstrap(
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=CanvasBootstrapResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_CANVAS_BOOTSTRAP),
     )
     label_failover(response, result.freshness, failing_over)
     await _apply_stale_overlay(scope, result.freshness, result.aggregated)
@@ -283,6 +285,7 @@ async def canvas_expand(
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=CanvasExpandResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_CANVAS_EXPAND),
     )
     label_failover(response, result.freshness, failing_over)
     await _apply_stale_overlay(scope, result.freshness, result.aggregated_delta)
