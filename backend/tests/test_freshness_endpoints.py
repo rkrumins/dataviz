@@ -152,11 +152,22 @@ def _as_signal(v):
     """Pad a test's ``(generation, cache_as_of, stale_reason)`` to the
     four-signal shape production reads.
 
-    The fourth is ``built_at`` — when a compute was last STORED, as opposed
-    to ``cache_as_of``, which is when the cache was last thrown away. Tests
-    that do not care about it say nothing and get None; the ones that do
-    pass a full four-tuple."""
-    return tuple(v) + (None,) * (4 - len(v)) if isinstance(v, tuple) else v
+    The fourth is ``built_at`` — when a compute was last STORED, as against
+    ``cache_as_of``, which is when the cache was last thrown AWAY. A
+    three-tuple fixture predates the distinction and meant "this source has
+    a cache", so it is padded with its own ``cache_as_of`` rather than with
+    None: the counts those tests assert are about coverage, and padding with
+    None would silently turn every one of them into "cold".
+
+    A test that specifically wants "invalidated, and nothing stored" — the
+    state that made ``58/58 cached`` a lie — passes the full four-tuple with
+    an explicit None."""
+    if not isinstance(v, tuple):
+        return v
+    if len(v) >= 4:
+        return v
+    gen, as_of, reason = (tuple(v) + (None,) * 3)[:3]
+    return (gen, as_of, reason, as_of)
 
 
 def _norm_signals(signals):

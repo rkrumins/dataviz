@@ -4623,7 +4623,7 @@ def _summarize_freshness(
             pending += 1
         if status in (None, "none", "skipped"):
             not_built += 1
-        _gen, cache_as_of, stale_reason, _built = signals.get(
+        _gen, cache_as_of, stale_reason, built_at = signals.get(
             (str(ws_id), str(ds_id)), (None, None, None, None),
         )
         marker = bool(stale_reason)
@@ -4651,7 +4651,14 @@ def _summarize_freshness(
             or is_stalled
         ):
             needs_attention += 1
-        if cache_as_of:
+        # The BUILT stamp, not the invalidation one. Counting cache_as_of
+        # made this "sources invalidated at least once, ever", which every
+        # source satisfies permanently after its first rebuild — hence
+        # "58/58 cached" over a fleet of cold caches. The rows now count the
+        # built stamp, so a summary on the old signal would put two numbers
+        # on one screen that disagree by the whole fleet, with the larger and
+        # more prominent one wrong.
+        if built_at:
             cache_stamped += 1
     return FreshnessSummary(
         total=len(full_rows),

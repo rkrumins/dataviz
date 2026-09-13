@@ -404,7 +404,7 @@ export interface FreshnessSummary {
     /** A stale marker is present. */
     recomputing: number
     needsAttention: number
-    /** Rows with a non-null ``cacheAsOf``. */
+    /** Rows with something WARM stored (a non-null ``cacheBuiltAt``). */
     cacheStamped: number
     /** Rows whose last reconciliation check found the rollups out of step
      *  (``drifting`` or ``overlayMissing``). */

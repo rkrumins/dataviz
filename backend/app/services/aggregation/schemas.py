@@ -1081,7 +1081,10 @@ class FreshnessSummary(BaseModel):
     not_built: int = Field(0, alias="notBuilt")  # status in ("none","skipped") or no state row
     recomputing: int = Field(0)  # stale marker present
     needs_attention: int = Field(0, alias="needsAttention")  # marker, failed, drifting, or suspended
-    cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
+    #: Sources with something WARM stored (cacheBuiltAt non-null) — not
+    #: sources that have been invalidated at some point, which is every
+    #: source that has ever been rebuilt.
+    cache_stamped: int = Field(0, alias="cacheStamped")
     # driftState is a drifting/overlayMissing verdict from the last sweep.
     drifting: int = Field(0)
     # Circuit breaker tripped — automation stopped; a person has to look.

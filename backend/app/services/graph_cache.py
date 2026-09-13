@@ -714,6 +714,7 @@ class GraphCache:
             await self._coord_redis.set(
                 _genat_key(scope), datetime.now(timezone.utc).isoformat(),
             )
+            await self._drop_built(scope)
         except RedisError as exc:
             logger.warning(
                 "graph_cache: generation bump failed for %s (%s); "
@@ -743,6 +744,7 @@ class GraphCache:
             for scope in scopes:
                 pipe.incr(key_fn(scope))
                 pipe.set(_genat_key(scope), now_iso)
+            await self._drop_built(*scopes)
             await pipe.execute()
         except RedisError as exc:
             logger.warning(
@@ -1008,6 +1010,33 @@ class GraphCache:
         except Exception as exc:                    # noqa: BLE001 — never a hard dep
             logger.debug("graph_cache: oversized marker write failed (%s)", exc)
 
+    async def _drop_built(self, *scopes: CacheScope) -> None:
+        """Forget the built-at stamp for these scopes: the generation just
+        moved, so every entry it described is unreachable.
+
+        Without this the stamp outlives what it claims by up to a full TTL —
+        an hour on the children/aggregated/top-level/canvas endpoints — and
+        the row says "Cached · built 40 minutes ago" over a scope with zero
+        reachable entries. That is the same lie the stamp was added to
+        remove, merely bounded.
+
+        It also removes the need to compare versions at all: a stamp that
+        only survives while its generation does IS "built at the version
+        being served". Best-effort and on the CACHE client, where the stamp
+        lives; a bump that cannot reach it degrades to the old behaviour
+        (a stamp expiring on its own TTL) rather than failing the write
+        path that invalidated.
+        """
+        if not scopes:
+            return
+        try:
+            pipe = self._cache_redis.pipeline(transaction=False)
+            for scope in scopes:
+                pipe.delete(_builtat_key(scope))
+            await pipe.execute()
+        except Exception as exc:  # noqa: BLE001 — never fail an invalidation
+            logger.debug("graph_cache: built-at drop failed: %s", exc)
+
     async def _note_built(
         self, scope: CacheScope, endpoint: str,
         ttl_seconds: Optional[int], generation: str,
@@ -1246,6 +1275,15 @@ class GraphCache:
             logger.warning("graph_cache: mirror read failed (%s)", exc)
             return None
         await self._set(cache_key, warm, ttl_seconds, endpoint, payload=body)
+        # A promotion IS a fill: the bytes now under the primary key were put
+        # there just now, which is what "built" claims. Without this the stamp
+        # went blank for the whole window between the primary entry expiring
+        # and a real recompute — so a cache serving promoted hits on every key
+        # rendered "Not cached / nothing warm stored", on exactly the steady
+        # read pattern the stamp was added to describe. The promotion only
+        # fires when the mirror's stamp matches ``gen``, so recording it keeps
+        # the generation honest.
+        await self._note_built(scope, endpoint, ttl_seconds, gen)
         return warm
 
 

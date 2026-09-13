@@ -574,12 +574,19 @@ export function FreshnessRow({
                     {row.cacheAsOf && (
                         <TimeStamp at={row.cacheAsOf} prefix="invalidated" icon={RotateCcw} />
                     )}
-                    {row.generation != null && (
+                    {row.cacheBuiltGeneration != null && (
+                        // The version the stored answer was built at, which
+                        // IS the version being served: the stamp is dropped
+                        // when the generation moves, so one that resolves
+                        // cannot be behind. There is deliberately no
+                        // comparison against `row.generation` — that is the
+                        // CONTENT counter alone, while this is the composite
+                        // "content.rollup" that rollup endpoints key on, so
+                        // comparing them warned permanently on every healthy
+                        // rollup source and never moved on the commonest
+                        // invalidation of all.
                         <span className="text-[10px] text-ink-muted tabular-nums" data-testid="cache-version">
-                            v{row.generation}
-                            {row.cacheBuiltGeneration != null
-                                && row.cacheBuiltGeneration !== String(row.generation)
-                                && ` · serving v${row.cacheBuiltGeneration}`}
+                            serving v{row.cacheBuiltGeneration}
                         </span>
                     )}
                 </div>

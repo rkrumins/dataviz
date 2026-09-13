@@ -661,8 +661,15 @@ async def test_bump_generations_pipelines_incrs() -> None:
     await cache.bump_generations(scopes)
 
     assert pipe.incr.call_count == 5
-    pipe.execute.assert_awaited_once()
     redis.incr.assert_not_awaited()  # nothing bumped outside the pipeline
+    # TWO pipelined round-trips, not one: the bump on the coordination client
+    # and the built-at drop on the cache client, which is a different Redis
+    # in production. Both are batched — the property this test defends is
+    # that neither is O(scopes) in round-trips, not that there is exactly
+    # one of them.
+    assert pipe.execute.await_count == 2
+    assert pipe.delete.call_count == 5
+    redis.delete.assert_not_awaited()
 
 
 # ─── genat cache-as-of stamp (OPS Freshness Cockpit foundation) ────────
@@ -686,8 +693,13 @@ async def test_bump_generation_sets_genat_stamp() -> None:
 
 @pytest.mark.asyncio
 async def test_bump_generations_pipelines_genat_sets() -> None:
-    """Bulk bumps set the genat stamp in the SAME pipeline — one genat SET
-    per scope, no extra round-trips."""
+    """Bulk bumps set the genat stamp in the SAME pipeline as the INCRs —
+    one genat SET per scope, and no round-trip that scales with the scopes.
+
+    The built-at drop is a second pipeline, deliberately: that stamp lives on
+    the cache client beside the entries, which is a different Redis in
+    production, and it has to go when the generation moves or it claims a
+    warm cache over one that was just emptied."""
     from unittest.mock import MagicMock
 
     redis = _make_redis()
@@ -703,7 +715,8 @@ async def test_bump_generations_pipelines_genat_sets() -> None:
 
     assert pipe.incr.call_count == 5
     assert pipe.set.call_count == 5
-    pipe.execute.assert_awaited_once()
+    assert pipe.execute.await_count == 2      # the bump, then the built-at drop
+    assert pipe.delete.call_count == 5        # batched, not one per scope
     redis.set.assert_not_awaited()  # nothing set outside the pipeline
 
 
@@ -3258,3 +3271,52 @@ def test_the_row_splits_the_stamp_into_two_plain_fields():
     )
     for junk in (None, "", 123, {}):
         assert _split_built_at(junk) == (None, None)
+
+
+def test_an_invalidation_forgets_the_built_stamp():
+    """A bump makes every entry unreachable. A stamp that survived it would
+    say "Cached · built 40 minutes ago" over a scope with nothing in it —
+    the same lie the stamp was added to remove, merely bounded to one TTL.
+
+    Dropping it also removes the need to compare versions at all: a stamp
+    that only lives as long as its generation IS "built at the version being
+    served"."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    assert "await self._drop_built(scope)" in inspect.getsource(gc.GraphCache._bump_one)
+    assert "await self._drop_built(*scopes)" in inspect.getsource(gc.GraphCache._bump_many)
+    drop = inspect.getsource(gc.GraphCache._drop_built)
+    # On the cache client, where the stamp lives — not the coordination one.
+    assert "self._cache_redis" in drop
+    assert "_builtat_key(scope)" in drop
+
+
+def test_a_promoted_mirror_counts_as_built():
+    """Promotion re-stores the primary entry — the bytes under that key were
+    put there just now, which is what "built" claims. Without this the stamp
+    went blank between the primary expiring and the next real recompute, so a
+    cache serving promoted hits on every key read as "nothing warm stored"."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    src = inspect.getsource(gc.GraphCache._promote_mirror)
+    assert "await self._note_built(scope, endpoint, ttl_seconds, gen)" in src
+    # After the re-store, not before it.
+    assert src.index("await self._set(cache_key, warm") < src.index("await self._note_built(")
+
+
+def test_the_fleet_summary_counts_what_the_rows_count():
+    """Two numbers on one screen that disagree by the whole fleet is the
+    complaint that started this, relocated from the row to the header."""
+    import inspect
+
+    from backend.app.services.aggregation import service
+
+    src = inspect.getsource(service._summarize_freshness)
+    assert "if built_at:" in src
+    assert "if cache_as_of:" not in src, (
+        "the summary must count what is STORED, not what was invalidated once"
+    )
