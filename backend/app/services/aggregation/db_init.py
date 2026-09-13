@@ -250,6 +250,19 @@ async def init_aggregation_db() -> None:
                 # JSON hints the next run starts from, never widening a knob.
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS observed_tuning TEXT NULL",
+                # Indexes for the three queries that run on every tick and
+                # every page (2026-09-13), mirrored in alembic
+                # 20260913_1000_job_scan_indexes. The reconciler's
+                # status-only sweep could not use ix_agg_jobs_ds_status,
+                # which leads with data_source_id, so it scanned the whole
+                # table — including run_stats — every 30 seconds.
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_active ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (status) "
+                "WHERE status IN ('pending', 'running')",
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_completed ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, completed_at)",
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_updated ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, updated_at)",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

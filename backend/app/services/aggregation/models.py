@@ -181,6 +181,29 @@ class AggregationJobORM(Base):
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
         Index("ix_agg_jobs_created_at", "created_at"),
         Index("ix_agg_jobs_workspace", "workspace_id"),
+        # The stuck-job reconciler asks "which rows are pending or running?"
+        # every 30 seconds, forever. ``ix_agg_jobs_ds_status`` leads with
+        # data_source_id, so it cannot serve that question at all and the
+        # sweep was a sequential scan of the whole table — hydrating full ORM
+        # entities, ``run_stats`` (tens of KB per row) included. With hundreds
+        # of sources the table grows by 10²-10³ rows a day, so the cost of the
+        # loop grows with the history it has no interest in. Partial, because
+        # active rows are a vanishing fraction of the table and the index
+        # should stay the size of the working set rather than the archive.
+        Index(
+            "ix_agg_jobs_active",
+            "status",
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+        # "The last completed run of this source" (the ETA baseline) and "the
+        # last failure of this source" (the freshness reason), both once per
+        # source per page of the fleet view. Without these each one sorts an
+        # unindexed TEXT column across every historical row of the source.
+        Index(
+            "ix_agg_jobs_ds_completed",
+            "data_source_id", "completed_at",
+        ),
+        Index("ix_agg_jobs_ds_updated", "data_source_id", "updated_at"),
         Index(
             "ix_agg_jobs_idem_active",
             "data_source_id",
