@@ -11,6 +11,7 @@ The live socket is covered by the real-FalkorDB module (CI / ``dev.sh infra``).
 """
 import asyncio
 import os
+import re
 
 import pytest
 
@@ -47,12 +48,39 @@ class FakeGraph:
         # (a trivial read that never touches the graph); a reachable instance answers it.
         if cypher == "RETURN 1":
             return _Result([[1]])
-        # projection verify (Part 1E) — mirrors _falkor_counts: exclude rollup-derived artifacts
-        # (the :AGGREGATED layer and its _GVRollupMeta marker) the same way FalkorDB's WHERE does.
-        if cypher == "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c":
-            return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") != "_GVRollupMeta")]])
-        if cypher == "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c":
-            return _Result([[sum(1 for e in self.edges.values() if e.get("type") != "AGGREGATED")]])
+        # Projection verify (Part 1E) — mirrors `reconcile.falkor_counts`: exclude the
+        # rollup-derived artifacts (the :AGGREGATED layer and the DERIVED_LABELS markers)
+        # the same way FalkorDB's WHERE does.
+        #
+        # EVALUATED, never string-matched. A literal `cypher == "…"` here is a booby trap:
+        # `falkor_counts` grew two more DERIVED_LABELS into its WHERE clause, this fake
+        # stopped recognising the query, and `_verify_and_heal` catches ANY count failure
+        # as "verify skipped -> publish". Four e2e tests that exist to prove the projector
+        # HOLDS BACK on a mismatch were therefore testing nothing, in the exact machinery
+        # that wedged a projection for 14 hours. Parse the exclusions out of the clause so
+        # the fake tracks the real cypher instead of a snapshot of it.
+        m = re.fullmatch(
+            r"MATCH \(n\)(?: WHERE (.+?))? RETURN count\(n\) AS c", cypher.strip()
+        )
+        if m:
+            excluded = set(re.findall(r"NOT '([^']+)' IN labels\(n\)", m.group(1) or ""))
+            if m.group(1) and not excluded:
+                raise AssertionError(
+                    f"node-count WHERE clause is no longer label exclusions: {cypher!r}"
+                )
+            return _Result([[sum(1 for n in self.nodes.values()
+                                 if n.get("_label") not in excluded)]])
+        m = re.fullmatch(
+            r"MATCH \(\)-\[r\]->\(\)(?: WHERE (.+?))? RETURN count\(r\) AS c", cypher.strip()
+        )
+        if m:
+            excluded = set(re.findall(r"type\(r\) <> '([^']+)'", m.group(1) or ""))
+            if m.group(1) and not excluded:
+                raise AssertionError(
+                    f"edge-count WHERE clause is no longer type exclusions: {cypher!r}"
+                )
+            return _Result([[sum(1 for e in self.edges.values()
+                                 if e.get("type") not in excluded)]])
         # Content-verify scans (reconciler primitives the full-seed verify now runs): the sorted
         # id-set streams + the deep urn fetch, over the same in-memory graph. entityId IS NOT NULL
         # / rollup exclusion mirror the real scan's guards.

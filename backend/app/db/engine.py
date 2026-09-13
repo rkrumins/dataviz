@@ -106,7 +106,7 @@ _POOL_DEFAULTS: dict[PoolRole, dict[str, int]] = {
     # GRAPH_READ absorbs the per-source fan-out (bounded to 4-wide on the FE
     # now). Kept modest so it can't dominate the Postgres budget; graph reads
     # fast-fail (~1.5s) on a down provider so holds are short. Env override:
-    # DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_MAX_OVERFLOW.
+    # DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_POOL_MAX_OVERFLOW.
     PoolRole.GRAPH_READ:     {"pool_size": 10, "max_overflow": 10},
     PoolRole.ADMIN:          {"pool_size": 2,  "max_overflow": 0},
 }
@@ -187,6 +187,20 @@ def _pool_kwargs(role: PoolRole) -> dict:
         "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECS", "1800")),
         "pool_pre_ping": os.getenv("DB_POOL_PRE_PING", "true").lower() == "true",
     }
+
+
+def graph_read_pool_capacity() -> int:
+    """Total GRAPH_READ sessions one process can hold at once (pool + overflow).
+
+    The graph endpoints hold one of these across the whole outbound provider
+    call, so this number IS the ceiling on concurrent graph requests per
+    worker — and it is shared by every data source. The admission gate in
+    ``providers/manager.py`` derives its per-source reservation from it so the
+    two can never drift into a state where one slow data source can occupy
+    the entire pool and 503 the others (see ``PROVIDER_SOURCE_RESERVED``).
+    """
+    kw = _pool_kwargs(PoolRole.GRAPH_READ)
+    return int(kw["pool_size"]) + int(kw["max_overflow"])
 
 
 def _pooler_disables_prepared_statements() -> bool:

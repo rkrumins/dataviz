@@ -583,7 +583,7 @@ export async function updateViewVisibility(viewId: string, visibility: string): 
     // own message, and several of them say something the generic card
     // cannot — which view of a bulk selection failed, or that the details
     // saved but the visibility did not. Without this the user gets the
-    // same refusal twice, once as a global card and once as a toast, and
+    // same refusal twice, once as a global card and once as a notification, and
     // the vaguer of the two is the one that stays on screen longest.
     return apiFetch<View>(`/api/v1/views/${viewId}/visibility`, {
         method: 'PUT',

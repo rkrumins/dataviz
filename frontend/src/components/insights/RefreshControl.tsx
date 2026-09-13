@@ -26,7 +26,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { RefreshCw, MoreHorizontal, Zap, Clock, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useDiscoveryStatus } from '@/hooks/useDiscoveryStatus'
 import { useInsightsConfig } from '@/hooks/useInsightsConfig'
 import { insightsAdminService } from '@/services/insightsAdminService'
@@ -70,7 +70,7 @@ export function RefreshControl({
     disabled = false,
     className,
 }: RefreshControlProps) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const config = useInsightsConfig()
     const status = useDiscoveryStatus()
 
@@ -112,19 +112,19 @@ export function RefreshControl({
         try {
             const result = await insightsAdminService.triggerDiscoveryTick()
             const enqueued = (result.list_jobs ?? 0) + (result.asset_jobs ?? 0)
-            showToast(
+            notify(
                 'success',
                 `Discovery tick fired — ${enqueued} job(s) enqueued across ${result.providers ?? 0} provider(s).`,
             )
         } catch (err: any) {
-            showToast(
+            notify(
                 'error',
                 `Discovery tick failed: ${err?.message ?? 'unknown error'}`,
             )
         } finally {
             setTickInFlight(false)
         }
-    }, [tickInFlight, showToast])
+    }, [tickInFlight, notify])
 
     return (
         <div

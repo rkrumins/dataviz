@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { relationshipLabel, parentPlacementPhrase } from '../relationshipLabel'
+import { relationshipLabel, parentPlacementPhrase, edgeTypeCopy } from '../relationshipLabel'
 
 describe('relationshipLabel', () => {
   it('humanizes camelCase ids', () => {
@@ -28,5 +28,23 @@ describe('parentPlacementPhrase', () => {
   it('defaults to "Part of" for unknown/empty', () => {
     expect(parentPlacementPhrase(undefined)).toBe('Part of')
     expect(parentPlacementPhrase('')).toBe('Part of')
+  })
+})
+
+describe('edgeTypeCopy', () => {
+  it('gives the system AGGREGATED type its plain-English wording', () => {
+    expect(edgeTypeCopy('AGGREGATED')).toEqual({
+      label: 'Combined flow',
+      description: 'Many detailed flows between two items, shown as one connection.',
+    })
+  })
+
+  it('matches the id case-insensitively', () => {
+    expect(edgeTypeCopy('aggregated')).toEqual(edgeTypeCopy('AGGREGATED'))
+  })
+
+  it('returns null for a type it has no opinion about', () => {
+    expect(edgeTypeCopy('FLOWS_TO')).toBeNull()
+    expect(edgeTypeCopy('')).toBeNull()
   })
 })

@@ -207,6 +207,10 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
         staleTime: 30_000,
     })
     if (!data) return null
+    // Both verdicts mean version control owns this source's rollups; they
+    // differ only in whether it is currently publishing them.
+    const versionControlled = data.driftState === 'managed'
+        || data.driftState === 'projectionStalled'
     return (
         <Card className="p-5">
             <div className="flex items-center gap-2 mb-3">
@@ -222,10 +226,25 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
                 )}
                 {/* Suppressed for a versioned graph: telling someone to
                     re-aggregate a source whose rollups version control rebuilds
-                    on every publish contradicts the badge below it. */}
-                {data.driftDetected && data.driftState !== 'managed' && (
+                    on every publish contradicts the badge below it. A source
+                    whose projector has stalled is suppressed for a sharper
+                    reason — re-aggregating is precisely the action that cannot
+                    help it, and the line below says what can. */}
+                {data.driftDetected && !versionControlled && (
                     <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
                         Source changed since last aggregation — re-aggregate from the workspace to refresh.
+                    </p>
+                )}
+                {/* Version control is not publishing this source's rolled-up
+                    connections, so lineage read from it is incomplete right
+                    now. Gated on ``projectorCurrent === false`` and never on
+                    ``isReady``, which deliberately stays true under a wedge —
+                    and never on null, which means UNKNOWN, not healthy. */}
+                {data.projectorCurrent === false && (
+                    <p className="mt-2 text-[11px] text-red-600 dark:text-red-400">
+                        This source's rolled-up connections are not up to date, so its
+                        lineage may look incomplete. Rebuilding will not fix it — open
+                        Freshness for what to do.
                     </p>
                 )}
                 {/* The reconciliation verdict, with a way through to the
@@ -235,20 +254,22 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
                         <DriftStateBadge state={data.driftState} />
                         {/* A versioned source is not "automation off" — the
-                            sweep deliberately never acts on it — and the
-                            drifting filter would not contain it, so the link
-                            would land on a list it is absent from. The badge's
-                            own tooltip carries the explanation. */}
+                            sweep deliberately never acts on it — so that badge
+                            stays hidden for both version-controlled verdicts.
+                            The link does NOT: a healthy versioned source has
+                            nothing to open (it appears in no drift filter), but
+                            a stalled one is exactly the row the cockpit can
+                            explain, and it opens directly on that source. */}
+                        {!versionControlled && data.autoReconcile === false && (
+                            <AutoReconcileOffBadge />
+                        )}
                         {data.driftState !== 'managed' && (
-                            <>
-                                {data.autoReconcile === false && <AutoReconcileOffBadge />}
-                                <Link
-                                    to={`/ingestion?tab=freshness&fds=${dataSourceId}`}
-                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
-                                >
-                                    Open Freshness <ArrowUpRight className="w-3 h-3" />
-                                </Link>
-                            </>
+                            <Link
+                                to={`/ingestion?tab=freshness&fds=${dataSourceId}`}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                            >
+                                Open Freshness <ArrowUpRight className="w-3 h-3" />
+                            </Link>
                         )}
                     </div>
                 )}

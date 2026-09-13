@@ -20,7 +20,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   useLivePrForBranch: () => ({ livePr, pending: false }),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
 vi.mock('@/store/branchStore', () => ({
   useBranchStore: (sel: (s: unknown) => unknown) => sel({ switchToMain: vi.fn() }),
 }))

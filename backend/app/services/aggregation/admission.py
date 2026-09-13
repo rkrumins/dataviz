@@ -58,6 +58,19 @@ than a briefly over-admitted endpoint)."""
 _GRAPH_LEASE_TTL_MS = int(os.getenv("AGGREGATION_GRAPH_LEASE_TTL_MS", "60000"))
 _GRAPH_LEASE_RENEW_SECS = _GRAPH_LEASE_TTL_MS / 1000 / 3
 
+_READ_PRESSURE_PREFIX = "agg:readpressure"
+_READ_PRESSURE_POLL_SECS = float(os.getenv("AGGREGATION_READ_PRESSURE_POLL_SECS", "2"))
+"""How long a read-pressure verdict is reused before Redis is asked again.
+One GET per write batch would already be cheap; one per couple of seconds
+is free. The key's own TTL (``AGGREGATION_READ_PRESSURE_TTL_S``, stamped
+by the web tier — see ``read_pressure.py``) bounds how stale a verdict
+can be."""
+
+
+def read_pressure_key(endpoint: str) -> str:
+    """Where the web tier says interactive reads are starving on ``endpoint``."""
+    return f"{_READ_PRESSURE_PREFIX}:{endpoint}"
+
 _ACQUIRE_SLOT_LUA = """
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
@@ -137,6 +150,8 @@ class AggregationAdmission:
     def __init__(self, redis_client: Any) -> None:
         self._redis = redis_client
         self._warned_at = 0.0
+        # endpoint key → (checked_at, reason) — see read_pressure()
+        self._read_pressure_memo: dict[str, tuple[float, Optional[str]]] = {}
 
     # -- fail-open logging ---------------------------------------------------
 
@@ -307,6 +322,28 @@ class AggregationAdmission:
         except Exception as exc:
             # TTL cleans up within 60s — releasing is best-effort.
             self._warn_fail_open("graph-lease release", exc)
+
+    # -- read pressure: interactive reads first -----------------------------------
+
+    async def read_pressure(self, provider: Any) -> Optional[str]:
+        """Why the web tier last reported interactive reads starving on this
+        provider's endpoint (``queue_full``, ``server_timeout``, ``deadline``),
+        or None. The materializer's pacing loop stretches its sleep-after-
+        write while this is set. Memoised for ``_READ_PRESSURE_POLL_SECS``;
+        fails open to None like everything else here."""
+        key = read_pressure_key(endpoint_key(provider))
+        now = time.monotonic()
+        memo = self._read_pressure_memo.get(key)
+        if memo is not None and now - memo[0] < _READ_PRESSURE_POLL_SECS:
+            return memo[1]
+        try:
+            value = await self._redis.get(key)
+        except Exception as exc:  # noqa: BLE001 — fail open
+            self._warn_fail_open("read-pressure check", exc)
+            value = None
+        reason = str(value) if value else None
+        self._read_pressure_memo[key] = (now, reason)
+        return reason
 
     # -- per-endpoint write slots -------------------------------------------------
 

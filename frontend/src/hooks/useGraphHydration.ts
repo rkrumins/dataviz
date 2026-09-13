@@ -13,8 +13,9 @@ import {
     useViewEntityTypes,
     useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
-import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
-import { BoundedQueue } from '@/lib/concurrency'
+import type { GraphNode, GraphEdge, EntityTypeDefinition, NodeQuery } from '@/providers/GraphDataProvider'
+import { BoundedQueue, mapWithConcurrency } from '@/lib/concurrency'
+import { classifyGraphFailure } from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
@@ -51,6 +52,21 @@ const CHILD_LOAD_CONCURRENCY = (() => {
     return Number.isFinite(fromEnv) && fromEnv >= 1 ? fromEnv : 6
 })()
 
+/**
+ * Cap on parallel node batches during the INITIAL load of a view. A curated
+ * view loads its assigned entities 100 URNs per request; a 2,000-entity view
+ * used to fire all 20 at once, and the backend — which admits ~8 concurrent
+ * calls per data source and sheds the rest with 429 — bounced the tail of
+ * the view's own burst. Four keeps the browser's per-host connection budget
+ * free for the edge fetch and the rest of the app, and is friendlier to slow
+ * links than 20 simultaneous uploads of URN lists. Tune via
+ * VITE_HYDRATION_CONCURRENCY.
+ */
+const HYDRATION_CONCURRENCY = (() => {
+    const fromEnv = Number(import.meta.env?.VITE_HYDRATION_CONCURRENCY)
+    return Number.isFinite(fromEnv) && fromEnv >= 1 ? fromEnv : 4
+})()
+
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
 interface LoadChildrenOptions {
@@ -60,39 +76,117 @@ interface LoadChildrenOptions {
     sortDirection?: 'asc' | 'desc'
 }
 
+/**
+ * What one child page actually delivered. Returned by `loadChildren` so the
+ * CALLER can decide whether to say something about it and in what words — the
+ * hook itself stays silent, because GraphCanvas and HierarchyCanvas share it
+ * and neither announces a load. Only ContextViewCanvas's two user-initiated
+ * call sites (expand, "Load N more") speak.
+ */
+export interface ChildLoadSummary {
+    /** The container's display name — the subject of the message. */
+    parentLabel: string
+    /** The container's entity type id. */
+    parentType?: string
+    /** Children this page returned. Zero = nothing more to load. */
+    arrived: number
+    /** Children already loaded before this page — 0 means this was page 1. */
+    offset: number
+    /** The container's declared total, when it has one. */
+    total?: number
+    /** Distinct entity types among this page's children — one means the message can use its schema noun. */
+    childTypes: string[]
+}
+
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
 
 /**
  * Authoritative hydration state machine. ALL terminal canvas UI (empty state,
- * provider overlay, success toasts) derives from this single value so the
+ * provider overlay, success notifications) derives from this single value so the
  * "genuinely empty" and "failed/loading" cases can never be confused — not
  * even transiently during an auto-retry. Transitions:
  *   loading → ready        (a fetch SUCCEEDED — canvas renders; empty-state
  *                           only if it returned 0 nodes)
  *   loading → warming      (provider is loading its dataset — friendly overlay)
- *   loading → unavailable  (provider down / hard error — overlay)
- *   warming/unavailable → ready  (a retry succeeded)
- * A retry NEVER leaves warming/unavailable until it actually succeeds, so the
+ *   loading → slow         (a request was too slow, was shed, or hit a
+ *                           transient gateway/session problem — the provider
+ *                           is reachable; calm overlay, keep retrying)
+ *   loading → unavailable  (the backend CONFIRMED the provider is unreachable
+ *                           — overlay)
+ *   loading → error        (code threw while the load ran — a UI library
+ *                           reading a property of undefined, a body that was
+ *                           not JSON. A bug, named as such: never rendered as
+ *                           an outage, never counted by the breaker, retried
+ *                           at the same calm cadence as `slow`)
+ *   warming/slow/unavailable/error → ready  (a retry succeeded)
+ * A retry NEVER leaves a failed state until it actually succeeds, so the
  * overlay stays put and "Start building" can't flash between attempts.
+ *
+ * `slow` exists because the canvas used to read every failure that was not a
+ * warming provider as an outage: a 504 from a slow query, a 429 from the
+ * backend shedding the view's own burst, a 401 from a just-expired access
+ * token, a client-side timeout on a slow link — all rendered "Graph service
+ * is unavailable" over a FalkorDB that was serving fine.
  */
-export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'unavailable'
+export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'slow' | 'unavailable' | 'error'
+
+/** The four ways a load can end without data. See {@link HydrationStatus}. */
+export type HydrationFailure = 'warming' | 'slow' | 'unavailable' | 'error'
 
 /** Thrown by the reference-view load when the view SHOULD have entities
  *  (has assignments / branch-created delta) but every fetch failed — so the
- *  canvas surfaces the failure instead of a false "empty / Start building".
- *  `warming` = the provider is starting up (retryable), vs a hard outage. */
+ *  canvas surfaces the failure instead of a false "empty / Start building". */
 class HydrationLoadError extends Error {
-    constructor(public warming: boolean) {
-        super(warming ? 'PROVIDER_LOADING' : 'provider-unavailable')
+    constructor(public kind: HydrationFailure) {
+        super(
+            kind === 'warming' ? 'PROVIDER_LOADING'
+                : kind === 'unavailable' ? 'provider-unavailable'
+                : kind === 'error' ? 'application-error'
+                : 'provider-slow',
+        )
         this.name = 'HydrationLoadError'
     }
 }
 
+/** Map a rejected load to the state the canvas should show. Anything the
+ *  shared classification calls transient (a slow, shed, or session-repair
+ *  failure) is `slow`; only a backend-confirmed outage is `unavailable`; an
+ *  engine error thrown by code is `error`, never either of those. */
+export function toHydrationFailure(err: unknown): HydrationFailure {
+    if (err instanceof HydrationLoadError) return err.kind
+    const kind = classifyGraphFailure(err)
+    return kind === 'transient' ? 'slow' : kind
+}
+
+const FAILURE_SEVERITY: Record<HydrationFailure, number> = { slow: 0, error: 1, warming: 2, unavailable: 3 }
+
+/** The state for a load whose batches failed in more than one way: a
+ *  confirmed outage outranks a warming provider, which outranks a thrown
+ *  error, which outranks slowness. */
+export function worstHydrationFailure(errors: readonly unknown[]): HydrationFailure {
+    let worst: HydrationFailure = 'slow'
+    for (const err of errors) {
+        const kind = toHydrationFailure(err)
+        if (FAILURE_SEVERITY[kind] > FAILURE_SEVERITY[worst]) worst = kind
+    }
+    return worst
+}
+
+const HYDRATION_FAILURE_MESSAGE: Record<HydrationFailure, string> = {
+    warming: 'Your graph is starting up…',
+    slow: 'Your graph is taking longer than usual to load. Retrying automatically…',
+    unavailable: 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.',
+    error: 'This view hit an error while loading. Your data is safe — retrying automatically; a refresh usually clears it.',
+}
+
+/** True for the states in which a load ended without (complete) data. */
+export function isHydrationFailure(status: HydrationStatus): status is HydrationFailure {
+    return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error'
+}
+
 export interface UseGraphHydrationResult {
     /** Load children for a node (empty string = load roots). */
-    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<void>
-    /** Search children under a parent node. */
-    searchChildren: (parentId: string, query: string) => Promise<void>
+    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<ChildLoadSummary | undefined>
     /**
      * Cancel a pending or in-flight `loadChildren` for the given parent.
      * Queued tasks are dropped silently; in-flight network requests
@@ -129,7 +223,7 @@ interface UseGraphHydrationOptions {
      * When true, runs the initial hydration effect that loads root nodes + edges
      * on mount / view change. Only ONE component should set this to true
      * (CanvasRouter). All other consumers should leave it false (default) and
-     * only use loadChildren / searchChildren.
+     * only use loadChildren.
      */
     hydrate?: boolean
 }
@@ -319,7 +413,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // This effect ONLY fires in CanvasRouter. Individual canvas components
     // (HierarchyCanvas, ContextViewCanvas, etc.) call useGraphHydration()
     // without { hydrate: true }, so they skip this entirely and only use
-    // loadChildren / searchChildren.
+    // loadChildren.
 
     useEffect(() => {
         if (!enableHydration) return
@@ -379,16 +473,34 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setHydrationPhase('complete')
         }
 
-        // Clear the canvas nodes for the fresh attempt. Do NOT clear
-        // hydrationError/status on a RETRY — that's what caused the overlay to
-        // blink to "Start building" between attempts; a retry only clears them
-        // by SUCCEEDING (markReady) below.
-        setGraph([], [])
-        // Fresh attempt → fresh edge-integrity state; failures from the
-        // previous attempt would otherwise keep the incomplete-canvas
-        // banner up after a clean reload.
+        // A load that rendered SOME of the view but not all of it: the nodes
+        // that arrived stay on screen, the status records why the rest did
+        // not, and the retry loop keeps trying for the remainder. Not 'ready'
+        // — 'ready' means complete — and not the blocking overlay either: the
+        // canvas has data, so CanvasRouter shows a pill over it instead.
+        const markPartial = (failure: HydrationFailure) => {
+            setHydrationStatus(failure)
+            setHydrationError(HYDRATION_FAILURE_MESSAGE[failure])
+            setHydrationPhase('complete')
+        }
+
+        // Clear the canvas ONLY for a genuinely new view. A reload of the SAME
+        // view — a retry after a failed or partial load, a schema-deps churn —
+        // keeps what is on screen until the new load lands (`setGraph` below
+        // replaces atomically), so a slow provider never wipes a canvas the
+        // user is reading; the overlay/pill say a refresh is in progress. The
+        // empty-state gate is status==='ready' && nodes===0, so kept nodes can
+        // never leak into "Start building". Do NOT clear hydrationError/status
+        // on a RETRY either — that's what caused the overlay to blink to "Start
+        // building" between attempts; a retry only clears them by SUCCEEDING
+        // (markReady) below.
+        if (isFreshView) setGraph([], [])
+        // Fresh attempt → fresh integrity state; failures from the previous
+        // attempt would otherwise keep the incomplete-canvas banner/pill up
+        // after a clean reload.
         useCanvasStore.getState().clearEdgeFetchFailures()
         useCanvasStore.getState().setEdgesTruncated(false)
+        useCanvasStore.getState().clearNodeFetchFailures()
 
         const controller = new AbortController()
 
@@ -430,21 +542,33 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // (0 outside a draft / with an empty delta) — logging only.
                     let deltaLoadedCount = 0
 
-                    // Track whether any node fetch FAILED (vs legitimately returned
-                    // []). A per-batch .catch(()=>[]) tolerates a partial failure,
-                    // but must not silently turn a TOTAL failure into "empty graph"
+                    // Track every node fetch that FAILED (vs legitimately returned
+                    // []). A failed batch is tolerated when others succeeded, but
+                    // must not silently turn a TOTAL failure into "empty graph"
                     // — that's what rendered a warming provider as "Start building".
-                    let anyBatchErrored = false
-                    let anyWarming = false
-                    const safeGetNodes = async (q: Parameters<typeof provider.getNodes>[0]): Promise<GraphNode[]> => {
-                        try {
-                            return await provider.getNodes(q)
-                        } catch (e) {
-                            anyBatchErrored = true
-                            if (String((e as Error)?.message ?? e).includes('PROVIDER_LOADING')) anyWarming = true
-                            return [] as GraphNode[]
-                        }
+                    // Batches run through a small pool (HYDRATION_CONCURRENCY), not
+                    // all at once: the backend sheds the tail of an oversized burst
+                    // with 429, and a shed batch is a failed batch.
+                    const batchErrors: unknown[] = []
+                    // Assigned entities inside the batches that failed — what a
+                    // partial load is missing, by count, for the pill.
+                    let missingEntities = 0
+                    const loadNodeBatches = async (queries: NodeQuery[]): Promise<GraphNode[]> => {
+                        const settled = await mapWithConcurrency(
+                            queries, HYDRATION_CONCURRENCY, q => provider.getNodes(q),
+                        )
+                        const loaded: GraphNode[] = []
+                        settled.forEach((outcome, i) => {
+                            if (outcome.status === 'fulfilled') {
+                                loaded.push(...outcome.value)
+                            } else {
+                                batchErrors.push(outcome.reason)
+                                missingEntities += queries[i].urns?.length ?? 0
+                            }
+                        })
+                        return loaded
                     }
+                    const totalFailure = () => new HydrationLoadError(worstHydrationFailure(batchErrors))
 
                     if (loadByUrn) {
                         // ── Assignment-driven loading (curated scope) ──
@@ -461,12 +585,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             urnBatches.push(urnArray.slice(i, i + 100))
                         }
 
-                        const batchResults = await Promise.all(
-                            urnBatches.map(batch =>
-                                safeGetNodes({ urns: batch as any[], limit: batch.length })
-                            )
+                        allNodes = await loadNodeBatches(
+                            urnBatches.map(batch => ({ urns: batch as any[], limit: batch.length })),
                         )
-                        allNodes = batchResults.flat()
                         if (controller.signal.aborted) return
 
                         // Children are NOT prefetched. Top-level assigned entities
@@ -486,19 +607,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             return
                         }
 
-                        const rootResults = await Promise.all(
-                            rootTypes.map(et =>
-                                safeGetNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
-                            )
+                        allNodes = await loadNodeBatches(
+                            rootTypes.map(et => ({ entityTypes: [et], limit: PER_TYPE_LIMIT })),
                         )
-                        allNodes = rootResults.flat()
                         if (controller.signal.aborted) return
                         if (allNodes.length === 0) {
-                            // Any fetch error → warming/outage, not "empty" (see the
-                            // shared empty-check above for the rationale).
-                            if (anyBatchErrored) {
-                                throw new HydrationLoadError(anyWarming)
-                            }
+                            // Any fetch error → warming/slow/outage, not "empty" (see
+                            // the shared empty-check above for the rationale).
+                            if (batchErrors.length > 0) throw totalFailure()
                             markReady()
                             return
                         }
@@ -508,12 +624,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         const loadedRootTypes = new Set(allNodes.map(n => n.entityType))
                         const remainingTypes = viewTypes.filter(t => !loadedRootTypes.has(t))
                         if (remainingTypes.length > 0) {
-                            const childResults = await Promise.all(
-                                remainingTypes.map(et =>
-                                    safeGetNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
-                                )
+                            const childNodes = await loadNodeBatches(
+                                remainingTypes.map(et => ({ entityTypes: [et], limit: PER_TYPE_LIMIT })),
                             )
-                            const childNodes = childResults.flat()
                             if (controller.signal.aborted) return
                             allNodes = [...allNodes, ...childNodes]
                         }
@@ -523,17 +636,28 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // Distinguish "failed to load" from "genuinely empty" by the
                         // ONLY reliable signal: did a fetch error? A healthy provider
                         // returns [] with no error for a truly empty view; a
-                        // down/warming provider throws. If ANY fetch errored we must
-                        // surface warming/outage (overlay + auto-retry) — never a false
-                        // "No entities yet / Start building" over data that may exist.
-                        // (Assignments/draft-state are NOT part of this decision — a
-                        // Published view with no assignments still must not lie "empty"
-                        // when the provider is down.)
-                        if (anyBatchErrored) {
-                            throw new HydrationLoadError(anyWarming)
-                        }
+                        // down/warming/overloaded provider throws. If ANY fetch errored
+                        // we must surface the failure (overlay + auto-retry) — never a
+                        // false "No entities yet / Start building" over data that may
+                        // exist. (Assignments/draft-state are NOT part of this decision
+                        // — a Published view with no assignments still must not lie
+                        // "empty" when the provider is down.)
+                        if (batchErrors.length > 0) throw totalFailure()
                         markReady()   // empty view — terminal, not a stall
                         return
+                    }
+                    const partial = batchErrors.length > 0
+                    if (partial) {
+                        // Partial: render what arrived rather than nothing, but
+                        // never pretend it is complete — the store records the
+                        // gap for the pill, the status stays failed so the retry
+                        // loop keeps going, and the first error is logged so the
+                        // gap is diagnosable.
+                        useCanvasStore.getState().noteNodeFetchFailure(batchErrors.length, missingEntities)
+                        console.warn(
+                            `[useGraphHydration] ${batchErrors.length} node batch(es) failed after retries — rendering the ${allNodes.length} entities that loaded; retrying for the rest`,
+                            batchErrors[0],
+                        )
                     }
 
                     // Show nodes immediately, then fetch edges
@@ -570,6 +694,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     )
 
                     console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
+                    if (partial) {
+                        markPartial(worstHydrationFailure(batchErrors))
+                        return
+                    }
                 } else {
                     // ── Hierarchy / Graph view ──────────────────────────
                     // Mirrors old App.tsx behavior: load roots, then first-level
@@ -672,27 +800,30 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 markReady()
             } catch (err) {
                 if (!controller.signal.aborted) {
-                    const msg = err instanceof Error ? err.message : 'Failed to load graph data'
-                    // "Warming" = the provider is loading its dataset (restart) —
-                    // transient and auto-retried, shown with a friendly tone. Anything
-                    // else that looks like a connectivity failure is a hard outage.
-                    const warming = (err instanceof HydrationLoadError && err.warming)
-                        || msg.includes('PROVIDER_LOADING')
-                    if (warming) {
-                        console.warn('[useGraphHydration] Provider warming up — retrying:', msg)
+                    // "Warming" = the provider is loading its dataset (restart);
+                    // "slow" = a request was too slow / shed / hit a transient
+                    // gateway or session problem — both auto-retried with a
+                    // friendly tone. Only a backend-CONFIRMED outage (503
+                    // PROVIDER_UNAVAILABLE, or no backend at all) is
+                    // "unavailable"; a 504, 429, 502, 401 or client timeout
+                    // never is — see services/graphRequestFailure.
+                    const failure = toHydrationFailure(err)
+                    if (failure === 'unavailable') {
+                        console.error('[useGraphHydration] Hydration failed — provider unavailable:', err)
+                    } else if (failure === 'error') {
+                        // A bug, not the provider: logged at error level with
+                        // its stack so it is found, and named as such in the
+                        // UI so nobody chases the graph service for it.
+                        console.error('[useGraphHydration] Hydration failed — code threw during the load (not a provider problem):', err)
                     } else {
-                        console.error('[useGraphHydration] Hydration failed:', err)
+                        console.warn(`[useGraphHydration] Hydration deferred (${failure}) — retrying:`, err)
                     }
                     // Single failure terminal: set the authoritative status. The
                     // overlay + auto-retry derive from this; it stays until a retry
                     // SUCCEEDS (markReady), so "Start building" can't flash between
                     // attempts. Phase → complete so the loading ghosts stop.
-                    setHydrationStatus(warming ? 'warming' : 'unavailable')
-                    setHydrationError(
-                        warming
-                            ? 'Your graph is starting up…'
-                            : 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.'
-                    )
+                    setHydrationStatus(failure)
+                    setHydrationError(HYDRATION_FAILURE_MESSAGE[failure])
                     setHydrationPhase('complete')
                 }
             }
@@ -723,7 +854,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         setRetryEpoch(e => e + 1)
     }, [forceReprobe])
 
-    // Auto-retry while the provider is warming/unavailable — but SCALE-SAFELY:
+    // Auto-retry while the provider is warming/slow/unavailable — but SCALE-SAFELY:
     //  • a configurable, deliberately-unhurried interval (POLLING_INTERVALS.
     //    providerRetry, default 10s), NOT a tight 2-3s loop that would multiply
     //    load across every affected user with no faster recovery;
@@ -732,10 +863,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     //  • NEVER stops. 'warming' means the backend answered 503 + Retry-After
     //    ("I exist, I'm loading the dataset") — a pod rotation + AOF replay
     //    legitimately takes minutes, so warming polls stay on the fast
-    //    cadence indefinitely. 'unavailable' (hard down) gets
-    //    PROVIDER_RETRY_MAX_ATTEMPTS fast attempts, then degrades to the slow
-    //    background cadence (providerRetrySlow, default 60s) — a completed
-    //    node rotation must self-heal without a user click or page reload;
+    //    cadence indefinitely. 'unavailable' (hard down) and 'slow' (a heavy
+    //    view timing out, a shed burst) get PROVIDER_RETRY_MAX_ATTEMPTS fast
+    //    attempts, then degrade to the slow background cadence
+    //    (providerRetrySlow, default 60s) — a completed node rotation must
+    //    self-heal without a user click or page reload, and a persistently
+    //    slow view must not re-run its heavy query every 10s forever;
     //  • PAUSED entirely while the tab is hidden (no background-tab hammering).
     // A retry NEVER clears the status/overlay — only a SUCCESSFUL load
     // (markReady) flips to 'ready', so the overlay can't blink to "Start
@@ -743,12 +876,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // each attempt and schedules the next while still failed.
     useEffect(() => {
         if (!enableHydration) return
-        if (hydrationStatus !== 'warming' && hydrationStatus !== 'unavailable') {
+        if (!isHydrationFailure(hydrationStatus)) {
             retryCountRef.current = 0
             return
         }
         if (typeof document !== 'undefined' && document.hidden) return
-        const exhausted = hydrationStatus === 'unavailable'
+        const exhausted = hydrationStatus !== 'warming'
             && retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS
         const attempt = retryCountRef.current + 1
         const delay = withJitter(exhausted
@@ -770,8 +903,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (!enableHydration || typeof document === 'undefined') return
         const onVisible = () => {
             if (document.hidden) return
-            const s = useCanvasStore.getState().hydrationStatus
-            if (s === 'warming' || s === 'unavailable') retryHydration()
+            if (isHydrationFailure(useCanvasStore.getState().hydrationStatus)) retryHydration()
         }
         document.addEventListener('visibilitychange', onVisible)
         return () => document.removeEventListener('visibilitychange', onVisible)
@@ -793,8 +925,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const was = prev
             prev = curr
             if (was === 'unhealthy' && curr === 'healthy') {
-                const s = useCanvasStore.getState().hydrationStatus
-                if (s === 'warming' || s === 'unavailable') retryHydration()
+                if (isHydrationFailure(useCanvasStore.getState().hydrationStatus)) retryHydration()
             }
         })
     }, [enableHydration, providerWsId, providerDsId, retryHydration])
@@ -874,7 +1005,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setRootsLoaded(0)
             setRootsHaveMore(false)
 
-            return submitRootPage(0)
+            await submitRootPage(0)
+            return
         }
 
         // ── Handle child loading (specific parentId) ────────────────
@@ -896,19 +1028,27 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const pendingNodeIds = new Set(
             nodes.filter(n => (n.data as any)?.isPending === 'create').map(n => n.id),
         )
+        // A child primed out of band by a search reveal (`useRevealSearchHit`)
+        // belongs to some later page — counting it would skew the offset the
+        // same way, skipping a real sibling. Same rule as optimistic children.
+        const revealedNodeIds = new Set(
+            nodes.filter(n => n.data?.viaReveal).map(n => n.id),
+        )
 
         // Count loaded SAVED children via containment edges (ontology-driven)
         const currentChildrenCount = edges.filter(e => {
             if (e.source !== parentId) return false
             if (!existingNodeIds.has(e.target)) return false
             if (e.data?.isPending === 'create' || pendingNodeIds.has(e.target)) return false
+            if (revealedNodeIds.has(e.target)) return false
             return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         }).length
 
         // If we have all children, don't refetch
         if (currentChildrenCount >= childCount && childCount > 0) return
 
-        return queueRef.current.submit(parentId, async (signal) => {
+        let summary: ChildLoadSummary | undefined
+        await queueRef.current.submit(parentId, async (signal) => {
             setFailedNodes(prev => { const next = new Set(prev); next.delete(parentId); return next })
             setLoadingNodes(prev => new Set(prev).add(parentId))
             try {
@@ -949,8 +1089,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     ].map(e => toCanvasEdge(e))
 
                     // Single atomic commit — nodes and edges arrive together
-                    const { addGraph: addGraphFresh } = useCanvasStore.getState()
+                    const { addGraph: addGraphFresh, updateNode } = useCanvasStore.getState()
                     addGraphFresh(nodesToAdd, edgesToAdd)
+
+                    // A revealed child this page actually delivered is now a
+                    // normal loaded child — clear the flag so it counts
+                    // toward the next page's offset.
+                    result.children.forEach(child => {
+                        if (revealedNodeIds.has(child.urn)) updateNode(child.urn, { viaReveal: false })
+                    })
 
                     // Cross-page sibling lineage: getChildrenWithEdges only
                     // returns lineage among [parent + this page's children],
@@ -982,6 +1129,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
                 }
+
+                // The facts about this page, for whoever asked for it. Set
+                // only on a page that actually completed — an aborted or
+                // failed load has nothing true to say.
+                summary = {
+                    // `|| urn`, not `?? ''`: a container whose backend
+                    // displayName is "" would otherwise be announced as
+                    // " · 5 datasets" — a message with no subject.
+                    parentLabel: String(parentNode.data.label || urn),
+                    parentType: parentNode.data.type as string | undefined,
+                    arrived: result.children.length,
+                    offset: currentChildrenCount,
+                    total: childCount,
+                    childTypes: [...new Set(result.children.map(c => c.entityType).filter(Boolean))],
+                }
             } catch (err) {
                 console.error(`[useGraphHydration] Failed to load children for ${parentId}`, err)
                 setFailedNodes(prev => new Set(prev).add(parentId))
@@ -993,6 +1155,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 })
             }
         })
+        // Undefined when the queue collapsed this call onto an in-flight one
+        // with the same key (the task never ran), and when the load aborted
+        // or failed — in every one of those cases there is nothing to report.
+        return summary
     }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes, submitRootPage])
 
     /**
@@ -1006,90 +1172,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         queueRef.current.cancel(parentId)
     }, [])
 
-    // ─── searchChildren ─────────────────────────────────────────────────
-
-    const searchChildren = useCallback(async (parentId: string, query: string) => {
-        if (!query.trim()) return
-
-        // Submit under a distinct keyspace so a concurrent loadChildren
-        // for the same parent doesn't collapse into the search task.
-        return queueRef.current.submit(`search:${parentId}`, async (signal) => {
-            setLoadingNodes(prev => new Set(prev).add(parentId))
-            try {
-                const { nodes, removeNodes, removeEdges, addGraph } = useCanvasStore.getState()
-
-                const parentNode = nodes.find(n => n.id === parentId)
-                const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
-                const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
-
-                // Single round-trip: children + edges for search results.
-                // The backend filters the parent's FULL child set by searchQuery
-                // (not the loaded subset), so this is global within the subtree.
-                // limit=200 is the match-count cap: ensures wide queries against
-                // 1000+ children still surface a useful spread of results.
-                const result = await provider.getChildrenWithEdges(urn, {
-                    edgeTypes: fetchTypes,
-                    lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
-                    searchQuery: query,
-                    limit: 200,
-                    includeLineageEdges: true,
-                })
-
-                if (signal.aborted) return
-
-                // Get freshest state right before mutating
-                const freshNodes = useCanvasStore.getState().nodes
-                const freshEdges = useCanvasStore.getState().edges
-
-                // Clean up existing children of this node to replace with search results
-                const existingEdgesToRemove = freshEdges.filter(e => e.source === parentId)
-                const targetNodeIdsToRemove = new Set(existingEdgesToRemove.map(e => e.target))
-
-                // Keep nodes connected to other parents
-                const otherEdges = freshEdges.filter(e => e.source !== parentId)
-                const safeNodesToKeep = new Set(otherEdges.map(e => e.target))
-                const nodeIdsToRemove = Array.from(targetNodeIdsToRemove).filter(id => !safeNodesToKeep.has(id))
-                const edgeIdsToRemove = existingEdgesToRemove.map(e => e.id)
-
-                if (nodeIdsToRemove.length > 0) removeNodes(nodeIdsToRemove)
-                if (edgeIdsToRemove.length > 0) removeEdges(edgeIdsToRemove)
-
-                if (result.children.length > 0) {
-                    const nodesToAdd: LineageNode[] = []
-
-                    const remainingNodeIds = new Set(freshNodes.map(n => n.id))
-                    nodeIdsToRemove.forEach(id => remainingNodeIds.delete(id))
-                    const newIds = new Set<string>()
-
-                    result.children.forEach(child => {
-                        if (!remainingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
-                            nodesToAdd.push(toCanvasNode(child))
-                            newIds.add(child.urn)
-                        }
-                    })
-
-                    const edgesToAdd = [
-                        ...result.containmentEdges,
-                        ...result.lineageEdges,
-                    ].map(e => toCanvasEdge(e))
-
-                    addGraph(nodesToAdd, edgesToAdd)
-                }
-            } catch (err) {
-                console.error(`[useGraphHydration] Failed to search children for ${parentId}`, err)
-            } finally {
-                setLoadingNodes(prev => {
-                    const next = new Set(prev)
-                    next.delete(parentId)
-                    return next
-                })
-            }
-        })
-    }, [provider, containmentEdgeTypes, lineageEdgeTypes])
-
     return {
         loadChildren,
-        searchChildren,
         cancelChildLoad,
         isLoading: loadingNodes.size > 0,
         loadingNodes,

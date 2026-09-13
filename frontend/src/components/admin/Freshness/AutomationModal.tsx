@@ -49,7 +49,7 @@ import { cn } from '@/lib/utils'
 import { DurationField, formatDuration } from '@/components/ui/DurationField'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { aggregationService, type AggregationCadence, type AggregationTuning } from '@/services/aggregationService'
 import type { FreshnessSummary } from '@/services/freshnessService'
@@ -223,7 +223,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     summary?: FreshnessSummary | null
 }) {
     const qc = useQueryClient()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const reconQ = useReconciliation()
     const policy = reconQ.data?.policy
@@ -398,10 +398,10 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
             // back to adopting whatever anyone else writes — and closing can
             // stop asking whether it is safe.
             setDirty(false)
-            showToast('success', 'Automation saved. Takes effect within a minute.')
+            notify('success', 'Automation saved. Takes effect within a minute.')
             onClose()
         },
-        onError: (e: Error) => showToast(
+        onError: (e: Error) => notify(
             'error',
             `Watch policy and cadence saved, but the rollup storage default did not: ${
                 e.message || 'unknown error'
@@ -420,7 +420,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
         // onSave), so a generic "could not save" would be a lie about half
         // the form. Say exactly which half failed; Save again re-sends the
         // policy with identical values (harmless) and retries the cadence.
-        onError: (e: Error) => showToast(
+        onError: (e: Error) => notify(
             'error',
             `Watch policy saved, but the Detect and Act settings did not save: ${
                 e.message || 'unknown error'
@@ -443,29 +443,29 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
 
     const onSave = () => {
         if (checkSecs != null && (!Number.isFinite(checkSecs) || checkSecs < MIN_CHECK_SECS || checkSecs > MAX_SECS)) {
-            showToast('error', 'Check no more often than once a minute, and at least once a day.')
+            notify('error', 'Check no more often than once a minute, and at least once a day.')
             return
         }
         const capNum = cap.trim() === '' ? null : Number(cap)
         if (capNum != null && (!Number.isFinite(capNum) || capNum < 0 || capNum > MAX_CAP)) {
-            // Reveal the field being complained about: a toast pointing at a
+            // Reveal the field being complained about: a notification pointing at a
             // control folded away behind a disclosure is a dead end.
             setActAdvanced(true)
-            showToast('error', 'Rebuilds per check must be between 0 and 200.')
+            notify('error', 'Rebuilds per check must be between 0 and 200.')
             return
         }
         const shrinkNum = shrinkPct.trim() === '' ? null : Number(shrinkPct)
         if (shrinkNum != null && (!Number.isFinite(shrinkNum) || shrinkNum < 0 || shrinkNum > MAX_SHRINK_PCT)) {
             setCheckAdvanced(true)
-            showToast('error', 'The shrink allowance must be between 0 and 100 percent.')
+            notify('error', 'The shrink allowance must be between 0 and 100 percent.')
             return
         }
         if (probeSecs != null && (!Number.isFinite(probeSecs) || probeSecs < MIN_PROBE_SECS || probeSecs > MAX_SECS)) {
-            showToast('error', 'Look for changes no more often than every 15 seconds, and at least once a day.')
+            notify('error', 'Look for changes no more often than every 15 seconds, and at least once a day.')
             return
         }
         if (cooldownSecs != null && (!Number.isFinite(cooldownSecs) || cooldownSecs < 0 || cooldownSecs > MAX_SECS)) {
-            showToast('error', 'The wait between rebuilds must be between 0 seconds and 24 hours.')
+            notify('error', 'The wait between rebuilds must be between 0 seconds and 24 hours.')
             return
         }
         // Both writes land in the same stored record, so they are sequenced
@@ -492,7 +492,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                     })
                 },
                 onError: (e: Error) =>
-                    showToast('error', e.message || 'Could not save the reconciliation policy.'),
+                    notify('error', e.message || 'Could not save the reconciliation policy.'),
             },
         )
     }

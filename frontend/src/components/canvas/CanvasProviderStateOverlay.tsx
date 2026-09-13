@@ -85,16 +85,112 @@ function UnavailableMark() {
   )
 }
 
+/** The three ways a load ends without data (see `HydrationStatus`):
+ *  - `warming`     — the provider is loading its dataset after a restart.
+ *  - `slow`        — the provider is reachable, but this view's requests were
+ *                    too slow, were shed under load, or hit a transient
+ *                    gateway / session hiccup. The canvas keeps retrying.
+ *  - `unavailable` — the backend confirmed the provider is unreachable.
+ *  - `error`       — code threw while the view loaded (a bug, not the
+ *                    provider); named as such so it is never mistaken for an
+ *                    outage or a slow graph. */
+export type CanvasProviderState = 'warming' | 'slow' | 'unavailable' | 'error'
+
 export interface CanvasProviderStateOverlayProps {
-  /** true = provider loading its dataset (transient); false = hard unavailable. */
-  warming: boolean
+  state: CanvasProviderState
   onRetry?: () => void
 }
 
+const COPY: Record<CanvasProviderState, { title: string; status: string }> = {
+  warming: { title: 'Preparing your graph', status: 'Retrying automatically…' },
+  slow: { title: 'Taking a little longer than usual', status: 'Retrying automatically…' },
+  unavailable: { title: 'Graph service is unavailable', status: 'Watching for recovery…' },
+  error: { title: 'Something went wrong while loading', status: 'Retrying automatically…' },
+}
+
+export interface CanvasProviderStatePillProps {
+  state: CanvasProviderState
+  /** True when the load rendered some of the view but not all of it. */
+  partial: boolean
+  /** Assigned entities the failed batches held (0 when unknown). */
+  missingEntities: number
+  onRetry?: () => void
+}
+
+/**
+ * CanvasProviderStatePill — the NON-blocking sibling of the overlay, for a
+ * canvas that has data on it. A refresh of a view the user is already
+ * reading must never dim the canvas and cover it with a card: the nodes
+ * stay interactive, and this small pill at the top says what is being
+ * retried. Three cases: a partial load (some entities didn't arrive), a
+ * refresh that is slow or warming, and a confirmed outage while the last
+ * loaded data is still shown.
+ */
+export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePill({
+  state,
+  partial,
+  missingEntities,
+  onRetry,
+}: CanvasProviderStatePillProps) {
+  const calm = state !== 'unavailable'
+  const headline = partial
+    ? (missingEntities > 0
+      ? `${missingEntities.toLocaleString()} ${missingEntities === 1 ? 'entity' : 'entities'} didn’t load`
+      : 'Some entities didn’t load')
+    : state === 'warming' ? 'Preparing your graph'
+      : state === 'slow' ? 'Refreshing is taking longer than usual'
+        : state === 'error' ? 'This view hit an error while refreshing'
+          : 'Graph service is unavailable'
+  const detail = calm
+    ? 'showing what’s loaded · retrying automatically'
+    : 'showing the last loaded data · watching for recovery'
+  return (
+    <div className="pointer-events-none absolute top-4 left-1/2 z-40 -translate-x-1/2">
+      <div
+        role="status"
+        aria-live="polite"
+        // Opaque on purpose: the pill floats over a busy canvas and has to stay
+        // legible. (`bg-canvas-elevated/90` would paint NOTHING — the token is
+        // a bare var() and an alpha suffix emits no rule; the amber variant is
+        // a real palette colour and keeps its alpha in dark mode.)
+        className={cn(
+          'pointer-events-auto flex items-center gap-2.5 rounded-full border py-1.5 pl-3.5 pr-2 text-xs shadow-lg',
+          calm
+            ? 'border-glass-border bg-canvas-elevated text-ink shadow-black/10'
+            : 'border-amber-300/60 bg-amber-50 text-amber-800 shadow-amber-500/10 backdrop-blur-sm dark:border-amber-500/30 dark:bg-amber-950/60 dark:text-amber-300',
+        )}
+      >
+        <span
+          className={cn(
+            'inline-block h-1.5 w-1.5 shrink-0 rounded-full animate-pulse',
+            calm ? 'bg-accent-lineage' : 'bg-amber-400',
+          )}
+        />
+        <span className="whitespace-nowrap font-semibold">{headline}</span>
+        <span className={cn('hidden sm:inline', calm ? 'text-ink-muted' : 'text-amber-600/80 dark:text-amber-400/70')}>
+          — {detail}
+        </span>
+        {onRetry && (
+          <button
+            onClick={onRetry}
+            className="ml-1 shrink-0 rounded-full p-1 transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.06]"
+            title="Retry now"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+})
+
 export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStateOverlay({
-  warming,
+  state,
   onRetry,
 }: CanvasProviderStateOverlayProps) {
+  // Warming and slow share the calm, "still loading" treatment: neither is
+  // an outage, and alarming amber for a busy afternoon was the old bug.
+  const warming = state !== 'unavailable'
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center px-6">
       <style>{STYLE}</style>
@@ -135,11 +231,15 @@ export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStat
 
           <div className="space-y-2">
             <h3 className="text-lg font-semibold tracking-tight text-ink">
-              {warming ? 'Preparing your graph' : 'Graph service is unavailable'}
+              {COPY[state].title}
             </h3>
             <p className="mx-auto max-w-xs text-sm leading-relaxed text-ink-muted">
-              {warming ? (
+              {state === 'warming' ? (
                 <>Your data is safe — we’re loading it from the graph service. This usually takes a few seconds after it restarts.</>
+              ) : state === 'slow' ? (
+                <>The graph service is reachable, but this view is loading slowly right now. <span className="text-ink">Nothing has been lost</span> — we keep trying in the background and it fills in as soon as it answers.</>
+              ) : state === 'error' ? (
+                <>The graph service answered, but this view hit an error while loading. <span className="text-ink">Nothing has been lost</span> — we keep retrying, and a refresh usually clears it. If it keeps happening, the details are in the browser console.</>
               ) : (
                 <>The graph service isn’t responding right now. <span className="text-ink">Nothing has been lost</span> — this view fills in the moment the service is back.</>
               )}
@@ -154,7 +254,7 @@ export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStat
                 warming ? 'bg-accent-lineage' : 'bg-amber-400',
               )}
             />
-            {warming ? 'Retrying automatically…' : 'Watching for recovery…'}
+            {COPY[state].status}
           </div>
 
           {onRetry && (

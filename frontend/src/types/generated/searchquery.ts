@@ -38,7 +38,7 @@ export type Lineageedgetypes = string[]
  */
 export type Notes = string[]
 /**
- * Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).
+ * Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.
  */
 export type Blobonlylabels = string[]
 /**
@@ -82,6 +82,10 @@ export type Valuesamplesbykey1 = {
  */
 export type Missingcontainment = boolean
 /**
+ * Sampled nodes with no n.searchableText — run `python -m backend.scripts.migrate_native_properties --searchable-text`.
+ */
+export type Missingsearchabletext = number
+/**
  * Hard cap on the candidate set the provider walks.
  */
 export type CandidateCap = number
@@ -124,7 +128,11 @@ export type Ancestorentitytypes = string[] | null
  * Required when by='ancestorLevel'.
  */
 export type Ancestorlevel = number | null
-export type By = 'ancestorType' | 'ancestorLevel' | 'parent' | 'tag' | 'entityType' | 'property'
+export type By =
+    'ancestorType' | 'ancestorLevel' | 'ancestor' | 'parent' | 'tag' | 'entityType' | 'property'
+/**
+ * Bucket ceiling. The headroom above a facet-sized list is for by='ancestor', which needs one bucket per container the canvas can collapse.
+ */
 export type Maxbuckets = number
 /**
  * Required when by='property'. The native node property whose values become the bucket keys (e.g. 'layer' → one bucket per layer value).
@@ -223,8 +231,7 @@ export type Edgeclass = 'lineage' | 'containment' | 'any'
  * Optional predicate evaluated against every traversed edge. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
 export type Edgepredicate =
-    | (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate)
-    | null
+    (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
 export type Key2 = string
 export type Kind5 = 'edgeProperty'
 export type Op2 =
@@ -288,8 +295,7 @@ export type Edgeclass7 = 'lineage' | 'containment' | 'any'
  * Optional predicate evaluated against every edge in the returned paths. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
 export type Edgepredicate1 =
-    | (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate)
-    | null
+    (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
 /**
  * Optional explicit edge-type list; overrides ``edge_class``'s resolved set.
  */
@@ -341,7 +347,7 @@ export type Layerassignment1 = string | null
  */
 export type Maxdepth1 = number | null
 /**
- * Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side. Capped at DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 256). The cap exists to bound the Cypher IN-list size + containment expansion fanout on multi-domain views with many top-level containers.
+ * Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side. Capped at DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The cap exists to bound the Cypher IN-list size + containment expansion fanout on multi-domain views with many top-level containers.
  */
 export type Rooturns = string[] | null
 /**
@@ -370,6 +376,10 @@ export type Displayname = string
 export type Entitytype = string
 export type Urn = string
 export type Field = string
+/**
+ * ``[start, end]`` offsets within ``snippet`` (not within the original field) — the snippet's leading ellipsis is already counted.
+ */
+export type Ranges = number[][]
 export type Score = number
 export type Snippet = string
 export type Highlights1 = SearchHighlight[]
@@ -384,12 +394,19 @@ export type Qualifiedname = string | null
 export type Sourcesystem = string | null
 export type Tags = string[]
 export type Urn1 = string
+export type Version = string | null
 export type Score1 = number
 export type Samplehits = SearchHit[]
 /**
  * Populated when the request's AggregationSpec carried a sub_aggregation.
  */
 export type Subbuckets = SearchAggregateBucket[] | null
+/**
+ * Per-entity-type breakdown of ``match_count`` — e.g. ``{'Column': 12, 'Table': 3}``. Populated by by='ancestor'; None for the kinds that don't compute one.
+ */
+export type Typecounts = {
+    [k: string]: number
+} | null
 export type Cachehit = boolean
 /**
  * Candidates that passed the predicate scan before the scope check and aggregation/limit. Useful for showing 'searching X nodes…' captions in the FE.
@@ -398,6 +415,9 @@ export type Candidatecount = number
 export type Cursor1 = string | null
 export type Deadlineexceeded = boolean
 export type Elapsedms1 = number
+/**
+ * Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.
+ */
 export type Hits = SearchHit[] | null
 /**
  * Populated when the request's predicate contains a PathPredicate and options.results='paths'. Ordered node→edge→node sequences from source to target.
@@ -419,6 +439,10 @@ export type Estimatedrows = number | null
  * Diagnostic hints — e.g. 'no index on properties.foo'.
  */
 export type Notes2 = string[]
+/**
+ * Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).
+ */
+export type Totalcount = number | null
 /**
  * True when the provider hit its candidate cap or soft deadline before exhausting the candidate set.
  */
@@ -480,6 +504,7 @@ export interface SearchDiscoverResult {
     elapsedMs?: Elapsedms
     labels?: Labels
     missingContainment?: Missingcontainment
+    missingSearchableText?: Missingsearchabletext
     tagValues?: Tagvalues
 }
 /**
@@ -612,9 +637,12 @@ export interface TextPredicate {
  * Typed comparison against a single user-property.
  *
  * After the storage refactor, user properties are native FalkorDB
- * fields, so these compile to indexed ``WHERE n.<key> <op> $val`` —
- * no Python post-filter. ``between`` expects ``value`` to be a
- * two-element list ``[lo, hi]``.
+ * fields, so these compile to ``WHERE n.<key> <op> $val`` — no Python
+ * post-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))
+ * <op> toLower($val)``) when ``value`` is a string and
+ * ``case_sensitive`` is false; a non-string value (or
+ * ``case_sensitive=True``) keeps the raw, indexed column comparison.
+ * ``between`` expects ``value`` to be a two-element list ``[lo, hi]``.
  */
 export interface PropertyPredicate {
     caseSensitive?: Casesensitive1
@@ -886,6 +914,7 @@ export interface SearchResultPage {
      * Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain.
      */
     scopeDiagnostics?: ScopeDiagnostics | null
+    totalCount?: Totalcount
     truncated?: Truncated
 }
 /**
@@ -899,6 +928,7 @@ export interface SearchAggregateBucket {
     matchCount: Matchcount
     sampleHits?: Samplehits
     subBuckets?: Subbuckets
+    typeCounts?: Typecounts
 }
 /**
  * One matched node, optionally with provenance.
@@ -928,6 +958,7 @@ export interface AncestorRef {
  */
 export interface SearchHighlight {
     field: Field
+    ranges?: Ranges
     score?: Score
     snippet: Snippet
 }
@@ -943,6 +974,7 @@ export interface GraphNode {
     sourceSystem?: Sourcesystem
     tags?: Tags
     urn: Urn1
+    version?: Version
 }
 export interface Properties {
     [k: string]: unknown

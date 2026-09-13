@@ -16,6 +16,7 @@ production incident:
 import pytest
 
 from backend.app.services.aggregation.fingerprint import (
+    counts_digest_from_counts,
     fingerprint_from_stats,
     raw_fingerprint_from_counts,
 )
@@ -456,6 +457,45 @@ def test_raw_fingerprint_is_invariant_across_a_rebuild():
         {"Table": 10}, {"FLOWS_TO": 5, "AGGREGATED": 1_204_318},
     )
     assert before == after
+
+
+def test_raw_fingerprint_is_invariant_across_the_run_stamp_too():
+    """The other half of the same invariant, and the half that was missing.
+
+    ``_stamp_run_meta`` MERGEs an ``_AggMeta`` singleton at the end of every
+    run, so the FIRST aggregation of a source added a node key to this digest
+    and moved the very baseline the next sweep compared against. ``_raw_drift``
+    then reported drift and queued a rebuild with nothing to fix — which
+    stamped it again."""
+    before, _, _ = raw_fingerprint_from_counts(
+        {"Table": 10}, {"FLOWS_TO": 5},
+    )
+    after, _, _ = raw_fingerprint_from_counts(
+        {"Table": 10, "_AggMeta": 1, "_Projection": 1, "_GVRollupMeta": 1},
+        {"FLOWS_TO": 5, "AGGREGATED": 1_204_318},
+    )
+    assert before == after
+
+
+def test_raw_fingerprint_still_moves_for_a_customer_underscore_label():
+    """Membership is the explicit derived list, not a "_" prefix rule: a
+    customer's own ``_internal`` nodes are their data, and a change in them is
+    real drift."""
+    a, _, _ = raw_fingerprint_from_counts({"Table": 10}, {"FLOWS_TO": 5})
+    b, _, _ = raw_fingerprint_from_counts(
+        {"Table": 10, "_internal": 3}, {"FLOWS_TO": 5},
+    )
+    assert a != b
+
+
+def test_the_tripwire_deliberately_still_sees_the_derived_artifacts():
+    """``counts_digest_from_counts`` is the opposite of the baseline above and
+    must NOT be aligned with it. It answers "did anything at all move since we
+    last looked", and ``_AggMeta`` disappearing IS the signal that the overlay
+    was wiped or reseeded — the failure the sweep exists to catch."""
+    a = counts_digest_from_counts({"Table": 10, "_AggMeta": 1}, {"FLOWS_TO": 5})
+    b = counts_digest_from_counts({"Table": 10}, {"FLOWS_TO": 5})
+    assert a != b
 
 
 def test_raw_fingerprint_moves_when_raw_counts_move():

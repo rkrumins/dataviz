@@ -53,16 +53,28 @@ def _dependant_gate_perms(dependant) -> set[str]:
 def _iter_route_gates():
     """Yield ``(full_path, dependant)`` for every mounted APIRoute.
 
-    Newer FastAPI/starlette include routers lazily: children no longer flatten
-    into ``app.routes`` but sit under ``_IncludedRouter`` wrappers. Their
-    fully-resolved absolute paths AND merged dependants — which fold in
-    router-``include``-level ``dependencies=[Depends(requires(...))]`` gates,
-    not just per-route ``Depends`` — are only materialised through the
-    wrapper's ``effective_candidates()`` / ``effective_low_priority_routes()``.
-    Walk those so introspection sees every gate with a correct absolute path.
-    Falls back to the plain ``app.routes`` APIRoutes for anything not wrapped
-    (e.g. the top-level health endpoints)."""
+    WORKS ON BOTH ROUTER SHAPES, because FastAPI has had both and this test
+    reaches into internals to see the gates at all.
+
+    Some versions include routers lazily: children do not flatten into
+    ``app.routes`` but sit under ``_IncludedRouter`` wrappers, and their
+    absolute paths and merged dependants are only materialised through
+    ``effective_candidates()`` / ``effective_low_priority_routes()``. Others —
+    0.136.1, the pinned one — flatten every child back into ``app.routes`` as
+    a plain ``APIRoute`` carrying its absolute path, with any
+    router-``include``-level ``dependencies=[Depends(requires(...))]`` already
+    folded into ``route.dependant``.
+
+    The wrapper is looked up with ``getattr`` rather than named directly:
+    referring to a private symbol that a supported version does not define
+    turned both callers into an ``AttributeError`` at import of the walk, which
+    is a test failing for a reason that has nothing to do with what it checks."""
     import fastapi.routing as _fr
+
+    # Absent on versions that flatten (0.136.1 and friends). `None` makes the
+    # isinstance check below simply never match, and the flattened branch
+    # handles everything.
+    _IncludedRouter = getattr(_fr, "_IncludedRouter", None)
 
     def _emit(ctx):
         original = getattr(ctx, "original_route", None)
@@ -73,9 +85,9 @@ def _iter_route_gates():
 
     def _walk(routes):
         for route in routes:
-            if isinstance(route, _fr._IncludedRouter):
+            if _IncludedRouter is not None and isinstance(route, _IncludedRouter):
                 for cand in route.effective_candidates():
-                    if isinstance(cand, _fr._IncludedRouter):
+                    if isinstance(cand, _IncludedRouter):
                         yield from _walk([cand])
                     else:
                         yield from _emit(cand)
@@ -227,3 +239,30 @@ async def test_me_nav_requires_auth(test_client: AsyncClient):
     finally:
         app.dependency_overrides.pop(get_current_user, None)
     assert r.status_code == 401
+
+
+def test_the_route_walk_actually_finds_gates():
+    """The walker must never yield nothing, or this whole file goes vacuous.
+
+    Every other test here asks "what permissions guard the routes under
+    ``/admin/x``" and asserts something about the answer. A walk that returns
+    an empty set makes each of those a comparison against nothing, and the file
+    passes while checking that no gate anywhere is what the catalogue says it
+    is.
+
+    It has already failed for a reason of exactly that kind: the walk named
+    ``fastapi.routing._IncludedRouter`` directly, and on the pinned FastAPI —
+    which flattens routers instead of wrapping them — that attribute does not
+    exist, so two tests died with an ``AttributeError`` about routing internals
+    rather than anything to do with navigation.
+    """
+    gates = list(_iter_route_gates())
+    assert len(gates) > 100, (
+        f"only {len(gates)} routes walked — the app mounts hundreds, so the "
+        f"walk is not seeing the router shape this FastAPI uses"
+    )
+    assert all(isinstance(path, str) and path.startswith("/") for path, _ in gates), (
+        "paths must be absolute, or `_perms_under` matches the wrong routes"
+    )
+    # A gate this test suite reasons about elsewhere, resolved end to end.
+    assert "system:audit:read" in _perms_under(("/admin/audit",))

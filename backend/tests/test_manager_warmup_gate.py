@@ -91,7 +91,11 @@ def test_blocks_reads_ignores_a_single_connect_timeout():
 def test_blocks_reads_gates_a_persistent_connect_timeout():
     state = ProviderState(cache_key=("p", "g"))
     state.last_observation = ProbeOutcome.from_warmup(False, "connect_timeout", 1500)
+    # Two misses can still be a busy instance answering AUTH+PING late in
+    # the 5s recovery lane — not yet gated.
     state.consecutive_failures = 2
+    assert state.blocks_reads(max_age_s=60.0) is False
+    state.consecutive_failures = 3
     assert state.blocks_reads(max_age_s=60.0) is True  # genuinely down: gate
 
 

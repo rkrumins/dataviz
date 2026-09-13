@@ -11,7 +11,7 @@
  * pulse before an earlier one settles would cancel the earlier one's
  * in-flight reveal — tallies how many actually landed in the DOM
  * afterward, and reports back: both a return value for the caller and,
- * whenever some or all targets could not be located, a toast instead of
+ * whenever some or all targets could not be located, a notification instead of
  * silence.
  */
 import { useCallback, useRef } from 'react'
@@ -32,8 +32,8 @@ export interface UseLocateManyOnCanvasOptions {
    *  best-effort union-centring pass across whatever ended up
    *  simultaneously in the DOM. */
   getScrollContainer: () => HTMLElement | null
-  /** Toast on a partial or total failure to locate. */
-  showToast: (type: 'warning' | 'error', message: string) => void
+  /** Notify on a partial or total failure to locate. */
+  notify: (type: 'warning' | 'error', message: string) => void
   /** How long to wait after each pulse for its row to materialize
    *  before checking whether it landed — mirrors the reveal-pulse
    *  effect's own timing (a settle delay plus two rAFs). Injectable so
@@ -56,7 +56,7 @@ export function useLocateManyOnCanvas(
 
   return useCallback(async (ids: string[]): Promise<LocateManyResult> => {
     const {
-      revealAndFocus, scrollHitIntoView, getElementById, getScrollContainer, showToast,
+      revealAndFocus, scrollHitIntoView, getElementById, getScrollContainer, notify,
       settleMs = 90,
     } = optsRef.current
 
@@ -92,7 +92,7 @@ export function useLocateManyOnCanvas(
     }
 
     if (revealed < ids.length) {
-      showToast(
+      notify(
         revealed === 0 ? 'error' : 'warning',
         revealed === 0
           ? `Couldn't locate any of the ${ids.length} entities on the canvas`

@@ -441,6 +441,38 @@ class DataSourceReadinessResponse(BaseModel):
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
+
+    # ── Projection health (versioned sources only) ────────────────────
+    # THE EVIDENCE BEHIND ``driftState == "projectionStalled"``. A versioned
+    # source's rollups are maintained by the projector, and while its
+    # watermark trails the published head every main read falls back to the
+    # version log — which holds no rolled-up connections. All four are null
+    # for a source that is not versioned, and for a versioned graph that is
+    # not pinned to a real graph target (nothing is projected there by
+    # design). They are also null when the projection store could not be read:
+    # NULL MEANS UNKNOWN, NEVER HEALTHY — do not render "up to date" from a
+    # null ``projectorCurrent``.
+    projector_current: Optional[bool] = Field(None, alias="projectorCurrent")
+    # How many published commits the read cache has not caught up to. 0 when
+    # current. This is the "how far behind" number for the UI.
+    projection_commits_behind: Optional[int] = Field(
+        None, alias="projectionCommitsBehind",
+    )
+    # The projector's own last recorded failure, verbatim. Operator-facing
+    # detail — show it in a details/expander, not as the headline.
+    projection_last_error: Optional[str] = Field(
+        None, alias="projectionLastError",
+    )
+    # ISO-8601 instant this projection reading was taken. Read live on every
+    # request (cached seconds, not minutes), so it is "as of now", not the
+    # last sweep.
+    projection_checked_at: Optional[str] = Field(
+        None, alias="projectionCheckedAt",
+    )
+    # ``isReady`` deliberately still reflects the aggregation JOB alone — the
+    # progress banner and the readiness poll both stop on it, and flipping it
+    # under a wedge would leave them running forever. The honesty lives in
+    # ``message`` and in the four fields above.
     message: str
 
     class Config:
@@ -642,6 +674,34 @@ class FreshnessRow(BaseModel):
     # a reconcile check. Fail-open False when the versioned lookup is down.
     platform_mastered: bool = Field(False, alias="platformMastered")
 
+    # ── Projection health (versioned sources only) ────────────────────
+    # THE EVIDENCE BEHIND ``driftState == "projectionStalled"``. A versioned
+    # source's rollups are maintained by the projector, and while its
+    # watermark trails the published head every main read falls back to the
+    # version log — which holds no rolled-up connections. All four are null
+    # for a source that is not versioned, and for a versioned graph that is
+    # not pinned to a real graph target (nothing is projected there by
+    # design). They are also null when the projection store could not be read:
+    # NULL MEANS UNKNOWN, NEVER HEALTHY — do not render "up to date" from a
+    # null ``projectorCurrent``.
+    projector_current: Optional[bool] = Field(None, alias="projectorCurrent")
+    # How many published commits the read cache has not caught up to. 0 when
+    # current. This is the "how far behind" number for the UI.
+    projection_commits_behind: Optional[int] = Field(
+        None, alias="projectionCommitsBehind",
+    )
+    # The projector's own last recorded failure, verbatim. Operator-facing
+    # detail — show it in a details/expander, not as the headline.
+    projection_last_error: Optional[str] = Field(
+        None, alias="projectionLastError",
+    )
+    # ISO-8601 instant this projection reading was taken. Read live on every
+    # request (cached seconds, not minutes), so it is "as of now", not the
+    # last sweep.
+    projection_checked_at: Optional[str] = Field(
+        None, alias="projectionCheckedAt",
+    )
+
     class Config:
         populate_by_name = True
 
@@ -751,6 +811,12 @@ class FreshnessSummary(BaseModel):
     # Counted in needsAttention too, but not in drifting (the overlay is
     # still wrong; the distinction is that the sweep will not retry).
     suspended: int = Field(0)
+    # Versioned sources whose projector is not current — their rolled-up
+    # connections are NOT reaching the product right now. Its own tile, never
+    # folded into ``drifting``: that one means "the rollup no longer matches
+    # the data, rebuild it", and a rebuild is not the remedy here. Counted in
+    # ``needsAttention``.
+    projection_stalled: int = Field(0, alias="projectionStalled")
 
     class Config:
         populate_by_name = True
@@ -772,6 +838,12 @@ class ProviderFreshnessSummary(BaseModel):
     cache_stamped: int = Field(0, alias="cacheStamped")
     drifting: int = Field(0)
     suspended: int = Field(0)
+    # Versioned sources whose projector is not current — their rolled-up
+    # connections are NOT reaching the product right now. Its own tile, never
+    # folded into ``drifting``: that one means "the rollup no longer matches
+    # the data, rebuild it", and a rebuild is not the remedy here. Counted in
+    # ``needsAttention``.
+    projection_stalled: int = Field(0, alias="projectionStalled")
 
     class Config:
         populate_by_name = True

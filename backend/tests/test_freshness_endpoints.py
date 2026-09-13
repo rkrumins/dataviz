@@ -909,6 +909,16 @@ def test_source_probe_failure_does_not_write_counts(monkeypatch):
         # checked BEFORE provider_unavailable (spec §9c ordering).
         ("provider unavailable: OOM command not allowed when used memory > 'maxmemory'.",
          "out_of_memory"),
+        # QUERY_MEM_CAPACITY is a DIFFERENT ceiling from maxmemory and wants a
+        # different fix, so it gets its own bucket — and, like out_of_memory,
+        # it must beat provider_unavailable: the breaker relabels it
+        # "Provider 'X' unavailable: ..." on the way up, which is exactly how
+        # it used to be mis-sold to operators as "the graph store is offline".
+        ("Query's mem consumption exceeded capacity", "query_memory"),
+        ("Provider 'falkordb:g' unavailable: ResponseError: Query's mem "
+         "consumption exceeded capacity", "query_memory"),
+        ("Retry 3/3: Provider 'falkordb:g' unavailable: ResponseError: "
+         "Query's mem consumption exceeded capacity", "query_memory"),
         ("asyncio.TimeoutError: query timed out after 30s", "timeout"),
         ("OntologyResolutionError: no ontology assigned to this source", "ontology"),
         ("ConflictError: job already active for this source", "conflict"),

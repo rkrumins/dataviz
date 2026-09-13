@@ -14,7 +14,7 @@
  *
  * So the friction is proportional to the consequence, which is the whole point:
  *
- *   - REMOVE (reversible): full impact, NO type-to-confirm, and an Undo in the toast. Making
+ *   - REMOVE (reversible): full impact, NO type-to-confirm, and an Undo in the notification. Making
  *     someone type a name to confirm something they can undo with one click is theatre, and
  *     theatre is what teaches people to stop reading confirmation dialogs.
  *   - DELETE PERMANENTLY (irreversible): type-to-confirm, and the copy stops hedging.
@@ -24,7 +24,7 @@ import {
     workspaceService,
     type WorkspaceDataSourceImpactResponse,
 } from '@/services/workspaceService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { ImpactSection } from '@/components/ui/DangerConfirmDialog'
 
 export function impactSections(
@@ -125,18 +125,18 @@ export interface DeletionTarget {
 
 export function useDataSourceDeletion(wsId: string | undefined, onChanged: () => void) {
     const [target, setTarget] = useState<DeletionTarget | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const restore = useCallback(async (id: string, label: string) => {
         if (!wsId) return
         try {
             await workspaceService.restoreDataSource(wsId, id)
-            showToast('success', `${label} restored`)
+            notify('success', `${label} restored`)
             onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : `Could not restore ${label}`)
+            notify('error', err instanceof Error ? err.message : `Could not restore ${label}`)
         }
-    }, [wsId, onChanged, showToast])
+    }, [wsId, onChanged, notify])
 
     const openFor = useCallback(async (id: string, label: string, permanent: boolean) => {
         if (!wsId) return
@@ -166,16 +166,16 @@ export function useDataSourceDeletion(wsId: string | undefined, onChanged: () =>
         onChanged()
 
         if (permanent) {
-            showToast('success', `${label} deleted permanently`)
+            notify('success', `${label} deleted permanently`)
             return
         }
         // THE UNDO. Most undos happen within seconds of the mistake, long before anyone thinks
         // to go looking for a trash can — so the trash comes to them.
-        showToast('success', `${label} offboarded`, {
+        notify('success', `${label} offboarded`, {
             label: 'Undo',
             onClick: () => { void restore(id, label) },
         })
-    }, [wsId, target, onChanged, showToast, restore])
+    }, [wsId, target, onChanged, notify, restore])
 
     return { target, open, openPermanent, close, confirm, restore }
 }

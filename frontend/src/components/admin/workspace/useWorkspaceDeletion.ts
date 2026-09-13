@@ -21,6 +21,7 @@ import {
     type WorkspaceImpactResponse,
 } from '@/services/workspaceService'
 import type { ImpactSection } from '@/components/ui/DangerConfirmDialog'
+import { useAppNotifications } from '@/components/ui/notifications'
 
 /** What the delete does NOT do. Silence here is how orphans are born. */
 export const DELETE_CAVEAT =
@@ -76,6 +77,7 @@ export interface DeletionTarget {
 
 export function useWorkspaceDeletion(onDeleted: () => void) {
     const [target, setTarget] = useState<DeletionTarget | null>(null)
+    const { notify } = useAppNotifications()
 
     const open = useCallback(async (workspaces: WorkspaceResponse[]) => {
         if (workspaces.length === 0) return
@@ -114,13 +116,19 @@ export function useWorkspaceDeletion(onDeleted: () => void) {
         onDeleted()
 
         if (failed > 0) {
+            // The dialog stays open and shows this — a partial fan-out must NEVER
+            // also raise a success notification saying the deletion went through.
             throw new Error(
                 failed === target.workspaces.length
                     ? 'Delete failed. Nothing was deleted.'
                     : `${target.workspaces.length - failed} deleted, ${failed} failed. The list has been refreshed.`,
             )
         }
-    }, [target, onDeleted])
+
+        notify('success', target.workspaces.length === 1
+            ? `Deleted “${target.workspaces[0].name}” — its views, members and custom roles went with it.`
+            : `Deleted ${target.workspaces.length} workspaces — their views, members and custom roles went with them.`)
+    }, [target, onDeleted, notify])
 
     return { target, open, close, confirm }
 }

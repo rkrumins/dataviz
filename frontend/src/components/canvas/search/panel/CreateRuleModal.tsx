@@ -18,7 +18,7 @@ import { Tags, X } from 'lucide-react'
 import { type FC, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { DisplayRuleEditor } from '@/components/canvas/property-manager/DisplayRuleEditor'
 import { cn, generateId } from '@/lib/utils'
@@ -42,7 +42,7 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
 }) => {
     const rules = useDisplayRules()
     const addDisplayRule = useReferenceModelStore((s) => s.addDisplayRule)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const handleSave = useCallback((rule: DisplayRuleConfig) => {
         addDisplayRule({ ...rule, id: rule.id || generateId('rule') })
@@ -50,8 +50,8 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
         // Optimistic confirmation — the rule engine recomputes the match
         // set asynchronously, so we reassure the user the tag is now live
         // (matching the Property Manager drawer's wording).
-        showToast('success', `“${rule.name}” applied — tagging matched entities`)
-    }, [addDisplayRule, onClose, showToast])
+        notify('success', `“${rule.name}” applied — tagging matched entities`)
+    }, [addDisplayRule, onClose, notify])
 
     // Seed the editor with the current query as a brand-new (id-less)
     // rule. The editor mints a real id on save via its own logic.

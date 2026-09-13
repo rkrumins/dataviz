@@ -5,9 +5,9 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { ProviderOnboardingWizard } from './ProviderOnboardingWizard'
 import { providerService } from '@/services/providerService'
 
-vi.mock('@/components/ui/toast', () => ({
-  useToast: () => ({
-    showToast: vi.fn(),
+vi.mock('@/components/ui/notifications', () => ({
+  useAppNotifications: () => ({
+    notify: vi.fn(),
   }),
 }))
 

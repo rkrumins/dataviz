@@ -30,6 +30,43 @@ export interface WorkspaceMemberResponse {
     subject: MemberSubject
 }
 
+/** One route by which a user holds a role in the workspace — a direct
+ *  binding, or one inherited through a group. */
+export interface WorkspaceAccessGrant {
+    role: string
+    via: 'direct' | 'group'
+    bindingId: string
+    groupId: string | null
+    groupName: string | null
+    expiresAt: string | null
+}
+
+/** A person with effective access, flattened across their direct
+ *  binding(s) and every bound group they belong to. */
+export interface WorkspaceAccessUser {
+    userId: string
+    displayName: string | null
+    email: string | null
+    avatarId: string | null
+    status: string | null
+    deleted: boolean
+    /** Distinct roles held here; permissions are the union of these. */
+    roles: string[]
+    /** Single badge label — the highest-precedence built-in role, or the
+     *  first role when only custom ones are held. See ``roles`` for all. */
+    effectiveRole: string
+    grants: WorkspaceAccessGrant[]
+}
+
+export interface WorkspaceAccessResponse {
+    users: WorkspaceAccessUser[]
+    totalUsers: number
+    /** Users with ≥1 binding of each kind. A user can be in BOTH, so
+     *  these need not sum to ``totalUsers``. */
+    directUsers: number
+    viaGroupUsers: number
+}
+
 export interface WorkspaceMemberCreateRequest {
     subjectType: 'user' | 'group'
     subjectId: string
@@ -58,6 +95,13 @@ function url(wsId: string, suffix: string = ''): string {
 export const workspaceMembersService = {
     list(wsId: string): Promise<WorkspaceMemberResponse[]> {
         return authFetch<WorkspaceMemberResponse[]>(url(wsId))
+    },
+
+    /** The flattened, inheritance-aware access list: every distinct
+     *  person who can reach the workspace, directly or via a bound
+     *  group, with the route(s) that got them there. */
+    listEffective(wsId: string): Promise<WorkspaceAccessResponse> {
+        return authFetch<WorkspaceAccessResponse>(url(wsId, '/effective'))
     },
 
     create(

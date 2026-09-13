@@ -111,6 +111,23 @@ baseline invariant across rebuilds by construction, so it never needs
 re-seeding. The digest carries a `"v": "raw1"` namespace tag so it can never
 collide with the schema digest for a source that happens to have no overlay.
 
+It also excludes the **derived bookkeeping labels**
+(`common.derived_artifacts.DERIVED_LABELS`: `_AggMeta`, `_Projection`,
+`_GVRollupMeta`), and that half was missing at first, which made the invariant
+above simply untrue. `_stamp_run_meta` MERGEs an `_AggMeta` singleton at the end
+of every run, so the first aggregation of a source added a node key to the
+digest and moved the very baseline the next sweep compared against: `raw_drift`
+fired and queued a rebuild with nothing to fix, which stamped it again. The
+counts it reads come from `get_stats` / `get_counts_fast`, and neither excluded
+the labels either — the same unfiltered numbers reached the profiling snapshots,
+where `_AggMeta` toggling 1 → 0 → 1 (MERGEd per run, wiped by seeds and purges)
+raised a **severe `type_gone` finding and a notification** on every cycle.
+
+The tripwire (`counts_digest_from_counts`) deliberately still sees them, for the
+same reason it still sees `AGGREGATED`: `_AggMeta` disappearing *is* the signal
+that the overlay was wiped. The asymmetry between the two digests is the point —
+do not "align" them.
+
 ### Detectors, first match wins
 
 | Reason | Fires when |

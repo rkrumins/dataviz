@@ -36,7 +36,7 @@
  *
  * ON THE LENS BOARD TOO (2026-08-22). "The loading state can be missed and
  * the user might confuse that for nothing happening": the Lens's own
- * surfaces were ten pixels of muted header text and a toast at the foot
+ * surfaces were ten pixels of muted header text and a notification at the foot
  * of a full-screen board. It now mounts this capsule from the moment
  * Focus opens, so both boards say "calculating" in one voice. The Lens
  * passes a `subject` (the focus is known before anything is fetched, so

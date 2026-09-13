@@ -4,13 +4,27 @@
  * the canvases' own floating toolbars. Renders nothing when the data source has no
  * versioned graph, so non-versioned views are untouched.
  *
- * On main: just the BranchSwitcher. On a draft: an amber strip with the switcher,
- * the committed change counts (+ unsaved-edit hint), and Review / Publish / Discard.
+ * On a draft: an amber strip with the committed change counts (+ unsaved-edit hint),
+ * and Review / Publish / Discard.
+ *
+ * On main it renders NOTHING, most of the time — and that is the point. It used to
+ * hold the branch switcher on the left and Reviews on the right and nothing else: a
+ * whole band of chrome for two controls, stacked under a page header that named the
+ * view and above a canvas toolbar that named it again. Reviews moved up into the page
+ * header (ViewReviewsButton) and the switcher moved down into the Context View's
+ * toolbar, which had a title slot going spare. What is left here on main is two
+ * TRANSIENT chips — projection sync and rollup sync — so the row
+ * is `empty:hidden`: when every child renders null there is no bar, no border and no
+ * padding, and the canvas takes the space back.
+ *
+ * `showBranchSwitcher` is false only for the canvas that hosts the switcher itself
+ * (the Context View). Every other canvas has no toolbar slot for it and keeps it here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, PanelRight } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
@@ -21,6 +35,7 @@ import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBra
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
+import { BRANCH_VOCAB } from '../model/branchVocab'
 import { AggregationSyncChip } from './AggregationSyncChip'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -30,16 +45,22 @@ import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
-import { ViewPrIndicator } from './ViewPrIndicator'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
 interface CanvasVersioningBarProps {
   workspaceId: string
   dataSourceId: string | null
+  /** False when the host canvas renders the BranchSwitcher in its own toolbar
+   *  (the Context View does). Every other canvas keeps it here. */
+  showBranchSwitcher?: boolean
 }
 
-export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersioningBarProps) {
-  const { showToast } = useToast()
+export function CanvasVersioningBar({
+  workspaceId,
+  dataSourceId,
+  showBranchSwitcher = true,
+}: CanvasVersioningBarProps) {
+  const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   // Hoisted so the resolve below can carry the view id (capability context +
   // shared cache entry with the canvas's own resolve).
@@ -117,7 +138,7 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
       if (hadUnsavedEdits) {
         // Never silently drop the optimistic canvas — the edits are still in the staged store and
         // can be re-saved onto a fresh draft, but the user has to know they didn't land.
-        showToast(
+        notify(
           'warning',
           merged
             ? 'This draft was published while you had unsaved edits — they were not included. You’re now on Published; start a new draft to save them.'
@@ -125,11 +146,11 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
         )
         return
       }
-      showToast('info', merged
+      notify('info', merged
         ? 'This draft has been published — you’re now on the Published version.'
         : 'This draft is no longer available — you’re now on the Published version.')
     },
-    [showToast],
+    [notify],
   )
   useActiveBranchGuard({
     enabled: !!graphId,
@@ -184,7 +205,10 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
     }
     return (
       <>
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-glass-border bg-gradient-to-r from-accent-lineage/[0.07] via-canvas-elevated/40 to-transparent shrink-0">
+        {/* `via-canvas-elevated/40` emitted nothing, which left the gradient
+            with no middle stop; the accent wash is a real palette colour and
+            paints, so the band keeps it and drops the phantom. */}
+        <div className="flex items-center gap-3 px-4 py-2 border-b border-glass-border bg-gradient-to-r from-accent-lineage/[0.07] to-transparent shrink-0">
           <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-accent-lineage/10 border border-accent-lineage/20 shrink-0">
             <GitBranch className="w-4 h-4 text-accent-lineage" />
           </span>
@@ -219,9 +243,9 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
     abandon.mutate(branchId, {
       onSuccess: () => {
         switchToMain()
-        showToast('success', 'Draft discarded.')
+        notify('success', 'Draft discarded.')
       },
-      onError: (e) => showToast('error', (e as Error).message),
+      onError: (e) => notify('error', (e as Error).message),
     })
   }
 
@@ -232,13 +256,21 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
       <PublishReceiptBanner graphId={graphId} onViewCommit={() => setPanelTab('history')} />
       <div
         className={cn(
-          // flex-wrap + min-w-0: on a narrow canvas the controls wrap to a second line
-          // instead of overflowing — the indicator/Reviews/Publish actions stay reachable.
-          'flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 border-b text-sm shrink-0 min-w-0',
-          isDraft ? 'bg-amber-500/10 border-amber-500/20' : 'bg-canvas-elevated/40 border-glass-border',
+          // empty:hidden is what collapses the band. On main every child below is
+          // conditional or self-hiding, so when none of them has anything to say the
+          // row has no child NODES at all, `:empty` matches, and the border and
+          // padding go with it — CanvasRouter's flex-1 canvas takes the height back.
+          // A draft always renders its change-count block, so it is never empty.
+          'empty:hidden flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 border-b text-sm shrink-0 min-w-0',
+          // `bg-canvas-elevated/40` painted nothing at all — the published
+          // band was transparent over the canvas. A real neutral gives it the
+          // quiet lift it was always asking for.
+          isDraft
+            ? 'bg-amber-500/10 border-amber-500/20'
+            : 'bg-black/[0.025] dark:bg-white/[0.025] border-glass-border',
         )}
       >
-        <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />
+        {showBranchSwitcher && <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />}
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
         {/* Publish → rollup visibility for hand-built models: when the published head
             advances, poll aggregation readiness and show Syncing → Synced. */}
@@ -250,37 +282,52 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
               <>
+                {/* The distinction the whole draft model hinges on — saved to
+                    the draft vs. not saved at all — was spelled out in OS
+                    chrome after a one-second wait. */}
                 {changeSet.changes.length > 0 ? (
-                  <span className="flex items-center gap-1.5" title="Committed to this branch — not merged to main yet">
-                    <ChangeCountChips changeSet={changeSet} />
-                    <span className="text-[11px] text-ink-muted/80">in branch</span>
-                  </span>
+                  <HoverTip
+                    className="inline-flex"
+                    label={`Saved to this ${BRANCH_VOCAB.draft.toLowerCase()}, not published yet`}
+                    detail={`${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <ChangeCountChips changeSet={changeSet} />
+                      <span className="text-[11px] text-ink-muted/80">in branch</span>
+                    </span>
+                  </HoverTip>
                 ) : uncommitted === 0 ? (
                   <span className="text-xs">No changes yet</span>
                 ) : null}
                 {uncommitted > 0 && (
-                  <span className="text-xs font-medium text-amber-500 inline-flex items-center gap-1"
-                        title="Edited on the canvas but not saved to the branch yet">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> {uncommitted} unsaved
-                  </span>
+                  <HoverTip
+                    className="inline-flex"
+                    label="Edited on the canvas, not saved to the draft yet"
+                    detail="Review &amp; Save writes them into the draft"
+                  >
+                    <span className="text-xs font-medium text-amber-500 inline-flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> {uncommitted} unsaved
+                    </span>
+                  </HoverTip>
                 )}
               </>
             )}
           </div>
         )}
 
-        <div className="flex-1" />
+        {/* Draft-only spacer. On main it would be a child of its own, and the row
+            could never be empty — the one thing standing between this bar and the
+            band it gives back. `ml-auto` below keeps the review chip right-aligned
+            in both states instead. */}
+        {isDraft && branchId && <div className="flex-1" />}
 
-        {/* Review layer — shown on both main and draft strips. */}
-        <ViewPrIndicator wsId={workspaceId} viewId={viewId} onOpen={() => setPanelTab('prs')} />
-        <button
-          onClick={() => setPanelTab(isDraft ? 'changes' : 'history')}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-ink-muted hover:bg-canvas-overlay transition-colors"
-          title="Changes, pull requests & history for this view"
-        >
-          <PanelRight className="w-3.5 h-3.5" />
-          Reviews
-        </button>
+        {/* The review SIGNAL followed the Reviews BUTTON up into the page
+            header, and for the same reason the button went: it is the one
+            thing here that is NOT transient. The other two chips appear while
+            a projection or a rollup catches up and then go; one open review
+            held this whole band for as long as it stood open, above a toolbar,
+            which read as a dead strip. It now sits under the actions it points
+            at, and this row is empty again on main. */}
 
         {isDraft && branchId && (
           <>
@@ -290,22 +337,38 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
               hasCommitted={changeSet.changes.length > 0}
             />
 
-            <button
-              onClick={() => setShowPublish(true)}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm transition-all"
+            {/* The most consequential control in the bar, and the only one in
+                its cluster that said nothing on hover. */}
+            <HoverTip
+              className="inline-flex"
+              label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}
+              detail="Shows you what would change before anything happens"
             >
-              <GitPullRequest className="w-3.5 h-3.5" />
-              Publish
-            </button>
+              <button
+                onClick={() => setShowPublish(true)}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm transition-all"
+              >
+                <GitPullRequest className="w-3.5 h-3.5" />
+                Publish
+              </button>
+            </HoverTip>
 
-            <button
-              onClick={handleDiscard}
-              disabled={abandon.isPending}
-              className="p-1.5 rounded-lg text-ink-muted hover:text-rose-500 hover:bg-rose-500/10 transition-colors disabled:opacity-50"
-              title="Discard draft"
+            {/* Destructive AND icon-only, so the `title` was also its only
+                accessible name — the conversion has to hand that back. */}
+            <HoverTip
+              className="inline-flex"
+              label="Throw this draft away"
+              detail="Everything in it goes, and it cannot be brought back"
             >
-              {abandon.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-            </button>
+              <button
+                onClick={handleDiscard}
+                disabled={abandon.isPending}
+                aria-label="Discard draft"
+                className="p-1.5 rounded-lg text-ink-muted hover:text-rose-500 hover:bg-rose-500/10 transition-colors disabled:opacity-50"
+              >
+                {abandon.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              </button>
+            </HoverTip>
           </>
         )}
       </div>
@@ -347,9 +410,14 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   )
 }
 
-/** Committed-vs-main highlight toggle + a hover legend. The canvas always shows STAGED (unsaved)
- *  edits as a dashed halo; this toggle shows/hides the SOLID committed-vs-main rings so older
- *  committed work can be muted. Both keep the green/orange/rose colour language. */
+/** Committed-vs-main highlight toggle, and the legend for what the canvas draws.
+ *
+ *  This control used to fire TWO tooltips at once: a native `title` on the
+ *  button and, simultaneously and with no delay, a hand-rolled `group-hover`
+ *  panel — the app's only bespoke hover card, clipped by its ancestors and
+ *  layered under the real tooltip layer. Both are one `HoverTip` now: the
+ *  action leads, the legend is the body. `label` takes a node precisely so a
+ *  legend like this does not need a second component. */
 function ChangeHighlightControl({
   committedHidden,
   onToggle,
@@ -360,11 +428,34 @@ function ChangeHighlightControl({
   hasCommitted: boolean
 }) {
   return (
-    <div className="relative group">
+    <HoverTip
+      className="inline-flex"
+      label={(
+        <span className="block">
+          <span className="block text-[12px] font-semibold leading-snug text-ink">
+            {committedHidden ? 'Show saved changes on the canvas' : 'Hide saved changes on the canvas'}
+          </span>
+          <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
+            <span className="flex items-center gap-2">
+              <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
+              solid ring = saved to this draft
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
+              dashed halo = edited but not saved
+            </span>
+            <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
+              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
+              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
+              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
+            </span>
+          </span>
+        </span>
+      )}
+    >
       <button
         onClick={onToggle}
         disabled={!hasCommitted}
-        title={committedHidden ? 'Show committed changes on the canvas' : 'Hide committed changes on the canvas'}
         className={cn(
           'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors disabled:opacity-40',
           !committedHidden && hasCommitted ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
@@ -373,24 +464,6 @@ function ChangeHighlightControl({
         {committedHidden && hasCommitted ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
         Committed
       </button>
-      <div className="absolute right-0 top-full mt-1.5 w-64 p-3 rounded-xl bg-canvas border border-glass-border shadow-xl text-[11px] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
-        <p className="font-semibold text-ink mb-2">How changes are marked on the canvas</p>
-        <div className="space-y-1.5 text-ink-muted">
-          <div className="flex items-center gap-2">
-            <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
-            solid ring = committed to this branch
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
-            dashed halo = unsaved (staged)
-          </div>
-          <div className="pt-1.5 mt-1 border-t border-glass-border/60 flex items-center gap-3">
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
-            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    </HoverTip>
   )
 }

@@ -54,9 +54,18 @@ HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
 # nothing but a trusted proxy can reach this port) in the deployment
 # that actually has one; trusting the header when the port is directly
 # reachable would let a caller name its own address.
+# GUNICORN_KEEPALIVE reaches the uvicorn worker as ``timeout_keep_alive``
+# (UvicornWorker maps gunicorn's ``keepalive`` setting). The default is 2s,
+# while the frontend nginx keeps a warm pool of 32 upstream connections and
+# only expires them after 30s (``keepalive_timeout`` in its upstream block).
+# The backend must always outlive the proxy's idle window, otherwise nginx
+# reuses a connection the worker has already closed and the request fails
+# with "upstream prematurely closed connection" — a sporadic 502 on a
+# perfectly healthy deployment.
 ENV GUNICORN_WORKERS=4 \
     GUNICORN_TIMEOUT=120 \
     GUNICORN_GRACEFUL_TIMEOUT=30 \
+    GUNICORN_KEEPALIVE=75 \
     FORWARDED_ALLOW_IPS=127.0.0.1
 
 CMD ["sh", "-c", "exec gunicorn backend.app.main:app \
@@ -65,5 +74,6 @@ CMD ["sh", "-c", "exec gunicorn backend.app.main:app \
     --bind 0.0.0.0:8000 \
     --timeout ${GUNICORN_TIMEOUT} \
     --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT} \
+    --keep-alive ${GUNICORN_KEEPALIVE} \
     --forwarded-allow-ips ${FORWARDED_ALLOW_IPS} \
     --access-logfile -"]

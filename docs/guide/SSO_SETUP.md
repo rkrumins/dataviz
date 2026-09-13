@@ -100,13 +100,27 @@ similar names resolve by default on a gateway connection), and it only
 participates while the connection's **Map their avatar from the claims** toggle
 — in the Behaviour section, off by default — is on. With it on, our server
 fetches the image during sign-in and serves it from here; browsers never load
-the corporate URL directly, so member lists cannot leak viewers to your photo
-host. A private photo host needs an internal-hosts allowlist entry, exactly
-like the gateway endpoints. While the connection supplies a picture it is
-IdP-managed like the names: shown everywhere, re-applied at every sign-in,
-and the person's own picker says so instead of offering a change that would
-not survive. The image refreshes whenever the URL in the claims changes, and
-unlinking the identity clears it.
+the external URL directly, so member lists cannot leak viewers to your photo
+host.
+
+The image host must be listed before anything is fetched. An **external**
+host — a public CDN, an avatar service — goes on **Avatar image hosts**
+(Settings tab): that list is the on-switch, and while it is empty every
+outside host is refused by name. A **private** host inside your own network
+goes on the internal-gateways allowlist instead, exactly like the gateway
+endpoints. What gets through is raster images only — PNG, JPEG, GIF, WebP or
+AVIF, up to 256 KiB; a raster is a grid of pixels, a finished picture, so an
+SVG (drawing instructions that can carry scripts) is refused. Redirects are
+followed up to three hops, and every host in the chain must be listed. When a
+picture is not arriving, **rehearse the connection**: the verdict now carries
+an avatar line that says exactly what happened — fetched (type and size), or
+refused and by which rule, naming the host to add.
+
+While the connection supplies a picture it is IdP-managed like the names:
+shown everywhere, re-applied at every sign-in, and the person's own picker
+says so instead of offering a change that would not survive. The image
+refreshes whenever the URL in the claims changes, and unlinking the identity
+clears it.
 
 #### If your IdP only sends one name
 
@@ -168,6 +182,28 @@ re-evaluated on every sign-in and every session refresh, so a rule you change
 here applies to active sessions within minutes. The group list itself is read
 from your directory at sign-in — a change made there lands at that person's
 next full sign-in, within 24 hours at the latest.
+
+Live rules are edited in place: the pencil on a rule opens it as the same
+left-to-right sentence the New-rule card uses, pre-filled, with the preview
+underneath showing exactly what will be saved and a struck-through "was" line
+once something differs. Every guard that applies on create applies on save.
+When an edit (or a removal) takes away the last rule reaching a target, the
+access already granted under it is cleared immediately rather than lingering;
+a target another rule still reaches is left to the normal per-person
+re-evaluation.
+
+Where the groups come *from* is the connection's claim mapping (the pencil on
+its card → mapping studio). A directory that nests membership — say
+`{"entitlements": {"groups": ["group1", …]}}` — works out of the box, and on
+gateway connections the container's name does not matter: whatever the
+payload nests its user object under, one level is flattened automatically.
+Deeper nesting is one dotted key away (`authz.ad.memberships` reaches
+`{"authz": {"ad": {"memberships": […]}}}`). Paste a sample payload into the
+studio and the Groups row names exactly which key supplied the list. Large
+directories are fine too: a person arriving with 100+ AD groups keeps every
+name intact (distinguished names are never split on their commas), and the
+rules are matched in one query — only the names you actually mapped do
+anything; the rest ride along unused.
 
 There is more to this than fits here: what a rule can grant, why removing
 somebody from a group does not always remove their access, and what platform-
@@ -374,6 +410,28 @@ where {brand} may send requests. You may need to ask someone else to add it.
 Some addresses are refused whatever is on the list — loopback, and the addresses
 cloud providers use to hand out credentials. Nothing in the admin UI can unlock
 those.
+
+### Trusting your gateway's TLS
+
+Gateways inside a corporate network usually serve TLS whose trust anchor is the
+company's own certificate authority — which this deployment does not trust out
+of the box, so every call fails with *certificate verify failed* and the
+rehearsal names it (`tls_verify_failed`).
+
+The fix is deployment-level, once, for every connection at the same time: hand
+the deployment your corporate CA bundle — one PEM file containing the issuing
+chain — and point the `SSO_OUTBOUND_TLS_CA_CERTS` environment variable at it.
+Every outbound SSO call verifies against it from the next request: the gateway
+legs, the session re-check, JWKS and OIDC discovery, SAML metadata imports, and
+avatar fetches. How to mount the file per deployment shape (docker-compose,
+Kubernetes, a bare host) is in the deployment guide.
+
+The per-connection **Skip TLS verification** toggle, in the connection's
+Behaviour section, is the warned last resort: it accepts *any* TLS answer on
+that connection's calls — the gateway legs and the avatar images its sign-ins
+fetch alike — drops the connection's rating to Unverified unless its replies
+are signed tokens checked against a pasted key or shared secret, and an
+Unverified connection cannot grant platform admin roles. Prefer the bundle.
 
 ### Setting it up
 

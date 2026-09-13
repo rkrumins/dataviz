@@ -417,6 +417,47 @@ describe('email-first with a gateway connection', () => {
             expect.stringContaining('login'), expect.anything(),
         )
     })
+
+    it('a miss says so and reveals the ways in, instead of doing nothing', async () => {
+        // The domain matches no connection (none configured, or a typo).
+        // This used to be a silent return — with the password form and
+        // the button row tucked behind disclosures, Enter did nothing
+        // at all, which reads as a broken page.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockResolvedValue({ provider: null })
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        await userEvent.type(emailInput, 'ada@personal.example{enter}')
+
+        expect(await screen.findByText(
+            /don't recognise that email's domain/i,
+        )).toBeInTheDocument()
+        // Every way in is on the table now: the password form opens…
+        expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+        // …the gateway button stands, and nothing signed in silently.
+        expect(screen.getByRole('button', { name: /corporate gateway/i }))
+            .toBeInTheDocument()
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('a failed resolve is a miss, not a crash', async () => {
+        // The endpoint is rate-limited like /login; a 429 (or outage)
+        // lands in the same spoken miss rather than a silent return.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockRejectedValue(new Error('429'))
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        await userEvent.type(emailInput, 'ada@corp.example{enter}')
+
+        expect(await screen.findByText(
+            /don't recognise that email's domain/i,
+        )).toBeInTheDocument()
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
 })
 
 // ── and when it is asked ─────────────────────────────────────────────

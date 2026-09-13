@@ -94,3 +94,31 @@ def test_both_call_sites_share_one_definition():
     for label in config.DERIVED_LABELS:
         assert f"NOT '{label}' IN labels(n)" in reconcile._NOT_DERIVED
         assert f"NOT '{label}' IN labels(n)" in reconcile._SCAN_NODES
+
+
+def test_the_one_definition_now_lives_outside_this_package():
+    """It drifted a SECOND way. The provider and profiling read paths needed
+    the same list, could not import it from the versioning package (which is
+    deliberately decoupled), and so went without one: ``get_stats`` and
+    ``get_counts_fast`` reported ``_AggMeta`` as an entity type, which raised a
+    severe "type is gone" finding every time a rebuild stamped it and a seed
+    wiped it. The definition moved to ``backend.common.derived_artifacts`` and
+    ``config`` re-exports it BY NAME so this module's callers — and the
+    identity assertion above — are unchanged."""
+    from backend.common import derived_artifacts
+
+    assert config.DERIVED_LABELS is derived_artifacts.DERIVED_LABELS
+
+
+def test_membership_is_the_explicit_list_not_an_underscore_prefix():
+    """A customer's own ``_``-prefixed label is their data. Hiding it would
+    turn this fix into a different bug: real entities silently missing from
+    profiling, stats and the ontology wizard."""
+    from backend.common.derived_artifacts import is_derived_label
+
+    for label in config.DERIVED_LABELS:
+        assert is_derived_label(label)
+    assert not is_derived_label("_internal")
+    assert not is_derived_label("_")
+    assert not is_derived_label("Table")
+    assert not is_derived_label("")

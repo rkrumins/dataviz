@@ -1009,3 +1009,19 @@ async def test_shared_with_me_filter_kwargs(db_session):
     )
     # alice created it — shared-with-me must not echo her own view back.
     assert resp_own_excluded.items == []
+
+
+async def test_list_views_filtered_search_multi_term_and(db_session: AsyncSession):
+    """Multi-word search ANDs one OR-group per whitespace term, so a
+    reordered query still finds the view (C9)."""
+    ws = await _create_workspace(db_session)
+    await view_repo.create_view(db_session, _make_create_req(ws.id, name="Sales Pipeline"))
+    await view_repo.create_view(db_session, _make_create_req(ws.id, name="Pipeline Review"))
+    await db_session.commit()
+
+    resp = await view_repo.list_views_filtered(db_session, search="pipeline sales")
+    assert [v.name for v in resp.items] == ["Sales Pipeline"]
+
+    # Single-word search is unchanged: matches both.
+    resp_single = await view_repo.list_views_filtered(db_session, search="pipeline")
+    assert {v.name for v in resp_single.items} == {"Sales Pipeline", "Pipeline Review"}

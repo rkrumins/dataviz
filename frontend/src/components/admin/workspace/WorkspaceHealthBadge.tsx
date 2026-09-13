@@ -74,9 +74,17 @@ export function WorkspaceHealthBadge({
  * `nodeCount` undefined means "stats haven't landed yet" and yields `unknown`,
  * NOT `no-data`. Reporting an unmeasured workspace as empty is a lie that reads
  * exactly like a real one.
+ *
+ * `projectorCurrent` is the one signal here that aggregationStatus cannot see.
+ * A version-controlled source whose projector has stalled has a perfectly
+ * successful last batch job and a stored status of `ready`, while the rolled-up
+ * connections it serves are missing — an analyst opening that workspace finds
+ * lineage gone. So an affirmative `false` is critical. `null`/absent is
+ * UNKNOWN, never healthy AND never a fault: it is what every unversioned source
+ * reports, and treating it as a wedge would paint the whole estate red.
  */
 export function deriveWorkspaceHealth(
-  dataSources: { aggregationStatus: string }[],
+  dataSources: { aggregationStatus: string; projectorCurrent?: boolean | null }[],
   opts?: { nodeCount?: number },
 ): WorkspaceHealth {
   if (dataSources.length === 0) return 'empty'
@@ -84,6 +92,7 @@ export function deriveWorkspaceHealth(
   const statuses = dataSources.map((ds) => ds.aggregationStatus)
   // Something broke, or is mid-flight. These DO belong in health.
   if (statuses.some((s) => s === 'failed')) return 'critical'
+  if (dataSources.some((ds) => ds.projectorCurrent === false)) return 'critical'
   if (statuses.some((s) => s === 'pending' || s === 'running')) return 'warning'
 
   const nodes = opts?.nodeCount

@@ -18,7 +18,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAffectedSample, useValueDistribution } from '@/hooks/usePropertyInsights'
 import { cn, generateId } from '@/lib/utils'
@@ -66,7 +66,7 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
     viewId, mode, initialKey = '', knownEntityTypes, knownLayers, onClose,
 }) => {
     const provider = useGraphProvider()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const addOp = usePropertyDraftStore((s) => s.addOp)
     const { allKeys, keysByEntityType, tagValues, getValueSamples } = useDiscovery(viewId)
 
@@ -175,7 +175,7 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
             createdAt: new Date().toISOString(),
         })
         const verb = kind === 'remove' ? 'Remove' : kind === 'rename' ? 'Rename' : 'Set'
-        showToast(
+        notify(
             'success',
             `Staged: ${verb} “${trimmedKey}”${kind === 'rename' ? ` → “${trimmedNewKey}”` : ''} on ${targetCount} ${targetCount === 1 ? 'entity' : 'entities'} — not yet saved`,
         )

@@ -169,7 +169,8 @@ export function riskChecks(
             tone: 'warn',
             message:
                 'Turning this off is refused if any active admin has no linked ' +
-                'SSO identity — nobody gets locked out by this switch.',
+                'SSO identity and is not a system account — system accounts ' +
+                'keep password sign-in as the break-glass.',
         })
     }
 

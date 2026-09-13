@@ -797,6 +797,12 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         Another job was writing to the same graph — this job parked and retried automatically. If the named holder is stale, its lease expires on its own.
                                                     </p>
                                                 )}
+                                                {job.errorMessage.includes('mem consumption exceeded') && (
+                                                    <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
+                                                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                                        One scan asked the graph store for more rows than a single query may hold. The store is healthy — this is not an outage. The rebuild narrows its scans automatically, so reaching this means it hit its narrowest slice: set Rollup storage to Auto so it reads fewer summary edges, or lower Scan Range Width in tuning.
+                                                    </p>
+                                                )}
                                             </div>
                                         )}
 

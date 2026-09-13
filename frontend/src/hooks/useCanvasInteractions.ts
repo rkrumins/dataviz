@@ -11,7 +11,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
 import { validateDrawnEdge } from '@/services/ontologyPreflightService'
 import { generateId } from '@/lib/utils'
@@ -151,7 +151,7 @@ export function useCanvasInteractions(
     } = options
     
     const provider = useGraphProvider()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const {
         nodes,
         selectedNodeIds,
@@ -367,7 +367,7 @@ export function useCanvasInteractions(
         const node = nodes.find(n => n.id === nodeId)
         if (node?.data.urn) {
             await navigator.clipboard.writeText(node.data.urn)
-            // Could show a toast here
+            // Could show a notification here
         }
     }, [nodes])
     
@@ -422,7 +422,7 @@ export function useCanvasInteractions(
         const containmentEdgeTypes = useSchemaStore.getState().schema?.containmentEdgeTypes ?? []
         const edgeTypeUpper = (edge.data?.edgeType ?? edge.data?.relationship ?? '').toUpperCase()
         if (containmentEdgeTypes.some(c => c.toUpperCase() === edgeTypeUpper)) {
-            showToast('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
+            notify('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
             return
         }
 
@@ -447,7 +447,7 @@ export function useCanvasInteractions(
                 useCanvasStore.getState().addEdges([{ ...edge }])
             },
         })
-    }, [showToast])
+    }, [notify])
 
     const stageEdgeCreate = useCallback((sourceUrn: string, targetUrn: string, edgeType: string) => {
         // Ontology gate before we stage anything: lineage-only (no hand-drawn containment), valid
@@ -468,7 +468,7 @@ export function useCanvasInteractions(
             entityTypes: schema?.entityTypes ?? [],
         })
         if (!verdict.allowed) {
-            showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+            notify('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
             return null
         }
 
@@ -501,7 +501,7 @@ export function useCanvasInteractions(
             discard: () => useCanvasStore.getState().removeEdge(tempId),
         })
         return tempId
-    }, [showToast])
+    }, [notify])
 
     // ===================
     // Canvas Actions

@@ -5,7 +5,7 @@
  * - Real-time polling when any job is pending/running
  * - Interactive status filter chips
  * - Inline active-job progress bars
- * - Loading states on action buttons with toast feedback
+ * - Loading states on action buttons with notification feedback
  * - Drift detection indicators
  */
 
@@ -13,7 +13,7 @@ import { useState, useMemo, useEffect, useCallback } from 'react'
 import {
     Database, Settings2, Trash2, AlertTriangle, Loader2,
     CheckCircle2, Clock, AlertCircle, XCircle, SkipForward, CircleDot,
-    RefreshCw, Activity,
+    RefreshCw, Activity, Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { mapWithConcurrency } from '@/lib/concurrency'
@@ -69,7 +69,13 @@ function relativeTime(dateStr: string): string {
     return `${diffD}d ago`
 }
 
-/** Resolve the current aggregation status for a DS, preferring readiness API data. */
+/** Resolve the current aggregation status for a DS, preferring readiness API data.
+ *
+ *  Deliberately unchanged for a source whose projector has stalled: this
+ *  reports the last BATCH JOB, which genuinely did succeed, and the poll and
+ *  the filter chips both key off it. The missing truth — that its rolled-up
+ *  connections are not being served — is a separate fact and gets its own
+ *  banner on the card, gated on ``projectorCurrent === false``. */
 function resolveStatus(ds: DataSourceResponse, readiness?: DataSourceReadinessResponse): string {
     return readiness?.aggregationStatus ?? ds.aggregationStatus ?? 'none'
 }
@@ -311,6 +317,11 @@ export function WorkspaceAggregationDashboard({
                         const status = resolveStatus(ds, readiness)
                         const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.none
                         const drift = readiness?.driftDetected ?? false
+                        // Only an affirmative false is a wedge. null means
+                        // "not versioned, or unreadable" — unknown, not healthy
+                        // and not a fault.
+                        const notServing = readiness?.projectorCurrent === false
+                        const behind = readiness?.projectionCommitsBehind ?? null
                         const needsRebuild = readiness?.needsRebuild ?? false
                         const activeJob = readiness?.activeJob
                         const isExpanded = expandedId === ds.id
@@ -405,6 +416,38 @@ export function WorkspaceAggregationDashboard({
                                                     {activeJob.processedEdges.toLocaleString()} / {activeJob.totalEdges.toLocaleString()} edges processed
                                                 </div>
                                             )}
+                                        </div>
+                                    )}
+
+                                    {/* Not serving its rolled-up connections. Louder
+                                        than the drift warning below and above it in
+                                        the card, because this one is not waiting on a
+                                        rebuild — a rebuild is the one thing that will
+                                        not help. */}
+                                    {notServing && (
+                                        <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/[0.07]">
+                                            {/* Unplug, not AlertTriangle: this banner
+                                                stacks directly above the drift warning,
+                                                which is a triangle too, and the two
+                                                prescribe opposite actions. Red-vs-amber
+                                                alone is the one channel the drift-badge
+                                                contract rules out, and Unplug is the
+                                                shape this verdict already carries on
+                                                every other surface. */}
+                                            <Unplug className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+                                            <div className="min-w-0">
+                                                <p className="text-[11px] font-semibold text-red-600 dark:text-red-400">
+                                                    Connections not up to date{behind != null && behind > 0
+                                                        ? ` — ${behind} published ${behind === 1 ? 'change' : 'changes'} behind`
+                                                        : ''}
+                                                </p>
+                                                <p className="text-[11px] text-red-600/90 dark:text-red-400/90">
+                                                    Aggregation finished, but this source's rolled-up
+                                                    connections are still catching up, so lineage may
+                                                    look incomplete. Re-aggregating will not fix it —
+                                                    check version control for this source.
+                                                </p>
+                                            </div>
                                         </div>
                                     )}
 

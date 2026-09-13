@@ -351,3 +351,77 @@ async def test_no_orphan_tasks_after_timeout():
     after = {t for t in asyncio.all_tasks() if not t.done()}
     leaked = after - baseline - {asyncio.current_task()}
     assert not leaked, f"Orphan tasks after timeout: {[t.get_name() for t in leaked]}"
+
+
+# ── Tier resolution for workspace-scoped routes ──────────────────────
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        # The canvas's hydration and browse reads, mounted under the
+        # workspace segment the tier table collapses away.
+        ("/api/v1/ws-1/graph/edges/aggregated", "aggregation"),
+        ("/api/v1/ws-1/graph/edges/between", "aggregation"),
+        ("/api/v1/ws-1/graph/nodes/urn:a:b/children-with-edges", "graph"),
+        ("/api/v1/ws-1/graph/nodes/urn:a:b/children", "graph"),
+        ("/api/v1/ws-1/graph/nodes/query", "graph"),
+        ("/api/v1/ws-1/graph/nodes/top-level", "graph"),
+        ("/api/v1/ws-1/graph/trace/v2", "trace"),
+        ("/api/v2/ws-1/graph/trace/closure", "trace"),
+        ("/api/v1/ws-1/versioning/branches", "versioning"),
+        # Not workspace-scoped: the literal prefixes and the default tier.
+        ("/api/v1/graph/nodes/query", "graph"),
+        ("/api/v1/health/deps", "health"),
+        ("/api/v1/views/", "default"),
+        ("/api/v1/admin/aggregation-workers", "default"),
+    ],
+)
+def test_workspace_scoped_graph_routes_get_their_tier(monkeypatch, path, expected):
+    """Every graph route the canvas hits is mounted as
+    ``/api/v1/{ws_id}/graph/...``; the tier table lists the prefixes without
+    the workspace segment. This pins the collapse: an edge scan budgeted at
+    40s on the provider must land in the 45s aggregation tier, not the 30s
+    default, or the middleware's 504 fires before the provider's own
+    structured timeout (and its stale-snapshot fallback) can."""
+    tiers = {
+        "health": "5", "aggregation": "45", "trace": "60",
+        "graph": "60", "versioning": "120", "default": "30",
+    }
+    monkeypatch.setenv("HTTP_TIMEOUT_HEALTH_SECS", tiers["health"])
+    monkeypatch.setenv("HTTP_TIMEOUT_AGGREGATION_SECS", tiers["aggregation"])
+    monkeypatch.setenv("HTTP_TIMEOUT_TRACE_SECS", tiers["trace"])
+    monkeypatch.setenv("HTTP_TIMEOUT_GRAPH_SECS", tiers["graph"])
+    monkeypatch.setenv("HTTP_TIMEOUT_VERSIONING_SECS", tiers["versioning"])
+    monkeypatch.setenv("HTTP_TIMEOUT_DEFAULT_SECS", tiers["default"])
+    mw = _TimeoutMiddleware(_instant_app())
+
+    assert mw._resolve_timeout(path) == float(tiers[expected])
+
+
+def test_every_provider_budget_sits_under_its_http_tier(monkeypatch):
+    """The provider's per-query deadlines must fire BEFORE the HTTP tier
+    around them: the provider's timeout is structured (504 PROVIDER_TIMEOUT,
+    last-known-good fallback), the middleware's is not (the handler is
+    cancelled, nothing is served). A default that crosses its tier is the
+    bug the "504 upstream" reports were made of."""
+    from backend.app.config import resilience as r
+
+    for name in (
+        "HTTP_TIMEOUT_HEALTH_SECS", "HTTP_TIMEOUT_AGGREGATION_SECS",
+        "HTTP_TIMEOUT_TRACE_SECS", "HTTP_TIMEOUT_GRAPH_SECS",
+        "HTTP_TIMEOUT_VERSIONING_SECS", "HTTP_TIMEOUT_DEFAULT_SECS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    mw = _TimeoutMiddleware(_instant_app())
+    aggregation = mw._resolve_timeout("/api/v1/ws/graph/edges/aggregated")
+    between = mw._resolve_timeout("/api/v1/ws/graph/edges/between")
+    graph = mw._resolve_timeout("/api/v1/ws/graph/nodes/query")
+
+    assert r.FALKORDB_AGGREGATED_READ_TIMEOUT_SECS < aggregation
+    assert r.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS < between
+    assert r.FALKORDB_NODES_QUERY_TIMEOUT_SECS < graph
+    assert r.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS < graph
+    # children-with-edges runs the children page and then its edges, each
+    # on the children budget.
+    assert 2 * r.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS < graph

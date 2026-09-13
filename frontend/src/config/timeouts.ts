@@ -19,6 +19,7 @@
  *   VITE_TIMEOUT_TOP_LEVEL_MS
  *   VITE_TIMEOUT_AGGREGATED_EDGES_MS
  *   VITE_TIMEOUT_EDGES_BETWEEN_MS
+ *   VITE_TIMEOUT_SEARCH_ADVANCED_MS
  *   VITE_TIMEOUT_PROVIDER_HEALTH_MS
  *   VITE_TIMEOUT_ADMIN_LIST_MS
  *   VITE_TIMEOUT_LINEAGE_FOCUS_MS
@@ -88,18 +89,50 @@ const _BANNER = { min: 5_000,  max: 600_000 } as const   // 5s..10min
 
 export const TIMEOUTS = {
   DEFAULT_MS:           readMs('VITE_TIMEOUT_DEFAULT_MS',           30_000, _MEDIUM),
-  TRACE_MS:             readMs('VITE_TIMEOUT_TRACE_MS',             60_000, _LONG),
+  // Trace: the backend's own budget is 60s (TRACE_TIMEOUT_SECS) and its ASGI
+  // tier is 60s too. At 60s here all three fired at the same instant — a
+  // coin flip over whether the user got the server's structured, truncated
+  // result or a client abort that threw it away. Outlast both.
+  TRACE_MS:             readMs('VITE_TIMEOUT_TRACE_MS',             75_000, _LONG),
   // Ontology publish runs the impact check and cache invalidation for every
   // assigned data source server-side — give it headroom over the default.
   PUBLISH_MS:           readMs('VITE_TIMEOUT_PUBLISH_MS',           60_000, _LONG),
-  GET_CHILDREN_MS:      readMs('VITE_TIMEOUT_GET_CHILDREN_MS',      30_000, _MEDIUM),
+  // POST /nodes/query — the canvas hydration hot path, fired four batches
+  // at a time on every view open. Its BACKEND budget is 20s
+  // (FALKORDB_NODES_QUERY_TIMEOUT), and it was the one hot graph read still
+  // inheriting the 30s default: 10s of margin to cover queue wait, response
+  // serialization and transfer, four of them sharing one slow link. Too thin,
+  // and the client aborting first is the worst outcome — it throws away work
+  // the server was about to finish and retries it, doubling load on exactly
+  // the query that was already slow. 45s matches its siblings and sits under
+  // the 60s graph HTTP tier.
+  NODES_QUERY_MS:       readMs('VITE_TIMEOUT_NODES_QUERY_MS',       45_000, _LONG),
+  // /nodes/{urn}/children and /children-with-edges. The latter runs the
+  // children page and then their edges, each on the backend's 15s children
+  // budget (FALKORDB_CHILDREN_QUERY_TIMEOUT): 30s here aborted the client
+  // while the server was still on the second query, so the backend's
+  // structured 504 never surfaced and the retry doubled the load. Sits
+  // above that 30s worst case and under the 60s graph HTTP tier.
+  GET_CHILDREN_MS:      readMs('VITE_TIMEOUT_GET_CHILDREN_MS',      45_000, _LONG),
   // /nodes/top-level. Must exceed the backend's worst case for this
   // endpoint (page query 15s + best-effort count 5s + queue/serialize
   // overhead — see FALKORDB_TOP_LEVEL_* in resilience.py) so the
   // backend always loses the race and surfaces its own, accurate error.
   TOP_LEVEL_MS:         readMs('VITE_TIMEOUT_TOP_LEVEL_MS',         45_000, _LONG),
-  AGGREGATED_EDGES_MS:  readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS',  45_000, _LONG),
-  EDGES_BETWEEN_MS:     readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',     45_000, _LONG),
+  // Both run under the 45s aggregation ASGI tier, and both used to sit
+  // exactly ON it. The layering rule this stack now follows is that each
+  // outer deadline outlasts the one inside it — provider budget < ASGI tier
+  // < client < proxy — so the innermost layer that can explain the failure
+  // is always the one that fires. A tie hands the user an abort instead of
+  // the backend's structured answer (and, for these two, throws away a scan
+  // that had already done its work).
+  AGGREGATED_EDGES_MS:  readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS',  60_000, _LONG),
+  EDGES_BETWEEN_MS:     readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',     60_000, _LONG),
+  // /search/advanced. The server's soft deadline is 30s but still
+  // returns partial results after it — give the client headroom over
+  // that so a search-as-you-type request isn't aborted before the
+  // backend's own partial response can arrive.
+  SEARCH_ADVANCED_MS:   readMs('VITE_TIMEOUT_SEARCH_ADVANCED_MS',   45_000, _LONG),
   PROVIDER_HEALTH_MS:   readMs('VITE_TIMEOUT_PROVIDER_HEALTH_MS',   30_000, _MEDIUM),
   // Per-call deadline for admin/dashboard list fan-outs wrapped in
   // Promise.allSettled. Generous enough for a healthy backend, tight

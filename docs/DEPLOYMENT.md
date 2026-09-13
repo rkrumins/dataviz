@@ -160,6 +160,70 @@ Beyond the defaults, for a production deployment:
 6. **Rotate the admin password** immediately after first login.
 7. **Disable FalkorDB browser UI in production** — it's authentication-free. Remove the port mapping `"3000:3000"` from `docker-compose.yml` for public deployments.
 
+## Corporate TLS trust for SSO
+
+Enterprise SSO endpoints — a corporate gateway, an internal IdP, a private
+photo host — usually serve TLS whose trust anchor is the company's own CA.
+Out of the box this deployment verifies outbound SSO calls against the
+public trust store only, so every such call fails with *certificate verify
+failed* and the SSO rehearsal reports `tls_verify_failed`.
+
+The supported fix is one environment variable: point
+`SSO_OUTBOUND_TLS_CA_CERTS` at a PEM bundle containing your corporate CA's
+issuing chain. Every outbound SSO call (gateway legs, OIDC
+discovery/token/JWKS, SAML metadata imports, avatar fetches) verifies
+against it from the next request — no restart-sensitive caching of a
+missing file, so a bundle mounted late starts working on its own.
+
+**docker-compose** — mount the PEM read-only and name it:
+
+```yaml
+services:
+  viz-service:
+    environment:
+      SSO_OUTBOUND_TLS_CA_CERTS: /etc/ssl/corp/ca-bundle.pem
+    volumes:
+      - ./secrets/corp-ca.pem:/etc/ssl/corp/ca-bundle.pem:ro
+```
+
+**Kubernetes** — ship the bundle as a Secret and mount it:
+
+```bash
+kubectl create secret generic corp-ca --from-file=ca-bundle.pem=corp-ca.pem
+```
+
+```yaml
+env:
+  - name: SSO_OUTBOUND_TLS_CA_CERTS
+    value: /etc/ssl/corp/ca-bundle.pem
+volumeMounts:
+  - name: corp-ca
+    mountPath: /etc/ssl/corp
+    readOnly: true
+volumes:
+  - name: corp-ca
+    secret:
+      secretName: corp-ca
+```
+
+**Bare host** — put the PEM anywhere the service user can read and export
+the variable in the service's environment (unit file or env file):
+
+```bash
+Environment=SSO_OUTBOUND_TLS_CA_CERTS=/etc/ssl/corp/ca-bundle.pem
+```
+
+Verify it took: rehearse an enterprise connection from Admin → SSO — the
+gateway and avatar lines stop reporting a trust failure. An unloadable
+path is logged at ERROR (naming the variable and the path) and the
+deployment falls back to the public store — never to "no verification".
+
+In production (`ENV=prod`) plain HTTP to these endpoints is refused
+outright, so the CA bundle is **the** supported path for internal HTTPS.
+The per-connection *Skip TLS verification* toggle in the admin UI is the
+warned last resort: it accepts any TLS answer on that one connection and
+costs it its Verified rating.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

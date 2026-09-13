@@ -321,3 +321,74 @@ async def test_probe_stamps_a_provider_with_no_counts_fast(monkeypatch):
     ))
 
     assert stamped == ["ds_1"]
+
+
+# ── trap 4: derived bookkeeping is not user data ─────────────────────
+#
+# The aggregation pipeline MERGEs `_AggMeta` into the graph it maintains, the
+# projector writes `_GVRollupMeta` and `_Projection`. Reporting them as entity
+# types put a phantom type into profiling that toggles 1 -> 0 -> 1 as rebuilds
+# stamp it and projection seeds wipe it — each dip raising a SEVERE
+# "type is gone" finding about the platform's own node.
+
+
+@pytest.mark.asyncio
+async def test_excludes_derived_bookkeeping_labels():
+    p = _make_provider(
+        {"*nodes": 1002, "*edges": 500,
+         "Asset": 1000, "_AggMeta": 1, "_Projection": 1, "FLOWS_TO": 500},
+        labels=("Asset", "_AggMeta", "_Projection"),
+        rel_types=("FLOWS_TO",),
+    )
+    result = await p.get_counts_fast()
+
+    assert result["entityTypeCounts"] == {"Asset": 1000}
+    # And — the trap — nodeCount comes off too. `node_count` is an unfiltered
+    # MATCH (n) total, so dropping the labels alone would leave the remainder
+    # branch attributing them to "unknown": one phantom type swapped for a
+    # worse one that raises the identical finding when it moves.
+    assert result["nodeCount"] == 1000
+    assert "unknown" not in result["entityTypeCounts"]
+
+
+@pytest.mark.asyncio
+async def test_derived_exclusion_does_not_mask_real_unlabelled_nodes():
+    """The remainder branch must still work: derived labels come off the
+    total, genuinely unlabelled nodes still land in "unknown"."""
+    p = _make_provider(
+        {"*nodes": 1011, "*edges": 0, "Asset": 1000, "_AggMeta": 1},
+        labels=("Asset", "_AggMeta"), rel_types=(),
+    )
+    result = await p.get_counts_fast()
+
+    assert result["nodeCount"] == 1010            # 1011 - 1 derived
+    assert result["entityTypeCounts"] == {"Asset": 1000, "unknown": 10}
+
+
+@pytest.mark.asyncio
+async def test_a_customer_label_starting_with_underscore_is_kept():
+    """Membership is the explicit list, never a "_" prefix rule. A customer's
+    own `_internal` nodes are their data and must keep being reported."""
+    p = _make_provider(
+        {"*nodes": 1001, "*edges": 0, "Asset": 1000, "_internal": 1},
+        labels=("Asset", "_internal"), rel_types=(),
+    )
+    result = await p.get_counts_fast()
+
+    assert result["entityTypeCounts"] == {"Asset": 1000, "_internal": 1}
+    assert result["nodeCount"] == 1001
+
+
+@pytest.mark.asyncio
+async def test_aggregated_edge_type_is_still_reported():
+    """Rollup volume is a real operational number. Only the profiling surfaces
+    strip AGGREGATED; the raw counts keep it (and the raw fingerprint excludes
+    it separately, in fingerprint.py)."""
+    p = _make_provider(
+        {"*nodes": 1, "*edges": 50000, "Asset": 1, "AGGREGATED": 50000},
+        labels=("Asset",), rel_types=("AGGREGATED",),
+    )
+    result = await p.get_counts_fast()
+
+    assert result["edgeTypeCounts"] == {"AGGREGATED": 50000}
+    assert result["edgeCount"] == 50000

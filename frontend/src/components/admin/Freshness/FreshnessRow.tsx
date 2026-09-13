@@ -20,7 +20,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, GitBranch, Loader2,
-    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle,
+    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle, Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -30,7 +30,7 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
+import { freshnessState, isDrifting, isPlatformMastered, isProjectionStalled, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState, StatusFacet } from './freshnessTriage'
 import {
     DRIFT_SPEC, DriftStateBadge,
@@ -71,7 +71,8 @@ export function timeUntil(iso?: string | null): string | null {
  *  `Pick`, not the full row type, so the decision logic is testable with a
  *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
 type AutomationRow = Pick<
-    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'
+    FreshnessRowData,
+    'driftState' | 'autoReconcile' | 'pausedUntil' | 'projectorCurrent'
 >
 
 /**
@@ -101,6 +102,18 @@ export function automationChip(row: AutomationRow): {
 } | null {
     const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
 
+    // Ranked above the breaker: automation is not merely stopped here, the
+    // action it would take is the wrong one. Saying nothing in this column
+    // would imply automation has the source covered.
+    if (isProjectionStalled(row)) {
+        return {
+            label: "Rebuild won't fix this", tone: DRIFT_SPEC.projectionStalled.tone,
+            facet: 'projectionStalled', Icon: Unplug,
+            title: 'Automatic reconciliation deliberately never rebuilds this '
+                + 'source, and a rebuild would not restore its rolled-up '
+                + 'connections. Someone has to look at version control for it.',
+        }
+    }
     if (row.driftState === 'suspended') {
         return {
             label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone,
@@ -333,7 +346,13 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 title="Lineage has never been built for this source."
             />,
         )
-    } else if (state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)) {
+    } else if (
+        state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)
+        // A wedged source's last build succeeded and carries no marker, so
+        // every other signal here reads healthy while its rolled-up
+        // connections are not reaching the product at all.
+        && !isProjectionStalled(row)
+    ) {
         badges.push(
             <Badge key="upToDate"
                 tone="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
@@ -345,8 +364,16 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
 
     // Current overlay verdict — additive on failed/queued rows, and the
     // primary freshness label when a ready source is drifting.
-    if (isDrifting(row) || isReconcileSuspended(row)) {
-        badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
+    if (isDrifting(row) || isReconcileSuspended(row) || isProjectionStalled(row)) {
+        // The live watermark can outrun the sweep stamp, so the badge is
+        // rendered from the verdict the predicate actually reached — otherwise
+        // the row suppresses "Up to date" and then shows the sky "Version
+        // controlled" badge in its place, which reads as reassurance.
+        badges.push(
+            <DriftStateBadge key="driftState"
+                state={isProjectionStalled(row) ? 'projectionStalled' : row.driftState}
+            />,
+        )
     }
 
     if (row.drifted === true) {

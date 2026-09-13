@@ -28,6 +28,10 @@ const FACET_LABEL: Record<Exclude<StatusFacet, ''>, string> = {
     cacheStamped: 'Cache coverage',
     drifting: 'Drifting',
     suspended: 'Needs a person',
+    // The chip has to read as the same state the badge, the tile and the row
+    // call it — this map is total on purpose so a new verdict cannot reach
+    // the active-filter chip unnamed.
+    projectionStalled: 'Connections not up to date',
 }
 
 interface Props {

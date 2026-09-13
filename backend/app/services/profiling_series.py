@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from backend.common.derived_artifacts import strip_derived_counts
+
 #: Series drawn before the tail is folded away. Above this a categorical
 #: palette runs out of distinguishable slots — a seventh hue is not a new
 #: colour to a reader with a colour-vision deficiency, it is one of the six
@@ -62,6 +64,23 @@ def _loads(raw: Any) -> Dict[str, int]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _counts(obs: Any, field: str) -> Dict[str, int]:
+    """One snapshot's type counts, with the platform's own artifacts removed.
+
+    Parsing stays in ``_loads``; the exclusion is policy and lives here. Every
+    series read goes through this, so a derived artifact can never reach the
+    chart, the type ledger or ``types_that_vanished`` — where ``_AggMeta``
+    (MERGEd per aggregation run, wiped by projection seeds and purges) showed
+    up as a type that repeatedly disappeared. Snapshots captured before the
+    providers stopped recording it stay readable for the retention window, so
+    filtering at the source alone would not have cleared the existing charts.
+    """
+    return strip_derived_counts(
+        _loads(getattr(obs, field, None)),
+        edges=(field == "edge_type_counts"),
+    )
 
 
 def _metric_value(obs, metric: str) -> int:
@@ -122,7 +141,7 @@ def _rank_types(
     for bucket in buckets:
         totals: Dict[str, int] = {}
         for obs in filled.get(bucket, {}).values():
-            for name, value in _loads(getattr(obs, field, None)).items():
+            for name, value in _counts(obs, field).items():
                 totals[name] = totals.get(name, 0) + value
         for name, value in totals.items():
             if value > peaks.get(name, 0):
@@ -199,7 +218,7 @@ def build_series(
     for bucket in buckets:
         summed: Dict[str, int] = {}
         for obs in filled[bucket].values():
-            for name, value in _loads(getattr(obs, field, None)).items():
+            for name, value in _counts(obs, field).items():
                 summed[name] = summed.get(name, 0) + value
         for key in drawn:
             per_type[key].append(summed.get(key, 0))
@@ -249,7 +268,7 @@ def types_that_vanished(
     for bucket in buckets:
         summed: Dict[str, int] = {}
         for obs in filled[bucket].values():
-            for name, value in _loads(getattr(obs, field, None)).items():
+            for name, value in _counts(obs, field).items():
                 summed[name] = summed.get(name, 0) + value
         for name, value in summed.items():
             peak[name] = max(peak.get(name, 0), value)

@@ -6,7 +6,6 @@ export interface LineageNode extends Node {
   data: {
     label: string
     businessLabel?: string
-    technicalLabel?: string
     /** The entity's description (mapped from GraphNode.description in toCanvasNode). */
     description?: string
     urn: string
@@ -35,6 +34,10 @@ export interface LineageNode extends Node {
     /** Reconstructed committed-deletion node (draft-vs-main). Read-only; rendered as a rose ghost
      *  until the draft is merged or the deletion is restored. See features/versioning/canvas/deletionGhosts. */
     isGhost?: boolean
+    /** Primed out of band by a search reveal (`useRevealSearchHit`) rather than
+     *  delivered by a child page. `loadChildren` excludes these from its page
+     *  offset and clears the flag once a real page delivers the child. */
+    viaReveal?: boolean
   }
 }
 
@@ -98,6 +101,17 @@ interface CanvasState {
   edgesTruncated: boolean
   setEdgesTruncated: (edgesTruncated: boolean) => void
 
+  // Node-fetch integrity — some batches of the initial load failed after
+  // their retries while others succeeded. The canvas renders what arrived
+  // and SAYS so (and keeps retrying), rather than a silently incomplete
+  // view. `missingEntityCount` is the number of assigned entities in the
+  // failed batches (0 when the failed batches were type-shaped, whose
+  // size is unknown until they load).
+  nodeFetchFailures: number
+  missingEntityCount: number
+  noteNodeFetchFailure: (batches: number, entities: number) => void
+  clearNodeFetchFailures: () => void
+
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
   // because multi-locate flows fire multiple pulses concurrently; using
@@ -145,7 +159,7 @@ interface CanvasState {
   hydrationPhase: HydrationPhase
   setHydrationPhase: (phase: HydrationPhase) => void
   /** Authoritative hydration status, mirrored from CanvasRouter so downstream
-   *  canvas components (empty-state, toasts, ghosts) derive their UI from ONE
+   *  canvas components (empty-state, notifications, ghosts) derive their UI from ONE
    *  source and never render a failed/loading load as an empty graph. */
   hydrationStatus: HydrationStatus
   setHydrationStatus: (status: HydrationStatus) => void
@@ -257,6 +271,13 @@ export const useCanvasStore = create<CanvasState>()(
       clearEdgeFetchFailures: () => set({ edgeFetchFailures: 0, lastEdgeError: null }),
       edgesTruncated: false,
       setEdgesTruncated: (edgesTruncated) => set({ edgesTruncated }),
+      nodeFetchFailures: 0,
+      missingEntityCount: 0,
+      noteNodeFetchFailure: (batches, entities) => set({
+        nodeFetchFailures: batches,
+        missingEntityCount: entities,
+      }),
+      clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the

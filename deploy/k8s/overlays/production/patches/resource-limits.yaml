@@ -13,7 +13,12 @@ spec:
               cpu: 500m
               memory: 1Gi
             limits:
-              cpu: "2"
+              # One core per gunicorn worker (GUNICORN_WORKERS=4). At 2 the
+              # four single-threaded async workers contend for two cores and
+              # CFS-throttle under exactly the concurrent load they exist to
+              # absorb — and a throttled worker's event loop stalls every
+              # request on it, which reads downstream as provider slowness.
+              cpu: "4"
               memory: 2Gi
 ---
 apiVersion: apps/v1

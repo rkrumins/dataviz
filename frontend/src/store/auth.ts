@@ -33,6 +33,7 @@ import {
     resetSessionLostLatch,
     setAuthEnvironmentId,
 } from '@/services/fetchWithTimeout'
+import { bumpAvatarCache } from '@/lib/avatarImage'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
@@ -323,13 +324,21 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // only starts once status flips to 'authenticated', below.
             setAuthEnvironmentId(environment_id)
             // A session can be holding no CSRF cookie — evicted by a
-            // sibling deployment's sign-out, cleared by hand, expired —
-            // and only a rotation re-mints it. Bootstrap is the one place
+            // sibling deployment's sign-out, cleared by hand — and until
+            // it is restored every write 403s. Bootstrap is the one place
             // that knows a session exists before any write is attempted,
-            // so repairing here is what makes reloading the page fix it:
-            // a reload otherwise changes nothing, because it issues only
-            // GETs and no GET needs a CSRF token.
-            void ensureCsrfToken()
+            // so repairing here is belt-and-braces with the server's own
+            // heal on GET /auth/me above.
+            //
+            // AWAITED, deliberately: fire-and-forget left a window in
+            // which the first admin write raced the repair and lost.
+            // Because GET /auth/me already healed the cookie a line
+            // earlier, this is normally a same-tick no-op (the
+            // cookie-present gate returns immediately); it only reaches
+            // the network on a backend too old to heal, where it costs
+            // one cheap /auth/csrf round trip before the authenticated
+            // flip — the ordering that makes writes safe. Never rejects.
+            await ensureCsrfToken()
             // Re-apply with the server's freshly-returned DTO so
             // role/status updates from the backend overwrite the
             // optimistic copy.
@@ -358,6 +367,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
+        // Sign-in is when the server may have just stored this
+        // person's avatar; forget the misses and version the URL so
+        // the picture appears without a hard refresh.
+        bumpAvatarCache()
         try {
             const { user, environment_id } = await authService.login({ email, password })
             setAuthEnvironmentId(environment_id)
@@ -379,6 +392,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
+        // Sign-in is when the server may have just stored this
+        // person's avatar; forget the misses and version the URL so
+        // the picture appears without a hard refresh.
+        bumpAvatarCache()
         try {
             const { user } = await authService.loginWithBrowserProfile(
                 providerSlug, payload,
@@ -402,6 +419,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, lastSsoDenial: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
+        // Sign-in is when the server may have just stored this
+        // person's avatar; forget the misses and version the URL so
+        // the picture appears without a hard refresh.
+        bumpAvatarCache()
         try {
             const { user } = await loginWithBackchannel(providerSlug, body)
             set({ ..._authenticated(user), error: null, isLoading: false })
@@ -440,6 +461,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             if (resp.autoSignedIn && resp.user) {
                 resetClaimRecovery()
                 resetSessionLostLatch()
+                bumpAvatarCache()
                 set({ ..._authenticated(resp.user), error: null, isLoading: false })
                 writeUserCache(resp.user)
                 await hydratePermissions(set)

@@ -66,7 +66,7 @@ import { viewService } from '@/services/viewService'
 import {
     viewToViewConfig, updateViewLayout, requestViewPublication,
 } from '@/services/viewApiService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { provisionBlankGraph, GraphNameUnavailableError, type BlankGraphResult } from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
@@ -851,7 +851,7 @@ function ViewWizardBody({
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments } = useReferenceModelStore()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const isBlank = scopeMode === 'blank'
     // Picking Enterprise without the publish permission means "create it,
     // then ask" — the view has to exist before a request can attach to it.
@@ -1223,12 +1223,12 @@ function ViewWizardBody({
                                 createdViewId,
                                 formData.publishNote?.trim() || undefined,
                             )
-                            showToast(
+                            notify(
                                 'success',
                                 'View created — your publication request was sent to your workspace admins',
                             )
                         } catch {
-                            showToast(
+                            notify(
                                 'error',
                                 "View created, but the publication request couldn't be sent. You can ask again from Share.",
                             )
@@ -1289,12 +1289,12 @@ function ViewWizardBody({
                         await requestViewPublication(
                             viewId, formData.publishNote?.trim() || undefined,
                         )
-                        showToast(
+                        notify(
                             'success',
                             'Saved — your publication request was sent to your workspace admins',
                         )
                     } catch {
-                        showToast(
+                        notify(
                             'error',
                             "Saved, but the publication request couldn't be sent. You can ask again from Share.",
                         )
@@ -1331,7 +1331,7 @@ function ViewWizardBody({
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView, clearDraft, canPublishHere, showToast])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView, clearDraft, canPublishHere, notify])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()

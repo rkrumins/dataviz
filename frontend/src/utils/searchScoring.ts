@@ -83,8 +83,29 @@ export function scoreCandidate<T>(
 }
 
 /**
+ * Score a candidate against a multi-word query as an AND of its tokens: each
+ * token must score above zero somewhere in `fields` or the whole match is 0.
+ * The literal phrase score is added on top as a bonus, so a candidate that
+ * contains the words in query order ranks above one that only matches the
+ * tokens individually.
+ */
+function scoreTokenised<T>(candidate: T, phrase: string, tokens: string[], fields: FieldSpec<T>[]): number {
+    let tokenSum = 0
+    for (const token of tokens) {
+        const s = scoreCandidate(candidate, token, fields)
+        if (s === 0) return 0
+        tokenSum += s
+    }
+    return scoreCandidate(candidate, phrase, fields) + tokenSum
+}
+
+/**
  * Score and filter a list of candidates against a query, returning the
  * highest-scoring matches sorted descending. Zero-score candidates are dropped.
+ *
+ * A multi-word query is tokenised on whitespace and matched as an AND of its
+ * tokens (see `scoreTokenised`); a single-token query is byte-identical to
+ * the original single-needle behaviour.
  *
  * Optionally takes a `tieBreaker` index to keep stable ordering when scores
  * are equal — Map keys preserve insertion order in JS, but tied sorts can
@@ -97,9 +118,10 @@ export function scoreCandidates<T>(
 ): { item: T; score: number }[] {
     const q = rawQuery.trim().toLowerCase()
     if (!q) return []
+    const tokens = q.split(/\s+/)
     const out: { item: T; score: number; idx: number }[] = []
     candidates.forEach((item, idx) => {
-        const s = scoreCandidate(item, q, fields)
+        const s = tokens.length > 1 ? scoreTokenised(item, q, tokens, fields) : scoreCandidate(item, q, fields)
         if (s > 0) out.push({ item, score: s, idx })
     })
     out.sort((a, b) => (b.score - a.score) || (a.idx - b.idx))
