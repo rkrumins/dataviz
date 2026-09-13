@@ -3161,3 +3161,75 @@ def test_the_worker_passes_the_stamp_a_heartbeat():
     assert "except TypeError:" in src, (
         "a provider that predates the keyword must still be called the old way"
     )
+
+
+# ── a lost write lease stops the run, it does not just stop renewing ────
+#
+# The per-graph write lease is the only thing standing between two rebuilds
+# and one master. Losing it used to stop the background renewal task and
+# nothing else: the pipeline captured the lease once at the top of ``run``
+# and touched it again only to release it in ``finally``, so it kept
+# MERGEing while a second run held the lease and MERGEd the same pairs.
+#
+# ``_write_items`` sets ``r.weight = item.w`` on a first touch and
+# ``coalesce(r.weight, 0) + item.w`` on a repeat, so the stored weight of
+# every pair BOTH runs touch is neither run's computed weight — a silently
+# wrong rollup that survives until a full fresh rebuild.
+#
+# The check rides ``_cancel_check``, which every phase and every write path
+# already calls, and raises ``MaterializationStoreUnstable`` — "the run keeps
+# its checkpoint and stops for a person", which is exactly right here: the
+# progress is good, the graph just is not ours to write any more.
+
+
+def _lost_lease():
+    from backend.app.services.aggregation.admission import GraphLease
+
+    lease = GraphLease("agg:graphwrite:n:g", "tok")
+    lease.mark_lost("holder changed, or the lease expired")
+    return lease
+
+
+def test_a_lost_lease_stops_the_pipeline_at_its_next_checkpoint():
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        pipe._cancel_check()
+    assert "lease" in str(exc.value).lower()
+
+
+def test_a_lost_lease_keeps_the_checkpoint_and_asks_for_a_person():
+    """``MaterializationStoreUnstable`` subclasses
+    ``MaterializationStoreUnreachable`` -> ``ConnectionError``, which is the
+    worker's resumable path — the run keeps every byte of progress."""
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    with pytest.raises(ConnectionError):
+        pipe._cancel_check()
+
+
+def test_a_held_lease_does_not_stop_the_pipeline():
+    from backend.app.services.aggregation.admission import GraphLease
+
+    pipe = _make_pipeline()
+    pipe._lease = GraphLease("agg:graphwrite:n:g", "tok")
+    pipe._cancel_check()            # must not raise
+
+
+def test_no_lease_at_all_does_not_stop_the_pipeline():
+    """Admission is optional — ``acquire_graph_lease`` returns None when the
+    bus is down (fail open), and a run with no lease is the behaviour that
+    existed before any of this."""
+    pipe = _make_pipeline()
+    assert getattr(pipe, "_lease", None) is None
+    pipe._cancel_check()            # must not raise
+
+
+def test_a_user_cancel_still_wins_over_a_lost_lease():
+    """A person pressing Cancel gets ``JobCancelled``, not a store error —
+    the status an operator reads must name what actually happened."""
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    pipe._should_cancel = lambda: True
+    with pytest.raises(JobCancelled):
+        pipe._cancel_check()

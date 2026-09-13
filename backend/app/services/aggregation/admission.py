@@ -146,6 +146,18 @@ end
 return 0
 """
 
+# Atomic renew: extend the TTL only while the slot still holds OUR token.
+# GET-then-PEXPIRE is check-then-act — between the two the lease can expire
+# and be taken over, and the renewal then extends the SUCCESSOR's lease,
+# keeping a second writer alive on the strength of our heartbeat. Returns 1
+# when renewed, -1 when the slot is not ours (changed hands, or expired).
+_RENEW_IF_OWNED_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return -1
+"""
+
 
 def reservation_key(endpoint: str) -> str:
     """The ledger of one graph-store node — keyed by the node the shard
@@ -205,12 +217,32 @@ def endpoint_key(provider: Any) -> str:
 
 
 class GraphLease:
-    """Held per materialization job; renewed in the background."""
+    """Held per materialization job; renewed in the background.
 
-    def __init__(self, key: str, token: str, renew_task: asyncio.Task) -> None:
+    ``lost`` is the part the pipeline reads. Stopping the renewal task on a
+    lost lease is not enough on its own: the run captured this object once
+    and would otherwise keep writing a graph another run now owns, and two
+    runs MERGEing the same pairs leave a stored weight that is neither
+    run's computed weight. ``__main__._renew_exec_lock`` aborts its run on
+    the same two conditions for the same reason.
+    """
+
+    def __init__(
+        self, key: str, token: str, renew_task: Optional[asyncio.Task] = None,
+    ) -> None:
         self.key = key
         self.token = token
         self.renew_task = renew_task
+        self.lost = False
+        self.lost_reason: Optional[str] = None
+        #: When ownership was last CONFIRMED — the deadline a bus outage is
+        #: measured against, since an outage longer than the TTL means the
+        #: key expired whatever the renewal task believes.
+        self.last_ok: Optional[float] = None
+
+    def mark_lost(self, reason: str) -> None:
+        if not self.lost:
+            self.lost, self.lost_reason = True, reason
 
 
 class ShardReservation:
@@ -353,30 +385,63 @@ class AggregationAdmission:
 
         return self._start_renew(key, token)
 
+    async def _renew_once(
+        self, lease: GraphLease, *, now: Optional[float] = None,
+    ) -> bool:
+        """One atomic renewal. True while the lease is still ours.
+
+        Marks it lost on the two conditions the exec lock aborts its run on:
+        the slot no longer holds our token, or we have not been able to
+        CONFIRM ownership for longer than the TTL — past which the key has
+        certainly expired and another run may already hold it. A shorter
+        bus blip is unknown, not lost, so it fails open and retries.
+        """
+        clock = time.monotonic() if now is None else now
+        if lease.last_ok is None:
+            lease.last_ok = clock
+        ttl_s = _GRAPH_LEASE_TTL_MS / 1000
+        try:
+            res = await self._redis.eval(
+                _RENEW_IF_OWNED_LUA, 1, lease.key, lease.token,
+                str(_GRAPH_LEASE_TTL_MS),
+            )
+        except Exception as exc:
+            if clock - lease.last_ok >= ttl_s:
+                lease.mark_lost(
+                    f"could not renew for more than the {ttl_s:.0f}s TTL ({exc})"
+                )
+                return False
+            self._warn_fail_open("graph-lease renew", exc)
+            return True
+        try:
+            renewed = int(res) == 1
+        except (TypeError, ValueError):
+            renewed = False
+        if not renewed:
+            lease.mark_lost("holder changed, or the lease expired")
+            return False
+        lease.last_ok = clock
+        return True
+
     def _start_renew(self, key: str, token: str) -> GraphLease:
+        lease = GraphLease(key, token)
+
         async def _renew() -> None:
             try:
                 while True:
                     await asyncio.sleep(_GRAPH_LEASE_RENEW_SECS)
-                    try:
-                        # Refresh TTL only while we still own the lease.
-                        current = await self._redis.get(key)
-                        if isinstance(current, (bytes, bytearray)):
-                            current = current.decode()
-                        if current != token:
-                            logger.warning(
-                                "aggregation admission: graph lease %s lost "
-                                "(holder changed); stopping renewal.", key,
-                            )
-                            return
-                        await self._redis.pexpire(key, _GRAPH_LEASE_TTL_MS)
-                    except Exception as exc:
-                        self._warn_fail_open("graph-lease renew", exc)
+                    if not await self._renew_once(lease):
+                        logger.error(
+                            "aggregation admission: graph lease %s lost (%s) — "
+                            "the run must stop writing this graph.",
+                            lease.key, lease.lost_reason,
+                        )
+                        return
             except asyncio.CancelledError:
                 pass
 
-        task = asyncio.create_task(_renew())
-        return GraphLease(key, token, task)
+        lease.renew_task = asyncio.create_task(_renew())
+        return lease
 
     async def _try_take_over(
         self, key: str, expected_value: str, new_token: str,
@@ -431,7 +496,8 @@ class AggregationAdmission:
     async def release_graph_lease(self, lease: Optional[GraphLease]) -> None:
         if lease is None:
             return
-        lease.renew_task.cancel()
+        if lease.renew_task is not None:
+            lease.renew_task.cancel()
         try:
             await self._redis.eval(
                 _RELEASE_IF_OWNED_LUA, 1, lease.key, lease.token,

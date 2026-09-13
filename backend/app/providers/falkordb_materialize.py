@@ -2069,6 +2069,8 @@ class AggregationPipeline:
             lease = await admission.acquire_graph_lease(
                 self.p, owner=self._job_id,
             )
+        # Kept on the instance so ``_cancel_check`` can see it go.
+        self._lease = lease
         try:
             # Persist a parseable cursor IMMEDIATELY — before any graph
             # work — so an early crash resumes instead of restarting with
@@ -2414,6 +2416,20 @@ class AggregationPipeline:
             raise JobCancelled(
                 job_id="<aggregation-pipeline>",
                 observed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        # A lost per-graph write lease has to reach the RUN. Stopping the
+        # background renewal is not enough: this graph may already be
+        # another rebuild's, and two runs MERGEing the same pairs leave a
+        # stored weight that is neither run's computed weight. Checked here
+        # because every phase and every write path already calls this.
+        lease = getattr(self, "_lease", None)
+        if lease is not None and getattr(lease, "lost", False):
+            raise MaterializationStoreUnstable(
+                f"the per-graph write lease on {self.p._graph_name} was lost "
+                f"({lease.lost_reason}) — another rebuild may now own this "
+                f"graph, so this run stopped rather than write alongside it. "
+                f"The run keeps its checkpoint; Resume it once no other job "
+                f"is running against this data source."
             )
 
     async def _checkpoint(

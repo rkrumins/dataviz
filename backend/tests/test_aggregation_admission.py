@@ -50,6 +50,10 @@ class _FakeRedis:
                 self.kv[key] = args[2]
                 return 1
             return 0
+        if "PEXPIRE" in script:  # lease renew: compare-and-extend
+            if self.kv.get(key) == args[1]:
+                return 1
+            return -1
         if "ZCARD" in script:  # slot acquire
             now, stale, limit, member = float(args[1]), float(args[2]), int(args[3]), args[4]
             z = self.zsets.setdefault(key, {})
@@ -395,5 +399,93 @@ def test_read_slots_fail_open_when_redis_is_down():
         a = adm.AggregationAdmission(_DownRedis())
         async with a.read_slot(_FakeProvider()):
             pass          # a bus outage must never stop a scan
+
+    _run(scenario())
+
+
+# ── a lost write lease has to REACH the run ─────────────────────────────
+#
+# The lease is the only thing standing between two rebuilds and one master.
+# Losing it used to stop the renewal task and nothing else: the pipeline
+# captured the lease once and touched it again only to release it, so it kept
+# MERGEing while a second run held the lease and MERGEd the same pairs. With
+# ``weight_mode`` 'overwrite' on a first touch and 'add' on a repeat, the
+# stored weight of every pair both runs touch is then neither run's computed
+# weight — and nothing says so.
+#
+# ``__main__._renew_exec_lock`` had this right for the exec lock on the same
+# two conditions (holder changed, or un-renewable for longer than the TTL):
+# it cancels the run, "to preserve single-active". These pin the same rule
+# for the graph lease.
+
+
+def test_a_lease_taken_over_is_marked_lost():
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+        lease = await a.acquire_graph_lease(provider)
+        assert lease is not None and not lease.lost
+
+        # Someone else's token is in the slot now — a takeover, or the TTL
+        # lapsed and a second run won the SET NX.
+        redis.kv[lease.key] = "somebody-else"
+        await a._renew_once(lease)
+
+        assert lease.lost is True
+        assert "holder changed" in (lease.lost_reason or "")
+
+    _run(scenario())
+
+
+def test_a_lease_that_cannot_be_renewed_past_its_ttl_is_marked_lost():
+    """A bus outage longer than the TTL means the key EXPIRED and another run
+    may hold it. The exec lock aborts on exactly this; the lease used to log
+    and keep looping forever."""
+    async def scenario():
+        lease = adm.GraphLease("k", "tok", None)
+        a = adm.AggregationAdmission(_DownRedis())
+
+        # Inside the TTL: unknown, not lost — keep trying.
+        await a._renew_once(lease, now=0.0)
+        assert lease.lost is False
+
+        # Past it: the key cannot still be ours.
+        await a._renew_once(lease, now=adm._GRAPH_LEASE_TTL_MS / 1000 + 1)
+        assert lease.lost is True
+        assert "renew" in (lease.lost_reason or "")
+
+    _run(scenario())
+
+
+def test_renewing_never_extends_a_successor_lease():
+    """GET-then-PEXPIRE is check-then-act: between the two the lease can
+    expire and be taken over, and the renewal then extends the NEW holder's
+    lease. One atomic script, like the release already uses."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        lease = await a.acquire_graph_lease(_FakeProvider())
+        other = "successor-token"
+        redis.kv[lease.key] = other
+
+        await a._renew_once(lease)
+        # The successor's token is untouched and its TTL was not extended
+        # on our behalf.
+        assert redis.kv[lease.key] == other
+        assert lease.lost is True
+
+    _run(scenario())
+
+
+def test_a_healthy_lease_keeps_being_renewed():
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        lease = await a.acquire_graph_lease(_FakeProvider())
+        for _ in range(3):
+            await a._renew_once(lease)
+        assert lease.lost is False
+        assert redis.kv[lease.key] == lease.token
 
     _run(scenario())
