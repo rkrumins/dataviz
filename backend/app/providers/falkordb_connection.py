@@ -1184,6 +1184,40 @@ def build_cache_client(
 # provider side by side and every service reaches each of them correctly.
 
 
+#: A provider owns the source graph and its projection graph, which may hash
+#: to the same node and are read concurrently on every canvas open.
+_GRAPHS_PER_PROVIDER = 2
+#: Headroom for the commands that are not graph queries — ``INFO
+#: replication`` for the read router, ``EXISTS`` for empty-key verification,
+#: ``WAIT`` for the replication governor — which must not queue behind a
+#: saturated read path.
+_POOL_HOUSEKEEPING_SOCKETS = 4
+
+
+def default_graph_pool_size() -> int:
+    """How many sockets one process's graph pool holds — PER NODE in cluster
+    mode, where redis-py applies ``max_connections`` to each node's own pool.
+
+    ``FALKORDB_POOL_SIZE`` when the operator sets it; otherwise derived from
+    the concurrency that can DEMAND sockets rather than from a round number.
+    The manager admits ``PROVIDER_MAX_CONCURRENCY`` (8) calls per
+    ``(provider, graph)`` at once and a provider spans TWO graphs — the
+    source and its projection — so two graphs whose keys hash to the same
+    node ask one node pool for 16 sockets at the same instant. The flat 10
+    this used to default to could not serve that against a perfectly healthy
+    store: the 11th caller got redis-py's ``MaxConnectionsError``, which
+    SUBCLASSES redis ``ConnectionError`` and therefore read to the circuit
+    breaker as "the downstream is sick" — three of them opened the breaker
+    for every shard, and the transient-retry path then rebuilt the client,
+    discarding the pooled sockets that were the scarce resource.
+    """
+    configured = os.getenv("FALKORDB_POOL_SIZE")
+    if configured:
+        return int(configured)
+    per_graph = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
+    return per_graph * _GRAPHS_PER_PROVIDER + _POOL_HOUSEKEEPING_SOCKETS
+
+
 def build_graph_pool_kwargs(
     cfg: FalkorDBConnConfig,
     *,
@@ -1202,7 +1236,7 @@ def build_graph_pool_kwargs(
         "max_connections": (
             max_connections
             or cfg.graph_pool_size
-            or int(os.getenv("FALKORDB_POOL_SIZE", "10"))
+            or default_graph_pool_size()
         ),
         **resilient_pool_kwargs(
             socket_timeout=socket_timeout,

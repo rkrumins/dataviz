@@ -90,6 +90,12 @@ _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "3
 # calls per (provider_id, graph_name) so 100 concurrent requests for a
 # slow provider can't all queue against its connection pool. Tune via env;
 # default 8 absorbs typical bursts while bounding fan-out.
+#
+# It is also what SIZES the FalkorDB socket pool: a provider spans two graphs
+# and this many calls may be in flight for each, so
+# ``falkordb_connection.default_graph_pool_size`` reads the same env var.
+# Raising this without raising FALKORDB_POOL_SIZE puts the surplus callers on
+# redis-py's MaxConnectionsError instead of on a socket.
 _MAX_PROVIDER_CONCURRENCY = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
 # Acquire-budget — how long a request waits for a semaphore slot before
 # fast-failing with ProviderBusy (429). 2s, not the old 0.25s: the cap on

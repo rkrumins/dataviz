@@ -681,6 +681,17 @@ class AggregatedEdgeResult(BaseModel):
     # canvas: kind, how far the ladder narrowed, the node and its ceiling.
     # None unless rows were lost — narrowing that completed is complete.
     degraded_detail: Optional[Dict[str, Any]] = Field(default=None, alias="degradedDetail")
+    # Why the answer is SHORT — for ANY cause, not only a store limit.
+    # ``degraded_detail`` names a limit an administrator can act on and is
+    # therefore None when no limit was involved, which left a lost batch
+    # with nothing machine-readable to say: the response cache's
+    # determinism test (``graph_cache._is_incomplete_result``) reads this
+    # to tell a cap that recomputes to the identical bytes ("truncated",
+    # "max_nodes" — full TTL) from a read that GAVE UP and may do better
+    # next time ("queue_full", "timeout", "query_memory", "failed" —
+    # negative TTL, never mirrored as last-known-good). None unless rows
+    # were lost.
+    truncation_reason: Optional[str] = Field(default=None, alias="truncationReason")
 
     class Config:
         populate_by_name = True
