@@ -326,3 +326,34 @@ def test_reaping_without_a_publisher_still_reaps():
     job2 = _job()
     _run(reap_job(_Session(_State()), job2, status="failed", events=_Broken()))
     assert job2.status == "failed"
+
+
+# ── The job table has to stop growing forever ───────────────────────────
+
+def test_retention_keeps_a_floor_per_source_as_well_as_a_window():
+    """Either condition alone is wrong. Age alone erases a slow source's whole
+    history — and that history is what "read this run against the last one" is
+    for. A per-source count alone lets a source rebuilt every fifteen minutes
+    keep years of rows."""
+    from backend.app.services.aggregation import reconciler as rec
+
+    assert rec._RETENTION_DAYS > 0
+    assert rec._RETENTION_MIN_PER_SOURCE > 0
+    # The floor is at least the number of attempts a single run archives, or a
+    # prune could remove the run whose attempt log the UI is showing.
+    from backend.app.services.aggregation.steps import _attempts_kept
+
+    assert rec._RETENTION_MIN_PER_SOURCE >= _attempts_kept()
+
+
+def test_retention_never_deletes_a_run_that_has_not_ended():
+    """A terminal-only filter, not an age one: a pending or running row that
+    old is a STUCK job, which is this module's other business. Deleting it
+    would hide exactly what the reconciler exists to surface."""
+    import inspect
+
+    from backend.app.services.aggregation import reconciler as rec
+
+    src = inspect.getsource(rec.prune_job_history)
+    assert 'terminal = ("completed", "failed", "cancelled")' in src
+    assert src.count("status.in_(terminal)") >= 2

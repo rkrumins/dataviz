@@ -32,7 +32,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from backend.app.jobs.metrics import increment as metrics_increment
 
@@ -58,6 +58,30 @@ _MAX_AUTO_RESUMES: int = int(os.getenv("STUCK_JOB_MAX_AUTO_RESUMES", "5"))
 # Nothing reads it once the job is terminal; a hand Resume deletes it. Seven
 # days is the repo's backstop convention for per-source Redis bookkeeping.
 _REDISPATCH_TTL_SECS: int = 7 * 86400
+
+#: How long a terminal run stays readable, and how many of each source's runs
+#: survive regardless of age. ``aggregation_jobs`` only ever grew: one row per
+#: rebuild, and with hundreds of sources on a schedule — plus drift, the
+#: reconcile sweep and the read path's own backfill — that is 10²-10³ rows a
+#: day, each carrying a ``run_stats`` document of tens of KB. Nothing anywhere
+#: deleted one except an operator pressing Delete on a single row.
+#:
+#: The floor matters as much as the window: a source rebuilt monthly would
+#: otherwise lose its whole history to a 90-day cutoff, and the history is
+#: what Job History's "read this run against the last one" is for. Set the
+#: window to 0 to keep everything.
+_RETENTION_DAYS: int = int(os.getenv("AGGREGATION_JOB_RETENTION_DAYS", "90"))
+_RETENTION_MIN_PER_SOURCE: int = int(
+    os.getenv("AGGREGATION_JOB_RETENTION_MIN_PER_SOURCE", "20")
+)
+#: One sweep an hour is ample for a table that grows by hundreds a day, and
+#: keeps the delete off the 30-second loop's critical path.
+_RETENTION_INTERVAL_SECS: float = float(
+    os.getenv("AGGREGATION_JOB_RETENTION_INTERVAL_SECS", "3600")
+)
+#: Rows per sweep. Bounded so the first sweep on a long-neglected table is a
+#: series of small transactions rather than one that locks it for minutes.
+_RETENTION_BATCH = 5_000
 # Stale-PENDING backstop: a row dispatched onto the job stream in a
 # deployment with no aggregation-worker consumer stays 'pending' forever
 # ("queued and will start shortly" in the UI) and 409-blocks every later
@@ -356,6 +380,67 @@ async def _sweep_stale_pending(
         return 0
 
 
+async def prune_job_history(session_factory: Any) -> int:
+    """Delete terminal runs past the retention window, keeping a floor per
+    source. Returns rows deleted. Best-effort: never raises into the loop.
+
+    Two conditions, both required, because either alone is wrong. Age alone
+    erases a slow source's entire history; a per-source count alone lets a
+    source rebuilt every fifteen minutes keep years of rows. A run is removed
+    only when it is BOTH older than the window and outside its source's most
+    recent ``_RETENTION_MIN_PER_SOURCE``.
+
+    Never touches a ``pending`` or ``running`` row, whatever its age: a row
+    that old is a stuck job, which is this module's other business, and
+    deleting it would hide the thing the reconciler exists to surface.
+    """
+    if _RETENTION_DAYS <= 0:
+        return 0
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=_RETENTION_DAYS)
+    ).isoformat()
+    terminal = ("completed", "failed", "cancelled")
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=AggregationJobORM.data_source_id,
+            order_by=AggregationJobORM.created_at.desc(),
+        )
+        .label("rank")
+    )
+    ranked = (
+        select(AggregationJobORM.id.label("id"), rank)
+        .where(AggregationJobORM.status.in_(terminal))
+        .subquery()
+    )
+    doomed = (
+        select(ranked.c.id)
+        .where(ranked.c.rank > _RETENTION_MIN_PER_SOURCE)
+        .limit(_RETENTION_BATCH)
+    )
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                delete(AggregationJobORM).where(
+                    AggregationJobORM.id.in_(doomed),
+                    AggregationJobORM.created_at < cutoff,
+                    AggregationJobORM.status.in_(terminal),
+                )
+            )
+            await session.commit()
+            deleted = int(result.rowcount or 0)
+    except Exception as exc:                      # noqa: BLE001 — housekeeping
+        logger.warning("job-history prune failed (%s); retrying next sweep", exc)
+        return 0
+    if deleted:
+        logger.info(
+            "job-history prune removed %d run(s) older than %d days, keeping "
+            "the most recent %d per source",
+            deleted, _RETENTION_DAYS, _RETENTION_MIN_PER_SOURCE,
+        )
+    return deleted
+
+
 async def run_reconciler(
     session_factory: Any,
     shutdown: asyncio.Event,
@@ -389,6 +474,9 @@ async def run_reconciler(
                 "Stuck-job reconciler: no event publisher (%s); reaped runs "
                 "will rely on the direct mirror write alone", exc,
             )
+    # Housekeeping runs on its own, much slower clock. Stamped in the past so
+    # the first sweep happens shortly after start-up rather than an hour in.
+    last_prune = 0.0
     while not shutdown.is_set():
         try:
             count = await _reconcile_once(session_factory, redis_client, events)
@@ -400,6 +488,15 @@ async def run_reconciler(
             # A failed sweep must not kill the loop — log and try
             # again next interval.
             logger.error("reconciler: sweep failed: %s", exc, exc_info=True)
+        now = asyncio.get_running_loop().time()
+        if now - last_prune >= _RETENTION_INTERVAL_SECS:
+            last_prune = now
+            try:
+                await prune_job_history(session_factory)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:              # noqa: BLE001 — housekeeping
+                logger.warning("reconciler: prune failed: %s", exc)
         try:
             await asyncio.wait_for(
                 shutdown.wait(), timeout=_RECONCILE_INTERVAL_SECS,
