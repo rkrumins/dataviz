@@ -2476,7 +2476,48 @@ class FalkorDBProvider(GraphDataProvider):
         }
         cache[graph_key] = (now, in_step)
         self._note_master_silent(graph_key, False)
-        return in_step & endpoints
+        usable = in_step & endpoints
+        if in_step and endpoints and not usable:
+            # TWO ADDRESS SPACES, and the router just fell between them.
+            #
+            # ``endpoints`` are what the cluster ANNOUNCES (the client's slot
+            # map); ``in_step`` are the peer addresses of the master's own
+            # replication links. They are the same string only by luck. A
+            # deployment that announces hostnames
+            # (``cluster-preferred-endpoint-type hostname``) without also
+            # setting ``replica-announce-ip`` reports pod IPs here and
+            # hostnames there, so this intersection is empty on EVERY read:
+            # every read goes to the master and the replica-read path is
+            # inert. Once a sample is cached the master-down fallback
+            # intersects too, so that stops working as well.
+            #
+            # Which side to normalise is the deployment's decision. Being
+            # unable to tell this apart from "the replicas are lagging" is
+            # not, so it is counted and named once per shard per window.
+            self._replica_endpoint_mismatch = (
+                getattr(self, "_replica_endpoint_mismatch", 0) + 1
+            )
+            # Counted every time — it is the signal that the path is dead —
+            # but said ONCE per shard: the sample window is 5s, so a warning
+            # per window would be thousands of identical lines a day for a
+            # condition that only changes when the deployment does.
+            warned = getattr(self, "_replica_mismatch_warned", None)
+            if warned is None:
+                warned = self._replica_mismatch_warned = set()
+            if graph_key in warned:
+                return usable
+            warned.add(graph_key)
+            logger.warning(
+                "FalkorDB %s: no replica can be vouched for on %s — the "
+                "master's replication links report %s and the client's slot "
+                "map holds %s, which do not overlap. Reads will stay on the "
+                "master. Set replica-announce-ip to the address the cluster "
+                "announces (or announce addresses rather than hostnames) so "
+                "the two agree.",
+                self._graph_name, graph_key,
+                sorted(in_step), sorted(endpoints),
+            )
+        return usable
 
     def _pinned_to(self, graph, node):
         """The same graph, with its commands addressed to ONE node.
@@ -2503,6 +2544,11 @@ class FalkorDBProvider(GraphDataProvider):
             "replicaReads": self._replica_reads,
             "masterReads": self._master_reads,
             "replicaFallbacks": self._replica_fallbacks,
+            # Non-zero means the replica-read path is not merely unused but
+            # UNUSABLE: see ``_replicas_in_step``.
+            "replicaEndpointMismatch": getattr(
+                self, "_replica_endpoint_mismatch", 0,
+            ),
         }
 
     async def _run_guarded(

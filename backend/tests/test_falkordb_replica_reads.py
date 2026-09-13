@@ -475,4 +475,112 @@ def test_the_counters_say_how_reads_were_served():
     p._replica_reads, p._master_reads, p._replica_fallbacks = 7, 3, 1
     assert p.read_routing_counters() == {
         "replicaReads": 7, "masterReads": 3, "replicaFallbacks": 1,
+        # Zero unless the master's replication links and the client's slot
+        # map disagree about how to spell a node — see the address-space
+        # tests below.
+        "replicaEndpointMismatch": 0,
     }
+
+
+# ── the two address spaces the router silently falls between ────────────
+#
+# `_replica_for_read` takes candidate replicas from the client's slot map
+# and keeps the ones `_replicas_in_step` vouched for. The slot map's
+# addresses are whatever the cluster ANNOUNCES; the vouched set is built
+# from `INFO replication`, whose `slave<n>:ip=` is the peer address of the
+# replication connection.
+#
+# Those are the same string only by luck. The shipped production-cluster
+# StatefulSet sets `--cluster-announce-hostname` and
+# `--cluster-preferred-endpoint-type hostname`, so the slot map yields
+# `falkordb-cluster-0.falkordb-cluster.synodic.svc.cluster.local:6379`,
+# while `replica-announce-ip` is set nowhere, so INFO yields the raw pod IP.
+# The intersection is then EMPTY on every read: `_replica_for_read` returns
+# None, every read goes to the master, and the whole replica-read path is
+# inert with no signal at all. It also disables the master-down fallback
+# once any sample has been cached, since that path intersects too.
+#
+# Which side to normalise is a deployment decision. What is not is that a
+# total feature failure must be visible, so the disjoint case is counted
+# and named rather than looking identical to "the replicas are lagging".
+
+
+def _provider_with_replication(monkeypatch, *, master_says, client_knows):
+    """A provider whose master reports ``master_says`` and whose slot map
+    holds ``client_knows`` — the two address spaces, set independently."""
+    p = _provider(_Conn())
+
+    async def _state(graph_key, timeout_s=1.0):
+        return {
+            "role": "master",
+            "replicas": [
+                {"endpoint": e, "state": "online", "lagBytes": 0}
+                for e in master_says
+            ],
+        }
+
+    monkeypatch.setattr(p, "replication_state", _state)
+    return p, set(client_knows)
+
+
+def test_a_disjoint_address_space_is_counted_not_silent(monkeypatch):
+    p, endpoints = _provider_with_replication(
+        monkeypatch,
+        master_says=["10.1.2.3:6379"],                       # INFO: pod IP
+        client_knows=["falkordb-cluster-1.falkordb:6379"],   # slot map: hostname
+    )
+    got = _run(p._replicas_in_step("g", endpoints))
+    assert got == set(), "nothing can be vouched for across address spaces"
+    assert p.read_routing_counters().get("replicaEndpointMismatch", 0) == 1, (
+        "the router fell between the master's address space and the client's "
+        "and said nothing — indistinguishable from a lagging replica"
+    )
+
+
+def test_a_lagging_replica_is_not_reported_as_a_mismatch(monkeypatch):
+    """An empty answer because the replica is BEHIND is the mechanism
+    working; only a disjoint address space is the misconfiguration."""
+    p = _provider(_Conn())
+
+    async def _state(graph_key, timeout_s=1.0):
+        return {"role": "master", "replicas": [
+            {"endpoint": "10.1.2.3:6379", "state": "online",
+             "lagBytes": 10 ** 12},
+        ]}
+
+    monkeypatch.setattr(p, "replication_state", _state)
+    got = _run(p._replicas_in_step("g", {"10.1.2.3:6379"}))
+    assert got == set()
+    assert p.read_routing_counters().get("replicaEndpointMismatch", 0) == 0
+
+
+def test_an_overlapping_address_space_is_not_a_mismatch(monkeypatch):
+    p, endpoints = _provider_with_replication(
+        monkeypatch,
+        master_says=["10.1.2.3:6379"],
+        client_knows=["10.1.2.3:6379"],
+    )
+    got = _run(p._replicas_in_step("g", endpoints))
+    assert got == {"10.1.2.3:6379"}
+    assert p.read_routing_counters().get("replicaEndpointMismatch", 0) == 0
+
+
+def test_the_mismatch_is_counted_every_time_but_logged_once(monkeypatch, caplog):
+    """The sample window is 5s, so a warning per window would be thousands
+    of identical lines a day for a condition that changes only when the
+    deployment does. The COUNTER is the signal; the line is the explanation."""
+    import logging
+
+    p, endpoints = _provider_with_replication(
+        monkeypatch,
+        master_says=["10.1.2.3:6379"],
+        client_knows=["falkordb-cluster-1.falkordb:6379"],
+    )
+    with caplog.at_level(logging.WARNING):
+        for _ in range(4):
+            p._repl_sample = {}          # force a fresh reading each time
+            _run(p._replicas_in_step("g", endpoints))
+
+    assert p.read_routing_counters()["replicaEndpointMismatch"] == 4
+    lines = [r for r in caplog.records if "do not overlap" in r.getMessage()]
+    assert len(lines) == 1, f"expected one warning, got {len(lines)}"
