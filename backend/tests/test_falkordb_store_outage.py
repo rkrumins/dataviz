@@ -436,3 +436,56 @@ def test_the_message_names_the_replay_and_the_knob(monkeypatch):
     msg = str(exc.value)
     assert "replaying" in msg
     assert "AGGREGATION_STORE_LOADING_HOLD_S" in msg
+
+
+# ── what a total master outage reaches users as ─────────────────────────
+#
+# Measured against a real six-node Redis Cluster with every master killed
+# at once. The surviving replicas hold the data, but a cluster with no
+# master quorum cannot promote one, goes `cluster_state:fail`, and the
+# cluster client then refuses every command — a targeted replica read
+# included (ClusterDownError). That is Redis's own safety model, not
+# something the router can route around.
+#
+# It is not an outage for users, and this pins why: both shapes that outage
+# produces classify as connection pressure, the breaker proxy turns them
+# into ProviderUnavailable, and graph_cache answers from the last known
+# good snapshot with a stale banner. One master down is different and
+# better — the cluster promotes a replica and reads carry on, verified
+# against a live `CLUSTER FAILOVER`.
+
+
+def test_a_total_master_outage_is_connection_pressure_not_a_hard_error():
+    from redis.exceptions import ClusterDownError
+    from backend.app.providers.falkordb_provider import _pressure_kind
+
+    # Both shapes a real all-masters-down cluster produced.
+    assert _pressure_kind(ClusterDownError("CLUSTERDOWN The cluster is down")) == "connection"
+    assert _pressure_kind(
+        ConnectionError("Error 111 connecting to node-7001.falkordb.local:7001")
+    ) == "connection"
+
+
+def test_the_read_path_still_answers_from_the_last_known_good():
+    """The property that makes a total master outage survivable for a
+    reader: it must not depend on any node being reachable."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    src = inspect.getsource(gc.GraphCache.get_or_compute)
+    assert "except (ProviderUnavailable, asyncio.TimeoutError)" in src
+    assert "_get_lkg" in src
+
+
+def test_a_dead_shard_names_the_node_that_died():
+    """Measured: a read of a graph whose whole shard is gone raises a
+    ConnectionError carrying the node, and the other shards keep serving —
+    so the message has to name which one, or an operator is hunting."""
+    from backend.app.providers.falkordb_provider import _refused_endpoint
+
+    exc = ConnectionError(
+        "Error 111 connecting to node-7002.falkordb.local:7002. "
+        "Connect call failed ('127.0.0.1', 7002)."
+    )
+    assert _refused_endpoint(exc) == "node-7002.falkordb.local:7002"
