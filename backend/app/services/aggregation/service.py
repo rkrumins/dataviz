@@ -422,6 +422,32 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
+def _liveness_is_stale(job) -> bool:
+    """True when nothing has been heard from this run's worker for longer than
+    the stuck-job reconciler's own threshold.
+
+    The same number the reaper uses, deliberately: a run this side of it is
+    one the platform still believes in, and a run past it is one the platform
+    is about to end. Anything unparsable counts as fresh — a missing timestamp
+    is not evidence of death, and treating it as such would blank the estimate
+    for every run that has not checkpointed yet.
+    """
+    stamp = getattr(job, "last_checkpoint_at", None) or getattr(job, "started_at", None)
+    if not stamp:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    from .reconciler import _HEARTBEAT_THRESHOLD_SECS
+
+    return (
+        datetime.now(timezone.utc) - seen
+    ).total_seconds() > _HEARTBEAT_THRESHOLD_SECS
+
+
 def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
     """When this run should finish, projected off its STEP LEDGER against
     the previous completed run's on the same source.
@@ -442,6 +468,14 @@ def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
     confidently wrong clock time.
     """
     if job.status != "running":
+        return None
+    # A row reads ``running`` until something ends it, and the thing that ends
+    # it is the worker — so a job whose worker died keeps that status until a
+    # reaper notices. Projecting a finish time for it is the most confident
+    # lie the API tells: the number moves, so it looks live. If the run has
+    # not checkpointed within the window the stuck-job reconciler uses to
+    # decide a worker is gone, say nothing rather than promise a clock time.
+    if _liveness_is_stale(job):
         return None
     try:
         steps = (json.loads(getattr(job, "run_stats", None) or "{}") or {}).get("steps")
@@ -504,14 +538,33 @@ async def _prior_ledgers(
     return out
 
 
+#: Failure categories a resume cannot get past, so the affordance must not be
+#: offered for them. ``ontology`` means the run's frozen ontology no longer
+#: matches the source's — resuming re-runs the same validation and fails the
+#: same way; the source needs a fresh trigger against the new ontology.
+#: ``never_dispatched`` means no executor ever saw the row, so there is no
+#: checkpoint to resume FROM and re-dispatching it is what the operator
+#: actually wants.
+_UNRESUMABLE_CATEGORIES = frozenset({"ontology", "never_dispatched"})
+
+
 def _is_resumable(job) -> bool:
     """Whether a job can be MANUALLY resumed/restarted from its checkpoint.
 
-    A user restart is always allowed for a failed or cancelled job — the
+    A user restart is allowed for a failed or cancelled job — the
     ``max_retries`` cap bounds only AUTOMATED retries (crash recovery /
     delivery attempts), never the user. (Drives the UI's resume affordance.)
+
+    Except where resuming provably cannot help. Offering the button on a run
+    that will fail again identically is not a neutral default: the operator
+    presses it, waits, and gets the same failure, having been told by the UI
+    that this was the way out.
     """
-    return job.status in ("failed", "cancelled")
+    if job.status not in ("failed", "cancelled"):
+        return False
+    return classify_failure(getattr(job, "error_message", None)) not in (
+        _UNRESUMABLE_CATEGORIES
+    )
 
 
 #: Origins whose ONLY evidence that a source changed is the fingerprint
