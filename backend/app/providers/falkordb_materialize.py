@@ -242,6 +242,28 @@ def _store_hold_max_s() -> int:
     return _env_int("AGGREGATION_HOLD_MAX_SECS", 1800, 60, 21_600)
 
 
+def _hold_max_for(kind: Optional[str], default_s: int) -> int:
+    """The per-hold budget for ONE reason.
+
+    A replica that is absent and a replica that is REPLAYING look identical
+    from the master: a rotated pod is simply missing from ``INFO
+    replication`` until it has loaded its dataset and reattached, and
+    ``hold_reason`` can only see the master. So ``replica_lost`` is the one
+    reason whose honest duration is a node restart — which
+    ``AGGREGATION_STORE_LOADING_HOLD_S`` already documents as up to an hour
+    for a multi-GB AOF replay, and which the default 30-minute bound cut in
+    half. A rebuild against a perfectly healthy master died for a routine
+    pod rotation, at the 30-minute mark, having done nothing wrong.
+
+    Every other reason keeps the shorter bound: a fork that has not finished
+    in half an hour, or RSS that has not come back under the container's
+    line, is a node that is not recovering on its own.
+    """
+    if kind == "replica_lost":
+        return max(default_s, _store_loading_hold_s())
+    return default_s
+
+
 #: How many per-hold budgets one run may spend on the SAME reason before
 #: the bound trips on the TOTAL.
 #:
@@ -1717,7 +1739,15 @@ class AggregationPipeline:
             # and replicas that catch up just enough to let one through
             # reset it for ever.
             total = self._replica_hold_s + held
-            if held >= self._hold_max_s or total >= self._hold_max_s * _HOLD_TOTAL_BUDGETS:
+            # A replica that is ABSENT may be a rotated pod replaying its
+            # dataset, which takes up to an hour — the same case, and the
+            # same budget, as the governor's replica_lost hold. A replica
+            # that is merely BEHIND is a live node that is not keeping up,
+            # and half an hour of that is already generous.
+            hold_max = _hold_max_for(
+                "replica_lost" if attached <= 0 else "replica_lag", self._hold_max_s,
+            )
+            if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:
                 what = (
                     f"its replicas gone (the run started with {self._expected_replicas})"
                     if attached <= 0 else
@@ -1918,7 +1948,7 @@ class AggregationPipeline:
                     "aggregation pipeline on %s: holding the next write batch — %s. "
                     "Writing through this is how a rebuild takes a node down; the "
                     "run waits (up to %d min per hold) and carries on from where it is.",
-                    self.p._graph_name, detail, self._hold_max_s // 60,
+                    self.p._graph_name, detail, _hold_max_for(kind, self._hold_max_s) // 60,
                 )
             held = time.monotonic() - started
             # Per episode AND cumulatively for the same reason. This clock
@@ -1926,7 +1956,10 @@ class AggregationPipeline:
             # clear → AOF rewrite lets a batch through per cycle and resets
             # it every time: hours held, the bound never reached.
             total = self._store_hold_s.get(kind, 0.0) + held
-            if held >= self._hold_max_s or total >= self._hold_max_s * _HOLD_TOTAL_BUDGETS:
+            # Per REASON, because a missing replica is the one whose honest
+            # duration is a node restart — see _hold_max_for.
+            hold_max = _hold_max_for(kind, self._hold_max_s)
+            if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:
                 self._record_hold(kind, held, detail)
                 raise MaterializationStoreUnstable(
                     f"the graph store node {shard.endpoint} stayed outside the "

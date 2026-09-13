@@ -945,3 +945,51 @@ def test_no_controller_at_all_still_scans():
     pipe = _pipeline(_Conn(_picture()))
     pipe.p._admission_controller = None
     assert _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS")) == [(0, 10)]
+
+
+# ── a rotated replica takes an hour, and the master is fine throughout ───
+#
+# A replica that is ABSENT and one that is REPLAYING look identical from the
+# master: a rotated pod is simply missing from INFO replication until it has
+# loaded its dataset and reattached, and hold_reason can only see the master.
+# The 30-minute default therefore cut a routine pod rotation in half and
+# killed a rebuild that had done nothing wrong, against a healthy master.
+
+
+def test_a_missing_replica_gets_the_time_a_restart_actually_takes():
+    from backend.app.providers.falkordb_materialize import (
+        _hold_max_for, _store_hold_max_s, _store_loading_hold_s,
+    )
+
+    default = _store_hold_max_s()
+    # The same hour the pipeline already documents for a node replaying its
+    # dataset — one number, one reason, not two that can drift.
+    assert _hold_max_for("replica_lost", default) == max(default, _store_loading_hold_s())
+    assert _hold_max_for("replica_lost", default) >= 3600
+
+
+def test_every_other_reason_keeps_the_shorter_bound():
+    """A fork that has not finished in half an hour, or RSS still past the
+    container's line, is a node that is not recovering on its own."""
+    from backend.app.providers.falkordb_materialize import _hold_max_for, _store_hold_max_s
+
+    default = _store_hold_max_s()
+    for kind in ("fork", "replica_lag", "memory", "unmeasured", None):
+        assert _hold_max_for(kind, default) == default, kind
+
+
+def test_both_gates_use_the_per_reason_budget():
+    """The governor's hold and the replica-acknowledgement gate are separate
+    loops with the same 30-minute constant; fixing one and not the other
+    leaves the run dying at the same mark for the same reason."""
+    import inspect
+
+    from backend.app.providers.falkordb_materialize import AggregationPipeline
+
+    gov = inspect.getsource(AggregationPipeline._govern_write)
+    assert "hold_max = _hold_max_for(kind, self._hold_max_s)" in gov
+    assert "if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:" in gov
+
+    gate = inspect.getsource(AggregationPipeline._hold_for_replicas)
+    assert '"replica_lost" if attached <= 0 else "replica_lag"' in gate
+    assert "if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:" in gate
