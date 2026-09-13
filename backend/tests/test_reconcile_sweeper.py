@@ -842,8 +842,12 @@ async def test_action_cap_bounds_one_sweep(session_factory):
 
 @pytest.mark.asyncio
 async def test_first_builds_are_capped_separately(session_factory):
-    """A fresh install with many unbuilt sources drains one per sweep rather
-    than queueing every full build at once."""
+    """A fresh install with many unbuilt sources drains a BOUNDED number per
+    sweep rather than queueing every full build at once.
+
+    The bound is occupancy, not a fixed rate: nothing is in flight here, so
+    the sweep fills up to the target and stops — five sources do not become
+    five concurrent full-cube rebuilds."""
     for i in range(5):
         await _seed(
             session_factory, ds_id=f"ds_{i}",
@@ -854,8 +858,13 @@ async def test_first_builds_are_capped_separately(session_factory):
     svc = _FakeService()
     result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
 
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _FIRST_BUILD_TARGET_IN_FLIGHT,
+    )
+
     assert result.findings == 5
-    assert len(svc.triggers) == 1
+    assert len(svc.triggers) == _FIRST_BUILD_TARGET_IN_FLIGHT
+    assert len(svc.triggers) < 5, "never the whole backlog at once"
 
 
 @pytest.mark.asyncio
@@ -2165,3 +2174,52 @@ async def test_the_run_row_says_how_many_rows_the_window_cost(session_factory):
     assert result.rows_read == 1 == result.scanned
     assert json.loads(result.detail_json())["rowsRead"] == 1
 
+
+
+# ── first builds: occupancy, not a fixed rate ───────────────────────────
+#
+# _FIRST_BUILD_CAP = 1 was two problems, not one. Too slow going in: 300
+# never-aggregated sources take ~5h just to be QUEUED at one per tick. And
+# too fast coming out — it is an admission RATE with no feedback from drain,
+# and the only re-queue guard is per source, so queued-but-unstarted first
+# builds accumulate whenever the fleet drains slower than one per tick. The
+# head of that queue reaches AGGREGATION_PENDING_TIMEOUT_SECS and is failed
+# as NEVER_DISPATCHED — "the dispatch message was likely lost", which is not
+# what happened — and three of those suspend the source.
+
+
+def test_a_fleet_that_is_not_draining_admits_nothing():
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _FIRST_BUILD_TARGET_IN_FLIGHT, _first_build_cap,
+    )
+
+    assert _first_build_cap(_FIRST_BUILD_TARGET_IN_FLIGHT, 10) == 0
+    assert _first_build_cap(_FIRST_BUILD_TARGET_IN_FLIGHT + 5, 10) == 0
+    # …and it recovers on its own as they drain, with no operator action.
+    assert _first_build_cap(0, 10) == _FIRST_BUILD_TARGET_IN_FLIGHT
+
+
+def test_first_builds_never_take_more_than_half_the_action_budget():
+    """They draw from the SAME allowance as drift rebuilds, which are the
+    freshness the fleet is judged on. (It is also why a cap above
+    max_actions was always silently ineffective.)"""
+    from backend.app.services.aggregation.reconcile_sweeper import _first_build_cap
+
+    assert _first_build_cap(0, 2) <= 1
+    assert _first_build_cap(0, 100) <= _first_build_cap(0, 100)
+    for budget in (1, 2, 4, 10):
+        assert _first_build_cap(0, budget) <= max(1, budget // 2)
+
+
+def test_the_cap_is_read_from_what_the_sweep_already_loaded():
+    """A job queued or running, for a source that has never completed one.
+    Both facts are on the context rows already; a new query per sweep to
+    police the cold start would be its own cost."""
+    import inspect
+
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    src = inspect.getsource(rs.ReconciliationSweeper._phase_a)
+    assert 'row.get("job_in_flight") and not row.get("has_completed_job")' in src
+    assert "first_build_cap = _first_build_cap(first_builds_in_flight, max_actions)" in src
+    assert "if first_builds >= first_build_cap:" in src

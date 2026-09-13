@@ -69,10 +69,60 @@ _LIVE_OBS_TIMEOUT_S = 5.0
 # not reached in time evaluate from their stored counts (named skip paths).
 _LIVE_OBS_TOTAL_BUDGET_S = 30.0
 
-# Cold-start guard, separate from the general action cap. A fresh install
-# with 200 never-aggregated sources drains at one first build per sweep
-# rather than queueing 200 full builds at once.
-_FIRST_BUILD_CAP = 1
+# Cold-start guard, separate from the general action cap.
+#
+# This was a fixed 1 per sweep, which is two problems rather than one.
+#
+# TOO SLOW, going in: 300 never-aggregated sources take ~5 hours to even be
+# QUEUED at one per 60s tick, and 1000 take most of a day.
+#
+# And TOO FAST, coming out, which is the half the fixed number hid. It is an
+# admission RATE with no feedback from drain: the only thing stopping a
+# re-queue is per source (`job_in_flight`), so queued-but-unstarted first
+# builds accumulate whenever the fleet drains slower than one per tick —
+# routine, since a first build writes the WHOLE cube rather than a delta.
+# The head of that queue then reaches AGGREGATION_PENDING_TIMEOUT_SECS and
+# is failed as NEVER_DISPATCHED ("the dispatch message was likely lost"),
+# which is not what happened, and three of those suspend the source.
+#
+# So the rule is occupancy, not rate: admit up to a target number of first
+# builds IN FLIGHT across the fleet, and admit nothing while that many are
+# already queued or running. A fleet that is not draining therefore admits
+# zero without needing to be told, and a fleet that is draining fast admits
+# more than one per tick.
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    import os
+
+    try:
+        return max(lo, min(hi, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+_FIRST_BUILD_TARGET_IN_FLIGHT = _env_int(
+    "AGGREGATION_FIRST_BUILD_TARGET_IN_FLIGHT", 2, 0, 50,
+)
+
+
+def _first_build_cap(in_flight: int, max_actions: int) -> int:
+    """How many NEW first builds this sweep may queue.
+
+    Bounded by half the pass's action budget as well as by occupancy: first
+    builds draw from the SAME `actions` allowance as drift rebuilds, so an
+    unbounded share of it would starve the freshness work the fleet is
+    actually judged on. (It is also why a cap above `max_actions` was always
+    silently ineffective.)
+
+    The concurrency is deliberately modest. The new protections make a higher
+    number SAFER, not safe: the per-node write slot fails open after
+    AGGREGATION_SLOT_WAIT_MAX_SECS and stops capping under exactly the
+    over-admission a large cap would create, and two rebuilds racing onto one
+    master can refuse each other on headroom neither is using yet — a
+    MaterializationBudgetExceeded is terminal and stamps the source for six
+    hours, so contention there loses a run rather than delaying it.
+    """
+    room = max(0, _FIRST_BUILD_TARGET_IN_FLIGHT - max(0, in_flight))
+    return max(0, min(room, max(1, int(max_actions) // 2)))
 
 # Per-pass cap on stats-poll nudges for sources whose counts are too stale
 # to trust. Best-effort; the next sweep sees fresh numbers.
@@ -476,6 +526,21 @@ class ReconciliationSweeper:
             # Preserve the original oldest-checked-first order.
             states = [by_id[i] for i in ds_ids if i in by_id]
 
+            # How many first builds the fleet is already working on. Both
+            # facts come off the context rows the sweep has already loaded:
+            # a job queued or running, for a source that has never completed
+            # one. No extra query.
+            first_builds_in_flight = sum(
+                1 for row in ctx.values()
+                if row.get("job_in_flight") and not row.get("has_completed_job")
+            )
+            first_build_cap = _first_build_cap(first_builds_in_flight, max_actions)
+            if first_build_cap == 0 and first_builds_in_flight:
+                logger.info(
+                    "reconcile sweep: %d first build(s) already in flight — "
+                    "queueing none this pass until they drain",
+                    first_builds_in_flight,
+                )
             first_builds = 0
             for state in states:
                 ctx_row = ctx.get(state.data_source_id, {})
@@ -638,7 +703,7 @@ class ReconciliationSweeper:
 
                 first_build = verdict.reason == "never_aggregated"
                 if first_build:
-                    if first_builds >= _FIRST_BUILD_CAP:
+                    if first_builds >= first_build_cap:
                         # Same fairness stamp as the action cap above: a
                         # >200-source backlog of never-built sources drained
                         # at 1/tick must rotate through the window, not camp
