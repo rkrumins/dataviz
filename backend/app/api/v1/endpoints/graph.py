@@ -2206,18 +2206,39 @@ async def query_nodes(
         return _NodeListResult(await engine.get_nodes_query(query))
 
     scope = _cache_scope(engine)
+    # (params built below — see _node_query_cache_params)
     if scope is None:
         return (await _bounded_compute(engine, compute)()).root
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_NODES_QUERY,
-        params=query.model_dump(mode="json", by_alias=True, exclude_none=True),
+        params=_node_query_cache_params(query),
         compute=_bounded_compute(engine, compute),
         model_cls=_NodeListResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
     )
     return result.root
+
+
+def _node_query_cache_params(query) -> dict:
+    """Cache params for /nodes/query, with the list filters normalised.
+
+    The query is a SET of URNs, entity types and tags — the answer does not
+    depend on the order they arrived in, and the canvas builds them by
+    expansion order. Hashing the raw dump therefore gave two users who
+    reached the identical view by different routes two different entries for
+    one compute. Every neighbouring endpoint already sorts; this one did not.
+
+    Only the cache key is normalised — the query handed to the engine is
+    untouched, in case any filter is ever order-sensitive.
+    """
+    dumped = query.model_dump(mode="json", by_alias=True, exclude_none=True)
+    for field in ("urns", "entityTypes", "tags"):
+        value = dumped.get(field)
+        if isinstance(value, list):
+            dumped[field] = sorted(value)
+    return dumped
 
 
 @router.get("/metadata/entity-types", response_model=List[str])

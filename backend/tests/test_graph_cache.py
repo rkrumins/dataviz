@@ -3383,3 +3383,54 @@ def test_a_failed_run_carries_the_workspace_so_it_can_invalidate():
     assert run.count("workspace_id=job.workspace_id") >= 5, (
         "every failure exit and the cancel exit must carry it"
     )
+
+
+# ── keys that depend on things the answer does not ──────────────────────
+
+
+def test_the_assignment_key_drops_the_wall_clock_and_sorts_the_urns():
+    """`assignedAt` is REQUIRED on every assignment and the client stamps
+    rule-derived ones with `new Date()` at request time, so a view with one
+    rule-derived assignment produced a brand-new key on every call: a
+    guaranteed miss, an entry written and never read, unbounded key growth at
+    a 3600s TTL. assignment_engine never reads the field."""
+    from backend.app.api.v1.endpoints.assignments import _cache_params
+    from backend.common.models.assignment import LayerAssignmentRequest
+
+    def mk(stamp, urns):
+        return LayerAssignmentRequest.model_validate({
+            "layers": [], "urns": urns,
+            "assignments": {"a": {
+                "entityId": "a", "layerId": "l1", "priority": 1,
+                "assignedBy": "rule", "assignedAt": stamp,
+            }},
+        })
+
+    early = _cache_params(mk("2026-09-13T22:00:00Z", ["b", "a"]))
+    later = _cache_params(mk("2026-09-13T23:59:59Z", ["a", "b"]))
+    assert early == later, "same compute, same key"
+    assert "assignedAt" not in early["assignments"]["a"]
+    assert early["urns"] == ["a", "b"]
+    # The rest of the assignment is untouched — only the stamp goes.
+    assert early["assignments"]["a"]["assignedBy"] == "rule"
+
+
+def test_the_node_query_key_is_order_insensitive():
+    """The query is a SET; the canvas builds it by expansion order. Two
+    users at the identical view by different routes got two entries."""
+    from backend.app.api.v1.endpoints.graph import _node_query_cache_params
+    from backend.common.models.graph import NodeQuery
+
+    one = _node_query_cache_params(NodeQuery.model_validate(
+        {"urns": ["b", "a"], "tags": ["z", "y"], "entityTypes": ["T2", "T1"]},
+    ))
+    two = _node_query_cache_params(NodeQuery.model_validate(
+        {"urns": ["a", "b"], "tags": ["y", "z"], "entityTypes": ["T1", "T2"]},
+    ))
+    assert one == two
+    assert one["urns"] == ["a", "b"]
+    # Paging still separates entries — it changes the answer.
+    paged = _node_query_cache_params(NodeQuery.model_validate(
+        {"urns": ["a", "b"], "offset": 100},
+    ))
+    assert paged != _node_query_cache_params(NodeQuery.model_validate({"urns": ["a", "b"]}))
