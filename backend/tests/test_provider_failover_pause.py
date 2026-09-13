@@ -546,3 +546,101 @@ def test_an_unpinned_refused_read_still_reports_the_failover():
     finally:
         asyncio.sleep = original
     assert p.rebuilds == 1
+
+
+from backend.app.providers.falkordb_provider import (      # noqa: E402
+    _SENTINEL_DOWN_AFTER_MS, _TRANSIENT_RETRY_BACKOFFS,
+)
+
+# ── sentinel promotes too, and must be told apart from sentinel dying ────
+#
+# Every protection in _run_guarded was gated on `mode == "cluster"`, so in
+# the one topology whose entire purpose is automatic failover a master
+# rotation fell through to the bare raise. The breaker counted it, and with
+# fail_max=3 three readers of three hundred opened it within milliseconds:
+# a ~10s promotion became up to 30s of refusing every request, each
+# half-open probe that landed early re-opening it.
+
+
+class _MasterNotFoundError(RedisConnectionError):
+    """redis-py's shape: raised by discover_master, subclasses ConnectionError."""
+
+
+def _sentinel_provider():
+    p = _provider(mode="sentinel")
+    return p
+
+
+def _drive(p, exc, **kw):
+    """Run _run_guarded against a runner that always raises `exc`."""
+    slept = []
+    calls = []
+
+    async def _call():
+        calls.append(1)
+        raise exc
+
+    async def _sleep(s):
+        slept.append(s)
+
+    original = asyncio.sleep
+    asyncio.sleep = _sleep
+    try:
+        raised = None
+        try:
+            _run(p._run_guarded(_call, **kw))
+        except BaseException as e:                       # noqa: BLE001
+            raised = e
+    finally:
+        asyncio.sleep = original
+    return raised, calls, slept
+
+
+def test_a_sentinel_master_rotation_is_a_failover_not_a_breaker_failure():
+    p = _sentinel_provider()
+    raised, _calls, _slept = _drive(p, REFUSED, read_only=True)
+    assert isinstance(raised, ProviderFailingOver), (
+        "a refused data node in sentinel is a promotion in flight, and the "
+        "breaker must not count it"
+    )
+    assert p.rebuilds >= 1, "re-resolving is how the promoted master is found"
+
+
+def test_sentinel_waits_on_its_own_clock_not_the_clusters():
+    """down-after-milliseconds is 5s in the shipped harness; the cluster's
+    17.5s window would hold a query permit and a pool socket for seventeen
+    seconds against a topology that had already finished promoting."""
+    from backend.app.providers.falkordb_provider import (
+        _REFUSED_RETRY_BACKOFFS, _SENTINEL_RETRY_BACKOFFS,
+    )
+
+    assert sum(_SENTINEL_RETRY_BACKOFFS) < sum(_REFUSED_RETRY_BACKOFFS)
+    # …and still outlasts the window it exists for.
+    assert sum(_SENTINEL_RETRY_BACKOFFS) > _SENTINEL_DOWN_AFTER_MS / 1000.0
+
+    p = _sentinel_provider()
+    _raised, _calls, slept = _drive(p, REFUSED)          # a WRITE: full window
+    assert sum(slept) <= sum(_SENTINEL_RETRY_BACKOFFS) + 0.01
+
+
+def test_a_sentinel_tier_that_cannot_name_a_master_is_a_dead_provider():
+    """The one case that must still reach the breaker. Nothing is being
+    promoted — no quorum, or the daemons are gone — so every request sitting
+    through the escalated schedule first is pure added latency on an outage
+    that is not going to resolve itself."""
+    p = _sentinel_provider()
+    raised, _calls, slept = _drive(
+        p, _MasterNotFoundError("No master found for 'mymaster'"), read_only=True,
+    )
+    assert not isinstance(raised, ProviderFailingOver)
+    assert isinstance(raised, RedisConnectionError)
+    # And it does not spend the promotion window on the way out.
+    assert sum(slept) <= sum(_TRANSIENT_RETRY_BACKOFFS) + 0.01
+
+
+def test_standalone_is_untouched_a_dead_host_is_a_dead_provider():
+    """There is no promoted replica to find, so the breaker is right."""
+    p = _provider(mode="standalone")
+    raised, _calls, _slept = _drive(p, REFUSED, read_only=True)
+    assert not isinstance(raised, ProviderFailingOver)
+    assert isinstance(raised, RedisConnectionError)

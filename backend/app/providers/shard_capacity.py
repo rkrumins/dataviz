@@ -677,10 +677,36 @@ def hold_reason(
 
 
 def _endpoint_of(conn: Any) -> str:
+    """``host:port`` for the node behind ``conn``, or a stable stand-in.
+
+    A SENTINEL pool has no host in its ``connection_kwargs``: it resolves the
+    master on every connect, by service name. That returned the literal
+    "unknown", and since this string keys the per-node write slots, the read
+    slots, the reservation ledger and the read-pressure signal, every graph
+    in a sentinel fleet collapsed onto one key called "unknown" — including
+    two providers pointed at different sentinel services, whose budgets then
+    silently shared a ledger.
+
+    So: the pool's own kwargs first (standalone), then a live connection's
+    resolved address (sentinel, once anything has connected), then the
+    service name — which is not a node, but IS stable, distinct per master,
+    and follows the promotion, which is what admission wants from a key.
+    """
     pool = getattr(conn, "connection_pool", None)
     kw = getattr(pool, "connection_kwargs", None) or {}
     host, port = kw.get("host"), kw.get("port")
-    return f"{host}:{port}" if host else "unknown"
+    if host:
+        return f"{host}:{port}"
+    # A connection the sentinel pool has already resolved carries the real
+    # address of the master it reached.
+    for bucket in ("_available_connections", "_in_use_connections"):
+        for candidate in (getattr(pool, bucket, None) or ()):
+            chost = getattr(candidate, "host", None)
+            cport = getattr(candidate, "port", None)
+            if chost:
+                return f"{chost}:{cport}"
+    service = getattr(pool, "service_name", None)
+    return f"sentinel:{service}" if service else "unknown"
 
 
 async def _owner(

@@ -864,3 +864,60 @@ def test_without_a_container_limit_the_budget_is_what_it_was():
     )
     assert b.governed_by == "shard" and b.container_headroom is None
     assert "container_limit" not in b.as_stats()
+
+
+# ── a sentinel pool has a node too, it just does not advertise it ────────
+#
+# This string keys the per-node write slots, the read slots, the reservation
+# ledger and the read-pressure signal. A sentinel pool resolves its master on
+# every connect and carries no host in connection_kwargs, so it returned the
+# literal "unknown" — collapsing every graph in the fleet onto one key, and
+# merging the budgets of two providers pointed at different sentinel services.
+
+
+def _conn(**pool_attrs):
+    import types
+    return types.SimpleNamespace(connection_pool=types.SimpleNamespace(**pool_attrs))
+
+
+def test_a_standalone_pool_names_its_host():
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    assert _endpoint_of(
+        _conn(connection_kwargs={"host": "10.0.0.1", "port": 6379}),
+    ) == "10.0.0.1:6379"
+
+
+def test_a_sentinel_pool_names_the_master_it_actually_reached():
+    import types
+
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    pool = _conn(
+        connection_kwargs={},
+        service_name="mymaster",
+        _available_connections=[types.SimpleNamespace(host="10.0.0.9", port=6379)],
+    )
+    assert _endpoint_of(pool) == "10.0.0.9:6379"
+
+
+def test_a_sentinel_pool_that_has_not_connected_is_named_by_its_service():
+    """Not a node, but stable, distinct per master, and it follows the
+    promotion — which is everything admission needs from a key. Two
+    providers on different sentinel services stop sharing one budget."""
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    assert _endpoint_of(
+        _conn(connection_kwargs={}, service_name="mymaster"),
+    ) == "sentinel:mymaster"
+    assert _endpoint_of(
+        _conn(connection_kwargs={}, service_name="other"),
+    ) == "sentinel:other"
+
+
+def test_nothing_to_go_on_is_still_unknown():
+    import types
+
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    assert _endpoint_of(types.SimpleNamespace()) == "unknown"

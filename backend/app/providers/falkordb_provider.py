@@ -300,6 +300,30 @@ _CLUSTER_ROUTING_EXC_NAMES = frozenset({
 #: errors, so the classifier needs no redis import.
 _ROLE_CHANGED_EXC_NAMES = frozenset({"ReadOnlyError"})
 
+#: Sentinel could not tell us who the master IS. Distinct from a data node
+#: that will not answer: that node is being replaced and a promotion is
+#: under way, while this is the discovery tier itself being unreachable or
+#: without quorum — nothing is being promoted and nothing will be. redis-py
+#: raises these from ``discover_master`` on every (re)connect, and both
+#: subclass ``ConnectionError``, so the transient ladder already retries
+#: them; the name match is what keeps them OUT of the failover verdict.
+_SENTINEL_GONE_EXC_NAMES = frozenset({"MasterNotFoundError", "SlaveNotFoundError"})
+
+
+def _is_sentinel_discovery_error(exc: BaseException) -> bool:
+    """The SENTINEL tier could not name a master, as opposed to the master
+    itself not answering."""
+    seen: Optional[BaseException] = exc
+    depth = 0
+    while seen is not None and depth < 6:
+        depth += 1
+        if type(seen).__name__ in _SENTINEL_GONE_EXC_NAMES:
+            return True
+        if "no master found for" in str(seen).lower():
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
 # Short backoff schedule (seconds) for transparently retrying a transient
 # connection drop. Three attempts keeps the total well inside a single op's
 # budget while letting redis-py hand out a fresh pooled connection.
@@ -319,6 +343,28 @@ _REFUSED_RETRY_BACKOFFS: tuple = (0.5, 2.0, 5.0, 10.0)
 # especially with a hundred of them at once. One re-resolve (the promoted
 # replica may already be there), then hand back ProviderFailingOver.
 _READ_REFUSED_RETRIES = 1
+
+#: Sentinel promotes on its OWN clock, not the cluster's. ``down-after-
+#: milliseconds`` is when the daemons first agree the master is gone (5 s in
+#: the shipped harness), and an election follows — so the wait has to outlast
+#: that, and no longer. Reusing the cluster's 17.5 s window here would hold a
+#: query-semaphore permit and a pool socket for seventeen seconds per write
+#: against a topology that had already finished promoting, which at 300
+#: concurrent users is its own outage.
+_SENTINEL_DOWN_AFTER_MS = float(
+    os.getenv("FALKORDB_SENTINEL_DOWN_AFTER_MS", "5000")
+)
+
+
+def _sentinel_retry_backoffs() -> tuple:
+    """A schedule that just outlasts ``down-after`` plus an election, built
+    from the one number an operator actually sets."""
+    down_after_s = max(0.5, _SENTINEL_DOWN_AFTER_MS / 1000.0)
+    # Half the window, then the rest, then an election's worth again.
+    return (0.5, round(down_after_s / 2, 2), round(down_after_s, 2))
+
+
+_SENTINEL_RETRY_BACKOFFS: tuple = _sentinel_retry_backoffs()
 
 #: How far behind a replica may be and still answer a read (seconds).
 _REPLICA_READ_MAX_LAG_BYTES = int(
@@ -3265,6 +3311,37 @@ class FalkorDBProvider(GraphDataProvider):
                         self._conn_cfg is not None
                         and self._conn_cfg.mode == "cluster"
                     )
+                    # A topology that REPLACES a node that has gone: a cluster
+                    # promotes a replica on cluster-node-timeout, sentinel does
+                    # the same on down-after-milliseconds. Every protection
+                    # below used to be gated on `cluster` alone, so in sentinel
+                    # — the topology whose entire purpose is automatic failover
+                    # — a master rotation fell through to the bare raise, the
+                    # breaker counted it, and three readers of the three
+                    # hundred opened it within milliseconds of each other. A
+                    # ~10 s promotion became up to 30 s of refusing every
+                    # request for the provider, with each half-open probe that
+                    # landed before the promotion re-opening it.
+                    #
+                    # The two are NOT interchangeable below. `cluster` still
+                    # decides the two genuinely cluster-shaped things — MOVED
+                    # routing, and whether one shard's failure must be kept
+                    # away from a breaker that spans every other shard —
+                    # while `promoting` decides "wait, something is being
+                    # replaced", which is true of both.
+                    sentinel = (
+                        self._conn_cfg is not None
+                        and self._conn_cfg.mode == "sentinel"
+                    )
+                    promoting = cluster or sentinel
+                    # …but only while there IS a promotion. When SENTINEL
+                    # ITSELF cannot name a master, nothing is being promoted
+                    # and nothing will be: no quorum, or the daemons are gone.
+                    # That is a dead provider in the one mode where the
+                    # provider is a single logical master, and the breaker is
+                    # exactly the right place for it — fast-fail beats every
+                    # request sitting through the escalated schedule first.
+                    tier_gone = sentinel and _is_sentinel_discovery_error(exc)
                     # Cluster slot moved → rebuild the single-node client, retry.
                     if cluster and _is_cluster_routing_error(exc):
                         if attempt >= max_retries:
@@ -3305,7 +3382,10 @@ class FalkorDBProvider(GraphDataProvider):
                     # handle is still live (redis-py self-heals the pool) and a
                     # full rebuild when close() nulled it.
                     handle_lost = _is_null_handle_error(exc)
-                    refused = cluster and _is_connection_refused_error(exc)
+                    refused = (
+                        promoting and not tier_gone
+                        and _is_connection_refused_error(exc)
+                    )
                     # A PINNED call is addressed to one node the READ ROUTER
                     # chose — today always a replica — and its caller holds a
                     # master to fall back on. None of the failover machinery
@@ -3335,11 +3415,16 @@ class FalkorDBProvider(GraphDataProvider):
                     # raises the underlying error, which is what
                     # ``_replica_at_fault`` reads to bench the node and re-run
                     # on the master.
-                    if refused and not pinned and schedule is not _REFUSED_RETRY_BACKOFFS:
-                        # Nothing is listening: give the cluster time to
+                    escalated = (
+                        _REFUSED_RETRY_BACKOFFS if cluster
+                        else _SENTINEL_RETRY_BACKOFFS
+                    )
+                    if refused and not pinned and schedule is not escalated:
+                        # Nothing is listening: give the topology time to
                         # notice and promote, instead of spending the whole
-                        # budget redialing a dead address.
-                        schedule = _REFUSED_RETRY_BACKOFFS
+                        # budget redialing a dead address. Each waits on its
+                        # OWN clock — see _SENTINEL_RETRY_BACKOFFS.
+                        schedule = escalated
                         max_retries = len(schedule)
                     if refused and read_only and not pinned and attempt >= _READ_REFUSED_RETRIES:
                         # One re-resolve was enough to know: the owner is not
@@ -3360,7 +3445,10 @@ class FalkorDBProvider(GraphDataProvider):
                         # A refusal is proof the address is dead, so re-resolve
                         # from the FIRST retry; a reset may be one bad socket,
                         # which the cheap redial absorbs without pool churn.
-                        reresolve = (cluster and not pinned and not handle_lost
+                        # Sentinel re-resolves too: _rebuild_graph_client_for_failover
+                        # goes back through build_graph_client, which re-runs
+                        # discover_master — the promoted node, by name.
+                        reresolve = (promoting and not pinned and not handle_lost
                                      and (refused or attempt >= 2))
                         logger.warning(
                             "FalkorDB %s: %s (%s) — %s + retry %d/%d after %.2fs.",
@@ -3428,12 +3516,16 @@ class FalkorDBProvider(GraphDataProvider):
                                 tuple(_TRANSIENT_REDIS_EXC or ())
                                 + (ConnectionError, OSError, TimeoutError),
                             ) and not is_auth_error(reconnect_exc)
-                            if cluster and unreachable and not pinned:
+                            if (
+                                promoting and unreachable and not pinned
+                                and not _is_sentinel_discovery_error(reconnect_exc)
+                            ):
                                 logger.warning(
                                     "FalkorDB %s: reconnect during retry failed "
-                                    "(%s) — one shard of this cluster is not "
-                                    "answering; reporting a failover so the "
-                                    "breaker leaves the other shards alone.",
+                                    "(%s) — the node holding this graph is not "
+                                    "answering and a replacement is being "
+                                    "promoted; reporting a failover rather than "
+                                    "counting it against the breaker.",
                                     self._graph_name, reconnect_exc,
                                 )
                                 raise self._failing_over(reconnect_exc) from exc
@@ -3445,23 +3537,29 @@ class FalkorDBProvider(GraphDataProvider):
                             raise reconnect_exc from exc
                         await asyncio.sleep(backoff)
                         continue
-                    if refused or (cluster and _is_transient_connection_error(exc)):
+                    if refused or (
+                        promoting and not tier_gone
+                        and _is_transient_connection_error(exc)
+                    ):
                         # The full failover window is spent and the node is
                         # still not there. Not a broken store: a node being
                         # replaced, so the breaker must not open on it — the
                         # rebuild waits it out, the reader retries.
                         #
                         # A RESET that outlives the whole schedule is the same
-                        # fact in cluster mode, and only there. A pod taking
+                        # fact in cluster and sentinel mode. A pod taking
                         # SIGTERM sends an RST on every established connection
                         # at once, and one provider spans two graphs — the
                         # source and its projection — which hash to two
                         # different shards: three resets from the shard being
                         # replaced opened the breaker for a provider whose
-                        # other graph was on a perfectly healthy one. Outside a
-                        # cluster the provider IS the single node, a host that
-                        # cannot be reached is a dead provider, and the breaker
-                        # is exactly the right place for it.
+                        # other graph was on a perfectly healthy one. In
+                        # STANDALONE the provider IS the single node, a host
+                        # that cannot be reached is a dead provider, and the
+                        # breaker is exactly the right place for it — as it is
+                        # in sentinel once the tier itself has stopped
+                        # answering (``tier_gone`` above keeps that case out of
+                        # this branch entirely).
                         #
                         # Never from a pinned call: see the note above. The
                         # underlying error is what the caller needs to bench
