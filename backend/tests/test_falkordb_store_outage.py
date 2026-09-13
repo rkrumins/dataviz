@@ -305,3 +305,134 @@ def test_the_breaker_verdict_still_names_the_node_that_died():
     assert _named_failure(breaker, "   ") is None
     concrete = ProviderUnavailable("XYZ", str(REFUSED), 30)
     assert _named_failure(concrete, str(REFUSED)) is None
+
+
+# ── a node replaying its dataset is worth waiting for, and only it ──────
+#
+# A rotated pod replays its AOF before it serves anything: minutes per GB,
+# and docker-compose's own comment records a multi-GB incremental taking
+# about an HOUR. Throughout, the node ACCEPTS connections and answers every
+# data command with `-LOADING Redis is loading the dataset in memory`.
+#
+# `_pressure_kind` did not classify that at all, so `_through_outage`
+# re-raised it instead of waiting: a rebuild that touched a rotating node
+# died on the spot, having done everything right. It is the same situation
+# the outage hold exists for — the node is not answering YET — so it is
+# classified as a connection signal and waited out.
+#
+# The budget differs, deliberately. A node that is silent might never come
+# back, so 15 minutes and then keep the checkpoint. A node that says it is
+# loading is telling us it IS coming back, and roughly when, so it earns the
+# longer wait. Guessing one number for both cases is what made the default
+# too short for a replay and too long for a corpse.
+
+
+def _loading_exc():
+    from redis.exceptions import BusyLoadingError
+
+    return BusyLoadingError("LOADING Redis is loading the dataset in memory")
+
+
+def test_a_loading_reply_is_a_wait_not_a_failure():
+    from backend.app.providers.falkordb_materialize import _pressure_kind
+
+    assert _pressure_kind(_loading_exc()) == "connection", (
+        "a node mid-replay flew past the outage hold and killed the run"
+    )
+
+
+def test_a_provider_loading_verdict_is_a_wait_too():
+    """The provider converts the raw reply into ``ProviderLoading`` before
+    the pipeline ever sees it, so that shape has to classify the same."""
+    from backend.common.adapters import ProviderLoading
+    from backend.app.providers.falkordb_materialize import _pressure_kind
+
+    exc = ProviderLoading(
+        provider_name="g1",
+        reason="graph is starting up (loading dataset into memory)",
+        retry_after_seconds=5,
+    )
+    assert _pressure_kind(exc) == "connection"
+
+
+def test_a_silent_node_is_still_a_connection_signal():
+    """Unchanged: the existing behaviour for a node that is simply gone."""
+    from backend.app.providers.falkordb_materialize import _pressure_kind
+
+    assert _pressure_kind(ConnectionError("Connection refused")) == "connection"
+
+
+def test_a_replaying_node_gets_the_longer_budget():
+    from backend.app.providers.falkordb_materialize import (
+        _store_loading_hold_s, _store_outage_hold_s,
+    )
+
+    assert _store_loading_hold_s() > _store_outage_hold_s(), (
+        "a node that says it is coming back must be waited for longer than "
+        "one that says nothing"
+    )
+    assert _store_loading_hold_s() >= 3600, (
+        "compose's own comment records a multi-GB AOF replay taking about an "
+        "hour; a shorter budget fails a run that would have succeeded"
+    )
+
+
+def test_a_replaying_node_is_waited_out_past_the_plain_outage_budget(monkeypatch):
+    """The budgets have to differ in the HOLD, not just in the constants."""
+    import backend.app.providers.falkordb_materialize as mat
+
+    pipe = object.__new__(mat.AggregationPipeline)
+    pipe._outage_since = None
+    pipe._outage_holds = pipe._outage_holds_now = pipe._outage_s = 0
+    pipe._outage_hold_s = 10          # a corpse gets 10s
+    pipe._loading_hold_s = 10_000     # a replay gets much longer
+    pipe.p = types.SimpleNamespace(_graph_name="g1", reconnect_owner=None)
+    pipe._last_budget = None
+    pipe._on_pressure = lambda *a, **k: None
+    pipe._cancel_check = lambda: None
+
+    async def _noop(*a, **k):
+        return None
+
+    pipe._ladder_heartbeat = _noop
+    pipe._note_node_identity = _noop
+    monkeypatch.setattr(mat.asyncio, "sleep", _noop)
+
+    # 30s into an outage, past the plain budget.
+    pipe._outage_since = mat.time.monotonic() - 30
+
+    # A node that is merely silent: give up, keep the checkpoint.
+    with pytest.raises(mat.MaterializationStoreUnreachable):
+        _run(pipe._hold_for_store(ConnectionError("refused"), "apply"))
+
+    # The SAME elapsed time, but the node says it is replaying: keep waiting.
+    pipe._outage_since = mat.time.monotonic() - 30
+    _run(pipe._hold_for_store(_loading_exc(), "apply"))   # must not raise
+
+
+def test_the_message_names_the_replay_and_the_knob(monkeypatch):
+    """An operator reading a failed run needs to know the wait ran out on a
+    REPLAY, and which knob buys more of it."""
+    import backend.app.providers.falkordb_materialize as mat
+
+    pipe = object.__new__(mat.AggregationPipeline)
+    pipe._outage_since = mat.time.monotonic() - 10_000
+    pipe._outage_holds = pipe._outage_holds_now = pipe._outage_s = 0
+    pipe._outage_hold_s = 10
+    pipe._loading_hold_s = 100
+    pipe.p = types.SimpleNamespace(_graph_name="g1", reconnect_owner=None)
+    pipe._last_budget = None
+    pipe._on_pressure = lambda *a, **k: None
+    pipe._cancel_check = lambda: None
+
+    async def _noop(*a, **k):
+        return None
+
+    pipe._ladder_heartbeat = _noop
+    pipe._note_node_identity = _noop
+
+    with pytest.raises(mat.MaterializationStoreUnreachable) as exc:
+        _run(pipe._hold_for_store(_loading_exc(), "apply"))
+    msg = str(exc.value)
+    assert "replaying" in msg
+    assert "AGGREGATION_STORE_LOADING_HOLD_S" in msg

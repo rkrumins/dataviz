@@ -211,6 +211,22 @@ def _store_outage_hold_s() -> int:
     return _env_int("AGGREGATION_STORE_OUTAGE_HOLD_S", 900, 30, 7_200)
 
 
+def _store_loading_hold_s() -> int:
+    """How long one run waits out a node that is REPLAYING its dataset.
+
+    Longer than the plain outage hold, and the distinction is the point. A
+    node that has gone silent might never come back, so the run keeps its
+    checkpoint after a quarter of an hour and lets a person decide. A node
+    answering ``-LOADING`` is telling us it IS coming back — it accepts
+    connections, it reports how far through it is, it just will not serve
+    yet — and a rotated pod replaying a multi-GB AOF incremental takes about
+    an HOUR (docker-compose.yml records exactly that, measured). Failing a
+    run 45 minutes before the node was ready wastes every byte of progress
+    it had, so a replay earns the wait. One number for both cases was too
+    short for a replay and too long for a corpse."""
+    return _env_int("AGGREGATION_STORE_LOADING_HOLD_S", 3_600, 60, 14_400)
+
+
 def _store_hold_max_s() -> int:
     """How long ONE hold may last before the run stops and keeps its
     checkpoint — a hold being the pipeline waiting, before a write batch,
@@ -1232,6 +1248,7 @@ class AggregationPipeline:
         # Waiting out a node that is not answering, and what the node said
         # about itself when it came back.
         self._outage_hold_s = _store_outage_hold_s()
+        self._loading_hold_s = _store_loading_hold_s()
         self._outage_holds = 0
         self._outage_s = 0.0
         #: When the CURRENT outage began, or None while the store answers.
@@ -1931,13 +1948,27 @@ class AggregationPipeline:
             )
             self._on_pressure(op, "connection", 0, 0, size=0)
         waited = time.monotonic() - self._outage_since
-        if waited >= self._outage_hold_s:
+        # A node that says it is loading has told us it is coming back, so
+        # it gets the longer budget. Re-checked every hold rather than
+        # latched: a node that starts replaying and then dies drops back to
+        # the shorter one, and one that begins answering -LOADING part way
+        # through an outage earns the longer one from then on.
+        replaying = self._exc_is_replay(exc)
+        budget = self._loading_hold_s if replaying else self._outage_hold_s
+        if waited >= budget:
             raise MaterializationStoreUnreachable(
                 f"the graph store node {endpoint} did not answer for "
                 f"{waited / 60:.0f} minute(s) during {op} ({type(exc).__name__}: "
                 f"{str(exc)[:160]}). The run keeps its checkpoint — Resume it "
                 f"once the node is back, and check whether the container was "
                 f"killed for memory or by its health probe."
+                + (
+                    f" It was still replaying its dataset when the "
+                    f"{budget / 60:.0f}-minute wait ran out; raise "
+                    f"AGGREGATION_STORE_LOADING_HOLD_S if this shard's replay "
+                    f"legitimately takes longer."
+                    if replaying else ""
+                )
             )
         self._outage_holds += 1
         self._outage_holds_now += 1
@@ -1953,6 +1984,18 @@ class AggregationPipeline:
         if reconnect is not None:
             await reconnect()
         await self._note_node_identity(endpoint)
+
+    @staticmethod
+    def _exc_is_replay(exc: BaseException) -> bool:
+        """Whether this failure is a node REPLAYING rather than one gone.
+
+        Both shapes reach here: the raw ``-LOADING`` reply, and the
+        ``ProviderLoading`` the provider converts it into.
+        """
+        from backend.common.adapters import ProviderLoading
+        from backend.app.providers.falkordb_provider import _is_loading_error
+
+        return isinstance(exc, ProviderLoading) or _is_loading_error(exc)
 
     def _store_endpoint(self) -> str:
         shard = self._last_budget.shard if self._last_budget is not None else None

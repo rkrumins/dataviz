@@ -727,8 +727,17 @@ def _pressure_kind(exc: BaseException) -> Optional[str]:
     # The provider's own verdict after it spent the failover window. It may
     # arrive without a cause (answered from the short memo), so it is matched
     # by type rather than by the text of what it wrapped.
-    from backend.common.adapters import ProviderFailingOver
+    from backend.common.adapters import ProviderFailingOver, ProviderLoading
     if isinstance(exc, ProviderFailingOver):
+        return "connection"
+    # A node replaying its dataset is not answering YET, which is what the
+    # outage hold is for. The RAW reply already classified here —
+    # ``BusyLoadingError`` subclasses ``ConnectionError`` — but
+    # ``_run_guarded`` converts it to ``ProviderLoading`` before the
+    # pipeline ever sees it, and that shape fell through to None: a rebuild
+    # that touched a rotating pod died on the spot instead of waiting out a
+    # replay it knew was in progress.
+    if isinstance(exc, ProviderLoading):
         return "connection"
     return None
 
