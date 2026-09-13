@@ -105,11 +105,13 @@ async def count_auto_resume(redis_client: Any, job_id: str) -> int:
     return attempts
 
 
-async def mark_auto_resume_exhausted(session: Any, job: Any, now_iso: str) -> None:
+async def mark_auto_resume_exhausted(
+    session: Any, job: Any, now_iso: str, events: Any = None,
+) -> None:
     """Terminal status for a job that died more times than automation may
     resume it. A hand Resume from the cursor is still possible."""
     await reap_job(
-        session, job, status="failed", now_iso=now_iso,
+        session, job, status="failed", now_iso=now_iso, events=events,
         error_message=(
             f"{WORKER_LOST} auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
             f"without completing; resume from cursor={job.last_cursor} "
@@ -122,7 +124,9 @@ async def mark_auto_resume_exhausted(session: Any, job: Any, now_iso: str) -> No
     )
 
 
-async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int:
+async def _reconcile_once(
+    session_factory: Any, redis_client: Any = None, events: Any = None,
+) -> int:
     """Single sweep. Returns the count of rows reconciled.
 
     Lock-aware (preferred): the per-job execution lock ``agg:exec:{job_id}``
@@ -197,6 +201,7 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                         await reap_job(
                             session, job, status="cancelled", now_iso=now_iso,
                             error_message="Cancelled; executor stopped.",
+                            events=events,
                         )
                         reconciled += 1
                         continue
@@ -206,7 +211,7 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                     # slides — see count_auto_resume).
                     attempts = await count_auto_resume(redis_client, job.id)
                     if attempts > _MAX_AUTO_RESUMES:
-                        await mark_auto_resume_exhausted(session, job, now_iso)
+                        await mark_auto_resume_exhausted(session, job, now_iso, events)
                         reconciled += 1
                         continue
 
@@ -257,7 +262,7 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                 job.last_checkpoint_at, job.last_cursor,
             )
             await reap_job(
-                session, job, status="failed", now_iso=now_iso,
+                session, job, status="failed", now_iso=now_iso, events=events,
                 error_message=(
                     f"{WORKER_LOST} no progress for {int(stale_for)}s "
                     f"(threshold={int(_HEARTBEAT_THRESHOLD_SECS)}s). "
@@ -271,7 +276,7 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
             )
             reconciled += 1
 
-        reconciled += await _sweep_stale_pending(session, redis_client)
+        reconciled += await _sweep_stale_pending(session, redis_client, events)
 
         if reconciled:
             await session.commit()
@@ -279,7 +284,9 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
     return reconciled
 
 
-async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
+async def _sweep_stale_pending(
+    session: Any, redis_client: Any, events: Any = None,
+) -> int:
     """Fail pending rows that will never be picked up — see the module
     constants for the two signals. Never raises."""
     now = datetime.now(timezone.utc)
@@ -335,7 +342,7 @@ async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
                 job.id, job.data_source_id, reason,
             )
             await reap_job(
-                session, job, status="failed",
+                session, job, status="failed", events=events,
                 error_message=reason, now_iso=now_iso,
             )
             metrics_increment(
@@ -368,9 +375,23 @@ async def run_reconciler(
         int(_RECONCILE_INTERVAL_SECS), int(_HEARTBEAT_THRESHOLD_SECS),
         redis_client is not None,
     )
+    # A reaped run has to reach the same mirrors a worker-ended one does, or
+    # the fleet cockpit shows the source mid-rebuild forever in the split-DB
+    # topology. Built once, off the Redis this loop already holds.
+    events = None
+    if redis_client is not None:
+        try:
+            from .events import AggregationEventPublisher
+
+            events = AggregationEventPublisher(redis_client)
+        except Exception as exc:                  # noqa: BLE001 — never fatal
+            logger.warning(
+                "Stuck-job reconciler: no event publisher (%s); reaped runs "
+                "will rely on the direct mirror write alone", exc,
+            )
     while not shutdown.is_set():
         try:
-            count = await _reconcile_once(session_factory, redis_client)
+            count = await _reconcile_once(session_factory, redis_client, events)
             if count:
                 logger.info("reconciler: reconciled %d stuck job(s)", count)
         except asyncio.CancelledError:

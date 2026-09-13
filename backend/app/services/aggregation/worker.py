@@ -922,40 +922,56 @@ class AggregationWorker:
                     },
                 )
 
-                # Platform terminal event — closes the SSE stream
-                # cleanly so frontend ``useJob`` unsubscribes and
-                # the row's React-Query cache flips to the durable
-                # API response.
-                await emitter.terminal(
-                    job_id=job_id,
-                    kind="aggregation",
-                    scope=scope,
-                    status="completed",
-                    payload={
-                        "edge_count": job.created_edges,
-                        "fingerprint": job.graph_fingerprint_after,
-                        "completed_at": job.completed_at,
-                    },
-                )
-
-                # Publish event for viz-service to sync its own tables
-                # and invalidate its aggregated-edge graph cache.
-                if self._events:
-                    await self._events.job_completed(
+                # ANNOUNCING the run is not part of DOING it. Everything
+                # below is a side effect on another system — an SSE stream, a
+                # Redis stream, the insights poll — and a failure in any of
+                # them used to land in the generic handler below, which sets
+                # status="failed" and the source to "failed". A perfect
+                # rebuild then read as a failure, and automation queued a full
+                # re-rebuild of a correct cube. The rebuild happened; a
+                # notification about it did not; those are different facts.
+                try:
+                    # Platform terminal event — closes the SSE stream
+                    # cleanly so frontend ``useJob`` unsubscribes and
+                    # the row's React-Query cache flips to the durable
+                    # API response.
+                    await emitter.terminal(
                         job_id=job_id,
-                        data_source_id=job.data_source_id,
-                        edge_count=job.created_edges,
-                        fingerprint=job.graph_fingerprint_after,
-                        completed_at=job.completed_at,
-                        workspace_id=job.workspace_id,
+                        kind="aggregation",
+                        scope=scope,
+                        status="completed",
+                        payload={
+                            "edge_count": job.created_edges,
+                            "fingerprint": job.graph_fingerprint_after,
+                            "completed_at": job.completed_at,
+                        },
                     )
 
-                # Aggregated-edge materialization changed the graph's edge
-                # counts — nudge the insights counts poll (cooldown-
-                # throttled, never raises).
-                if job.workspace_id:
-                    from backend.insights_service.enqueue import mark_stats_changed
-                    await mark_stats_changed(job.data_source_id, job.workspace_id)
+                    # Publish event for viz-service to sync its own tables
+                    # and invalidate its aggregated-edge graph cache.
+                    if self._events:
+                        await self._events.job_completed(
+                            job_id=job_id,
+                            data_source_id=job.data_source_id,
+                            edge_count=job.created_edges,
+                            fingerprint=job.graph_fingerprint_after,
+                            completed_at=job.completed_at,
+                            workspace_id=job.workspace_id,
+                        )
+
+                    # Aggregated-edge materialization changed the graph's edge
+                    # counts — nudge the insights counts poll (cooldown-
+                    # throttled, never raises).
+                    if job.workspace_id:
+                        from backend.insights_service.enqueue import mark_stats_changed
+                        await mark_stats_changed(job.data_source_id, job.workspace_id)
+                except Exception as notify_exc:     # noqa: BLE001 — see above
+                    logger.warning(
+                        "Aggregation job %s completed, but announcing it "
+                        "failed (%s). The run's durable state stands; the "
+                        "state-sync consumer reconciles from it.",
+                        job_id, notify_exc, exc_info=True,
+                    )
 
                 # created_edges is the desired-cube total (used for the
                 # readiness edge count). It is NOT how many edges this run
@@ -1273,7 +1289,34 @@ class AggregationWorker:
                                 observed_tuning=json.dumps(learned),
                             )
                     job.updated_at = _now()
-                    await session.commit()
+                    try:
+                        await session.commit()
+                    except Exception as commit_exc:  # noqa: BLE001
+                        # The one write that has to land. A session poisoned
+                        # earlier — ``record_terminal`` flushes inside its own
+                        # exception swallow — made this raise out of ``run()``
+                        # entirely, leaving the row ``running`` after the SSE
+                        # stream had already closed with terminal/completed.
+                        # Roll back and write the status on its own.
+                        logger.warning(
+                            "Aggregation job %s: terminal commit failed (%s); "
+                            "retrying with the status alone", job_id, commit_exc,
+                        )
+                        await session.rollback()
+                        try:
+                            await session.execute(
+                                update(AggregationJobORM)
+                                .where(AggregationJobORM.id == job_id)
+                                .values(status=job.status, updated_at=_now())
+                            )
+                            await session.commit()
+                        except Exception as retry_exc:   # noqa: BLE001
+                            logger.error(
+                                "Aggregation job %s: could not record its "
+                                "terminal status (%s) — the stuck-job "
+                                "reconciler will reap it", job_id, retry_exc,
+                            )
+                            await session.rollback()
                 # Always unregister the cancel event, including on
                 # uncaught exceptions, so a future job re-using this
                 # job_id (resume) starts with a fresh event.

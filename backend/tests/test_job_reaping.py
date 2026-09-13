@@ -274,3 +274,55 @@ def test_the_public_mirror_is_synced_too():
     finally:
         reap_mod.sync_workspace_row = original
     assert seen == [("ds", {"aggregation_status": "failed"})]
+
+
+class _Events:
+    """Stands in for the control plane's publisher."""
+
+    def __init__(self) -> None:
+        self.failed: list = []
+        self.cancelled: list = []
+
+    async def job_failed(self, job_id, data_source_id, error_message=None):
+        self.failed.append((job_id, data_source_id, error_message))
+
+    async def job_cancelled(self, job_id, data_source_id):
+        self.cancelled.append((job_id, data_source_id))
+
+
+def test_a_reaped_run_is_announced_like_a_worker_ended_one():
+    """The direct mirror write is a documented no-op when the public table
+    lives in another database, so in the split-DB topology it was the ONLY
+    thing a reaper did — and the fleet cockpit, which reads that table, showed
+    the source mid-rebuild forever. The event is the path that converges it."""
+    events = _Events()
+    _run(reap_job(
+        _Session(_State()), _job(), status="failed",
+        error_message="worker lost: no progress", events=events,
+    ))
+    assert events.failed == [("J", "ds", "worker lost: no progress")]
+    assert events.cancelled == []
+
+
+def test_a_reaped_cancel_is_announced_as_a_cancel():
+    events = _Events()
+    _run(reap_job(
+        _Session(_State()), _job(), status="cancelled", events=events,
+    ))
+    assert events.cancelled == [("J", "ds")] and events.failed == []
+
+
+def test_reaping_without_a_publisher_still_reaps():
+    """Reaping must never depend on a bus — clearing a ``running`` row is the
+    whole point, and a publisher that is absent or broken cannot stop it."""
+    class _Broken:
+        async def job_failed(self, **kw):
+            raise RuntimeError("bus down")
+
+    job = _job()
+    _run(reap_job(_Session(_State()), job, status="failed", events=None))
+    assert job.status == "failed"
+
+    job2 = _job()
+    _run(reap_job(_Session(_State()), job2, status="failed", events=_Broken()))
+    assert job2.status == "failed"

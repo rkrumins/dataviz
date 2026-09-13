@@ -107,7 +107,7 @@ async def release_source(session: Any, job: Any, status: str) -> None:
 
 async def reap_job(
     session: Any, job: Any, *, status: str, error_message: Optional[str] = None,
-    now_iso: Optional[str] = None,
+    now_iso: Optional[str] = None, events: Any = None,
 ) -> None:
     """End ``job`` at ``status`` and leave an honest record behind.
 
@@ -116,6 +116,19 @@ async def reap_job(
     run died in, and release the source. Best-effort throughout — a reaper
     that raises leaves the row ``running``, which is the state it exists to
     clear. The caller commits.
+
+    ``events`` is the caller's publisher, and passing one matters in the
+    split-DB topology. There are two mirrors of a source's aggregation
+    status: readiness reads ``aggregation.data_source_state``, and the fleet
+    Freshness cockpit reads ``public.workspace_data_sources``. A worker keeps
+    both in step — directly, and through ``aggregation.events.stream``. A
+    reaper had only the direct write, which :func:`release_source` documents
+    as a no-op when the public table lives in another database, so a reaped
+    run left the cockpit showing the source mid-rebuild forever — and the
+    failure-reason join, keyed off that same column, dropped the row, so the
+    cause was invisible too. It is a parameter rather than something this
+    module resolves for itself: reaping must never wait on a bus, and this
+    module stays import-light on purpose.
     """
     now_iso = now_iso or _now()
     job.status = status
@@ -125,3 +138,30 @@ async def reap_job(
     job.updated_at = now_iso
     seal_steps(job, status, now=now_iso)
     await release_source(session, job, status)
+    await _announce(events, job, status)
+
+
+async def _announce(events: Any, job: Any, status: str) -> None:
+    """Publish the terminal event a worker would have published.
+
+    Silent when the caller has no publisher, which keeps the direct mirror
+    write as the only behaviour anywhere the bus is not wired up — and keeps
+    reaping off the bus entirely in the paths that do not pass one."""
+    if events is None:
+        return
+    try:
+        if status == "cancelled":
+            await events.job_cancelled(
+                job_id=job.id, data_source_id=job.data_source_id,
+            )
+        else:
+            await events.job_failed(
+                job_id=job.id,
+                data_source_id=job.data_source_id,
+                error_message=getattr(job, "error_message", None),
+            )
+    except Exception as exc:                      # noqa: BLE001 — by contract
+        logger.debug(
+            "reap: could not announce %s for job %s (%s); the direct mirror "
+            "write stands", status, getattr(job, "id", "?"), exc,
+        )
