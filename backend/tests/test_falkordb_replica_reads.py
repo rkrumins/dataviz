@@ -67,9 +67,46 @@ class _Conn:
     async def initialize(self):
         return None
 
+    def _self_report(self, node):
+        """What one replica says about ITSELF, derived from what the master
+        observes about it — which is how a healthy pair actually agrees.
+
+        The router asks every candidate directly now (see
+        ``_vouched_replicas``), so a fake that answered the master's INFO
+        whatever was addressed would have every replica claim to be the
+        master. The translation is the honest one: ``state: online`` means
+        the link is up, ``wait_bgsave`` means a full resync is in flight,
+        and the offsets carry across so ``lagBytes`` comes out identical.
+        """
+        entry = None
+        for key, value in self._info.items():
+            if not (isinstance(key, str) and key.startswith("slave") and key[5:].isdigit()):
+                continue
+            if isinstance(value, dict) and (
+                f"{value.get('ip')}:{value.get('port')}" == f"{node.host}:{node.port}"
+            ):
+                entry = value
+                break
+        if entry is None:
+            # The master does not list it: it is not replicating from here.
+            return {"role": "master"}
+        state = entry.get("state")
+        report = {
+            "role": "slave",
+            "master_link_status": "up" if state == "online" else "down",
+            "master_sync_in_progress": 1 if state == "wait_bgsave" else 0,
+        }
+        if self._info.get("master_repl_offset") is not None:
+            report["master_repl_offset"] = self._info["master_repl_offset"]
+        if entry.get("offset") is not None:
+            report["slave_repl_offset"] = entry["offset"]
+        return report
+
     async def execute_command(self, command, *args, target_nodes=None):
         self.calls.append((command, args, target_nodes))
         if command == "INFO":
+            if target_nodes is not None and target_nodes is not MASTER:
+                return self._self_report(target_nodes)
             return self._info
         return "OK"
 
@@ -221,13 +258,25 @@ def test_a_replica_that_failed_a_read_is_skipped_for_a_while():
 
 
 def _deaf_master(conn):
-    """A shard whose master answers nothing — the pods are rotating."""
+    """A shard whose master answers nothing — the pods are rotating.
+
+    Only the MASTER goes quiet. Its replicas are the copies still standing,
+    which is the whole point of the case, so they keep answering — and what
+    they say about themselves is that their link is down, because it is.
+    They still carry the offsets from their last snapshot, so how far behind
+    each one was remains readable.
+    """
     async def _refuse(command, *args, target_nodes=None):
         conn.calls.append((command, args, target_nodes))
-        if command == "INFO":
-            raise ConnectionError(
-                "Error 111 connecting to 10.0.0.1:6379. Connection refused.")
-        return "OK"
+        if command != "INFO":
+            return "OK"
+        if target_nodes is not None and target_nodes is not MASTER:
+            report = conn._self_report(target_nodes)
+            if report.get("role") == "slave":
+                report["master_link_status"] = "down"
+            return report
+        raise ConnectionError(
+            "Error 111 connecting to 10.0.0.1:6379. Connection refused.")
 
     conn.execute_command = _refuse
     return conn
@@ -256,7 +305,7 @@ def test_a_master_that_answered_recently_hands_over_the_replicas_it_vouched_for(
     assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"    # only this one is in step
 
     _deaf_master(conn)
-    p._repl_sample["g1"] = (time.monotonic() - _stale_sample(), p._repl_sample["g1"][1])
+    p._vouch_sample["g1"] = (time.monotonic() - _stale_sample(), p._vouch_sample["g1"][1])
     for _ in range(4):
         # …and the lagging sibling is still not handed the reads.
         assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"
@@ -267,7 +316,9 @@ def test_a_dead_master_is_not_asked_again_on_every_read():
     p = _provider(conn)
     for _ in range(20):
         _run(p._replica_for("g1"))
-    assert sum(1 for c in conn.calls if c[0] == "INFO") == 1
+    # One round per window, not one per read: the master plus its two
+    # replicas, asked once and cached.
+    assert sum(1 for c in conn.calls if c[0] == "INFO") == 3
 
 
 def test_a_graph_this_pod_just_wrote_still_reads_once_its_master_goes():
@@ -282,7 +333,7 @@ def test_a_graph_this_pod_just_wrote_still_reads_once_its_master_goes():
     assert _run(p._replica_for("g1")) is None          # healthy master: pinned
 
     _deaf_master(conn)
-    p._repl_sample.clear()                             # take a fresh reading
+    p._vouch_sample.clear()                             # take a fresh reading
     assert _run(p._replica_for("g1")) in (R1, R2)
 
 
@@ -311,13 +362,19 @@ def test_the_failover_memo_never_blocks_a_read_aimed_at_a_replica():
 
 
 def test_replication_is_sampled_not_asked_per_read():
-    """One INFO per shard per window answers for every read of every graph
-    on it — otherwise the routing costs more than it saves."""
+    """One round per shard per window answers for every read of every graph
+    on it — otherwise the routing costs more than it saves.
+
+    The round is now one INFO per NODE (each node is asked about itself,
+    which is what removed the address matching) plus one for the master, to
+    know whether it is there. On the shipped one-replica-per-shard topology
+    that is two calls per 5s window; it is still bounded by the window and
+    not by the read rate, which is the property that matters."""
     conn = _Conn()
     p = _provider(conn)
     for _ in range(20):
         _run(p._replica_for("g1"))
-    assert sum(1 for c in conn.calls if c[0] == "INFO") == 1
+    assert sum(1 for c in conn.calls if c[0] == "INFO") == 3
 
 
 def test_a_write_pins_the_graph_it_actually_wrote():
@@ -475,112 +532,150 @@ def test_the_counters_say_how_reads_were_served():
     p._replica_reads, p._master_reads, p._replica_fallbacks = 7, 3, 1
     assert p.read_routing_counters() == {
         "replicaReads": 7, "masterReads": 3, "replicaFallbacks": 1,
-        # Zero unless the master's replication links and the client's slot
-        # map disagree about how to spell a node — see the address-space
-        # tests below.
-        "replicaEndpointMismatch": 0,
     }
 
 
-# ── the two address spaces the router silently falls between ────────────
+# ── vouching by interrogation, not by address arithmetic ────────────────
 #
-# `_replica_for_read` takes candidate replicas from the client's slot map
-# and keeps the ones `_replicas_in_step` vouched for. The slot map's
-# addresses are whatever the cluster ANNOUNCES; the vouched set is built
-# from `INFO replication`, whose `slave<n>:ip=` is the peer address of the
-# replication connection.
+# The router used to ask the MASTER which of its replicas were in step, and
+# intersect that answer with the client's own node list. Two subsystems, two
+# address spaces, compared as strings — and on the shipped cluster topology
+# they never matched (see the address-space tests above).
 #
-# Those are the same string only by luck. The shipped production-cluster
-# StatefulSet sets `--cluster-announce-hostname` and
-# `--cluster-preferred-endpoint-type hostname`, so the slot map yields
-# `falkordb-cluster-0.falkordb-cluster.synodic.svc.cluster.local:6379`,
-# while `replica-announce-ip` is set nowhere, so INFO yields the raw pod IP.
-# The intersection is then EMPTY on every read: `_replica_for_read` returns
-# None, every read goes to the master, and the whole replica-read path is
-# inert with no signal at all. It also disables the master-down fallback
-# once any sample has been cached, since that path intersects too.
+# It also meant ROLE was inferred rather than known: from the master's
+# `slave<n>` list, or from the client's cached slot map (`server_type`).
+# Both go stale the instant a failover or a role swap happens, which is
+# exactly when routing a read to the wrong node matters most.
 #
-# Which side to normalise is a deployment decision. What is not is that a
-# total feature failure must be visible, so the disjoint case is counted
-# and named rather than looking identical to "the replicas are lagging".
+# So each candidate is asked about ITSELF. A node's own INFO replication
+# carries its current role, its link health, whether it is mid-resync, and
+# a lag computed from ONE snapshot (master_repl_offset - slave_repl_offset)
+# — so there is no cross-node skew and, crucially, nothing to match: the
+# candidates and the answer live in the client's address space alone.
 
 
-def _provider_with_replication(monkeypatch, *, master_says, client_knows):
-    """A provider whose master reports ``master_says`` and whose slot map
-    holds ``client_knows`` — the two address spaces, set independently."""
-    p = _provider(_Conn())
+def _asking_provider(answers, *, replicas=(R1, R2)):
+    """A provider whose candidates answer INFO replication with ``answers``,
+    keyed by "host:port"."""
+    class _AskConn(_Conn):
+        async def execute_command(self, command, *args, target_nodes=None):
+            if command == "INFO":
+                key = f"{target_nodes.host}:{target_nodes.port}"
+                if key not in answers:
+                    raise ConnectionError(f"{key} unreachable")
+                return answers[key]
+            return "OK"
 
-    async def _state(graph_key, timeout_s=1.0):
-        return {
-            "role": "master",
-            "replicas": [
-                {"endpoint": e, "state": "online", "lagBytes": 0}
-                for e in master_says
-            ],
-        }
-
-    monkeypatch.setattr(p, "replication_state", _state)
-    return p, set(client_knows)
+    return _provider(_AskConn(replicas=replicas))
 
 
-def test_a_disjoint_address_space_is_counted_not_silent(monkeypatch):
-    p, endpoints = _provider_with_replication(
-        monkeypatch,
-        master_says=["10.1.2.3:6379"],                       # INFO: pod IP
-        client_knows=["falkordb-cluster-1.falkordb:6379"],   # slot map: hostname
-    )
-    got = _run(p._replicas_in_step("g", endpoints))
-    assert got == set(), "nothing can be vouched for across address spaces"
-    assert p.read_routing_counters().get("replicaEndpointMismatch", 0) == 1, (
-        "the router fell between the master's address space and the client's "
-        "and said nothing — indistinguishable from a lagging replica"
-    )
+def _replica_info(*, role="slave", link="up", syncing=0, master_off=1000, slave_off=1000):
+    return {
+        "role": role,
+        "master_link_status": link,
+        "master_sync_in_progress": syncing,
+        "master_repl_offset": master_off,
+        "slave_repl_offset": slave_off,
+    }
 
 
-def test_a_lagging_replica_is_not_reported_as_a_mismatch(monkeypatch):
-    """An empty answer because the replica is BEHIND is the mechanism
-    working; only a disjoint address space is the misconfiguration."""
-    p = _provider(_Conn())
-
-    async def _state(graph_key, timeout_s=1.0):
-        return {"role": "master", "replicas": [
-            {"endpoint": "10.1.2.3:6379", "state": "online",
-             "lagBytes": 10 ** 12},
-        ]}
-
-    monkeypatch.setattr(p, "replication_state", _state)
-    got = _run(p._replicas_in_step("g", {"10.1.2.3:6379"}))
-    assert got == set()
-    assert p.read_routing_counters().get("replicaEndpointMismatch", 0) == 0
+def test_an_in_sync_replica_is_vouched_for_from_its_own_answer():
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
 
 
-def test_an_overlapping_address_space_is_not_a_mismatch(monkeypatch):
-    p, endpoints = _provider_with_replication(
-        monkeypatch,
-        master_says=["10.1.2.3:6379"],
-        client_knows=["10.1.2.3:6379"],
-    )
-    got = _run(p._replicas_in_step("g", endpoints))
-    assert got == {"10.1.2.3:6379"}
-    assert p.read_routing_counters().get("replicaEndpointMismatch", 0) == 0
+def test_a_promoted_replica_is_never_read_from_as_a_replica():
+    """A failover makes one of these the MASTER. It answers role:master, and
+    a node that is the master must not be taken for a replica — whatever a
+    cached slot map or the old master's replica list still says."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(role="master"),   # promoted
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
 
 
-def test_the_mismatch_is_counted_every_time_but_logged_once(monkeypatch, caplog):
-    """The sample window is 5s, so a warning per window would be thousands
-    of identical lines a day for a condition that changes only when the
-    deployment does. The COUNTER is the signal; the line is the explanation."""
-    import logging
+def test_a_replica_whose_link_is_down_is_not_vouched_for():
+    """The master still listing it as ``online`` is not evidence: only the
+    replica knows whether its own link is up. An asymmetric partition was
+    invisible to the master-side check."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(link="down"),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
 
-    p, endpoints = _provider_with_replication(
-        monkeypatch,
-        master_says=["10.1.2.3:6379"],
-        client_knows=["falkordb-cluster-1.falkordb:6379"],
-    )
-    with caplog.at_level(logging.WARNING):
-        for _ in range(4):
-            p._repl_sample = {}          # force a fresh reading each time
-            _run(p._replicas_in_step("g", endpoints))
 
-    assert p.read_routing_counters()["replicaEndpointMismatch"] == 4
-    lines = [r for r in caplog.records if "do not overlap" in r.getMessage()]
-    assert len(lines) == 1, f"expected one warning, got {len(lines)}"
+def test_a_replica_mid_full_resync_is_not_vouched_for():
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(syncing=1),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_a_replica_too_far_behind_is_not_vouched_for():
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(master_off=10 ** 12, slave_off=0),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_an_unreachable_candidate_is_skipped_not_fatal():
+    p = _asking_provider({"10.0.2.1:6379": _replica_info()})   # R1 absent
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_when_every_replica_has_lost_the_master_they_still_answer_reads():
+    """The master being gone is when its replicas matter MOST: they are the
+    only copies of the graph still standing. A stale answer beats no answer,
+    which is the rule the old code kept by holding the master's last vouched
+    set — expressed here without needing the master at all."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(link="down"),
+        "10.0.2.1:6379": _replica_info(link="down"),
+    })
+    # MASTER is absent from the answers, so it refuses — which is the FACT
+    # the relaxation turns on, not an inference from the replicas.
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
+    assert p._master_is_silent("g1") is True
+
+
+def test_a_node_that_says_master_is_not_a_fallback_even_when_the_link_is_down():
+    """Relaxing on a silent master must not sweep in the PROMOTED node —
+    that is the new master, and reading it as a replica would defeat the
+    read-your-own-writes pin the router keeps on the master."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(role="master"),
+        "10.0.2.1:6379": _replica_info(link="down"),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_the_reading_is_cached_for_the_sample_window():
+    calls = {"n": 0}
+
+    class _CountingConn(_Conn):
+        async def execute_command(self, command, *args, target_nodes=None):
+            if command == "INFO":
+                calls["n"] += 1
+                return _replica_info()
+            return "OK"
+
+    p = _provider(_CountingConn())
+    _run(p._vouched_replicas("g1", [R1, R2]))
+    first = calls["n"]
+    _run(p._vouched_replicas("g1", [R1, R2]))
+    assert calls["n"] == first, "a second read inside the window re-asked every node"
