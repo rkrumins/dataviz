@@ -167,12 +167,13 @@ def test_a_provider_pinned_to_its_master_never_routes():
     assert _run(p._replica_for("g1")) is None
 
 
-def test_standalone_and_sentinel_never_route():
-    """There is no replica in the client's slot map to route to, and the
-    sentinel client follows failover inside its own pool."""
+def test_a_deployment_with_no_replicas_reads_from_its_master(monkeypatch):
+    """Whatever the mode. In cluster there is nothing beside the master in
+    the slot map; in sentinel/standalone the master names no replicas."""
     for mode in ("standalone", "sentinel"):
-        p = _provider(_Conn(), mode=mode)
+        p = _provider(_SentinelConn(replicas=[]), mode=mode)
         assert _run(p._replica_for("g1")) is None
+    assert _run(_provider(_Conn(replicas=()))._replica_for("g1")) is None
 
 
 def test_a_replica_that_is_behind_does_not_answer():
@@ -681,26 +682,12 @@ def test_the_reading_is_cached_for_the_sample_window():
     assert calls["n"] == first, "a second read inside the window re-asked every node"
 
 
-def test_a_mode_without_a_replica_read_path_says_so_once(caplog):
-    """Silence reads as "the replicas are busy" rather than "this deployment
-    has no replica read path", and those call for different actions."""
-    import logging
-
-    p = _provider(_Conn(), mode="sentinel")
-    with caplog.at_level(logging.INFO):
-        for _ in range(5):
-            assert _run(p._replica_for("g1")) is None
-    said = [r for r in caplog.records if "not available in sentinel mode" in r.getMessage()]
-    assert len(said) == 1, f"expected one line, got {len(said)}"
-
-
-def test_master_only_by_operator_choice_says_nothing():
-    """`read_from_replicas="never"` is a decision, not a limitation."""
-    import logging
-
-    p = _provider(_Conn(), mode="sentinel", read_from_replicas="never")
-    assert _run(p._replica_for("g1")) is None
-    assert getattr(p, "_replica_mode_warned", False) is False
+def test_master_only_by_operator_choice_routes_nowhere():
+    """`read_from_replicas="never"` is a decision an operator made, and it
+    holds in every mode."""
+    for mode in ("cluster", "sentinel", "standalone"):
+        p = _provider(_SentinelConn(), mode=mode, read_from_replicas="never")
+        assert _run(p._replica_for("g1")) is None
 
 
 # ── a node replaying its dataset cannot answer, for up to an hour ───────
@@ -831,3 +818,199 @@ def test_a_second_rotation_of_the_same_node_is_reported_again(caplog):
     said = [r for r in caplog.records
             if "10.0.1.1:6379 is loading" in r.getMessage()]
     assert len(said) == 2, f"expected one line per replay, got {len(said)}"
+
+
+# ── sentinel and standalone reach their replicas by their own clients ───
+#
+# The cluster path pins a read with ``target_nodes``, a RedisCluster API, so
+# sentinel and standalone had no replica-read path at all: every read went
+# to the master however many healthy replicas were attached.
+#
+# They do not need one from the slot map. The master's own INFO replication
+# names its replicas at CONNECTABLE addresses — the peer address of each
+# replication link, not an announced alias — so there is no second address
+# space to reconcile here, and each one gets a client of its own through
+# ``build_node_client`` (which applies the same auth and TLS as the primary).
+# Vouching is unchanged: the node is still asked about itself, so an
+# unreachable or loading or promoted replica simply is not a candidate and
+# the master serves.
+
+
+class _SentinelConn:
+    """The PRIMARY client in sentinel/standalone mode: one endpoint, no
+    ``target_nodes``, and an INFO that names the replicas."""
+
+    def __init__(self, replicas=((("127.0.0.1"), 6501), ("127.0.0.1", 6502)),
+                 master_info=None, loading=False):
+        self._replicas = list(replicas)
+        self.calls = []
+        self._loading = loading
+        self._master_info = master_info
+
+    async def execute_command(self, command, *args, target_nodes=None):
+        self.calls.append((command, args, target_nodes))
+        if command != "INFO":
+            return "OK"
+        if self._master_info is not None:
+            return self._master_info
+        info = {"role": "master", "connected_slaves": len(self._replicas),
+                "master_repl_offset": 500}
+        if self._loading:
+            info["loading"] = 1
+        for i, (ip, port) in enumerate(self._replicas):
+            info[f"slave{i}"] = {"ip": ip, "port": str(port),
+                                 "state": "online", "offset": 500, "lag": 0}
+        return info
+
+
+def _sentinel_provider(monkeypatch, *, conn=None, replica_answers=None):
+    """A sentinel-mode provider whose per-replica clients are stubs."""
+    conn = conn or _SentinelConn()
+    p = _provider(conn, mode="sentinel")
+
+    built = []
+
+    class _Stub:
+        def __init__(self, host, port):
+            self.host, self.port = host, port
+            self.queries = []
+
+        async def execute_command(self, command, *args, target_nodes=None):
+            if command == "INFO":
+                ans = (replica_answers or {}).get(f"{self.host}:{self.port}")
+                if ans is None:
+                    raise ConnectionError("unreachable")
+                return ans
+            return "OK"
+
+        async def aclose(self):
+            self.closed = True
+
+    async def _mk(host, port):
+        s = _Stub(host, port)
+        built.append(s)
+        return s
+
+    monkeypatch.setattr(p, "_build_pinned_replica", _mk)
+    p._built = built
+    return p
+
+
+def test_sentinel_routes_a_read_to_a_vouched_replica(monkeypatch):
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    node = _run(p._replica_for("g1"))
+    assert node is not None, "sentinel still has no replica read path"
+    assert (node.host, node.port) in (("127.0.0.1", 6501), ("127.0.0.1", 6502))
+
+
+def test_sentinel_replicas_are_discovered_from_the_master_not_a_slot_map(monkeypatch):
+    """There is no slot map in sentinel mode. The master names its replicas
+    at addresses that are connectable by construction."""
+    conn = _SentinelConn(replicas=[("127.0.0.1", 6501)])
+    p = _sentinel_provider(monkeypatch, conn=conn, replica_answers={
+        "127.0.0.1:6501": _replica_info(),
+    })
+    node = _run(p._replica_for("g1"))
+    assert (node.host, node.port) == ("127.0.0.1", 6501)
+
+
+def test_sentinel_a_promoted_replica_is_refused(monkeypatch):
+    """The whole point of sentinel is that one of these gets promoted."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(role="master"),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    for _ in range(4):
+        node = _run(p._replica_for("g1"))
+        assert (node.host, node.port) == ("127.0.0.1", 6502)
+
+
+def test_sentinel_an_unreachable_replica_falls_back_to_the_master(monkeypatch):
+    """The master's reported peer address may not be reachable from here.
+    That fails SAFE: not vouched, so the master serves."""
+    p = _sentinel_provider(monkeypatch, replica_answers={})   # none answer
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_sentinel_a_loading_replica_is_refused(monkeypatch):
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _loading_info(),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    node = _run(p._replica_for("g1"))
+    assert (node.host, node.port) == ("127.0.0.1", 6502)
+
+
+def test_sentinel_a_loading_master_hands_over_to_its_replicas(monkeypatch):
+    """A rotated sentinel master replays for up to an hour, answering INFO
+    the whole time. Its replicas take the reads."""
+    conn = _SentinelConn(loading=True)
+    p = _sentinel_provider(monkeypatch, conn=conn, replica_answers={
+        "127.0.0.1:6501": _replica_info(link="down"),
+        "127.0.0.1:6502": _replica_info(link="down"),
+    })
+    node = _run(p._replica_for("g1"))
+    assert node is not None, "reads stayed on a master that can only answer -LOADING"
+    assert p._master_is_silent("g1") is True
+
+
+def test_the_pinned_replica_clients_are_built_once_and_closed(monkeypatch):
+    """One client per replica, reused across reads, and released on close —
+    a pool per read would leak connections at the rate of the read path."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    for _ in range(6):
+        p._vouch_sample = {}
+        _run(p._replica_for("g1"))
+    assert len(p._built) == 2, f"built {len(p._built)} clients for 2 replicas"
+    assert len(p._pinned_replicas) == 2
+    _run(p._release_pinned_replicas())
+    assert p._pinned_replicas == {}
+
+
+def test_a_failover_rebuild_drops_the_clients_pinned_to_the_old_replicas(monkeypatch):
+    """A failover changes which nodes are replicas. Clients pinned to the
+    old ones must go with the old primary, not linger and be vouched again."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(), "127.0.0.1:6502": _replica_info(),
+    })
+    _run(p._replica_for("g1"))
+    assert len(p._pinned_replicas) == 2
+    old = list(p._pinned_replicas.values())
+
+    async def _noop_build(*a, **k):
+        raise RuntimeError("rebuild internals not under test here")
+
+    # Drive only the release half of the rebuild.
+    _run(p._release_pinned_replicas())
+    assert p._pinned_replicas == {}
+    assert all(getattr(t, "closed", False) for t in old), "old clients left open"
+
+
+def test_close_releases_every_pinned_replica_client(monkeypatch):
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(), "127.0.0.1:6502": _replica_info(),
+    })
+    _run(p._replica_for("g1"))
+    targets = list(p._pinned_replicas.values())
+    assert targets, "nothing to close"
+    _run(p._release_pinned_replicas())
+    assert all(t.closed for t in targets)
+
+
+def test_the_number_of_pinned_replica_clients_is_bounded(monkeypatch):
+    """The list comes from a node's own report; a broken deployment must not
+    be able to make this unbounded."""
+    many = [("127.0.0.1", 6500 + i) for i in range(40)]
+    p = _sentinel_provider(
+        monkeypatch,
+        conn=_SentinelConn(replicas=many),
+        replica_answers={f"127.0.0.1:{6500+i}": _replica_info() for i in range(40)},
+    )
+    _run(p._replica_for("g1"))
+    assert len(p._pinned_replicas) <= fp._MAX_PINNED_REPLICAS

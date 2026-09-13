@@ -358,6 +358,43 @@ _REPLICA_SAMPLE_S = 5.0
 #: that cannot answer this promptly is not one to hand a read to, and
 #: the master is always there to fall back on.
 _REPLICA_ASK_TIMEOUT_S = 1.0
+#: How many per-replica clients one provider may hold. The list comes from a
+#: node's own report, and a broken deployment must not be able to make this
+#: unbounded.
+_MAX_PINNED_REPLICAS = 8
+
+
+class _NodeTarget:
+    """One node addressed by its OWN client.
+
+    Cluster nodes are addressed with ``target_nodes`` on the shared cluster
+    client; sentinel and standalone have no such API, so their nodes carry a
+    client each. Both shapes answer ``host``/``port`` and can be asked for
+    an ``INFO``, which is all the vouching and the read routing need.
+    """
+
+    __slots__ = ("host", "port", "db", "pool")
+
+    def __init__(self, host: str, port: int, db: Any = None, pool: Any = None):
+        self.host, self.port, self.db, self.pool = host, port, db, pool
+
+    async def execute_command(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("target_nodes", None)                  # one endpoint, by construction
+        return await self.db.connection.execute_command(*args, **kwargs)
+
+    async def aclose(self) -> None:
+        """Release this node's client. Best-effort: a pool that will not
+        close must not stop the others being closed."""
+        for closeable in (self.db.connection if self.db is not None else None, self.pool):
+            if closeable is None:
+                continue
+            try:
+                await closeable.aclose()
+            except Exception:                             # noqa: BLE001 — best effort
+                pass
+
+    def __repr__(self) -> str:
+        return f"{self.host}:{self.port}"
 #: How long a replica that failed a read is skipped.
 _REPLICA_PENALTY_S = 30.0
 
@@ -2288,6 +2325,12 @@ class FalkorDBProvider(GraphDataProvider):
             # the factory) so failover never drops credentials or TLS.
             pool_kwargs = self._build_pool_kwargs(socket_timeout)
 
+            # A failover can change which nodes are replicas and what they
+            # are called, so the clients pinned to the old ones go with the
+            # old primary rather than lingering and being vouched again.
+            await self._release_pinned_replicas()
+            self._vouch_sample = {}
+
             old_pool, old_proj_pool = self._pool, self._proj_pool
             old_db, old_proj_db = self._db, self._proj_db
             self._db, self._pool = await build_graph_client(
@@ -2348,6 +2391,112 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
     # ── Reads from in-sync replicas ──────────────────────────────────────
+
+    async def _build_pinned_replica(self, host: str, port: int) -> Any:
+        """A client bound to ONE replica, for the modes with no
+        ``target_nodes``.
+
+        ``build_node_client`` applies the same auth and TLS as the primary,
+        so a replica read can never reach an authenticated deployment
+        unauthenticated. Returned as a ``_NodeTarget`` so the vouching and
+        the read address it the same way a cluster node is addressed.
+        """
+        from backend.app.providers.falkordb_connection import build_node_client
+
+        pool_kwargs = self._build_pool_kwargs(self._graph_socket_timeout())
+        db, pool = build_node_client(self._conn_cfg, host, port, pool_kwargs)
+        return _NodeTarget(host, port, db=db, pool=pool)
+
+    async def _pinned_replica_for(self, host: str, port: int) -> Optional[Any]:
+        """The cached client for one replica, built on first use.
+
+        One per replica, reused across reads: a pool per read would leak
+        connections at the rate of the read path. Bounded, because the list
+        comes from a node's own report and a broken deployment must not be
+        able to make this unbounded.
+        """
+        cache = getattr(self, "_pinned_replicas", None)
+        if cache is None:
+            cache = self._pinned_replicas = {}
+        key = f"{host}:{port}"
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        if len(cache) >= _MAX_PINNED_REPLICAS:
+            return None
+        try:
+            target = await self._build_pinned_replica(host, port)
+        except Exception as exc:                          # noqa: BLE001 — master serves
+            logger.debug(
+                "FalkorDB %s: could not build a client for replica %s: %s",
+                self._graph_name, key, exc,
+            )
+            return None
+        cache[key] = target
+        return target
+
+    async def _release_pinned_replicas(self) -> None:
+        """Drop every per-replica client. Called on close and whenever the
+        primary is rebuilt, since a failover may have changed who the
+        replicas are."""
+        cache = getattr(self, "_pinned_replicas", None) or {}
+        self._pinned_replicas = {}
+        for target in cache.values():
+            closer = getattr(target, "aclose", None)
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception:                             # noqa: BLE001 — best effort
+                pass
+
+    async def _replica_candidates(self, graph_key: str) -> Tuple[Any, List[Any]]:
+        """``(master, replicas)`` for ``graph_key`` — however this mode
+        names its nodes.
+
+        CLUSTER reads them out of the client's own slot map. SENTINEL and
+        STANDALONE have no slot map, and do not need one: the master's own
+        ``INFO replication`` names its replicas at CONNECTABLE addresses
+        (the peer address of each replication link, not an announced
+        alias), so there is no second address space to reconcile and each
+        one gets a client of its own. An address that is not reachable from
+        here simply fails to vouch, and the master serves.
+        """
+        conn = getattr(self._db, "connection", None)
+        if conn is None:
+            return None, []
+        if self._conn_cfg is not None and self._conn_cfg.mode == "cluster":
+            try:
+                slot = conn.keyslot(graph_key)
+                nodes = list(conn.nodes_manager.slots_cache.get(slot) or [])
+            except Exception:                             # noqa: BLE001 — master serves
+                return None, []
+            if not nodes:
+                return None, []
+            return nodes[0], nodes[1:]
+
+        primary = _NodeTarget(*self._primary_endpoint(), db=self._db)
+        answer = await self._ask_node_role(primary)
+        if not isinstance(answer, dict):
+            return primary, []
+        out: List[Any] = []
+        for entry in (answer.get("replicas") or [])[:_MAX_PINNED_REPLICAS]:
+            host, port = entry.get("ip"), entry.get("port")
+            if not host or port is None:
+                continue
+            target = await self._pinned_replica_for(str(host), int(port))
+            if target is not None:
+                out.append(target)
+        return primary, out
+
+    def _primary_endpoint(self) -> Tuple[str, int]:
+        """Where the primary client is pointed, for labelling only."""
+        try:
+            kwargs = self._db.connection.connection_pool.connection_kwargs
+            return str(kwargs.get("host") or "primary"), int(kwargs.get("port") or 0)
+        except Exception:                                 # noqa: BLE001 — a label
+            return "primary", 0
+
     #
     # A shard's master takes every write AND, until now, served every read.
     # On a cluster with two replicas per shard that left two thirds of the
@@ -2373,33 +2522,16 @@ class FalkorDBProvider(GraphDataProvider):
     def _replica_reads_enabled(self) -> bool:
         """Whether this provider may route a read off the master.
 
-        Cluster only, and not for want of asking: the read is pinned with
-        ``target_nodes``, which is a ``RedisCluster`` API. Sentinel reaches
-        its replicas through ``Sentinel.slave_for``, which picks one for you
-        and so cannot be vouched for per node, and a standalone client has
-        exactly one endpoint by definition.
-
-        Said ONCE per provider when an operator asked for replica reads and
-        the mode cannot give them: silence here reads as "the replicas are
-        busy" rather than "this deployment has no replica read path", and
-        those call for different actions.
+        Every mode may: cluster nodes are aimed at with ``target_nodes``,
+        and sentinel/standalone replicas carry a client each (see
+        ``_replica_candidates``). A deployment with no replicas simply has
+        no candidates. ``read_from_replicas="never"`` is the operator's
+        choice to stay on the master.
         """
         cfg = self._conn_cfg
         if cfg is None:
             return False
-        wanted = getattr(cfg, "read_from_replicas", "auto") != "never"
-        if cfg.mode != "cluster":
-            if wanted and not getattr(self, "_replica_mode_warned", False):
-                self._replica_mode_warned = True
-                logger.info(
-                    "FalkorDB %s: replica reads are not available in %s mode "
-                    "(the read is pinned with a cluster API); every read will "
-                    "go to the master. Failover and role changes are still "
-                    "handled — a demoted node re-resolves the master.",
-                    self._graph_name, cfg.mode,
-                )
-            return False
-        return wanted
+        return getattr(cfg, "read_from_replicas", "auto") != "never"
 
     def _note_local_write(self, graph_key: Optional[str] = None) -> None:
         """This process just wrote to a graph: its reads stay on the master
@@ -2434,20 +2566,11 @@ class FalkorDBProvider(GraphDataProvider):
             return None
         if _read_consistency.get() == "master":
             return None
-        # One cluster client resolves any key's slot, so the source client
-        # answers for the projection graph too.
-        conn = getattr(self._db, "connection", None)
-        if conn is None:
-            return None
-        try:
-            slot = conn.keyslot(graph_key)
-            nodes = list(conn.nodes_manager.slots_cache.get(slot) or [])
-        except Exception:                                 # noqa: BLE001 — never fail a read
-            return None
-        replicas = [n for n in nodes[1:] if self._replica_usable(n)]
+        master, candidates = await self._replica_candidates(graph_key)
+        replicas = [n for n in candidates if self._replica_usable(n)]
         if not replicas:
             return None
-        vouched = await self._vouched_replicas(graph_key, replicas, master=nodes[0])
+        vouched = await self._vouched_replicas(graph_key, replicas, master=master)
         # Read-your-own-writes pins a graph this process just wrote to its
         # master — unless that master is the node that has stopped
         # answering. Then the choice is a slightly stale answer from a
@@ -2486,7 +2609,10 @@ class FalkorDBProvider(GraphDataProvider):
         """
         from backend.app.services.graph_store import info_parse
 
-        conn = getattr(self._db, "connection", None)
+        # A node with a client of its own answers for itself (sentinel and
+        # standalone); a cluster node is addressed on the shared client.
+        sender = node if hasattr(node, "execute_command") else None
+        conn = sender or getattr(self._db, "connection", None)
         if conn is None:
             return None
         try:
@@ -2498,7 +2624,8 @@ class FalkorDBProvider(GraphDataProvider):
             # from one that will be busy for the next hour.
             raw = await asyncio.wait_for(
                 conn.execute_command(
-                    "INFO", "replication", "persistence", target_nodes=node,
+                    "INFO", "replication", "persistence",
+                    **({} if sender is not None else {"target_nodes": node}),
                 ),
                 timeout=_REPLICA_ASK_TIMEOUT_S,
             )
@@ -2670,6 +2797,13 @@ class FalkorDBProvider(GraphDataProvider):
         schema and the result parsing exactly as they are.
         """
         import copy
+
+        # A node with a client of its own IS the pin: select the same graph
+        # on it and every command goes there, no rebinding needed. This is
+        # how sentinel and standalone reach a replica, having no
+        # ``target_nodes`` to aim with.
+        if getattr(node, "db", None) is not None:
+            return node.db.select_graph(graph.name)
 
         pinned = copy.copy(graph)
         base = graph.client.execute_command
@@ -12891,6 +13025,15 @@ class FalkorDBProvider(GraphDataProvider):
         # reconcile without colliding with the cancelled one.
         self._reconcile_task = None
         self._reconcile_started = False
+
+        # Per-replica clients first: they are ours alone, and a pool left
+        # behind here leaks for the life of the process.
+        try:
+            await asyncio.wait_for(
+                self._release_pinned_replicas(), timeout=_close_timeout,
+            )
+        except Exception as exc:                          # noqa: BLE001 — best effort
+            logger.debug("FalkorDB replica clients close skipped: %s", exc)
 
         try:
             if hasattr(self, "_redis") and self._redis is not None:
