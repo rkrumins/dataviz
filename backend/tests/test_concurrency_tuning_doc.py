@@ -67,6 +67,59 @@ def test_the_ladder_table_matches_the_code(doc):
     )
 
 
+def test_the_store_rows_match_the_overlay_the_doc_names(doc):
+    """Rows 7 and 8 are the two ceilings the app cannot move — the graph store's
+    own query width and its queue — and the doc names the production-cluster
+    overlay for both. Nothing compared them to that overlay, so the manifest
+    could change with CI green while the table an on-call reads at 3am went
+    quietly wrong. Reads the SAME file `test_thread_count_assumption.py` reads.
+
+    THREAD_COUNT in particular is not a number on its own: it is paired with
+    the pod's memory limit by the sizing rule, so 'the doc says 6 and the shard
+    runs 8' is also 'the doc's user-count table is derived from the wrong
+    thread count and the shard is one load spike from an OOM kill'.
+    """
+    shards = (_DOC.parents[1]
+              / "deploy/k8s/overlays/production-cluster/resources"
+              / "falkordb-cluster-statefulsets.yaml").read_text()
+
+    for label, pattern, row in [
+        ("THREAD_COUNT", r"(?<!OMP_)\bTHREAD_COUNT (\d+)",
+         r"FalkorDB query threads \|[^|]*?`THREAD_COUNT` \*\*(\d+)\*\* per node"),
+        ("MAX_QUEUED_QUERIES", r"\bMAX_QUEUED_QUERIES (\d+)",
+         r"FalkorDB queue \|[^|]*?`MAX_QUEUED_QUERIES` \*\*(\d+)\*\* per node"),
+    ]:
+        shipped = {int(m) for m in re.findall(pattern, shards)}
+        assert shipped, f"no {label} found in the cluster StatefulSets"
+        assert len(shipped) == 1, f"the three shards disagree on {label}: {shipped}"
+        found = re.search(row, doc)
+        assert found, f"§1 has no cluster-overlay row stating {label}"
+        assert int(found.group(1)) == shipped.pop(), (
+            f"§1 says {label} is {found.group(1)}; the production-cluster shards "
+            f"run something else. Every capacity figure below that table is "
+            f"derived from these two numbers."
+        )
+
+
+def test_the_two_shipped_topologies_are_not_conflated(doc):
+    """The base single instance and the cluster shards ship DIFFERENT pairs
+    (8 threads on 14Gi, 6 on 56Gi), and applying the base pair to a shard needs
+    more memory than the shard has. The doc has to say which topology rows 7-8
+    describe, or a reader applies the only numbers on the page."""
+    assert re.search(r"production-cluster", doc), (
+        "§1 no longer names the topology rows 7-8 come from, so the only "
+        "THREAD_COUNT on the page reads as the one to apply everywhere"
+    )
+    base = (_DOC.parents[1]
+            / "deploy/k8s/base/infrastructure/falkordb/statefulset.yaml").read_text()
+    base_threads = {int(m) for m in re.findall(r"(?<!OMP_)\bTHREAD_COUNT (\d+)", base)}
+    assert base_threads, "no THREAD_COUNT in the base StatefulSet"
+    assert re.search(rf"`THREAD_COUNT {base_threads.pop()}`", doc), (
+        "§1 no longer states the base/Helm single-instance thread count beside "
+        "the cluster one, so the two topologies are indistinguishable on the page"
+    )
+
+
 def test_the_deployed_column_matches_the_configmap(doc):
     """The doc's whole point in §1 is that the DEPLOYED value differs from the
     code default. That only helps if the deployed column tracks the ConfigMap."""

@@ -31,9 +31,38 @@ A graph request passes through eight ceilings. Each is a separate queue.
 | 3 | `GRAPH_READ` DB session | `pool_size 10 + overflow 10` = 20 | **8 + 8 = 16** | per **process** |
 | 4 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` = **8** (+16 waiters, 2s wait) | same | per **process**, per (provider, graph) |
 | 5 | Provider query semaphore | `FALKORDB_QUERY_CONCURRENCY` = **20** | same (unset) | per **process** |
-| 6 | Outbound socket pool | `FALKORDB_GRAPH_POOL_SIZE` = **24** | same (unset) | per **process**, **per node** |
+| 6 | Outbound socket pool | read path `FALKORDB_GRAPH_POOL_SIZE` = **24**; every other client `FALKORDB_POOL_SIZE` = **`PROVIDER_MAX_CONCURRENCY` × 2 + 4** | **20** stated in `common-config` | per **process**, **per node** |
 | 7 | FalkorDB query threads | `THREAD_COUNT` **6** per node (cluster overlay) | same | per node |
 | 8 | FalkorDB queue | `MAX_QUEUED_QUERIES` **150** per node | same | per node |
+
+Rows 7 and 8 are the **production-cluster overlay's** shards
+(`overlays/production-cluster/resources/falkordb-cluster-statefulsets.yaml`). The k8s base
+and the Helm chart run a single instance at `THREAD_COUNT 8` / `MAX_QUEUED_QUERIES 64` on a
+14Gi pod — the pairs are not interchangeable, and carrying 8 threads onto a 56Gi shard needs
+56.4 GiB and OOM-kills it. A test parses both values out of that manifest and fails if this
+table drifts from it.
+
+**Row 6 is two pools, and they are not the same knob.** A graph request goes through the
+read path's pool (`ProviderManager` → `FalkorDBProvider`), sized by
+`FALKORDB_GRAPH_POOL_SIZE` = 24. Everything else that talks to FalkorDB — the versioning
+registry, the projector, the worker factories — builds its client through
+`build_graph_pool_kwargs`, sized by `FALKORDB_POOL_SIZE`. On top of that the aggregation
+processes set `FALKORDB_GRAPH_POOL_SIZE` for themselves at startup (control plane 4,
+worker `WORKER_CONCURRENCY × 4 + 8`). Changing one name does not move the others, which is
+why a pool problem so often looks like it was not fixed.
+
+`FALKORDB_POOL_SIZE` no longer defaults to a round number. In cluster mode redis-py applies
+`max_connections` to **each node's own pool**, and a provider spans two graphs (the source
+and its projection) that may hash to the same node, each admitting
+`PROVIDER_MAX_CONCURRENCY` = 8 concurrent calls — so one node pool can be asked for 16
+sockets at one instant, plus the non-query commands (`INFO replication` for the read
+router, `EXISTS`, `WAIT`). The old flat 10 could not serve that against a **perfectly
+healthy store**, and the 11th caller got redis-py's `MaxConnectionsError`, which subclasses
+redis `ConnectionError` — so the circuit breaker read local socket exhaustion as "the
+downstream is sick" and opened for every shard. The default is derived from those two
+numbers now, and the production-cluster ConfigMap states the resulting value rather than
+inheriting it, so a `PROVIDER_MAX_CONCURRENCY` change is a deliberate re-derivation rather
+than a silent one.
 
 Two things this table does not show, both of which matter:
 
@@ -106,6 +135,16 @@ shard — six of them on the shape shipped today.
 > Going from `replicas: 2` to `replicas: 3` on the cluster StatefulSets **doubles read
 > capacity per source**, which makes the 9-pod move a throughput change, not only a
 > resilience one.
+>
+> **It needs nine nodes first, and it will not tell you.** The overlay's anti-affinity is
+> `requiredDuringScheduling` with one FalkorDB pod per hostname and `requests ≈ limits`, so
+> a pod needs a node to itself; the README provisions `falkordb-pool` with six (2 per zone
+> × 3 zones). Setting `replicas: 3` against that pool leaves three pods `Pending` for as
+> long as you leave it — not degraded, not slower, just three shards that never get their
+> second replica. Grow the pool to 3 per zone, confirm the nodes are `Ready`, then change
+> `replicas:`. (`FALKORDB_DEPLOYMENT.md` worked example 2 is already budgeted for the
+> 9-pod shape at `2 replicas × 2gb hard`, so the 6-pod deployment shipped today has ~2 GiB
+> more headroom per shard than that table shows.)
 
 Against 6–12 threads the fleet can present 96 provider slots, and each HTTP request
 issues one Cypher per label bucket. Once `slots_in_use × buckets ≥ 150` the store starts
@@ -136,7 +175,20 @@ Double each row for the 9-pod shape. Cache hit rate moves it more than anything 
 this page — a warm open costs no Cypher at all.
 
 **Measure your service time before trusting any row of that table.** It is the one input
-that decides the answer and the one nobody can derive from the manifests.
+that decides the answer and the one nobody can derive from the manifests — so the
+deployment now measures it for you. The topology sweep reads `INFO commandstats` from every
+node, master and replica, and exports:
+
+```
+graph_store_command_usec_per_call{command="graph.ro_query", endpoint, role}
+graph_store_command_calls{command="graph.ro_query", endpoint, role}
+```
+
+Both are cumulative since each node last started, so the figure to put in the table is
+`rate(graph_store_command_calls[5m])` against the `usec_per_call` gauge beside it — on a
+node that has been up for weeks, the gauge alone is mostly history. `role` is what answers
+"are the replicas actually serving", which is the same question §8 of the release notes
+asks. Turn the scrape endpoint on (`METRICS_ENABLED` + `METRICS_TOKEN`) to read them.
 
 ---
 
@@ -268,14 +320,34 @@ container URNs each time — and the cache key is doing its job.
 ### Aggregation runs make the platform unusable
 
 1. Confirm read-pressure signalling is live: `/health/deps` → `resilience.read_pressure`.
-   `signals_sent` should be non-zero while users are being starved. If it is zero and
-   users *are* starved, the listener did not register — check startup logs for
-   "read-pressure signal not registered".
+   `signals_sent` should be non-zero while users are being starved. **Those counters are
+   per PROCESS** — each gunicorn worker keeps its own, so against 12 workers one
+   `/health/deps` hit lands on the worker that signalled about one time in twelve, and a
+   single zero proves nothing. Use
+   `aggregation_read_pressure_signals_total{outcome="signals_sent"}` off the scrape
+   endpoint for the fleet view, or hit `/health/deps` repeatedly. A rising
+   `signals_unkeyed` means the owning node could not be named, so the signal was dropped
+   rather than aimed at every shard; a flat zero on all of them with users starved means
+   the listener did not register — check startup logs for "read-pressure signal not
+   registered".
 2. `AGGREGATION_READ_PRESSURE_PACING_RATIO` (default 4.0) is the yield. The larger of it
    and the job's own pacing ratio wins, so a job set to "no pacing" still yields.
 3. If jobs still dominate, the contention is writes, not pacing: check the write lease
    and the per-endpoint write slots, and whether several sources are rebuilding onto the
-   same shard at once.
+   same shard at once. Those slots are a SHARE of the node's `THREAD_COUNT`
+   (`write + read <= THREAD_COUNT - 2`, set in `worker-config` and re-derived by the
+   production-cluster overlay), not an absolute number — a topology change moves them.
+
+### Sizing Postgres for the job table
+
+`aggregation_jobs` used to only grow: every run of every source, kept forever, with
+`run_stats` JSON on each. It is pruned now — `AGGREGATION_JOB_RETENTION_DAYS` (90) with a
+floor of `AGGREGATION_JOB_RETENTION_MIN_PER_SOURCE` (20) most-recent runs per source that
+survive whatever their age, swept every `AGGREGATION_JOB_RETENTION_INTERVAL_SECS` (3600)
+off the reconciler loop. So plan for **sources x max(20, runs in 90 days)**, not for the
+lifetime of the deployment. Keep the per-source floor at or above
+`AGGREGATION_ATTEMPTS_KEPT` (20) or a prune can take the run whose attempt log Job History
+is displaying. `AGGREGATION_JOB_RETENTION_DAYS=0` restores the old unbounded behaviour.
 
 ### A node restart takes an hour
 

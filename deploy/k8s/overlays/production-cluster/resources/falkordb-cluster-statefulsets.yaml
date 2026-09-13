@@ -80,7 +80,11 @@ spec:
                   fieldPath: metadata.name
             # Module args per doc §7.2: THREAD_COUNT 6 of 8 reserves cores
             # for Redis I/O + AOF rewrite + replication; QUERY_MEM_CAPACITY
-            # 2 GiB bounds a runaway Cypher query.
+            # 1 GiB (1073741824) bounds a runaway Cypher query. 2 GiB is the
+            # value the budget block below records as the BUG — at 40 GiB
+            # maxmemory it needed 66.6 GiB of a 56 GiB container — so the
+            # comment naming it here read as the intent rather than the
+            # thing that was fixed.
             - name: FALKORDB_ARGS
               value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
             # Sizing, by the deployment guide's own rule (§ "Sizing: the

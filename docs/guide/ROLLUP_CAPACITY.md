@@ -111,9 +111,11 @@ you save. One figure is set by the deployment and shown for information only:
 how often the apply re-measures the shard.
 
 > **Tip:** Nothing in the presets sets the edge ceiling, on purpose. A ceiling
-> on a job wins over the measurement, so a 25,000,000 left in Defaults from an
-> older version would keep every rebuild at 25 million edges however much
-> memory the shards have. If a refusal names the ceiling, clear it.
+> on a job wins over the measurement, so a number left in Defaults from an
+> older version would keep every rebuild at that many edges however much memory
+> the shards have — a 25,000,000 in particular, which used to be the shipped
+> default and is now neither a default nor reachable inside a day's run. If a
+> refusal names the ceiling, clear it.
 
 ---
 

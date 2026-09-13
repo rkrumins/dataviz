@@ -25,5 +25,22 @@ data:
   # pipeline reads what it has just written), so EXTRACT and RECONCILE
   # compete with the canvas for the master's THREAD_COUNT. Keep the read
   # limit above AGGREGATION_EXTRACT_CONCURRENCY.
+  #
+  # THE BUDGET IS A SHARE OF THREAD_COUNT, NOT A NUMBER ON ITS OWN:
+  #
+  #   FALKORDB_ENDPOINT_WRITE_SLOTS + FALKORDB_ENDPOINT_READ_SLOTS
+  #     <= THREAD_COUNT - 2   (the node's, from its FALKORDB_ARGS)
+  #
+  # The base StatefulSet runs THREAD_COUNT 8, so 2 + 4 = 6 leaves two
+  # threads. That margin is not spare capacity — it is what the rest of the
+  # pipeline needs on the SAME master: the 10s post-write settle window,
+  # index DDL, the write governor's INFO, and the probe lane's
+  # get_counts_fast. Spend it and they queue behind MAX_QUEUED_QUERIES with
+  # the canvas, which is the starvation the read slots exist to prevent
+  # ("leave threads for the readers rather than apologise to them").
+  #
+  # A topology with a different THREAD_COUNT must re-derive both numbers —
+  # the production-cluster overlay runs 6 and patches this ConfigMap. A test
+  # checks each shipped pair against its manifest's THREAD_COUNT.
   FALKORDB_ENDPOINT_WRITE_SLOTS: "2"
   FALKORDB_ENDPOINT_READ_SLOTS: "4"

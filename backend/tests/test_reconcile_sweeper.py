@@ -2018,3 +2018,150 @@ async def test_act_off_holds_first_builds_too(session_factory, monkeypatch):
 
     assert result.by_skip.get("fleet_held") == 1
     assert svc.triggers == [] and svc.signals == []
+
+
+# ── The scan window belongs to the sources that are due ─────────────────
+#
+# The SQL cutoff used to be clamped to a 300s floor while _is_due tested the
+# resolved per-source interval (3600s by default). Every source checked
+# between those two numbers matched the query, took a slot in the LIMIT, was
+# dropped by _is_due without its fairness clock moving, and took the same
+# slot again on the next tick. At steady state that is ~92% of the fleet, so
+# past ~218 sources the window held nothing the pass could act on — and a
+# source made due by the counts tripwire, whose last_reconcile_checked_at is
+# by definition RECENT, sorted to the tail and was the row the LIMIT cut.
+
+
+async def _set_interval(factory, ds_id, secs):
+    async with factory() as s:
+        state = await s.get(AggregationDataSourceStateORM, ds_id)
+        state.reconcile_check_interval_secs = secs
+        await s.commit()
+
+
+async def _quiet(factory, ds_id):
+    """Steady state for a source nothing has happened to: the probe has read
+    its counts and the sweep has already seen that digest. Without this the
+    tripwire's own NULL-digest fallback holds the source open, which is a
+    different (and correct) reason to be due."""
+    await _set_digests(factory, ds_id, stats_digest="same", seen_digest="same")
+
+
+@pytest.mark.asyncio
+async def test_a_source_inside_its_interval_is_not_even_read(session_factory):
+    """The bug, at its smallest. 600s is past the old 300s clamp and far
+    inside the 3600s interval the verdict is actually taken against."""
+    for i in range(3):
+        await _seed(session_factory, ds_id=f"ds_{i}", checked_at=_ago(seconds=600))
+        await _quiet(session_factory, f"ds_{i}")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        assert await sweeper._candidates(s, None, 3600) == []
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_not_spent_on_rows_the_pass_would_discard(
+    session_factory, monkeypatch,
+):
+    """The consequence at fleet scale, with the cap shrunk so three sources
+    stand in for three hundred. The tripwire source was checked seconds ago,
+    so oldest-checked-first puts it LAST; it has to be in the window anyway,
+    because the promise on that path is sub-minute detection."""
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    monkeypatch.setattr(rs, "_SCAN_CAP", 2)
+    for i in range(4):
+        await _seed(session_factory, ds_id=f"quiet_{i}", checked_at=_ago(seconds=600))
+        await _quiet(session_factory, f"quiet_{i}")
+    await _seed(session_factory, ds_id="moved", checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "moved", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["moved"]
+
+
+@pytest.mark.asyncio
+async def test_a_tripwire_row_outranks_an_older_but_merely_stale_one(
+    session_factory, monkeypatch,
+):
+    """Both are due; only one has fresh evidence. With the window full, the
+    order decides which gets looked at this tick and which waits."""
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    monkeypatch.setattr(rs, "_SCAN_CAP", 1)
+    await _seed(session_factory, ds_id="ancient", checked_at=_ago(seconds=90_000))
+    await _quiet(session_factory, "ancient")
+    await _seed(session_factory, ds_id="moved", checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "moved", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["moved"]
+
+
+@pytest.mark.asyncio
+async def test_each_source_is_due_on_its_own_cadence(session_factory):
+    """A per-source override is now a SQL predicate rather than a clamp, so a
+    fast source is read on its own schedule and a slow neighbour is not read
+    at all. Under the clamp the fast source's override widened the cutoff for
+    the whole fleet, and — being the most recently checked — sorted last and
+    was the row the LIMIT truncated, so its own override never took effect."""
+    await _seed(session_factory, ds_id="fast", checked_at=_ago(seconds=120))
+    await _set_interval(session_factory, "fast", 60)
+    await _quiet(session_factory, "fast")
+    await _seed(session_factory, ds_id="slow", checked_at=_ago(seconds=120))
+    await _quiet(session_factory, "slow")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["fast"]
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_source_cannot_narrow_the_fleets_window(session_factory):
+    """``probe_scheduler._fastest_override`` filters disabled sources out of
+    its fleet-wide MIN for this reason. There is no fleet-wide number here any
+    more, so the property holds by construction — which is what this pins."""
+    await _seed(session_factory, ds_id="stopped", checked_at=_ago(seconds=120),
+                reconcile_enabled=False)
+    await _set_interval(session_factory, "stopped", 30)
+    await _quiet(session_factory, "stopped")
+    await _seed(session_factory, ds_id="quiet", checked_at=_ago(seconds=120))
+    await _quiet(session_factory, "quiet")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert "quiet" not in [c.data_source_id for c in candidates]
+
+
+@pytest.mark.asyncio
+async def test_the_run_row_says_how_many_rows_the_window_cost(session_factory):
+    """``scanned=5`` while 195 rows were read and thrown away was invisible.
+    The two now track each other, and the gap is on the run row when it does
+    not."""
+    await _seed(session_factory, ds_id="due", checked_at=_ago(seconds=7200))
+    await _quiet(session_factory, "due")
+    await _seed(session_factory, ds_id="inside", checked_at=_ago(seconds=600))
+    await _quiet(session_factory, "inside")
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert result.rows_read == 1 == result.scanned
+    assert json.loads(result.detail_json())["rowsRead"] == 1
+

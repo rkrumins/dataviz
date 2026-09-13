@@ -16,6 +16,7 @@ Neither has a runtime check: nothing compares them to the pods. If they drift
 from the manifest, everything keeps working until the day it matters. So they
 are compared here instead.
 """
+import os
 import re
 from pathlib import Path
 
@@ -117,3 +118,96 @@ def test_server_timeout_max_matches_the_deployed_args(config, manifest, label):
         f"{label}: the backend clamps per-query timeouts to {declared}ms but the "
         f"server's TIMEOUT_MAX is different. Queries asking for more are REJECTED."
     )
+
+
+# ── aggregation's share of a node's query threads ────────────────────────
+#
+# FALKORDB_ENDPOINT_WRITE_SLOTS and FALKORDB_ENDPOINT_READ_SLOTS are the
+# CROSS-POD budget for one FalkorDB node, and their defaults live in
+# admission.py where nothing can see the THREAD_COUNT they are a share of.
+# The shipped pair used to sum to exactly the cluster overlay's THREAD_COUNT
+# 6, so aggregation's own caps could take a master's entire query width —
+# and the whole pipeline reads under read_from_master_only, so all six landed
+# on the master. Everything else that must reach a master then queued behind
+# MAX_QUEUED_QUERIES: the post-write settle window, index DDL, the governor's
+# INFO, the probe lane's counts read, and any interactive read inside a
+# settle window. The read slots exist to "leave threads for the readers
+# rather than apologise to them"; at 6 of 6 they did neither.
+
+_SLOT_HEADROOM = 2
+"""Threads a node must keep outside aggregation's budget. Not spare capacity:
+it is what the settle window, index DDL, the governor and the probe lane need
+on the SAME master while a rebuild runs."""
+
+
+@pytest.mark.parametrize("config,manifest,label", [
+    ("deploy/k8s/base/configmaps/worker-config.yaml",
+     "deploy/k8s/base/infrastructure/falkordb/statefulset.yaml", "base"),
+    ("deploy/k8s/overlays/production-cluster/patches/worker-slots.yaml",
+     "deploy/k8s/overlays/production-cluster/resources/falkordb-cluster-statefulsets.yaml",
+     "production-cluster"),
+])
+def test_the_slot_budget_leaves_the_node_threads_to_answer_with(config, manifest, label):
+    write = _cm_value(_read(config), "FALKORDB_ENDPOINT_WRITE_SLOTS")
+    read = _cm_value(_read(config), "FALKORDB_ENDPOINT_READ_SLOTS")
+    assert write and read, (
+        f"{label}: the slot budget is unset, so the pods take admission.py's "
+        f"defaults — which are sized for a different topology's THREAD_COUNT."
+    )
+    threads = {int(m) for m in re.findall(r"(?<!OMP_)\bTHREAD_COUNT (\d+)", _read(manifest))}
+    assert len(threads) == 1, f"{label}: no single THREAD_COUNT in the manifest: {threads}"
+    thread_count = threads.pop()
+    assert int(write) + int(read) <= thread_count - _SLOT_HEADROOM, (
+        f"{label}: aggregation may hold {write} + {read} = {int(write) + int(read)} of "
+        f"this node's {thread_count} query threads, leaving "
+        f"{thread_count - int(write) - int(read)} for everything else that has to "
+        f"reach the master. Re-derive both numbers against THREAD_COUNT, or raise "
+        f"THREAD_COUNT with the pod memory the sizing rule then needs."
+    )
+    assert int(read) > int(write), (
+        f"{label}: scans are the bulk of a rebuild's work and each is short, so the "
+        f"read limit is deliberately the larger one — too small a cap starves "
+        f"rebuilds fleet-wide to protect threads that were never contended."
+    )
+
+
+# ── the per-node socket pool the ConfigMap states rather than inherits ───
+
+
+def test_the_overlay_states_the_pool_size_the_code_derives():
+    """``FALKORDB_POOL_SIZE`` is per NODE in cluster mode — redis-py gives each
+    node its own pool — and its default is DERIVED
+    (``PROVIDER_MAX_CONCURRENCY`` x 2 graphs + housekeeping), not a round
+    number. The overlay states the result so the value is visible where an
+    operator reads it, which means it can also go stale: if the derivation
+    moves and the ConfigMap does not, the explicit value wins silently.
+
+    Getting it too low is not a slow deployment, it is an outage-shaped one:
+    the caller past the cap gets redis-py's ``MaxConnectionsError``, which
+    subclasses redis ``ConnectionError``, so the circuit breaker reads local
+    socket exhaustion as a sick downstream and opens for every shard.
+    """
+    from backend.app.providers.falkordb_connection import default_graph_pool_size
+
+    stated = _cm_value(
+        _read("deploy/k8s/overlays/production-cluster/patches/cluster-config.yaml"),
+        "FALKORDB_POOL_SIZE",
+    )
+    assert stated, (
+        "the production-cluster overlay no longer states FALKORDB_POOL_SIZE, so "
+        "every process inherits a derived default that nothing in deploy/ records"
+    )
+    env = dict(os.environ)
+    for name in ("FALKORDB_POOL_SIZE", "PROVIDER_MAX_CONCURRENCY"):
+        os.environ.pop(name, None)
+    try:
+        derived = default_graph_pool_size()
+    finally:
+        os.environ.clear()
+        os.environ.update(env)
+    assert int(stated) == derived, (
+        f"the overlay pins FALKORDB_POOL_SIZE={stated} but the code now derives "
+        f"{derived}. An explicit ConfigMap value beats a new default silently — "
+        f"re-derive the ConfigMap, or say in its comment why it differs."
+    )
+

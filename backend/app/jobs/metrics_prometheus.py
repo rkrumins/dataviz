@@ -28,10 +28,19 @@ there for the one somebody adds later without thinking.
 
 **Per process, like every Prometheus target.** Each gunicorn worker and each
 aggregation worker counts its own. Scrape them all; sum in the query.
+
+**A scrape is never empty.** Every emit site in this codebase is in the
+worker or the control plane, so a web pod answered 200 with zero series —
+indistinguishable from a healthy pod that happened to be idle, and from a
+pod whose startup wiring never ran. ``install()`` therefore seeds
+``metrics_process_up``: one series, one label, present from the first
+scrape, so "no series" means the target is wrong rather than the fleet
+being quiet.
 """
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Dict, Mapping, Tuple
 
@@ -160,15 +169,31 @@ class PrometheusBackend:
 _INSTALLED: "PrometheusBackend | None" = None
 
 
+def _role() -> str:
+    """Which kind of process this is, for the identity series. ``SYNODIC_ROLE``
+    is what the ConfigMaps already set per workload (``worker``, and unset on
+    the web tier); bounded by the deployment, which is what keeps the label
+    safe."""
+    return (os.getenv("SYNODIC_ROLE") or "web").strip().lower()[:32] or "web"
+
+
 def install() -> PrometheusBackend:
     """Register this backend with the façade. Idempotent — a process that
-    calls it twice (web tier lifespan plus a test) keeps one registry."""
+    calls it twice (web tier lifespan plus a test) keeps one registry.
+
+    Seeds one series. A registry with nothing in it renders as an empty body,
+    and an empty body is what a misconfigured scrape target, a process that
+    never ran its startup wiring, and a perfectly healthy idle pod all look
+    like. One gauge tells those apart, and its role label says which half of
+    the fleet answered.
+    """
     global _INSTALLED
     if _INSTALLED is None:
         from . import metrics
 
         _INSTALLED = PrometheusBackend()
         metrics.set_backend(_INSTALLED)
+        _INSTALLED.gauge_set("metrics_process_up", {"role": _role()}, 1.0)
         logger.info("metrics: in-process Prometheus backend installed")
     return _INSTALLED
 

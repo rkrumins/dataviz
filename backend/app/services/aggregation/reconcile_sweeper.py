@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 
 from .holds import HeldError, read_scope_holds, resolve_scope_hold, skip_for
 from .reconcile import Observation, Verdict, evaluate
@@ -77,10 +77,6 @@ _FIRST_BUILD_CAP = 1
 # Per-pass cap on stats-poll nudges for sources whose counts are too stale
 # to trust. Best-effort; the next sweep sees fresh numbers.
 _NUDGE_CAP = 25
-
-# Floor on the SQL-side due-ness cutoff. The query is deliberately permissive
-# (it cannot know each source's override) and Python filters exactly.
-_MIN_CHECK_INTERVAL_SECS = 300
 
 _RUN_RETENTION_DAYS = 30
 
@@ -171,6 +167,19 @@ def _is_terminal_skip(verdict: Verdict) -> bool:
     return verdict.skip in _TERMINAL_SKIPS and verdict.reason is None
 
 
+def _tripwire_moved(stats, state):
+    """SQL for "the counts moved since this source's last verdict".
+
+    Used twice by the candidate query — once to SELECT the row and once to
+    sort it to the head of the window — so it is written once. The NULL guard
+    is load-bearing; see the note at the call site.
+    """
+    return (
+        stats.counts_digest.isnot(None)
+        & stats.counts_digest.is_distinct_from(state.last_seen_counts_digest)
+    )
+
+
 def _unresolved_finding_open(state) -> bool:
     """True when drift is still open and we have not yet acted on it.
 
@@ -196,6 +205,12 @@ class SweepResult:
     run_id: str
     mode: str = "auto"
     scanned: int = 0
+    #: Rows the candidate query READ, against ``scanned`` (the rows it acted
+    #: on). The two used to differ by an order of magnitude with nothing
+    #: saying so: a pass reported ``scanned=5`` having read and discarded 195
+    #: rows, and the discarded ones kept their place in the window every tick.
+    #: They now track each other; a gap that reopens is the regression.
+    rows_read: int = 0
     skipped: int = 0
     seeded: int = 0
     findings: int = 0
@@ -213,6 +228,7 @@ class SweepResult:
     def detail_json(self) -> str:
         findings = self.finding_rows[:_SCAN_CAP]
         return json.dumps({
+            "rowsRead": self.rows_read,
             "byReason": self.by_reason,
             "bySkip": self.by_skip,
             "findings": findings,
@@ -255,11 +271,11 @@ class ReconciliationSweeper:
                 result = await self.sweep()
                 if result and (result.findings or result.actions):
                     logger.info(
-                        "reconcile sweep %s: scanned=%d findings=%d actions=%d "
-                        "seeded=%d skipped=%d errors=%d",
-                        result.run_id, result.scanned, result.findings,
-                        result.actions, result.seeded, result.skipped,
-                        result.errors,
+                        "reconcile sweep %s: read=%d scanned=%d findings=%d "
+                        "actions=%d seeded=%d skipped=%d errors=%d",
+                        result.run_id, result.rows_read, result.scanned,
+                        result.findings, result.actions, result.seeded,
+                        result.skipped, result.errors,
                     )
             except asyncio.CancelledError:
                 raise
@@ -421,6 +437,7 @@ class ReconciliationSweeper:
                 session, data_source_ids, global_interval,
                 full_scan=full_scan,
             )
+            result.rows_read = len(states)
             if not states:
                 return actions, nudges
 
@@ -474,11 +491,14 @@ class ReconciliationSweeper:
                     scope_holds=scope_holds,
                     drift_auto_rebuild=drift_auto,
                 )
-                # Per-source due-ness: the SQL cutoff is permissive because it
-                # cannot know each source's override, so the exact check is
-                # here. A not-yet-due source is left untouched (no checked_at
-                # write) and reappears on a later tick. Manual / preview and
-                # explicit ids skip this — the operator asked for a verdict.
+                # Per-source due-ness. The SQL now compares each row against
+                # its OWN interval, so this is a backstop rather than the
+                # filter it used to be — it still decides the digest and
+                # open-finding cases, which need the batched context the query
+                # does not have. A not-yet-due source is left untouched (no
+                # checked_at write) and reappears on a later tick. Manual /
+                # preview and explicit ids skip this — the operator asked for
+                # a verdict.
                 interval = resolve_reconcile_interval(
                     state.reconcile_check_interval_secs, global_interval,
                 )
@@ -828,8 +848,8 @@ class ReconciliationSweeper:
     async def _candidates(
         self, session, data_source_ids, global_interval, *, full_scan=False,
     ):
-        """Bounded, oldest-checked-first. Explicit ids and operator
-        manual/preview passes bypass due-ness; auto ticks do not.
+        """Bounded, tripwire-first then oldest-checked-first. Explicit ids
+        and operator manual/preview passes bypass due-ness; auto ticks do not.
 
         Auto also loads sources whose COUNTS have moved since the last
         verdict — a probe or counts poll that finds real change must not wait
@@ -847,23 +867,7 @@ class ReconciliationSweeper:
                 S.last_reconcile_checked_at.asc().nullsfirst()
             ).limit(_SCAN_CAP)
         else:
-            interval = min(
-                global_interval or _MIN_CHECK_INTERVAL_SECS,
-                _MIN_CHECK_INTERVAL_SECS,
-            )
-            # A per-source override faster than the clamp above was never
-            # loaded by the timestamp clause — the exact bug the probe
-            # lane's _fastest_override exists for. One scalar MIN keeps the
-            # cutoff a SUPERSET of every override; _is_due stays the exact
-            # per-source test.
-            fastest = (await session.execute(
-                select(func.min(S.reconcile_check_interval_secs))
-            )).scalar()
-            if fastest is not None:
-                interval = min(interval, int(fastest))
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(seconds=interval)
-            ).isoformat()
+            cutoff_col = await self._due_cutoff(session, global_interval)
             stmt = (
                 select(S)
                 .outerjoin(
@@ -872,7 +876,7 @@ class ReconciliationSweeper:
                 )
                 .where(
                     (S.last_reconcile_checked_at.is_(None))
-                    | (S.last_reconcile_checked_at < cutoff)
+                    | (S.last_reconcile_checked_at < cutoff_col)
                     | (
                         # The tripwire: the counts moved since we last looked.
                         #
@@ -887,10 +891,7 @@ class ReconciliationSweeper:
                         # treats a never-written NULL as different from any
                         # stored value, which would pin the source permanently
                         # due instead of never due.
-                        DataSourceStatsORM.counts_digest.isnot(None)
-                        & DataSourceStatsORM.counts_digest.is_distinct_from(
-                            S.last_seen_counts_digest
-                        )
+                        _tripwire_moved(DataSourceStatsORM, S)
                     )
                     | (
                         # No digest yet — a source the probe has not reached,
@@ -919,10 +920,69 @@ class ReconciliationSweeper:
                         )
                     )
                 )
-                .order_by(S.last_reconcile_checked_at.asc().nullsfirst())
+                # Tripwire rows FIRST, then oldest-checked-first. A source the
+                # counts moved under was checked seconds ago, so pure
+                # oldest-first sorts the one piece of fresh evidence in the
+                # window to its tail — behind every merely-stale row — and the
+                # LIMIT truncates exactly it. The promise on that path is
+                # sub-minute detection, not "after the backlog drains".
+                .order_by(
+                    _tripwire_moved(DataSourceStatsORM, S).desc(),
+                    S.last_reconcile_checked_at.asc().nullsfirst(),
+                )
                 .limit(_SCAN_CAP)
             )
         return list((await session.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def _due_cutoff(session, global_interval):
+        """The timestamp a source must have been checked BEFORE to be due —
+        as a per-ROW expression, not one fleet-wide clamp.
+
+        The clamp this replaces compared every row against a 300s floor while
+        :meth:`_is_due` compared it against the resolved per-source interval
+        (3600s by default). At steady state that
+        matched ~92% of the fleet: those rows filled the ``_SCAN_CAP`` window,
+        were dropped by ``_is_due`` without advancing their fairness clock, and
+        filled it again next tick. Past ~218 sources the window was consumed
+        entirely by rows the pass discards, and a source made due by the counts
+        tripwire — checked seconds ago, so sorted last — waited tens of minutes
+        to be looked at.
+
+        One scalar read of the distinct intervals in play turns that into an
+        exact predicate: each row is compared against ITS OWN cadence, so the
+        query returns what ``_is_due`` accepts and a stopped source's override
+        cannot narrow anybody else's window (the bug
+        ``probe_scheduler._fastest_override`` guards against by filtering —
+        here there is no fleet-wide number left to narrow).
+        """
+        from .models import AggregationDataSourceStateORM as S
+        from .service import resolve_reconcile_interval
+
+        now = datetime.now(timezone.utc)
+
+        def _at(secs: int) -> str:
+            return (now - timedelta(seconds=max(0, secs))).isoformat()
+
+        inherited = resolve_reconcile_interval(None, global_interval)
+        overrides = sorted({
+            int(v) for (v,) in (await session.execute(
+                select(S.reconcile_check_interval_secs)
+                .where(S.reconcile_check_interval_secs.isnot(None))
+                .distinct()
+            )).all()
+        })
+        if not overrides:
+            return _at(inherited)
+        # ``else_`` is unreachable — the CASE covers every value the read
+        # above just returned, in the same transaction — and is stated
+        # because a CASE without one yields NULL, which compares to nothing
+        # and would drop a row silently rather than loudly.
+        return case(
+            {secs: _at(secs) for secs in overrides},
+            value=func.coalesce(S.reconcile_check_interval_secs, inherited),
+            else_=_at(inherited),
+        )
 
     async def _batch_context(
         self, session, ds_ids, versioned, health=None,

@@ -440,13 +440,34 @@ New knobs, all defaulting on:
 Ordered. Steps 1–2 change infrastructure and must land before the values that depend on
 them.
 
-1. **Re-apply the FalkorDB manifests.** `THREAD_COUNT 8` requires `cpu 8` / `memory 14Gi`
-   on the same pod — applying the thread count alone trades a caught query error for an
-   OOM kill under exactly the load it was meant to serve. `EFFECTS_THRESHOLD 0` is
-   required before replica reads are correct.
-2. **Check `replicas:` on the cluster StatefulSets.** `replicas: 3` (1 master + 2) doubles
-   per-source read capacity against `replicas: 2`. This is a throughput change, not only a
-   resilience one.
+1. **Re-apply the FalkorDB manifests — the pair for YOUR topology.** `THREAD_COUNT` and
+   the pod's `cpu` / `memory` are one decision, not two: applying the thread count alone
+   trades a caught query error for an OOM kill under exactly the load it was meant to
+   serve. The shipped pairs are not interchangeable.
+
+   | Topology | Manifest | Apply |
+   |---|---|---|
+   | Single instance (k8s base, Helm) | `base/infrastructure/falkordb/statefulset.yaml` | `THREAD_COUNT 8` · cpu 8 · memory **14Gi** · `maxmemory 6gb` |
+   | 3-shard cluster (production-cluster) | `overlays/production-cluster/resources/falkordb-cluster-statefulsets.yaml` | `THREAD_COUNT 6` · cpu 7 · memory **56Gi** · `maxmemory 32gb` |
+
+   **Do not carry `THREAD_COUNT 8` onto a cluster shard.** At 56Gi and
+   `QUERY_MEM_CAPACITY 1gb` the sizing rule then needs 56.4 GiB against a 56 GiB limit,
+   and the pod is OOM-killed under load — see [`CONCURRENCY_TUNING.md`](CONCURRENCY_TUNING.md)
+   §1 row 7 and `FALKORDB_DEPLOYMENT.md` § "Sizing: the ceilings share ONE budget".
+
+   `EFFECTS_THRESHOLD 0` is required on both before replica reads are correct.
+2. **Check `replicas:` on the cluster StatefulSets — after checking the node pool.**
+   `replicas: 3` (1 master + 2) doubles per-source read capacity against `replicas: 2`,
+   so it is a throughput change and not only a resilience one. It **cannot schedule on the
+   pool this overlay documents.** The anti-affinity is `required` with one FalkorDB pod per
+   hostname and `requests ≈ limits`, so nine pods need nine nodes; the overlay's README
+   provisions six (2 per zone × 3 zones). Applied as-is, three pods sit `Pending`
+   indefinitely and the shards they belong to stay at one replica.
+
+   Grow the pool to nine first (3 per zone), then change `replicas:`. Note that
+   `FALKORDB_DEPLOYMENT.md` worked example 2 is budgeted for the 9-pod shape — `2 replicas
+   × 2gb hard` — so a 6-pod deployment has ~2 GiB more headroom per shard than that table
+   shows, not less.
 3. **Remove stale overrides from `viz-config`.** An explicit ConfigMap value beats a new
    default silently, with no log line. The ones that most often survive an upgrade and
    undo the fix:
@@ -454,6 +475,22 @@ them.
    `PROVIDER_SEMAPHORE_BUDGET_S=0.25`, `PROVIDER_PREFLIGHT_DEADLINE_S=1.5`,
    `GRAPH_CACHE_*_TTL_S=900`, `FALKORDB_REPLICA_READ_SETTLE_S=30`.
    `kubectl get configmap viz-config -o yaml` — read it, do not recall it.
+
+   **Two places this list does not reach**, both of which fail quietly:
+
+   * **`REDIS_ARGS` on the FalkorDB StatefulSets.** These are pod launch args, not
+     ConfigMap values, so nothing about them rolls when you apply a ConfigMap — they take
+     effect only when the pods do. `client-output-buffer-limit` is the one that matters
+     most: `AGGREGATION_REPLICA_LAG_HOLD_BYTES` is *derived* from the replica class's hard
+     limit, so until the shards restart the write governor holds against the old default
+     while every figure in the app says otherwise. `repl-backlog-size`, `repl-timeout` and
+     the AOF/RDB settings are in the same position.
+   * **`FALKORDB_SERVER_TIMEOUT_MAX_MS` in `common-config`.** This is the backend's
+     fallback clamp until it has read a node's own `TIMEOUT_MAX`, and the two must be
+     equal. A stale `180000` (the base value) against a production-cluster shard running
+     `TIMEOUT_MAX 120000` does not make queries slow — the server **rejects** any query
+     asking for more than its ceiling, so the failure is total rather than gradual. The
+     production-cluster overlay patches it to `120000`; a hand-edited ConfigMap may not.
 4. **Confirm the pool spelling.** `DB_GRAPH_READ_POOL_SIZE` and
    `DB_GRAPH_READ_POOL_MAX_OVERFLOW` size the admission gate
    (`hard = pool − 4`). A misspelling leaves the pool at the code default and the gate
@@ -483,13 +520,18 @@ them.
    costs memory and write amplification, not correctness — but until it runs, the index
    half of this release has not landed.
 
-8. **Turn the metrics on** (`METRICS_ENABLED=true`, and `METRICS_TOKEN` if your
-   scraper can present one). Every protection in this release was visible only
-   per run until now; scrape the web tier and control plane at
-   `/api/v1/metrics` and each aggregation worker on `METRICS_PORT` (9100).
-   Alert on `aggregation_slot_fail_open_total{reason="deadline"}` — see
+8. **Turn the metrics on** — `METRICS_ENABLED=true` **and** `METRICS_TOKEN=<secret>`,
+   which your scraper presents as a bearer token. Both are required: enabling
+   without a token answers 404, exactly as if it were off. That combination
+   used to serve, and the labels carry every graph store node's `host:port`,
+   the governor's hold counts and fleet load — with each aggregation worker
+   publishing its own copy on `0.0.0.0:METRICS_PORT` and no ingress in front
+   of it. Every protection in this release was visible only per run until now;
+   scrape the web tier and control plane at `/api/v1/metrics` and each
+   aggregation worker on `METRICS_PORT` (9100). Alert on
+   `aggregation_slot_fail_open_total{reason="deadline"}` — see
    [`CONCURRENCY_TUNING.md`](CONCURRENCY_TUNING.md) §"What to watch". Nothing
-   is exposed until you set the flag.
+   is exposed until you set both.
 
 Nothing in steps 3–8 needs a maintenance window. Step 1 is a StatefulSet roll; the app
 treats a rotating node as a pause ([§4.3](#43-a-node-rotation-is-a-pause-not-an-outage)).
@@ -506,13 +548,14 @@ Each row is a thing to look at and the shape that means it is working.
 | Admin → Graph store → cache health | Hit ratio climbing over the first hour and then staying high. A view opened twice should show the second open as a hit. |
 | `GET /admin/graph-store/providers/{id}` → `reads` | `replicaReads` climbing against `masterReads`. All-master means a gate is closed — check the settle window and `FALKORDB_READ_FROM_REPLICAS`. |
 | `/health/deps` → `resilience.breaker` | `deadline_timeouts_not_counted` rising while `breaker_opens` stays flat. That is slow, not broken — the healthy shape under load. |
-| `/health/deps` → `resilience.read_pressure` | `signals_sent` non-zero while a rebuild runs and users are reading. Zero here with starved users means the listener did not register. |
-| `GRAPH.INFO` / `INFO commandstats` per node | `usec_per_call` for `GRAPH.RO_QUERY` on the replicas, not only on the master. |
+| `/health/deps` → `resilience.read_pressure` | `signals_sent` non-zero while a rebuild runs and users are reading. **Per PROCESS** — the counters are module globals and a viz-service pod runs 4 gunicorn workers, so against 12 workers a single `/health/deps` hit lands on the one that signalled roughly one time in twelve. Zero from one hit proves nothing; scrape `aggregation_read_pressure_signals_total{outcome="signals_sent"}` for the fleet view, or hit it repeatedly. A nonzero `signals_unkeyed` means the owning node could not be named and the signal was dropped rather than aimed at every shard. |
+| `graph_store_command_usec_per_call{command,endpoint,role}` | `usec_per_call` for `graph.ro_query` on the replicas, not only on the master. The topology sweep now reads `INFO commandstats` from every node and exports it, so this is a scrape rather than a shell on each pod — which is what makes the capacity table in `CONCURRENCY_TUNING.md` §1 measurable at all. Cumulative since each node started: read it beside `rate(graph_store_command_calls)`. |
 | A cold view open, timed | Seconds on the first open of a source; sub-second on every open after, for up to 24h with no write. |
 
 **The one number to measure before trusting any capacity claim** is mean Cypher service
-time. It decides how many users the deployment supports and nobody can derive it from the
-manifests — see `CONCURRENCY_TUNING.md` §5 Step 0.
+time. It decides how many users the deployment supports and cannot be derived from the
+manifests — the row above is where the deployment now reports its own; see
+`CONCURRENCY_TUNING.md` §5 Step 0.
 
 ---
 
@@ -538,10 +581,14 @@ rollback of the image.
 
 ## 10. Known limitations
 
-* **Mean Cypher service time is still unmeasured on this deployment.** Every user-count
-  figure in `CONCURRENCY_TUNING.md` is parameterised on it, and the load-test harness
-  cannot produce it: it fires each request once and counts a non-200 as a failure, so it
-  under-measures by roughly 3× and cannot reproduce retry amplification at all.
+* **Mean Cypher service time is measured but not yet historical.** Every user-count
+  figure in `CONCURRENCY_TUNING.md` is parameterised on it. The topology sweep now reads
+  `INFO commandstats` from every node and exports `graph_store_command_usec_per_call`
+  ([§8](#8-verifying-it-worked)) — but that is a cumulative mean since each node started,
+  so a node up for weeks reports its history rather than today. Read it beside
+  `rate(graph_store_command_calls)`, and take a figure for a period from the load-test
+  harness (`loadtest/`, whose retry model now mirrors the frontend's, so a saturated run
+  no longer under-measures the ceiling).
 * **The HPA scales on CPU**, which saturation of the graph store does not move. It also
   crosses `MAX_QUEUED_QUERIES` at the fifth pod. Scaling out the web tier past that point
   adds queue depth against the same query threads.
@@ -550,10 +597,15 @@ rollback of the image.
   against ~74 MB/s for a base bulk load. Adding
   `--auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb` to the manifests is
   the single highest-value change for restart time and is **not** in this release.
-* **`container_memory_needed()` omits the replication terms** (~5 GiB), so it will approve
-  a `THREAD_COUNT` on a 56Gi shard that the manifest budget refuses. Two tests pin the
-  discrepancy; the formula has not been changed, because changing it would move a number
-  operators have already sized against.
+* **The container guard silently under-books when a node will not say.**
+  `container_memory_needed()` counts the replication terms — `validate_limits` passes the
+  backlog, the replica count and the output-buffer hard limit from the node's own `INFO`
+  and `CONFIG`, and `test_thread_count_assumption.py::test_the_container_guard_counts_replication`
+  pins that it does. But all three default to **zero**, so a node whose `INFO` or `CONFIG`
+  read fails or is blocked (a managed instance, a permissions change, a timeout mid-sweep)
+  is planned by the old single-instance rule — ~5 GiB short on a cluster shard — and the
+  refusal it shows names no reason for the gap. Check the node's replication figures on
+  Admin → Graph store before trusting a raise that only just fits.
 * **Promotion extends an answer's life to 24 hours when nothing bumps the generation.**
   For a graph the platform owns this is exact: every write bumps it. For a graph written
   to from outside, the generation moves when the change is *noticed* — a
