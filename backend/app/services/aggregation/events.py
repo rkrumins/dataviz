@@ -147,18 +147,37 @@ class AggregationEventPublisher:
         job_id: str,
         data_source_id: str,
         error_message: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> None:
+        """``workspace_id`` is what makes the cache invalidation possible.
+
+        Without it the listener's invalidation is a guaranteed no-op — and a
+        failed run is exactly when one is needed. RECONCILE deletes stale
+        cells and APPLY writes new ones inside the per-range loop, both
+        checkpointing as they go, so a run that dies part way leaves the
+        :AGGREGATED layer partly old and partly new. Leaving the generation
+        where it is caches that half-rebuilt cube for a full TTL and lets the
+        mirror re-promote it for up to twice that."""
         await self.publish("job.failed", {
             "job_id": job_id,
             "data_source_id": data_source_id,
+            "workspace_id": workspace_id,
             "status": "failed",
             "error_message": error_message,
         })
 
-    async def job_cancelled(self, job_id: str, data_source_id: str) -> None:
+    async def job_cancelled(
+        self,
+        job_id: str,
+        data_source_id: str,
+        workspace_id: Optional[str] = None,
+    ) -> None:
+        """Same as :meth:`job_failed`: a cancel lands mid-write just as a
+        failure does, so the partly-rebuilt layer has to be invalidated."""
         await self.publish("job.cancelled", {
             "job_id": job_id,
             "data_source_id": data_source_id,
+            "workspace_id": workspace_id,
             "status": "cancelled",
         })
 

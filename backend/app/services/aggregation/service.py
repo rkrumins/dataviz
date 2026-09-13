@@ -2451,13 +2451,34 @@ class AggregationService:
                 marker_set = True
             else:
                 await clear_source_stale(workspace_id, ds_id)
-        if provider is not None:
+        # Invalidate once per CHANGE, not once per detection of it.
+        #
+        # ``stored_fp`` only advances when a rebuild COMPLETES, so while one
+        # is deferred by the rebuild cooldown the gate above keeps answering
+        # "changed" on every sweep — and this block used to bump the
+        # generation each time, making every entry re-warmed since
+        # unreachable. Against a 30s reconcile tick and a 900s cooldown that
+        # is thirty invalidations for one change, and a cache whose effective
+        # life is the detection cadence rather than its TTL. The data really
+        # did change, so the FIRST invalidation is right and the stale marker
+        # stays set throughout; the repeats bought nothing and cost every
+        # reader a recompute.
+        already = getattr(state, "invalidated_fingerprint", None) if state else None
+        reinvalidate = force or not fingerprints_match(already, current_fp)
+        if provider is not None and reinvalidate:
             await provider.clear_content_caches()
             content_cleared = True
-        if workspace_id:
+        if workspace_id and reinvalidate:
             purge_count = await invalidate_hierarchy_reads(workspace_id, ds_id)
             gen_bumped = purge_count is not None
             lkg_purged = purge_count or 0
+            if state is not None:
+                state.invalidated_fingerprint = current_fp
+        elif workspace_id:
+            logger.debug(
+                "signal_source_changed: caches already invalidated for %s at "
+                "this fingerprint — not bumping again", ds_id,
+            )
         if workspace_id:
             stats_nudged = True
             try:

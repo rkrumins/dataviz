@@ -1049,14 +1049,35 @@ class GraphCache:
         describes rather than outliving them — "built 20 minutes ago" stops
         being said the moment nothing built 20 minutes ago is still there.
         """
+        key = _builtat_key(scope)
+        value = f"{datetime.now(timezone.utc).isoformat()}|{generation}"
+        ttl = _resolve_ttl(ttl_seconds, endpoint)
         try:
-            await self._cache_redis.set(
-                _builtat_key(scope),
-                f"{datetime.now(timezone.utc).isoformat()}|{generation}",
-                ex=_resolve_ttl(ttl_seconds, endpoint),
-            )
+            # Never SHORTEN the stamp. One key covers every endpoint of a
+            # scope, and their TTLs differ by an order of magnitude — so a
+            # single 300s trace read used to rewrite the stamp of a source
+            # holding an hour of aggregated entries, which then vanished five
+            # minutes later and left the row reading "nothing warm stored"
+            # over a cache with fifty-five minutes left in it.
+            #
+            # KEEPTTL writes the value without touching the expiry; EXPIRE GT
+            # then raises it only when this entry outlives what is already
+            # recorded. Two commands, one round trip, and the stamp ends up
+            # carrying the longest-lived thing it describes.
+            pipe = self._cache_redis.pipeline(transaction=False)
+            pipe.set(key, value, keepttl=True)
+            pipe.expire(key, ttl, gt=True)
+            await pipe.execute()
         except Exception as exc:  # noqa: BLE001 — telemetry, never a read
-            logger.debug("graph_cache: built-at stamp failed: %s", exc)
+            # KEEPTTL needs Redis 6.0 and EXPIRE GT needs 7.0. Anything older,
+            # or any other failure, falls back to the plain write: the stamp
+            # is then this endpoint's TTL, which is the behaviour before this
+            # refinement and still bounded.
+            logger.debug("graph_cache: built-at stamp (keepttl) failed: %s", exc)
+            try:
+                await self._cache_redis.set(key, value, ex=ttl)
+            except Exception as exc2:  # noqa: BLE001
+                logger.debug("graph_cache: built-at stamp failed: %s", exc2)
 
     async def _set(
         self,
@@ -1892,11 +1913,30 @@ class _CacheStatsRecorder:
         # Endpoint and outcome only: a workspace label would put a tenant
         # list in the scrape and multiply the cardinality by the tenancy.
         _cache_metric("graph_cache_reads_total", endpoint=endpoint, outcome=outcome)
-        key = _stats_key(scope.workspace_id, scope.data_source_id, _current_bucket())
-        field = (key, f"{endpoint}:{outcome}")
-        if field not in self._pending and len(self._pending) >= _STATS_MAX_PENDING:
-            return
-        self._pending[field] = self._pending.get(field, 0) + 1
+        bucket = _current_bucket()
+        field = (
+            _stats_key(scope.workspace_id, scope.data_source_id, bucket),
+            f"{endpoint}:{outcome}",
+        )
+        # …and the same count against the workspace ROLLUP key.
+        #
+        # ``read_cache_stats`` without a data source reads _stats_key(ws, None,
+        # bucket), which resolves to the "-" slot — and nothing wrote it,
+        # because every real read carries a data source. So the one surface in
+        # the product that answers "how much read load is the cache actually
+        # absorbing" — CacheHealthCard on Admin → Graph store — returned all
+        # zeros and an empty endpoint map until an operator drilled into a
+        # single source, which reads as "no traffic" rather than "wrong key".
+        # One extra field per flush batch, on a map that is already keyed by
+        # (key, field), so it costs one HINCRBY in the same pipeline.
+        rollup = (_stats_key(scope.workspace_id, "", bucket), f"{endpoint}:{outcome}")
+        # The bound covers BOTH fields. Counting only the per-source one let
+        # the rollup grow past _STATS_MAX_PENDING while the bus was down,
+        # which is the unbounded map this cap exists to prevent.
+        for entry in (field, rollup):
+            if entry not in self._pending and len(self._pending) >= _STATS_MAX_PENDING:
+                continue
+            self._pending[entry] = self._pending.get(entry, 0) + 1
         if self._flusher is None or self._flusher.done():
             try:
                 loop = asyncio.get_running_loop()

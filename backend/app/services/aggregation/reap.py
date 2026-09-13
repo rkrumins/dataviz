@@ -207,11 +207,13 @@ async def _announce(events: Any, job: Any, status: str) -> None:
         if status == "cancelled":
             await events.job_cancelled(
                 job_id=job.id, data_source_id=job.data_source_id,
+                workspace_id=getattr(job, "workspace_id", None),
             )
         else:
             await events.job_failed(
                 job_id=job.id,
                 data_source_id=job.data_source_id,
+                workspace_id=getattr(job, "workspace_id", None),
                 error_message=getattr(job, "error_message", None),
             )
     except Exception as exc:                      # noqa: BLE001 — by contract

@@ -1078,6 +1078,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1119,6 +1120,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1159,6 +1161,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1219,6 +1222,7 @@ class AggregationWorker:
                     await self._events.job_cancelled(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                     )
 
             except asyncio.CancelledError:
@@ -1304,6 +1308,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 

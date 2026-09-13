@@ -250,6 +250,14 @@ async def init_aggregation_db() -> None:
                 # JSON hints the next run starts from, never widening a knob.
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS observed_tuning TEXT NULL",
+                # The fingerprint the read caches were last invalidated for
+                # (2026-09-13), mirrored in alembic
+                # 20260913_1100_invalidated_fingerprint. Stops a rebuild
+                # deferred by the cooldown from re-bumping the generation on
+                # every sweep, which capped the cache's life at the detection
+                # cadence instead of its TTL.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS invalidated_fingerprint TEXT NULL",
                 # Indexes for the three queries that run on every tick and
                 # every page (2026-09-13), mirrored in alembic
                 # 20260913_1000_job_scan_indexes. The reconciler's

@@ -291,6 +291,16 @@ class AggregationDataSourceStateORM(Base):
     # stricter (never widen a knob); ``"{}"`` = the last run needed nothing.
     observed_tuning = Column(Text, nullable=True)
     graph_fingerprint = Column(Text, nullable=True)
+    #: The fingerprint the read caches were last INVALIDATED for.
+    #:
+    #: ``graph_fingerprint`` only advances when a rebuild COMPLETES, so while
+    #: one is deferred by the rebuild cooldown the change gate keeps reading
+    #: "changed" on every sweep — and each pass bumped the generation again,
+    #: making every entry re-warmed since unreachable. The cache's effective
+    #: lifetime became the detection cadence rather than its TTL. This
+    #: records what we have already thrown the cache away for, so the same
+    #: change costs one invalidation rather than one per tick.
+    invalidated_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
     # Per-source rebuild-cooldown override (seconds). NULL = fall through to
     # the persisted global cadence, then the env default. Resolved by

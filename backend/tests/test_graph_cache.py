@@ -3183,8 +3183,15 @@ async def test_many_reads_become_one_batch() -> None:
     await recorder.flush(cache)
 
     assert redis.pipeline.call_count == 1
-    assert redis.stats_pipe.hincrby.call_count == 1, "one field, one command"
-    assert redis.stats_pipe.hincrby.call_args.args[2] == 20
+    # TWO fields, not one: the per-source counter and the workspace ROLLUP.
+    # The rollup exists because read_cache_stats without a data source reads
+    # the "-" slot, which no real read ever wrote — so the fleet hit-rate
+    # card showed zeros. Still ONE command per field and one pipeline for the
+    # twenty reads, which is the property this test defends.
+    assert redis.stats_pipe.hincrby.call_count == 2, "one command per field"
+    assert {c.args[2] for c in redis.stats_pipe.hincrby.call_args_list} == {20}
+    keys = {c.args[0] for c in redis.stats_pipe.hincrby.call_args_list}
+    assert any(":ds1:" in k for k in keys) and any(":-:" in k for k in keys)
     redis.stats_pipe.execute.assert_awaited_once()
 
 
@@ -3319,4 +3326,60 @@ def test_the_fleet_summary_counts_what_the_rows_count():
     assert "if built_at:" in src
     assert "if cache_as_of:" not in src, (
         "the summary must count what is STORED, not what was invalidated once"
+    )
+
+
+def test_the_workspace_rollup_is_what_the_fleet_card_reads():
+    """`read_cache_stats(ws)` with no data source reads the "-" slot.
+    Nothing wrote it — every real read carries a source — so the one surface
+    that answers "how much read load is the cache absorbing" showed zeros
+    until an operator drilled into a single source."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    src = inspect.getsource(gc._CacheStatsRecorder.record)
+    assert '_stats_key(scope.workspace_id, "", bucket)' in src
+    # And the memory bound covers it: a rollup outside the cap would be the
+    # unbounded map the cap exists to prevent.
+    assert "for entry in (field, rollup):" in src
+    assert "len(self._pending) >= _STATS_MAX_PENDING" in src
+
+
+def test_the_built_stamp_never_shortens_itself():
+    """One key covers every endpoint of a scope and their TTLs differ by an
+    order of magnitude, so a 300s trace read would otherwise blank a source
+    holding an hour of aggregated entries."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    src = inspect.getsource(gc.GraphCache._note_built)
+    assert "keepttl=True" in src
+    assert "gt=True" in src
+    # Older Redis has neither; the plain write is the documented fallback.
+    assert "await self._cache_redis.set(key, value, ex=ttl)" in src
+
+
+def test_a_failed_run_carries_the_workspace_so_it_can_invalidate():
+    """RECONCILE deletes and APPLY writes inside the per-range loop, so a run
+    that dies part way leaves the rollup layer partly old and partly new. The
+    listener's invalidation keys on workspace_id, and the failure events did
+    not carry one — making it a guaranteed no-op on exactly the runs that
+    need it."""
+    import inspect
+
+    from backend.app.services.aggregation.events import AggregationEventPublisher
+
+    for meth in (AggregationEventPublisher.job_failed,
+                 AggregationEventPublisher.job_cancelled):
+        src = inspect.getsource(meth)
+        assert "workspace_id" in src, meth.__name__
+        assert '"workspace_id": workspace_id' in src, meth.__name__
+
+    from backend.app.services.aggregation.worker import AggregationWorker
+
+    run = inspect.getsource(AggregationWorker.run)
+    assert run.count("workspace_id=job.workspace_id") >= 5, (
+        "every failure exit and the cancel exit must carry it"
     )
