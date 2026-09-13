@@ -873,7 +873,23 @@ class FreshnessRow(BaseModel):
     aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
     last_materialized_at: Optional[str] = Field(None, alias="lastMaterializedAt")
-    cache_as_of: Optional[str] = Field(None, alias="cacheAsOf")
+    cache_as_of: Optional[str] = Field(
+        None, alias="cacheAsOf",
+        description="When this source's cache was last INVALIDATED (the last "
+                    "generation bump). Not when it was last filled.",
+    )
+    cache_built_at: Optional[str] = Field(
+        None, alias="cacheBuiltAt",
+        description="When a compute was last STORED for this source. Carries "
+                    "the entries' own TTL, so its absence means there is "
+                    "nothing warm left to serve.",
+    )
+    cache_built_generation: Optional[str] = Field(
+        None, alias="cacheBuiltGeneration",
+        description="The cache version that stored answer was built at. "
+                    "Behind `generation` means the newest readers are "
+                    "recomputing.",
+    )
     generation: Optional[int] = None
     stale_reason: Optional[str] = Field(None, alias="staleReason")
     # The marker carries no reliable "since": its TTL is a 7-day backstop

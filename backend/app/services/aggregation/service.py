@@ -2986,7 +2986,7 @@ class AggregationService:
 
         signals = (await _gc.read_freshness_signals(
             [(ds.workspace_id, ds.id)]
-        )).get((str(ds.workspace_id), str(ds.id)), (None, None, None))
+        )).get((str(ds.workspace_id), str(ds.id)), (None, None, None, None))
         running = await _running_job_map(session, [ds.id])
         # Resolved rebuild window for this source (per-source override →
         # persisted global → env), so the badge matches the cooldown gate.
@@ -3860,6 +3860,18 @@ def _projection_wire_fields(health) -> dict:
     )
 
 
+def _split_built_at(raw: Any) -> tuple:
+    """``"<iso>|<generation>"`` → ``(iso, generation)``, or ``(None, None)``.
+
+    Tolerates the un-suffixed form and anything unparseable: this is a
+    display signal, and a cockpit row is never worth failing over the shape
+    of a stamp."""
+    if not raw or not isinstance(raw, str):
+        return None, None
+    iso, _, gen = raw.partition("|")
+    return (iso or None), (gen or None)
+
+
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
@@ -3886,7 +3898,16 @@ def _freshness_row_kwargs(
     hold map (``holds.read_scope_holds``), read once per request by the
     caller; the row reports the RESOLVED hold, widest scope first, so the
     operator is pointed at the control that will actually release it."""
-    generation, cache_as_of, stale_reason = signals
+    # Padded rather than unpacked: this is display plumbing reached from
+    # several paths, and a signals tuple one element short must not cost the
+    # operator a whole cockpit row.
+    generation, cache_as_of, stale_reason, built_raw = (
+        tuple(signals) + (None,) * 4
+    )[:4]
+    # "<iso>|<generation>" — when a compute was last STORED, and at which
+    # version. Split here so the row carries two plain fields rather than a
+    # packed string the UI would have to know the shape of.
+    cache_built_at, cache_built_generation = _split_built_at(built_raw)
     st = state_row or {}
     auto_reconcile = resolve_reconcile_enabled(
         st.get("reconcile_enabled"), reconcile_enabled_global,
@@ -3916,6 +3937,13 @@ def _freshness_row_kwargs(
         # freshness paths.
         last_materialized_at=None,
         cache_as_of=cache_as_of,
+        # Three different questions, three different fields. cache_as_of is
+        # when the cache was last THROWN AWAY; cache_built_at is when one was
+        # last BUILT; generation is which version a reader is served. One
+        # word for all three is what made a month-old invalidation read as a
+        # month-old refresh.
+        cache_built_at=cache_built_at,
+        cache_built_generation=cache_built_generation,
         generation=generation,
         stale_reason=stale_reason,
         stale_since=None,
@@ -4595,8 +4623,8 @@ def _summarize_freshness(
             pending += 1
         if status in (None, "none", "skipped"):
             not_built += 1
-        _gen, cache_as_of, stale_reason = signals.get(
-            (str(ws_id), str(ds_id)), (None, None, None),
+        _gen, cache_as_of, stale_reason, _built = signals.get(
+            (str(ws_id), str(ds_id)), (None, None, None, None),
         )
         marker = bool(stale_reason)
         if marker:

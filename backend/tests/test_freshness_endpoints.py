@@ -148,10 +148,25 @@ def _svc(registry):
     )
 
 
+def _as_signal(v):
+    """Pad a test's ``(generation, cache_as_of, stale_reason)`` to the
+    four-signal shape production reads.
+
+    The fourth is ``built_at`` — when a compute was last STORED, as opposed
+    to ``cache_as_of``, which is when the cache was last thrown away. Tests
+    that do not care about it say nothing and get None; the ones that do
+    pass a full four-tuple."""
+    return tuple(v) + (None,) * (4 - len(v)) if isinstance(v, tuple) else v
+
+
+def _norm_signals(signals):
+    return {k: _as_signal(v) for k, v in (signals or {}).items()}
+
+
 def _patch_fleet_collaborators(monkeypatch, *, signals=None, events=None,
                                running=None, stale=None):
     async def _sig(pairs):
-        return signals if signals is not None else {}
+        return _norm_signals(signals) if signals is not None else {}
     monkeypatch.setattr(gc_mod, "read_freshness_signals", _sig)
 
     async def _events(session, ds_ids):
@@ -749,7 +764,7 @@ def test_source_doc_exposes_resolved_and_source(monkeypatch):
 def _patch_source_collaborators(monkeypatch, *, signals=None, lkg=(2, 120),
                                 events=None, cache_keys=None):
     async def _sig(pairs):
-        return signals or {}
+        return _norm_signals(signals)
     monkeypatch.setattr(gc_mod, "read_freshness_signals", _sig)
 
     async def _lkg(ws, ds):

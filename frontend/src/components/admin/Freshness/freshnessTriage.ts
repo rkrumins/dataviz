@@ -159,7 +159,11 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
         case 'notBuilt':
             return isNeverBuilt(row)
         case 'cacheStamped':
-            return row.cacheAsOf != null
+            // The facet means "has something warm stored", which is the
+            // question an operator is asking. cacheAsOf only says the source
+            // was invalidated once, which stays true forever after the first
+            // rebuild and so matched everything.
+            return row.cacheBuiltAt != null
         case 'drifting':
             return isDrifting(row)
         case 'suspended':

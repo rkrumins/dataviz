@@ -107,12 +107,18 @@ def _payload_sets(redis: AsyncMock) -> list:
     mirror.
 
     The cross-process election SETs too, on a key of its own, and so does the
-    marker that says an answer was too large to store. Both are bookkeeping —
-    about who is computing, and about what is not worth coordinating on —
-    rather than something the cache stored, and no assertion about what was
-    cached should have to know either happened.
+    marker that says an answer was too large to store, and so does the
+    built-at stamp that records WHEN a compute was last stored. All three are
+    bookkeeping — about who is computing, about what is not worth
+    coordinating on, and about when the last fill happened — rather than
+    something the cache stored, and no assertion about what was cached should
+    have to know any of them happened.
     """
-    bookkeeping = (graph_cache._LEADER_PREFIX, graph_cache._OVERSIZED_PREFIX)
+    bookkeeping = (
+        graph_cache._LEADER_PREFIX,
+        graph_cache._OVERSIZED_PREFIX,
+        graph_cache._BUILTAT_PREFIX,
+    )
     return [
         c for c in redis.set.await_args_list
         if not str(c.args[0]).startswith(bookkeeping)
@@ -3182,3 +3188,73 @@ async def test_the_pending_counts_are_bounded(monkeypatch) -> None:
         recorder.record(cache, CacheScope("ws1", "ds1"), f"endpoint-{i}", "hit")
 
     assert len(recorder._pending) == 3
+
+
+# ── "last invalidated" and "last built" are different facts ──────────────
+#
+# The cockpit had one stamp, _genat_key, written ONLY by bump_generation —
+# an invalidation — and rendered it under the word "updated". So a source
+# invalidated a month ago and served warm from cache ever since read
+# identically to one whose cache had been empty for a month.
+
+
+def test_the_built_stamp_records_the_fill_not_the_invalidation():
+    """_genat_key moves on a bump; _builtat_key moves on a store. A cache
+    that is filled and never invalidated must still say when it was built."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    bump = inspect.getsource(gc.GraphCache._bump_one)
+    assert "_genat_key" in bump
+    assert "_builtat_key" not in bump, "an invalidation is not a build"
+
+    built = inspect.getsource(gc.GraphCache._note_built)
+    assert "_builtat_key" in built
+    # It carries the ENTRY's TTL, so it cannot outlive what it describes and
+    # claim a warm cache over an empty one.
+    assert "_resolve_ttl(ttl_seconds, endpoint)" in built
+    # And it goes beside the entries, not with the coordination keys: a wiped
+    # cache Redis must lose the claim along with the data.
+    assert "self._cache_redis" in built
+
+
+def test_only_a_stored_answer_counts_as_built():
+    """An answer dropped for exceeding the payload cap is not a fill, and a
+    cache that can never store this endpoint's answers must not read as one
+    that was just refreshed."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    src = inspect.getsource(gc.GraphCache.get_or_compute)
+    assert 'if stored == "stored":' in src
+    assert "await self._note_built(scope, endpoint, ttl_seconds, gen)" in src
+    # The guard has to come BEFORE the call, not merely exist near it.
+    assert src.index('if stored == "stored":') < src.index("await self._note_built(")
+
+
+def test_the_stamp_carries_the_generation_it_was_built_at():
+    """"Which version is being served" is answerable only if the stamp says
+    which generation produced it — otherwise a stale fill and a current one
+    look the same."""
+    import inspect
+
+    from backend.app.services import graph_cache as gc
+
+    built = inspect.getsource(gc.GraphCache._note_built)
+    assert 'f"{datetime.now(timezone.utc).isoformat()}|{generation}"' in built
+
+
+def test_the_row_splits_the_stamp_into_two_plain_fields():
+    from backend.app.services.aggregation.service import _split_built_at
+
+    assert _split_built_at("2026-09-13T21:00:00+00:00|7.3") == (
+        "2026-09-13T21:00:00+00:00", "7.3",
+    )
+    # Tolerant: a stamp from before the generation suffix, and junk.
+    assert _split_built_at("2026-09-13T21:00:00+00:00") == (
+        "2026-09-13T21:00:00+00:00", None,
+    )
+    for junk in (None, "", 123, {}):
+        assert _split_built_at(junk) == (None, None)

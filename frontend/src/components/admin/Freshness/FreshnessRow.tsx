@@ -559,10 +559,29 @@ export function FreshnessRow({
             {/* Cache */}
             <td className="px-3 py-2 align-top">
                 <div className="flex flex-col gap-1">
-                    <CacheStatusPill cached={row.cacheAsOf != null} />
-                    {row.cacheAsOf
-                        ? <TimeStamp at={row.cacheAsOf} prefix="updated" icon={Database} />
-                        : <EmptyCell />}
+                    {/* Three different facts, three different lines. The
+                        column used to show ONE — the last generation bump —
+                        under the word "updated", which reads as the opposite
+                        of what it is: that stamp moves when the cache is
+                        thrown AWAY. A month-old invalidation therefore
+                        rendered as a month-old refresh, on a source that may
+                        have been serving warm answers all month, or nothing
+                        at all. Neither could be told from the other. */}
+                    <CacheStatusPill cached={row.cacheBuiltAt != null} />
+                    {row.cacheBuiltAt
+                        ? <TimeStamp at={row.cacheBuiltAt} prefix="built" icon={Database} />
+                        : <span className="text-[11px] text-ink-muted">nothing warm stored</span>}
+                    {row.cacheAsOf && (
+                        <TimeStamp at={row.cacheAsOf} prefix="invalidated" icon={RotateCcw} />
+                    )}
+                    {row.generation != null && (
+                        <span className="text-[10px] text-ink-muted tabular-nums" data-testid="cache-version">
+                            v{row.generation}
+                            {row.cacheBuiltGeneration != null
+                                && row.cacheBuiltGeneration !== String(row.generation)
+                                && ` · serving v${row.cacheBuiltGeneration}`}
+                        </span>
+                    )}
                 </div>
             </td>
 

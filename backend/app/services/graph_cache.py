@@ -67,6 +67,10 @@ _GEN_PREFIX = "graphcache:gen"
 # get_cache_as_of(). Best-effort, same fail-open conventions as the rest
 # of this module.
 _GENAT_PREFIX = "graphcache:genat"
+#: When a compute was last stored (see :func:`_builtat_key`). Value is
+#: ``"<iso>|<generation>"`` so one read answers both "when was this cache
+#: last built" and "which version is being served".
+_BUILTAT_PREFIX = "graphcache:builtat:v1"
 
 
 # ─── env-safe parsing ──────────────────────────────────────────────────
@@ -564,6 +568,11 @@ class GraphCache:
             payload = await asyncio.to_thread(result.model_dump_json, by_alias=True)
             stored = await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
             await self._set_lkg(scope, endpoint, params, result, gen, payload=payload)
+            if stored == "stored":
+                # Only when something actually landed: an answer that was
+                # dropped for being over the payload cap must not read as a
+                # cache that was just built.
+                await self._note_built(scope, endpoint, ttl_seconds, gen)
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             _stats_recorder.record(self, scope, endpoint, "miss")
@@ -999,6 +1008,27 @@ class GraphCache:
         except Exception as exc:                    # noqa: BLE001 — never a hard dep
             logger.debug("graph_cache: oversized marker write failed (%s)", exc)
 
+    async def _note_built(
+        self, scope: CacheScope, endpoint: str,
+        ttl_seconds: Optional[int], generation: str,
+    ) -> None:
+        """Record that a compute was stored for this scope, and at which
+        generation. Best-effort: a stamp is never worth failing a read that
+        has already succeeded.
+
+        The TTL is the entry's own, so the stamp expires with the answers it
+        describes rather than outliving them — "built 20 minutes ago" stops
+        being said the moment nothing built 20 minutes ago is still there.
+        """
+        try:
+            await self._cache_redis.set(
+                _builtat_key(scope),
+                f"{datetime.now(timezone.utc).isoformat()}|{generation}",
+                ex=_resolve_ttl(ttl_seconds, endpoint),
+            )
+        except Exception as exc:  # noqa: BLE001 — telemetry, never a read
+            logger.debug("graph_cache: built-at stamp failed: %s", exc)
+
     async def _set(
         self,
         cache_key: str,
@@ -1306,6 +1336,24 @@ async def _deserialize(model_cls: type[T], raw: Any) -> T:
 def _genat_key(scope: CacheScope) -> str:
     # (ws, ds)-scoped coordination, same rationale as _gen_key above.
     return f"{_GENAT_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
+
+
+def _builtat_key(scope: CacheScope) -> str:
+    """When a compute was last STORED for this scope, and at which generation.
+
+    The counterpart to :func:`_genat_key`, which records the opposite event.
+    ``genat`` moves on every ``bump_generation`` — an INVALIDATION — and
+    nothing else, so on its own it can only ever answer "when was this cache
+    last thrown away". The cockpit rendered it under the word "updated",
+    which reads as the reverse of what it is.
+
+    Deliberately on the CACHE Redis, beside the entries, and written with the
+    same TTL as the entry that produced it: the stamp then shares their fate.
+    A Redis that was wiped or evicted loses the stamp too, so "last built"
+    cannot outlive the thing it describes and claim a warm cache over an
+    empty one.
+    """
+    return f"{_BUILTAT_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
 
 
 def graph_ns_hash(physical_graph_id: str) -> str:
@@ -2003,23 +2051,36 @@ async def get_cache_as_of(
 
 async def read_freshness_signals(
     pairs: list[tuple[str, str]],
-) -> dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str]]]:
+) -> dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str], Optional[str]]]:
     """Batch-read the freshness signals for many ``(workspace_id,
-    data_source_id)`` pairs in ONE Redis pipeline — the fleet freshness
-    view's only cache round-trip. For each pair it reads the cache
-    generation counter, the cache-as-of stamp, and the stale-source
-    marker reason.
+    data_source_id)`` pairs — the fleet freshness view's only cache round
+    trip. Four signals, and three of them answer DIFFERENT questions that
+    were previously collapsed into one word on screen:
 
-    Returns a dict keyed by ``(str(ws), str(ds))`` → ``(generation,
-    cache_as_of, stale_reason)``; any missing/unparseable value is
-    ``None``. Best-effort: on any Redis error every requested pair maps to
-    ``(None, None, None)`` so callers degrade to "freshness unknown"
-    rather than failing. Follows graph_cache conventions: ``str()``
-    coercion, empty-id guards, never raises."""
+    * ``generation`` — which version of this source's cache is being served.
+      It is part of every cache key, so a reader either gets an answer built
+      at this number or computes a new one.
+    * ``cache_as_of`` — when the cache was last INVALIDATED (the last
+      ``bump_generation``). Not when it was last filled; nothing writes this
+      key on a cache write.
+    * ``built_at`` — when a compute was last STORED, and at which
+      generation. Lives on the CACHE Redis with the entries and carries
+      their TTL, so it disappears when they do rather than claiming a warm
+      cache over an empty one.
+    * ``stale_reason`` — the stale-while-revalidate marker.
+
+    Two pipelines because the two stamps deliberately live on different
+    instances, and they fail independently: a cache-Redis outage loses
+    ``built_at`` (correctly — it also means there are no entries) without
+    costing the coordination signals.
+
+    Returns a dict keyed by ``(str(ws), str(ds))``; any missing or
+    unparseable value is ``None``. Best-effort throughout: never raises."""
     clean = [(str(ws), str(ds)) for ws, ds in pairs if ws and ds]
-    result: dict[tuple[str, str], tuple[Optional[int], Optional[str], Optional[str]]] = {
-        pair: (None, None, None) for pair in clean
-    }
+    result: dict[
+        tuple[str, str],
+        tuple[Optional[int], Optional[str], Optional[str], Optional[str]],
+    ] = {pair: (None, None, None, None) for pair in clean}
     if not clean:
         return result
     try:
@@ -2037,13 +2098,27 @@ async def read_freshness_signals(
             len(clean), exc,
         )
         return result
+    built: list[Optional[str]] = [None] * len(clean)
+    try:
+        cache = get_graph_cache()
+        bpipe = cache._cache_redis.pipeline(transaction=False)
+        for ws, ds in clean:
+            bpipe.get(_builtat_key(
+                CacheScope(workspace_id=ws, data_source_id=ds, branch_id=""),
+            ))
+        built = list(await bpipe.execute())
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: read_freshness_signals built-at leg failed for %d "
+            "pairs: %s", len(clean), exc,
+        )
     for idx, pair in enumerate(clean):
         gen_raw, genat_raw, stale_raw = raw[idx * 3: idx * 3 + 3]
         try:
             gen = int(gen_raw) if gen_raw is not None else None
         except (TypeError, ValueError):
             gen = None
-        result[pair] = (gen, genat_raw, stale_raw)
+        result[pair] = (gen, genat_raw, stale_raw, built[idx] if idx < len(built) else None)
     return result
 
 
