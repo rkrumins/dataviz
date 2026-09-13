@@ -2490,16 +2490,57 @@ class FalkorDBProvider(GraphDataProvider):
         if conn is None:
             return None
         try:
+            # BOTH sections in one call, which Redis allows and which costs
+            # exactly what asking for one did. ``persistence`` carries
+            # ``loading``: a node replaying its dataset answers INFO quite
+            # happily while refusing every data command with -LOADING, so
+            # the replication section alone cannot tell a node that is ready
+            # from one that will be busy for the next hour.
             raw = await asyncio.wait_for(
-                conn.execute_command("INFO", "replication", target_nodes=node),
+                conn.execute_command(
+                    "INFO", "replication", "persistence", target_nodes=node,
+                ),
                 timeout=_REPLICA_ASK_TIMEOUT_S,
             )
         except Exception:                                 # noqa: BLE001 — not a candidate
             return None
         try:
-            return info_parse.replication_stats(info_parse.parse_info_text(raw))
+            info = info_parse.parse_info_text(raw)
+            out = info_parse.replication_stats(info)
+            out["loading"] = bool(info_parse.as_int(info.get("loading")))
+            out["loadingEtaS"] = info_parse.as_int(info.get("loading_eta_seconds"))
+            out["loadingPct"] = info_parse.as_float(info.get("loading_loaded_perc"))
+            return out
         except Exception:                                 # noqa: BLE001 — not a candidate
             return None
+
+    def _log_loading(self, endpoint: str, answer: Dict[str, Any]) -> None:
+        """Say that a node is replaying, and how far it has to go.
+
+        An hour of -LOADING and an indefinite hang read identically in a
+        log. The node reports an ETA and a percentage, so pass them on —
+        once per node per replay, since the window is seconds and a replay
+        is minutes to hours.
+        """
+        warned = getattr(self, "_loading_warned", None)
+        if warned is None:
+            warned = self._loading_warned = set()
+        if endpoint in warned:
+            return
+        warned.add(endpoint)
+        eta = answer.get("loadingEtaS")
+        pct = answer.get("loadingPct")
+        logger.info(
+            "FalkorDB %s: node %s is loading its dataset (%s%s) — it cannot "
+            "serve reads until that finishes; routing around it.",
+            self._graph_name, endpoint,
+            f"{pct:.0f}% in" if isinstance(pct, (int, float)) else "progress unknown",
+            f", about {eta // 60} min left" if isinstance(eta, int) and eta >= 60
+            else (f", about {eta}s left" if isinstance(eta, int) else ""),
+        )
+
+    def _clear_loading_note(self, endpoint: str) -> None:
+        getattr(self, "_loading_warned", set()).discard(endpoint)
 
     async def _vouched_replicas(
         self, graph_key: str, candidates: Sequence[Any], master: Any = None,
@@ -2553,7 +2594,20 @@ class FalkorDBProvider(GraphDataProvider):
         results = await asyncio.gather(*probes, return_exceptions=True)
         answers = results[:len(candidates)]
         master_answer = results[len(candidates)] if master is not None else None
-        master_silent = master is not None and not isinstance(master_answer, dict)
+        # A master that is REPLAYING cannot serve either, and it is not
+        # silent — it answers INFO, which is why nothing used to mark it
+        # unavailable and every read stayed pinned to it for the whole
+        # replay while a good replica sat idle. Unavailable is unavailable.
+        master_loading = (
+            isinstance(master_answer, dict) and bool(master_answer.get("loading"))
+        )
+        if master_loading:
+            self._log_loading(f"{master.host}:{master.port}", master_answer)
+        elif isinstance(master_answer, dict) and master is not None:
+            self._clear_loading_note(f"{master.host}:{master.port}")
+        master_silent = master is not None and (
+            not isinstance(master_answer, dict) or master_loading
+        )
 
         strict: List[str] = []
         alive_replicas: List[str] = []
@@ -2563,6 +2617,12 @@ class FalkorDBProvider(GraphDataProvider):
             if answer.get("role") != "replica":
                 # A master — promoted, or never a replica. Either way not
                 # ours to read as one.
+                continue
+            if answer.get("loading"):
+                # Replaying its dataset: every read it took would come back
+                # -LOADING. Excluded from the relaxed path too, which exists
+                # to serve the copies still STANDING.
+                self._log_loading(key, answer)
                 continue
             link_up = answer.get("masterLinkStatus") == "up"
             lag = answer.get("lagBytes")
@@ -2575,6 +2635,9 @@ class FalkorDBProvider(GraphDataProvider):
             # still reports the offsets its last snapshot knew, so the
             # figure remains readable. Only an unknowable lag is waved
             # through, and only once the master is gone.
+            # It answered and is not replaying, so a NEXT replay on this
+            # node is news again — pods get rotated more than once.
+            self._clear_loading_note(key)
             if within_budget:
                 alive_replicas.append(key)
             if (

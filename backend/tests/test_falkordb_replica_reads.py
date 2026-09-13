@@ -701,3 +701,133 @@ def test_master_only_by_operator_choice_says_nothing():
     p = _provider(_Conn(), mode="sentinel", read_from_replicas="never")
     assert _run(p._replica_for("g1")) is None
     assert getattr(p, "_replica_mode_warned", False) is False
+
+
+# ── a node replaying its dataset cannot answer, for up to an hour ───────
+#
+# A rotated FalkorDB pod comes back and replays its AOF command-by-command
+# before it will serve anything — minutes per GB, and docker-compose's own
+# comment records a multi-GB incremental taking about an HOUR. Throughout,
+# the node accepts connections and answers INFO perfectly happily while
+# every data command gets `-LOADING Redis is loading the dataset in
+# memory`. Measured on a real node mid-load: `loading:1`, no
+# `master_link_status` at all (it has not reached its master yet), and a
+# `loading_eta_seconds` worth telling an operator.
+#
+# Two consequences, and the router has to get both right:
+#
+#   * A LOADING candidate is never a candidate. The strict gate happened to
+#     exclude it (no link), but the relaxed master-is-gone path would have
+#     swept it in — handing reads to the one node guaranteed to refuse them.
+#   * A LOADING MASTER cannot serve either, and it is NOT silent: it answers
+#     INFO, so nothing marked it unavailable. Reads stayed pinned to it for
+#     the whole replay while a perfectly good replica sat idle. An hour of
+#     -LOADING is the outage this routing exists to avoid.
+
+
+def _loading_info(*, role="slave", pct=15.7, eta=2400):
+    """What a node genuinely mid-replay reports (field names measured)."""
+    return {
+        "role": role,
+        "loading": 1,
+        "loading_total_bytes": 213777878,
+        "loading_loaded_perc": pct,
+        "loading_eta_seconds": eta,
+    }
+
+
+def test_a_loading_replica_is_never_vouched_for():
+    p = _asking_provider({
+        "10.0.1.1:6379": _loading_info(),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_a_loading_replica_is_not_swept_in_when_the_master_is_gone_either():
+    """The relaxation exists to serve the copies still standing. A node
+    replaying its dataset is not one of them: every read it takes comes
+    back -LOADING."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _loading_info(),
+        "10.0.2.1:6379": _loading_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert got == [], "handed reads to nodes that can only answer -LOADING"
+
+
+def test_a_loading_master_hands_its_reads_to_an_in_sync_replica():
+    """THE case this is for. A rotated master replays for up to an hour. It
+    answers INFO, so it never looked silent — and every read stayed on it."""
+    p = _asking_provider(
+        {
+            "10.0.0.1:6379": _loading_info(role="master"),
+            "10.0.1.1:6379": _replica_info(link="down"),   # its master is busy loading
+            "10.0.2.1:6379": _replica_info(link="down"),
+        },
+        replicas=(R1, R2),
+    )
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
+    assert p._master_is_silent("g1") is True, (
+        "a master that cannot serve has to read as unavailable, whether it "
+        "is unreachable or merely busy replaying"
+    )
+
+
+def test_a_loading_node_says_how_long_it_has_left(caplog):
+    """An hour of -LOADING and an indefinite hang look identical in a log.
+    The node reports an ETA; pass it on."""
+    import logging
+
+    p = _asking_provider({
+        "10.0.1.1:6379": _loading_info(eta=2400, pct=15.7),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    with caplog.at_level(logging.INFO):
+        _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "loading" in said.lower()
+    assert "40" in said or "2400" in said, f"no ETA in: {said!r}"
+
+
+def test_a_node_that_finished_loading_is_vouched_for_again():
+    """Nothing sticky: the next window asks again, and a node that finished
+    its replay goes straight back into service."""
+    answers = {
+        "10.0.1.1:6379": _loading_info(),
+        "10.0.2.1:6379": _replica_info(),
+    }
+    p = _asking_provider(answers)
+    assert {f"{n.host}:{n.port}" for n in _run(
+        p._vouched_replicas("g1", [R1, R2], master=MASTER))} == {"10.0.2.1:6379"}
+    answers["10.0.1.1:6379"] = _replica_info()      # replay finished
+    p._vouch_sample = {}
+    assert {f"{n.host}:{n.port}" for n in _run(
+        p._vouched_replicas("g1", [R1, R2], master=MASTER))} == {
+            "10.0.1.1:6379", "10.0.2.1:6379"}
+
+
+def test_a_second_rotation_of_the_same_node_is_reported_again(caplog):
+    """Pods get rotated more than once. A node that finished one replay and
+    starts another is news again, not a line already said."""
+    import logging
+
+    answers = {"10.0.1.1:6379": _loading_info(), "10.0.2.1:6379": _replica_info()}
+    p = _asking_provider(answers)
+
+    def rounds():
+        p._vouch_sample = {}
+        _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+
+    with caplog.at_level(logging.INFO):
+        rounds()                                    # replay 1
+        answers["10.0.1.1:6379"] = _replica_info()  # finished
+        rounds()
+        answers["10.0.1.1:6379"] = _loading_info()  # rotated again
+        rounds()
+
+    said = [r for r in caplog.records
+            if "10.0.1.1:6379 is loading" in r.getMessage()]
+    assert len(said) == 2, f"expected one line per replay, got {len(said)}"
