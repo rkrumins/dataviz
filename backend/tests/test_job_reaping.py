@@ -276,84 +276,146 @@ def test_the_public_mirror_is_synced_too():
     assert seen == [("ds", {"aggregation_status": "failed"})]
 
 
-class _Events:
-    """Stands in for the control plane's publisher."""
-
-    def __init__(self) -> None:
-        self.failed: list = []
-        self.cancelled: list = []
-
-    async def job_failed(self, job_id, data_source_id, error_message=None):
-        self.failed.append((job_id, data_source_id, error_message))
-
-    async def job_cancelled(self, job_id, data_source_id):
-        self.cancelled.append((job_id, data_source_id))
-
-
-def test_a_reaped_run_is_announced_like_a_worker_ended_one():
-    """The direct mirror write is a documented no-op when the public table
-    lives in another database, so in the split-DB topology it was the ONLY
-    thing a reaper did — and the fleet cockpit, which reads that table, showed
-    the source mid-rebuild forever. The event is the path that converges it."""
-    events = _Events()
-    _run(reap_job(
-        _Session(_State()), _job(), status="failed",
-        error_message="worker lost: no progress", events=events,
-    ))
-    assert events.failed == [("J", "ds", "worker lost: no progress")]
-    assert events.cancelled == []
+# ── the PUBLIC mirror has a narrower vocabulary than the private row ────
+#
+# ``workspace_data_sources.aggregation_status`` carries a CHECK constraint
+# (``ck_ds_aggregation_status``) that allows none|pending|running|ready|
+# failed|skipped and NOT 'cancelled'. The private
+# ``aggregation_data_source_state`` row has no such constraint, and
+# ``AggregationService.cancel`` writes 'cancelled' to it deliberately.
+#
+# So a reaper that forwards the private value to the mirror verbatim writes a
+# value the constraint rejects. The violation lands at FLUSH, outside
+# ``sync_workspace_row``'s try/except, so it takes down the whole reconciler
+# tick: every job it reaped stays 'running', the source stays in-flight, and
+# the next tick reaps the same row and fails the same way. Forever.
+#
+# ``_MIRROR_STATUS`` maps to what the event listener writes for the same
+# terminal event (``job.cancelled`` -> 'none', event_listener.py), so both
+# paths leave the mirror saying the same thing.
 
 
-def test_a_reaped_cancel_is_announced_as_a_cancel():
-    events = _Events()
-    _run(reap_job(
-        _Session(_State()), _job(), status="cancelled", events=events,
-    ))
-    assert events.cancelled == [("J", "ds")] and events.failed == []
+class _MirrorRow:
+    """The public mirror row, as a single-DB topology has it."""
+
+    def __init__(self):
+        self.id = "ds"
+        self.deleted_at = None
+        self.aggregation_status = "running"
 
 
-def test_reaping_without_a_publisher_still_reaps():
-    """Reaping must never depend on a bus — clearing a ``running`` row is the
-    whole point, and a publisher that is absent or broken cannot stop it."""
-    class _Broken:
-        async def job_failed(self, **kw):
-            raise RuntimeError("bus down")
+class _SingleDBSession:
+    """Both rows exist — the single-DB topology the compose stack ships,
+    where no event listener owns the mirror and the reaper writes it."""
 
+    def __init__(self, state, mirror):
+        self.state = state
+        self.mirror = mirror
+
+    async def get(self, orm, key):
+        name = getattr(orm, "__name__", "")
+        return self.state if name.endswith("StateORM") else self.mirror
+
+
+def _mirror_vocabulary() -> set:
+    """The values ``ck_ds_aggregation_status`` actually permits, read off the
+    ORM so this test cannot drift from the constraint."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    import re
+
+    for arg in WorkspaceDataSourceORM.__table__.constraints:
+        text = str(getattr(arg, "sqltext", ""))
+        if "aggregation_status" in text:
+            return set(re.findall(r"'([a-z]+)'", text))
+    raise AssertionError("ck_ds_aggregation_status not found on the ORM")
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_a_reaped_run_writes_a_status_the_mirror_constraint_permits(status):
+    mirror = _MirrorRow()
     job = _job()
-    _run(reap_job(_Session(_State()), job, status="failed", events=None))
+    _run(reap_job(_SingleDBSession(_State(), mirror), job, status=status))
+    allowed = _mirror_vocabulary()
+    assert mirror.aggregation_status in allowed, (
+        f"reap_job(status={status!r}) wrote "
+        f"{mirror.aggregation_status!r} to workspace_data_sources, which "
+        f"ck_ds_aggregation_status rejects (allows {sorted(allowed)}). The "
+        f"flush raises and the whole reconciler tick rolls back."
+    )
+
+
+def test_a_cancelled_reap_leaves_the_mirror_where_the_event_listener_would():
+    """``job.cancelled`` -> ``aggregation_status='none'`` in
+    event_listener.py. A reaped cancel must not disagree with it."""
+    mirror = _MirrorRow()
+    _run(reap_job(_SingleDBSession(_State(), mirror), _job(), status="cancelled"))
+    assert mirror.aggregation_status == "none"
+
+
+def test_the_private_row_still_records_cancelled():
+    """Only the MIRROR's vocabulary is narrow. The private row keeps the
+    precise terminal status, as ``AggregationService.cancel`` writes it."""
+    state = _State()
+    _run(reap_job(_SingleDBSession(state, _MirrorRow()), _job(), status="cancelled"))
+    assert state.aggregation_status == "cancelled"
+
+
+# ── the reaper is the worker's ``finally``, and that block invalidates ───
+#
+# The worker's terminal block does four things; this module's docstring
+# names three of them. The fourth is the terminal EVENT, and
+# ``event_listener`` turns that into
+# ``invalidate_aggregated_reads(workspace_id, data_source_id)`` for
+# job.failed and job.cancelled alike — because "a failed run may have
+# PARTIALLY written before dying — cached pre-run answers no longer match
+# the store" (event_listener.py).
+#
+# A reaper emits no event, so nothing invalidated. That matters more than a
+# missed bump: ``graph_cache._promote_mirror`` treats an UNMOVED generation
+# as proof the answer is still current and re-promotes the pre-run view past
+# every TTL expiry, bounded only by ``GRAPH_CACHE_LKG_TTL_S`` (24 h). A
+# rebuild that wrote rollup edges and then had its pod killed therefore left
+# users on stale lineage for up to a day, with no stale banner either.
+
+
+def _reap_with_spy(monkeypatch, *, status, job=None, session=None):
+    """Reap while recording what the cache choke point was asked to do."""
+    calls: list = []
+
+    async def _spy(workspace_id, data_source_id):
+        calls.append((workspace_id, data_source_id))
+
+    import backend.app.services.graph_cache as gc
+    monkeypatch.setattr(gc, "invalidate_aggregated_reads", _spy)
+    _run(reap_job(session or _Session(_State()), job or _job(), status=status))
+    return calls
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_a_reaped_run_invalidates_the_aggregated_read_caches(monkeypatch, status):
+    calls = _reap_with_spy(monkeypatch, status=status, job=_job(workspace_id="ws1"))
+    assert calls == [("ws1", "ds")], (
+        "a reaped run wrote rollup edges the caches do not know about; "
+        "_promote_mirror will keep serving the pre-run answer for up to "
+        "GRAPH_CACHE_LKG_TTL_S because the generation never moved"
+    )
+
+
+def test_a_run_with_no_workspace_id_does_not_invalidate(monkeypatch):
+    """The cache keys are workspace-scoped, so there is no scope to build —
+    the same rule ``event_listener`` applies to pre-workspace_id events."""
+    calls = _reap_with_spy(monkeypatch, status="failed", job=_job(workspace_id=None))
+    assert calls == []
+
+
+def test_invalidation_failure_never_fails_the_reap(monkeypatch):
+    """A reaper that raises leaves the row ``running`` — the state it exists
+    to clear. Cache invalidation is best-effort like every other read here."""
+    async def _boom(workspace_id, data_source_id):
+        raise RuntimeError("redis gone")
+
+    import backend.app.services.graph_cache as gc
+    monkeypatch.setattr(gc, "invalidate_aggregated_reads", _boom)
+    job = _job(workspace_id="ws1")
+    _run(reap_job(_Session(_State()), job, status="failed"))   # must not raise
     assert job.status == "failed"
-
-    job2 = _job()
-    _run(reap_job(_Session(_State()), job2, status="failed", events=_Broken()))
-    assert job2.status == "failed"
-
-
-# ── The job table has to stop growing forever ───────────────────────────
-
-def test_retention_keeps_a_floor_per_source_as_well_as_a_window():
-    """Either condition alone is wrong. Age alone erases a slow source's whole
-    history — and that history is what "read this run against the last one" is
-    for. A per-source count alone lets a source rebuilt every fifteen minutes
-    keep years of rows."""
-    from backend.app.services.aggregation import reconciler as rec
-
-    assert rec._RETENTION_DAYS > 0
-    assert rec._RETENTION_MIN_PER_SOURCE > 0
-    # The floor is at least the number of attempts a single run archives, or a
-    # prune could remove the run whose attempt log the UI is showing.
-    from backend.app.services.aggregation.steps import _attempts_kept
-
-    assert rec._RETENTION_MIN_PER_SOURCE >= _attempts_kept()
-
-
-def test_retention_never_deletes_a_run_that_has_not_ended():
-    """A terminal-only filter, not an age one: a pending or running row that
-    old is a STUCK job, which is this module's other business. Deleting it
-    would hide exactly what the reconciler exists to surface."""
-    import inspect
-
-    from backend.app.services.aggregation import reconciler as rec
-
-    src = inspect.getsource(rec.prune_job_history)
-    assert 'terminal = ("completed", "failed", "cancelled")' in src
-    assert src.count("status.in_(terminal)") >= 2

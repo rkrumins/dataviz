@@ -264,31 +264,52 @@ async def init_aggregation_db() -> None:
                 f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_updated ON "
                 f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, updated_at)",
             )
-            async with engine.begin() as conn:
-                for stmt in _additive_migrations:
-                    try:
+            # ONE TRANSACTION PER STATEMENT, deliberately. These all shared
+            # a single `engine.begin()`, which made the try/except below
+            # inert on PostgreSQL: the first error aborts the transaction, so
+            # every later statement fails with InFailedSQLTransactionError
+            # and is logged the same way, and COMMIT on an aborted
+            # transaction silently ROLLS BACK — so nothing escaped the
+            # context manager and init logged success with NOT ONE statement
+            # applied, including the ones that had already succeeded. One
+            # malformed statement therefore voided all 35, on every boot,
+            # silently. Per-statement transactions cost one round trip each
+            # at start-up and make "continuing init" true.
+            applied = 0
+            for stmt in _additive_migrations:
+                try:
+                    async with engine.begin() as conn:
                         await conn.execute(text(stmt))
-                    except Exception as exc:
-                        # Don't fail init on a single migration — log
-                        # and continue. Worst case the affected feature
-                        # degrades gracefully (e.g. UI phase label
-                        # stays NULL).
-                        logger.warning(
-                            "Aggregation additive migration failed "
-                            "(continuing init): %s — %s",
-                            stmt, exc,
-                        )
+                    applied += 1
+                except Exception as exc:
+                    # Don't fail init on a single migration — log
+                    # and continue. Worst case the affected feature
+                    # degrades gracefully (e.g. UI phase label
+                    # stays NULL).
+                    logger.warning(
+                        "Aggregation additive migration failed "
+                        "(continuing init): %s — %s",
+                        stmt, exc,
+                    )
 
             if attempt > 1:
                 logger.info(
                     "Aggregation DB init succeeded on attempt %d (Postgres became reachable)",
                     attempt,
                 )
+            if applied != len(_additive_migrations):
+                logger.error(
+                    "Aggregation DB init: %d of %d additive migrations did "
+                    "NOT apply (see the warnings above). Columns the write "
+                    "path names may be missing until alembic runs.",
+                    len(_additive_migrations) - applied,
+                    len(_additive_migrations),
+                )
             logger.info(
                 "Aggregation DB init complete (%d tables in '%s' schema, "
-                "%d additive migrations applied)",
+                "%d of %d additive migrations applied)",
                 len(aggregation_tables), SCHEMA_NAME,
-                len(_additive_migrations),
+                applied, len(_additive_migrations),
             )
             return
 

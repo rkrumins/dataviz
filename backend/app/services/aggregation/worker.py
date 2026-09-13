@@ -1683,10 +1683,24 @@ class AggregationWorker:
         pacing = doc.get("write_pacing_ratio")
         if isinstance(pacing, (int, float)) and not isinstance(pacing, bool) and pacing >= 0:
             out["write_pacing_ratio"] = float(pacing)
-        for key in ("extract_concurrency", "scan_width", "write_batch_max"):
+        for key in (
+            "extract_concurrency", "scan_width", "write_batch_max",
+            # Replication backpressure. Absent here, these two were in
+            # _LIVE_PIPELINE_KEYS and never in the dict that list is read
+            # against, so the tick's `if key in fresh` never fired: setting
+            # them on a running job was persisted, logged, and ignored.
+            "replica_ack_timeout_ms",
+        ):
             value = _tuning_int(doc, key)
             if value is not None:
                 out[key] = value
+        # replicaAckMin may be 0 — that IS the escape hatch for a run held
+        # behind a lagging replica (see shard_capacity.hold_reason), so a
+        # positive-int guard would discard exactly the value an operator
+        # reaches for. Same reason write_pacing_ratio is read separately.
+        ack_min = doc.get("replica_ack_min")
+        if isinstance(ack_min, int) and not isinstance(ack_min, bool) and ack_min >= 0:
+            out["replica_ack_min"] = int(ack_min)
         target = doc.get("write_batch_target_s")
         if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0:
             out["write_batch_target_s"] = float(target)

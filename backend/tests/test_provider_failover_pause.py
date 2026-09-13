@@ -107,7 +107,25 @@ def test_the_failover_signal_carries_the_node_and_a_short_retry():
     assert isinstance(exc, ProviderUnavailable)          # existing handlers still match
     # And the pipeline reads it as the kind of pressure you wait out.
     assert _pressure_kind(exc) == "connection"
-    assert _pressure_kind(ProviderLoading("g", "loading")) is None
+    # So is a node REPLAYING its dataset, for the same reason this commit
+    # gave for the signal above: "halving a page cannot reach a node that is
+    # not there, so the failure propagates and the cache serves the last
+    # good answer instead of half a canvas." A node answering -LOADING is
+    # not there YET, and it will keep refusing for as long as the replay
+    # takes — up to an hour on a multi-GB AOF incremental.
+    #
+    # This assertion used to read `is None`, which made a rebuild that
+    # touched a rotating pod die on the spot: the raw BusyLoadingError
+    # classifies here (it subclasses ConnectionError), but `_run_guarded`
+    # converts it to ProviderLoading before the pipeline ever sees it, and
+    # that shape fell through to None and re-raised past the outage hold.
+    #
+    # The breaker is unaffected — ProviderLoading is still a logical
+    # exception, so a node being replaced still never opens it — and
+    # graph_cache still propagates it by TYPE rather than by this
+    # classifier, so a loading node still gets a retryable answer rather
+    # than a day-old snapshot.
+    assert _pressure_kind(ProviderLoading("g", "loading")) == "connection"
 
 
 def test_the_endpoint_is_read_out_of_what_redis_actually_says():

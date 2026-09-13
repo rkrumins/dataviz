@@ -16,7 +16,9 @@ import time
 from collections import defaultdict, deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, List, NamedTuple, Optional, Dict, Any, Set, Tuple
+from typing import (
+    Awaitable, Callable, Dict, Any, List, NamedTuple, Optional, Sequence, Set, Tuple,
+)
 
 
 class AggRunMeta(NamedTuple):
@@ -291,6 +293,13 @@ _CLUSTER_ROUTING_EXC_NAMES = frozenset({
     "MovedError", "AskError", "ClusterDownError", "TryAgainError",
 })
 
+#: Redis answers a write on a replica with ``-READONLY``. In sentinel and
+#: standalone that IS what a failover looks like from the client's side: the
+#: pool is still pointed at the node that was the master when it connected,
+#: and that node has been demoted. Matched by NAME, like the cluster routing
+#: errors, so the classifier needs no redis import.
+_ROLE_CHANGED_EXC_NAMES = frozenset({"ReadOnlyError"})
+
 # Short backoff schedule (seconds) for transparently retrying a transient
 # connection drop. Three attempts keeps the total well inside a single op's
 # budget while letting redis-py hand out a fresh pooled connection.
@@ -318,7 +327,7 @@ _REPLICA_READ_MAX_LAG_BYTES = int(
 #: How long this process's own writes pin a graph's reads to its master.
 #:
 #: Read-your-own-writes, and it is a BACKSTOP rather than the primary guard.
-#: The primary guard is ``_replicas_in_step``, which measures the bytes a
+#: The primary guard is ``_vouched_replicas``, which measures the bytes a
 #: replica still owes the stream — a real freshness check, not a guess. What
 #: the settle window has to cover is that check's own staleness: the verdict
 #: is cached for ``_REPLICA_SAMPLE_S`` (5s), so a replica that was in step
@@ -346,6 +355,47 @@ _LABEL_WARMUP_COOLDOWN_S = float(os.getenv("FALKORDB_LABEL_WARMUP_COOLDOWN_S", "
 _LABEL_WARMUP_TASKS: set = set()
 #: How often one shard's replication state is sampled for the router.
 _REPLICA_SAMPLE_S = 5.0
+#: How long one candidate may take to describe itself. Short: a node
+#: that cannot answer this promptly is not one to hand a read to, and
+#: the master is always there to fall back on.
+_REPLICA_ASK_TIMEOUT_S = 1.0
+#: How many per-replica clients one provider may hold. The list comes from a
+#: node's own report, and a broken deployment must not be able to make this
+#: unbounded.
+_MAX_PINNED_REPLICAS = 8
+
+
+class _NodeTarget:
+    """One node addressed by its OWN client.
+
+    Cluster nodes are addressed with ``target_nodes`` on the shared cluster
+    client; sentinel and standalone have no such API, so their nodes carry a
+    client each. Both shapes answer ``host``/``port`` and can be asked for
+    an ``INFO``, which is all the vouching and the read routing need.
+    """
+
+    __slots__ = ("host", "port", "db", "pool")
+
+    def __init__(self, host: str, port: int, db: Any = None, pool: Any = None):
+        self.host, self.port, self.db, self.pool = host, port, db, pool
+
+    async def execute_command(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("target_nodes", None)                  # one endpoint, by construction
+        return await self.db.connection.execute_command(*args, **kwargs)
+
+    async def aclose(self) -> None:
+        """Release this node's client. Best-effort: a pool that will not
+        close must not stop the others being closed."""
+        for closeable in (self.db.connection if self.db is not None else None, self.pool):
+            if closeable is None:
+                continue
+            try:
+                await closeable.aclose()
+            except Exception:                             # noqa: BLE001 — best effort
+                pass
+
+    def __repr__(self) -> str:
+        return f"{self.host}:{self.port}"
 #: How long a replica that failed a read is skipped.
 _REPLICA_PENALTY_S = 30.0
 #: endpoint -> monotonic deadline, PROCESS-wide. See _penalise_replica.
@@ -594,6 +644,28 @@ def _is_cluster_routing_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_role_changed_error(exc: BaseException) -> bool:
+    """True when the node we are talking to says it is a REPLICA.
+
+    A redirect, not a failure: re-resolve and retry, exactly as a cluster
+    MOVED is handled. ``ReadOnlyError`` is a ``ResponseError`` rather than a
+    ``ConnectionError``, so the transient ladder never caught it and a
+    sentinel failover mid-write failed hard — at the one moment
+    re-resolving would have fixed it, since redis-py re-runs
+    ``discover_master`` on reconnect and the rebuild lands on the node that
+    was just promoted. Cluster mode gets MOVED first and rarely reaches
+    here, but a demoted node is a demoted node in every mode.
+    """
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        if type(seen).__name__ in _ROLE_CHANGED_EXC_NAMES:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 def _is_transient_connection_error(exc: BaseException) -> bool:
     """True when *exc* (or its cause) is a transient redis connection drop
     (e.g. 'Connection reset by peer' under FalkorDB memory pressure) worth a
@@ -823,8 +895,17 @@ def _pressure_kind(exc: BaseException) -> Optional[str]:
     # The provider's own verdict after it spent the failover window. It may
     # arrive without a cause (answered from the short memo), so it is matched
     # by type rather than by the text of what it wrapped.
-    from backend.common.adapters import ProviderFailingOver
+    from backend.common.adapters import ProviderFailingOver, ProviderLoading
     if isinstance(exc, ProviderFailingOver):
+        return "connection"
+    # A node replaying its dataset is not answering YET, which is what the
+    # outage hold is for. The RAW reply already classified here —
+    # ``BusyLoadingError`` subclasses ``ConnectionError`` — but
+    # ``_run_guarded`` converts it to ``ProviderLoading`` before the
+    # pipeline ever sees it, and that shape fell through to None: a rebuild
+    # that touched a rotating pod died on the spot instead of waiting out a
+    # replay it knew was in progress.
+    if isinstance(exc, ProviderLoading):
         return "connection"
     return None
 
@@ -2529,6 +2610,12 @@ class FalkorDBProvider(GraphDataProvider):
             # the factory) so failover never drops credentials or TLS.
             pool_kwargs = self._build_pool_kwargs(socket_timeout)
 
+            # A failover can change which nodes are replicas and what they
+            # are called, so the clients pinned to the old ones go with the
+            # old primary rather than lingering and being vouched again.
+            await self._release_pinned_replicas()
+            self._vouch_sample = {}
+
             old_pool, old_proj_pool = self._pool, self._proj_pool
             old_db, old_proj_db = self._db, self._proj_db
             self._db, self._pool = await build_graph_client(
@@ -2589,6 +2676,112 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
     # ── Reads from in-sync replicas ──────────────────────────────────────
+
+    async def _build_pinned_replica(self, host: str, port: int) -> Any:
+        """A client bound to ONE replica, for the modes with no
+        ``target_nodes``.
+
+        ``build_node_client`` applies the same auth and TLS as the primary,
+        so a replica read can never reach an authenticated deployment
+        unauthenticated. Returned as a ``_NodeTarget`` so the vouching and
+        the read address it the same way a cluster node is addressed.
+        """
+        from backend.app.providers.falkordb_connection import build_node_client
+
+        pool_kwargs = self._build_pool_kwargs(self._graph_socket_timeout())
+        db, pool = build_node_client(self._conn_cfg, host, port, pool_kwargs)
+        return _NodeTarget(host, port, db=db, pool=pool)
+
+    async def _pinned_replica_for(self, host: str, port: int) -> Optional[Any]:
+        """The cached client for one replica, built on first use.
+
+        One per replica, reused across reads: a pool per read would leak
+        connections at the rate of the read path. Bounded, because the list
+        comes from a node's own report and a broken deployment must not be
+        able to make this unbounded.
+        """
+        cache = getattr(self, "_pinned_replicas", None)
+        if cache is None:
+            cache = self._pinned_replicas = {}
+        key = f"{host}:{port}"
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        if len(cache) >= _MAX_PINNED_REPLICAS:
+            return None
+        try:
+            target = await self._build_pinned_replica(host, port)
+        except Exception as exc:                          # noqa: BLE001 — master serves
+            logger.debug(
+                "FalkorDB %s: could not build a client for replica %s: %s",
+                self._graph_name, key, exc,
+            )
+            return None
+        cache[key] = target
+        return target
+
+    async def _release_pinned_replicas(self) -> None:
+        """Drop every per-replica client. Called on close and whenever the
+        primary is rebuilt, since a failover may have changed who the
+        replicas are."""
+        cache = getattr(self, "_pinned_replicas", None) or {}
+        self._pinned_replicas = {}
+        for target in cache.values():
+            closer = getattr(target, "aclose", None)
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception:                             # noqa: BLE001 — best effort
+                pass
+
+    async def _replica_candidates(self, graph_key: str) -> Tuple[Any, List[Any]]:
+        """``(master, replicas)`` for ``graph_key`` — however this mode
+        names its nodes.
+
+        CLUSTER reads them out of the client's own slot map. SENTINEL and
+        STANDALONE have no slot map, and do not need one: the master's own
+        ``INFO replication`` names its replicas at CONNECTABLE addresses
+        (the peer address of each replication link, not an announced
+        alias), so there is no second address space to reconcile and each
+        one gets a client of its own. An address that is not reachable from
+        here simply fails to vouch, and the master serves.
+        """
+        conn = getattr(self._db, "connection", None)
+        if conn is None:
+            return None, []
+        if self._conn_cfg is not None and self._conn_cfg.mode == "cluster":
+            try:
+                slot = conn.keyslot(graph_key)
+                nodes = list(conn.nodes_manager.slots_cache.get(slot) or [])
+            except Exception:                             # noqa: BLE001 — master serves
+                return None, []
+            if not nodes:
+                return None, []
+            return nodes[0], nodes[1:]
+
+        primary = _NodeTarget(*self._primary_endpoint(), db=self._db)
+        answer = await self._ask_node_role(primary)
+        if not isinstance(answer, dict):
+            return primary, []
+        out: List[Any] = []
+        for entry in (answer.get("replicas") or [])[:_MAX_PINNED_REPLICAS]:
+            host, port = entry.get("ip"), entry.get("port")
+            if not host or port is None:
+                continue
+            target = await self._pinned_replica_for(str(host), int(port))
+            if target is not None:
+                out.append(target)
+        return primary, out
+
+    def _primary_endpoint(self) -> Tuple[str, int]:
+        """Where the primary client is pointed, for labelling only."""
+        try:
+            kwargs = self._db.connection.connection_pool.connection_kwargs
+            return str(kwargs.get("host") or "primary"), int(kwargs.get("port") or 0)
+        except Exception:                                 # noqa: BLE001 — a label
+            return "primary", 0
+
     #
     # A shard's master takes every write AND, until now, served every read.
     # On a cluster with two replicas per shard that left two thirds of the
@@ -2612,8 +2805,16 @@ class FalkorDBProvider(GraphDataProvider):
     _replica_fallbacks: int = 0
 
     def _replica_reads_enabled(self) -> bool:
+        """Whether this provider may route a read off the master.
+
+        Every mode may: cluster nodes are aimed at with ``target_nodes``,
+        and sentinel/standalone replicas carry a client each (see
+        ``_replica_candidates``). A deployment with no replicas simply has
+        no candidates. ``read_from_replicas="never"`` is the operator's
+        choice to stay on the master.
+        """
         cfg = self._conn_cfg
-        if cfg is None or cfg.mode != "cluster":
+        if cfg is None:
             return False
         return getattr(cfg, "read_from_replicas", "auto") != "never"
 
@@ -2697,22 +2898,11 @@ class FalkorDBProvider(GraphDataProvider):
             return None
         if _read_consistency.get() == "master":
             return None
-        # One cluster client resolves any key's slot, so the source client
-        # answers for the projection graph too.
-        conn = getattr(self._db, "connection", None)
-        if conn is None:
-            return None
-        try:
-            slot = conn.keyslot(graph_key)
-            nodes = list(conn.nodes_manager.slots_cache.get(slot) or [])
-        except Exception:                                 # noqa: BLE001 — never fail a read
-            return None
-        replicas = [n for n in nodes[1:] if self._replica_usable(n)]
+        master, candidates = await self._replica_candidates(graph_key)
+        replicas = [n for n in candidates if self._replica_usable(n)]
         if not replicas:
             return None
-        in_step = await self._replicas_in_step(
-            graph_key, {f"{n.host}:{n.port}" for n in replicas},
-        )
+        vouched = await self._vouched_replicas(graph_key, replicas, master=master)
         # Read-your-own-writes pins a graph this process just wrote to its
         # master — unless that master is the node that has stopped
         # answering. Then the choice is a slightly stale answer from a
@@ -2726,17 +2916,19 @@ class FalkorDBProvider(GraphDataProvider):
             or await self._fleet_wrote_recently(graph_key)
         ):
             return None
-        replicas = [n for n in replicas if f"{n.host}:{n.port}" in in_step]
-        if not replicas:
+        if not vouched:
             return None
         # Round-robin so one replica does not take every read of a shard —
         # and, when the caller allows it, so the master's idle query threads
-        # take their share instead of only writes.
-        candidates: List[Any] = list(replicas)
+        # take their share instead of only writes. On the shipped overlay
+        # (one replica per shard) that is the only doubling of read capacity
+        # available without more hardware: `replicas: 3` cannot schedule on
+        # the six-node pool the overlay's own README mandates.
+        rotation: List[Any] = list(vouched)
         if include_master and _MASTER_READ_SHARE > 0:
-            candidates.extend([None] * _MASTER_READ_SHARE)
-        self._replica_turn = (getattr(self, "_replica_turn", -1) + 1) % len(candidates)
-        return candidates[self._replica_turn]
+            rotation.extend([None] * _MASTER_READ_SHARE)
+        self._replica_turn = (getattr(self, "_replica_turn", -1) + 1) % len(rotation)
+        return rotation[self._replica_turn]
 
     def _replica_usable(self, node) -> bool:
         until = _REPLICA_PENALTY_BOX.get(f"{node.host}:{node.port}", 0.0)
@@ -2764,96 +2956,193 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, endpoint, type(exc).__name__, _REPLICA_PENALTY_S,
         )
 
-    async def _replicas_in_step(self, graph_key: str, endpoints: Set[str]) -> Set[str]:
-        """WHICH of this shard's replicas are close enough to serve a read.
+    async def _ask_node_role(self, node: Any) -> Optional[Dict[str, Any]]:
+        """What ``node`` says about ITSELF, or None if it will not answer.
 
-        Closeness is measured in the bytes a replica still owes the stream,
-        never in the ``lag`` seconds ``INFO`` reports: a replica acknowledges
-        the stream about once a second whatever it has actually applied, so
-        ``lag`` reads 0 for one that is gigabytes behind. Under the workload
-        this router exists to relieve — a rebuild writing hard to the master
-        — that is precisely when it would wave a badly stale replica through.
-
-        A per-replica answer, not one verdict for the shard: one replica
-        keeping up says nothing about its sibling, and a set means a lagging
-        replica is skipped instead of being handed the reads its healthy
-        neighbour qualified for.
-
-        One ``INFO replication`` per shard per sample window answers it for
-        every read of every graph on that shard — and when the master
-        cannot answer at all, the last set it vouched for stands rather
-        than the shard falling back to a node that is not there.
-
-        A master that MISSED the sample deadline is not a master that is
-        gone. It used to be treated as one: a single reading over 1.0 s made
-        the shard "silent", which bypassed read-your-own-writes for the very
-        process that had just written, and froze the lag verdict — the stale
-        set was re-stamped with ``now`` on every miss, so it had no maximum
-        age and a busy master could hold it forever. Silence is now a
-        connection-class failure only, the vouched set expires
-        (``_REPLICA_VOUCH_MAX_AGE_S``) instead of being renewed, and a
-        process that has never had an answer routes to the master rather
-        than admitting every replica the client happens to list on no
-        freshness evidence at all.
+        One ``INFO replication`` addressed at the node. Never raises: an
+        unreachable candidate is simply not a candidate.
         """
-        now = time.monotonic()
-        cache = getattr(self, "_repl_sample", None)
+        from backend.app.services.graph_store import info_parse
+
+        # A node with a client of its own answers for itself (sentinel and
+        # standalone); a cluster node is addressed on the shared client.
+        sender = node if hasattr(node, "execute_command") else None
+        conn = sender or getattr(self._db, "connection", None)
+        if conn is None:
+            return None
+        try:
+            # BOTH sections in one call, which Redis allows and which costs
+            # exactly what asking for one did. ``persistence`` carries
+            # ``loading``: a node replaying its dataset answers INFO quite
+            # happily while refusing every data command with -LOADING, so
+            # the replication section alone cannot tell a node that is ready
+            # from one that will be busy for the next hour.
+            raw = await asyncio.wait_for(
+                conn.execute_command(
+                    "INFO", "replication", "persistence",
+                    **({} if sender is not None else {"target_nodes": node}),
+                ),
+                timeout=_REPLICA_ASK_TIMEOUT_S,
+            )
+        except Exception:                                 # noqa: BLE001 — not a candidate
+            return None
+        try:
+            info = info_parse.parse_info_text(raw)
+            out = info_parse.replication_stats(info)
+            out["loading"] = bool(info_parse.as_int(info.get("loading")))
+            out["loadingEtaS"] = info_parse.as_int(info.get("loading_eta_seconds"))
+            out["loadingPct"] = info_parse.as_float(info.get("loading_loaded_perc"))
+            return out
+        except Exception:                                 # noqa: BLE001 — not a candidate
+            return None
+
+    def _log_loading(self, endpoint: str, answer: Dict[str, Any]) -> None:
+        """Say that a node is replaying, and how far it has to go.
+
+        An hour of -LOADING and an indefinite hang read identically in a
+        log. The node reports an ETA and a percentage, so pass them on —
+        once per node per replay, since the window is seconds and a replay
+        is minutes to hours.
+        """
+        warned = getattr(self, "_loading_warned", None)
+        if warned is None:
+            warned = self._loading_warned = set()
+        if endpoint in warned:
+            return
+        warned.add(endpoint)
+        eta = answer.get("loadingEtaS")
+        pct = answer.get("loadingPct")
+        logger.info(
+            "FalkorDB %s: node %s is loading its dataset (%s%s) — it cannot "
+            "serve reads until that finishes; routing around it.",
+            self._graph_name, endpoint,
+            f"{pct:.0f}% in" if isinstance(pct, (int, float)) else "progress unknown",
+            f", about {eta // 60} min left" if isinstance(eta, int) and eta >= 60
+            else (f", about {eta}s left" if isinstance(eta, int) else ""),
+        )
+
+    def _clear_loading_note(self, endpoint: str) -> None:
+        getattr(self, "_loading_warned", set()).discard(endpoint)
+
+    async def _vouched_replicas(
+        self, graph_key: str, candidates: Sequence[Any], master: Any = None,
+    ) -> List[Any]:
+        """Which of ``candidates`` will answer a read of ``graph_key``
+        correctly right now.
+
+        EVERY NODE IS ASKED ABOUT ITSELF, and nothing is inferred from an
+        address. The router used to ask the master which of its replicas
+        were in step and intersect that with the client's own node list —
+        two subsystems, two address spaces, compared as strings. On a cluster
+        that announces hostnames (``cluster-preferred-endpoint-type
+        hostname``) while ``INFO replication`` reports the peer IP of each
+        replication link, that intersection is empty on every read and the
+        whole path goes quietly inert.
+
+        It also meant ROLE was inferred — from the master's ``slave<n>``
+        list, or from the client's cached slot map — and both go stale the
+        moment a failover or a role swap happens, which is precisely when
+        sending a read to the wrong node costs the most. A node's own
+        ``INFO replication`` carries its CURRENT role, its link health,
+        whether it is mid-resync, and a lag computed from one snapshot
+        (``master_repl_offset - slave_repl_offset``), so there is no
+        cross-node skew and nothing to match: candidates and answers live in
+        the client's address space alone.
+
+        When the master is gone its replicas are the only copies of the
+        graph still standing, so a link that is down stops disqualifying
+        them — a stale answer beats no answer, the rule the old code kept by
+        holding the master's last vouched set. A node reporting ``master``
+        is never swept in by that relaxation: it IS the new master, and the
+        router pins the master separately for read-your-own-writes.
+        """
+        cache = getattr(self, "_vouch_sample", None)
         if cache is None:
-            cache = self._repl_sample = {}
-        # When the master last actually ANSWERED — kept apart from the
-        # sample stamp above, which a failed sample also moves.
-        vouched_at = getattr(self, "_repl_vouched_at", None)
-        if vouched_at is None:
-            vouched_at = self._repl_vouched_at = {}
+            cache = self._vouch_sample = {}
+        now = time.monotonic()
+        by_key = {f"{n.host}:{n.port}": n for n in candidates}
         cached = cache.get(graph_key)
         if cached is not None and now - cached[0] < _REPLICA_SAMPLE_S:
-            return cached[1] & endpoints
-        state, probe_exc = await self._replication_probe(
-            graph_key, timeout_s=_REPLICA_SAMPLE_TIMEOUT_S,
+            return [by_key[k] for k in cached[1] if k in by_key]
+
+        # The master is asked too, and only so we know whether it is THERE.
+        # Inferring that from "no replica reports a live link" is too clever:
+        # one replica mid-resync gives the same signal as a dead master, and
+        # relaxing then hands reads to a node that is deliberately not
+        # serving. One extra INFO per shard per window buys a fact.
+        probes = [self._ask_node_role(n) for n in candidates]
+        if master is not None:
+            probes.append(self._ask_node_role(master))
+        results = await asyncio.gather(*probes, return_exceptions=True)
+        answers = results[:len(candidates)]
+        master_answer = results[len(candidates)] if master is not None else None
+        # A master that is REPLAYING cannot serve either, and it is not
+        # silent — it answers INFO, which is why nothing used to mark it
+        # unavailable and every read stayed pinned to it for the whole
+        # replay while a good replica sat idle. Unavailable is unavailable.
+        master_loading = (
+            isinstance(master_answer, dict) and bool(master_answer.get("loading"))
         )
-        if not state:
-            # The master could not be asked. WHY decides what follows: a
-            # refused or reset connection is the moment its replicas matter
-            # most — they are the only copies of this graph still standing,
-            # and the node that would otherwise take the read is the one
-            # that just failed to answer. A deadline is not that; it is a
-            # master that is merely busy, and it is still the master.
-            silent = probe_exc is not None and (
-                _is_connection_refused_error(probe_exc)
-                or _is_transient_connection_error(probe_exc)
+        if master_loading:
+            self._log_loading(f"{master.host}:{master.port}", master_answer)
+        elif isinstance(master_answer, dict) and master is not None:
+            self._clear_loading_note(f"{master.host}:{master.port}")
+        master_silent = master is not None and (
+            not isinstance(master_answer, dict) or master_loading
+        )
+
+        strict: List[str] = []
+        alive_replicas: List[str] = []
+        for (key, _node), answer in zip(by_key.items(), answers):
+            if not isinstance(answer, dict):
+                continue
+            if answer.get("role") != "replica":
+                # A master — promoted, or never a replica. Either way not
+                # ours to read as one.
+                continue
+            if answer.get("loading"):
+                # Replaying its dataset: every read it took would come back
+                # -LOADING. Excluded from the relaxed path too, which exists
+                # to serve the copies still STANDING.
+                self._log_loading(key, answer)
+                continue
+            link_up = answer.get("masterLinkStatus") == "up"
+            lag = answer.get("lagBytes")
+            within_budget = (
+                not isinstance(lag, int) or lag <= _REPLICA_READ_MAX_LAG_BYTES
             )
-            if cached is not None:
-                # The replicas it vouched for when it last spoke, until that
-                # reading is too old to mean anything — then the master, which
-                # is where a shard with no freshness evidence belongs.
-                fresh = now - vouched_at.get(graph_key, cached[0]) < _REPLICA_VOUCH_MAX_AGE_S
-                vouched = cached[1] if fresh else set()
-            elif silent:
-                # Never sampled and the node is not answering: a reading
-                # nobody can take beats no answer at all, and this ages out
-                # like any other.
-                vouched = set(endpoints)
-                vouched_at[graph_key] = now
-            else:
-                vouched = set()
-            # Stamped so a master that is gone is asked once per window, not
-            # once per read.
-            cache[graph_key] = (now, vouched)
-            self._note_master_silent(graph_key, silent)
-            return vouched & endpoints
-        in_step = {
-            str(r.get("endpoint"))
-            for r in (state.get("replicas") or [])
-            if r.get("state") == "online"
-            # No offset reported means no way to tell how far behind it is,
-            # and the master answers whatever the router is unsure of.
-            and isinstance(r.get("lagBytes"), int)
-            and r["lagBytes"] <= _REPLICA_READ_MAX_LAG_BYTES
-        }
-        cache[graph_key] = (now, in_step)
-        vouched_at[graph_key] = now
-        self._note_master_silent(graph_key, False)
-        return in_step & endpoints
+            # A replica that was already far behind when its master died is
+            # still a bad answer, so the relaxation below drops the LINK and
+            # SYNC requirements and keeps the lag one: a detached replica
+            # still reports the offsets its last snapshot knew, so the
+            # figure remains readable. Only an unknowable lag is waved
+            # through, and only once the master is gone.
+            # It answered and is not replaying, so a NEXT replay on this
+            # node is news again — pods get rotated more than once.
+            self._clear_loading_note(key)
+            if within_budget:
+                alive_replicas.append(key)
+            if (
+                link_up
+                and not answer.get("masterSyncInProgress")
+                and isinstance(lag, int)
+                and lag <= _REPLICA_READ_MAX_LAG_BYTES
+            ):
+                strict.append(key)
+
+        if strict:
+            chosen = strict
+        elif master_silent and alive_replicas:
+            # The master is not there. Its replicas are the only copies of
+            # this graph still standing, so a stale answer beats no answer —
+            # the rule the old master-side sampling kept by holding the last
+            # set it vouched for.
+            chosen = alive_replicas
+        else:
+            chosen = []
+        cache[graph_key] = (now, chosen)
+        self._note_master_silent(graph_key, master_silent)
+        return [by_key[k] for k in chosen]
 
     def _pinned_to(self, graph, node):
         """The same graph, with its commands addressed to ONE node.
@@ -2863,6 +3152,13 @@ class FalkorDBProvider(GraphDataProvider):
         schema and the result parsing exactly as they are.
         """
         import copy
+
+        # A node with a client of its own IS the pin: select the same graph
+        # on it and every command goes there, no rebinding needed. This is
+        # how sentinel and standalone reach a replica, having no
+        # ``target_nodes`` to aim with.
+        if getattr(node, "db", None) is not None:
+            return node.db.select_graph(graph.name)
 
         pinned = copy.copy(graph)
         base = graph.client.execute_command
@@ -2980,6 +3276,25 @@ class FalkorDBProvider(GraphDataProvider):
                             "client and retrying (%d/%d).",
                             self._graph_name, type(exc).__name__,
                             attempt, max_retries,
+                        )
+                        await self._rebuild_graph_client_for_failover(gen)
+                        continue
+                    # The node says it is a replica now: our pool is pointed
+                    # at a demoted master. Re-resolve and retry in ANY mode —
+                    # this is the sentinel/standalone shape of what MOVED is
+                    # for a cluster, and it is bounded by the same schedule so
+                    # a node that is never coming back cannot hold the
+                    # caller's whole budget.
+                    if _is_role_changed_error(exc):
+                        if attempt >= max_retries:
+                            raise
+                        gen = self._conn_generation
+                        attempt += 1
+                        logger.warning(
+                            "FalkorDB %s: the node answered READONLY — it has "
+                            "been demoted; re-resolving the master and "
+                            "retrying (%d/%d).",
+                            self._graph_name, attempt, max_retries,
                         )
                         await self._rebuild_graph_client_for_failover(gen)
                         continue
@@ -13203,6 +13518,15 @@ class FalkorDBProvider(GraphDataProvider):
         # reconcile without colliding with the cancelled one.
         self._reconcile_task = None
         self._reconcile_started = False
+
+        # Per-replica clients first: they are ours alone, and a pool left
+        # behind here leaks for the life of the process.
+        try:
+            await asyncio.wait_for(
+                self._release_pinned_replicas(), timeout=_close_timeout,
+            )
+        except Exception as exc:                          # noqa: BLE001 — best effort
+            logger.debug("FalkorDB replica clients close skipped: %s", exc)
 
         try:
             if hasattr(self, "_redis") and self._redis is not None:

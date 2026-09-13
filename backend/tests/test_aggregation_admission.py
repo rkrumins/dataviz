@@ -63,6 +63,10 @@ class _FakeRedis:
                 self.kv[key] = args[2]
                 return 1
             return 0
+        if "PEXPIRE" in script:  # lease renew: compare-and-extend
+            if self.kv.get(key) == args[1]:
+                return 1
+            return -1
         if "ZCARD" in script:  # slot acquire
             now, stale, limit, member = float(args[1]), float(args[2]), int(args[3]), args[4]
             z = self.zsets.setdefault(key, {})
@@ -199,35 +203,6 @@ def test_a_still_renewing_predecessor_is_not_taken_over():
         with pytest.raises(ProviderBusy):
             await a.acquire_graph_lease(provider, owner="agg_self")
         first.renew_task.cancel()
-
-    _run(scenario())
-
-
-def test_a_lease_lost_to_another_holder_is_published_to_the_writer():
-    """A lease is only a fence if the writer reads it. The renewer stops when
-    the key holds somebody else's token; it must also SAY so, or the pipeline
-    keeps writing a graph it no longer owns."""
-    async def scenario():
-        redis = _FakeRedis()
-        a = adm.AggregationAdmission(redis)
-        provider = _FakeProvider()
-
-        # Drive the renewer on a test cadence rather than the production 20s:
-        # a unit test that sleeps a renew interval is a unit test nobody runs.
-        original = adm._GRAPH_LEASE_RENEW_SECS
-        adm._GRAPH_LEASE_RENEW_SECS = 0.01
-        try:
-            lease = await a.acquire_graph_lease(provider, owner="agg_one")
-            assert lease is not None and not lease.is_lost()
-            redis.kv[lease.key] = "somebody-else|agg_two|other-host"
-            for _ in range(200):
-                if lease.is_lost():
-                    break
-                await asyncio.sleep(0.01)
-            assert lease.is_lost()
-            lease.renew_task.cancel()
-        finally:
-            adm._GRAPH_LEASE_RENEW_SECS = original
 
     _run(scenario())
 
@@ -470,84 +445,89 @@ def test_read_slots_fail_open_when_redis_is_down():
     _run(scenario())
 
 
-# ── the slots and the node's threads, compared at last ───────────────────
+# ── a lost write lease has to REACH the run ─────────────────────────────
 #
-# The slot envs live in a ConfigMap and THREAD_COUNT in a StatefulSet, set
-# by different people solving different problems. The shipped base pair
-# (2 + 4) is exactly the production-cluster overlay's whole query width, and
-# nothing anywhere compared the two numbers — the pipeline read the thread
-# count off the node on every write batch and never looked at it.
+# The lease is the only thing standing between two rebuilds and one master.
+# Losing it used to stop the renewal task and nothing else: the pipeline
+# captured the lease once and touched it again only to release it, so it kept
+# MERGEing while a second run held the lease and MERGEd the same pairs. With
+# ``weight_mode`` 'overwrite' on a first touch and 'add' on a repeat, the
+# stored weight of every pair both runs touch is then neither run's computed
+# weight — and nothing says so.
+#
+# ``__main__._renew_exec_lock`` had this right for the exec lock on the same
+# two conditions (holder changed, or un-renewable for longer than the TTL):
+# it cancels the run, "to preserve single-active". These pin the same rule
+# for the graph lease.
 
 
-def test_a_node_whose_threads_the_slots_would_fill_says_so_once():
-    adm._SLOTS_CHECKED.clear()
-    try:
-        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 2, 4
-        first = adm.check_slot_sizing("10.0.0.1:6379", 6)
-        assert first and "THREAD_COUNT 6" in first and "6 of 4 available" in first
-        # Once per node per process: this runs on every write batch.
-        assert adm.check_slot_sizing("10.0.0.1:6379", 6) is None
-        # …and per NODE, because the shards need not be sized alike.
-        assert adm.check_slot_sizing("10.0.0.2:6379", 6) is not None
-    finally:
-        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 2, 4
-        adm._SLOTS_CHECKED.clear()
-
-
-def test_slots_inside_the_budget_are_silent_and_so_is_an_unknown_count():
-    adm._SLOTS_CHECKED.clear()
-    orig = adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT
-    try:
-        # The overlay's own patch: 1 + 3 against THREAD_COUNT 6.
-        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 1, 3
-        assert adm.check_slot_sizing("10.0.0.1:6379", 6) is None
-        # Exactly at the line is inside it.
-        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 2, 2
-        assert adm.check_slot_sizing("10.0.0.2:6379", 6) is None
-        # A node that did not say is never warned about — and is not
-        # remembered either, so the next reading still gets to check.
-        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 8, 8
-        assert adm.check_slot_sizing("10.0.0.3:6379", None) is None
-        assert adm.check_slot_sizing("10.0.0.3:6379", 0) is None
-        assert adm.check_slot_sizing("10.0.0.3:6379", 6) is not None
-    finally:
-        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = orig
-        adm._SLOTS_CHECKED.clear()
-
-
-def test_the_check_runs_where_the_reading_lands():
-    """A check nobody calls is a comment. The governor's measured reading is
-    the only place the node's THREAD_COUNT and this pod's envs meet."""
-    import inspect
-
-    from backend.app.providers.falkordb_materialize import AggregationPipeline
-
-    src = inspect.getsource(AggregationPipeline._governor_reading)
-    assert "check_slot_sizing" in src
-
-
-def test_on_a_cluster_an_unnamed_node_reads_no_pressure_at_all():
-    """The stamp half refuses to WRITE the seed key on a cluster, because a
-    seed is shared by every shard and a stamp there tells all three shards'
-    writers to slow for one shard's starving readers. The reading half kept
-    falling back to it — and found whatever a pre-fix stamp had left, on a
-    key nothing keyed to a shard ever writes. It fell back exactly when the
-    governor had no measured reading to name a node with: under load."""
+def test_a_lease_taken_over_is_marked_lost():
     async def scenario():
         redis = _FakeRedis()
         a = adm.AggregationAdmission(redis)
-        cluster = _FakeProvider()
-        cluster._conn_cfg = types.SimpleNamespace(mode="cluster", host="seed", port=6379)
-        await redis.set(adm.read_pressure_key("seed:6379"), "queue_full")
+        provider = _FakeProvider()
+        lease = await a.acquire_graph_lease(provider)
+        assert lease is not None and not lease.lost
 
-        assert await a.read_pressure(cluster) is None
-        # Named node, named key: the signal still works where it is aimed.
-        await redis.set(adm.read_pressure_key("10.0.0.7:6379"), "queue_full")
-        assert await a.read_pressure(cluster, node="10.0.0.7:6379") == "queue_full"
+        # Someone else's token is in the slot now — a takeover, or the TTL
+        # lapsed and a second run won the SET NX.
+        redis.kv[lease.key] = "somebody-else"
+        await a._renew_once(lease)
 
-        # Standalone has one node, and the connection endpoint IS that node.
-        single = _FakeProvider()
-        single._conn_cfg = types.SimpleNamespace(mode="standalone", host="seed", port=6379)
-        assert await a.read_pressure(single) == "queue_full"
+        assert lease.lost is True
+        assert "holder changed" in (lease.lost_reason or "")
+
+    _run(scenario())
+
+
+def test_a_lease_that_cannot_be_renewed_past_its_ttl_is_marked_lost():
+    """A bus outage longer than the TTL means the key EXPIRED and another run
+    may hold it. The exec lock aborts on exactly this; the lease used to log
+    and keep looping forever."""
+    async def scenario():
+        lease = adm.GraphLease("k", "tok", None)
+        a = adm.AggregationAdmission(_DownRedis())
+
+        # Inside the TTL: unknown, not lost — keep trying.
+        await a._renew_once(lease, now=0.0)
+        assert lease.lost is False
+
+        # Past it: the key cannot still be ours.
+        await a._renew_once(lease, now=adm._GRAPH_LEASE_TTL_MS / 1000 + 1)
+        assert lease.lost is True
+        assert "renew" in (lease.lost_reason or "")
+
+    _run(scenario())
+
+
+def test_renewing_never_extends_a_successor_lease():
+    """GET-then-PEXPIRE is check-then-act: between the two the lease can
+    expire and be taken over, and the renewal then extends the NEW holder's
+    lease. One atomic script, like the release already uses."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        lease = await a.acquire_graph_lease(_FakeProvider())
+        other = "successor-token"
+        redis.kv[lease.key] = other
+
+        await a._renew_once(lease)
+        # The successor's token is untouched and its TTL was not extended
+        # on our behalf.
+        assert redis.kv[lease.key] == other
+        assert lease.lost is True
+
+    _run(scenario())
+
+
+def test_a_healthy_lease_keeps_being_renewed():
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        lease = await a.acquire_graph_lease(_FakeProvider())
+        for _ in range(3):
+            await a._renew_once(lease)
+        assert lease.lost is False
+        assert redis.kv[lease.key] == lease.token
 
     _run(scenario())

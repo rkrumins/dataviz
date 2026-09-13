@@ -281,8 +281,11 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     p._gov_unmeasured = 0
     p._gov_others = (0, 0)
     # The graph write lease, which `_paced_write` checks at the batch
-    # boundary. None here: nothing fences a test that holds no lease.
+    # boundary — through `_cancel_check`, the one place a lost lease is
+    # read, so the cooperative-cancel hook it also reads has to be here too.
+    # Neither fences a test that holds no lease and was never cancelled.
     p._lease = None
+    p._should_cancel = None
     p._store_holds = {}
     p._store_hold_s = {}
     p._store_hold_last = None
