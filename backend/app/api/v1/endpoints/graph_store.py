@@ -4,7 +4,11 @@ Four reads over one cached snapshot (``services.graph_store.topology``).
 Gating differs by route on purpose: the whole fleet is an administrator's
 view of the infrastructure, while a single graph's PLACEMENT is part of
 reading a data source — the Freshness drawer and a source's profile show
-"which node holds this" to anyone who may see the source at all.
+"which node holds this" to anyone who may see the source at all. That gate
+is any-workspace, so the placement handlers do the second half of it: the
+source row is read under the caller's visible workspaces, an id outside them
+is a 404 rather than a 403, and what ELSE shares the shard is administrators
+only.
 
 Nothing here dials a node per request. A refresh is the snapshot's job,
 behind its TTL and its stampede lock, so a hundred concurrent viewers cost
@@ -17,7 +21,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from backend.app.auth.dependencies import requires
+from backend.app.auth.dependencies import get_permission_claims, requires
+from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.graph_store import topology
 from backend.app.services.graph_store.schemas import (
     GraphPlacementResponse,
@@ -41,6 +46,12 @@ _REQUIRE_SYSTEM_ADMIN = requires("system:admin")
 #: A list surface asks for many placements at once; the cap keeps one
 #: request from turning into an unbounded response.
 _MAX_BATCH = 200
+
+#: Workspace and data source ids, as the schema mints them (``ws_``/``ds_``
+#: plus hex). Enforced on the refresh route because its two ids become a
+#: Redis ``SCAN MATCH`` glob: the metacharacters are what turn "this source"
+#: into "every source of every workspace".
+_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
 
 
 #: How long Re-measure may hold for the sweep it just asked for. Under any
@@ -131,8 +142,12 @@ async def get_cache_stats(
     dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
 )
 async def refresh_cache(
-    workspaceId: str = Query(..., description="Workspace the source belongs to"),
-    dataSourceId: str = Query(..., description="Data source to refresh"),
+    workspaceId: str = Query(
+        ..., pattern=_ID_PATTERN, description="Workspace the source belongs to",
+    ),
+    dataSourceId: str = Query(
+        ..., pattern=_ID_PATTERN, description="Data source to refresh",
+    ),
     keepFallback: bool = Query(
         True,
         description=(
@@ -146,9 +161,15 @@ async def refresh_cache(
     """Make the next read of every view on this source rebuild from the store.
 
     This is a generation bump, not a delete: existing entries become
-    unreachable immediately and expire on their own, so there is no SCAN over
-    the keyspace and no window where some pods serve the old answer and others
-    the new one. Every process sees the new generation on its next read.
+    unreachable immediately and expire on their own, so there is no window
+    where some pods serve the old answer and others the new one. Every process
+    sees the new generation on its next read. Only ``keepFallback=false`` adds
+    a SCAN, over the one scope's last-known-good mirror.
+
+    Both ids are pattern-bound because that scope is turned into a Redis
+    ``SCAN MATCH`` glob: ``*`` in either of them would widen the purge from
+    one source to every source of every workspace — and the endpoint would
+    report success for it.
 
     Use it when something changed the graph WITHOUT going through the app —
     a direct GRAPH.QUERY, an external loader, a restore. Changes the app makes
@@ -258,6 +279,7 @@ async def get_placement(
     dataSourceId: Optional[str] = Query(None),
     providerId: Optional[str] = Query(None),
     graph: Optional[str] = Query(None),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> GraphPlacementResponse:
     """By data source, or by ``providerId``+``graph`` for a catalogue-keyed
     view that holds a graph name rather than a data source id."""
@@ -266,10 +288,14 @@ async def get_placement(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Pass dataSourceId, or providerId and graph.",
         )
+    visible = _visible_workspace_ids(claims)
     snapshot = await _snapshot()
     if dataSourceId:
-        ds = await _data_source(dataSourceId)
+        ds = await _data_source(dataSourceId, visible)
         if ds is None:
+            # 404 for "not yours" as well as "not there": the ingestion gate
+            # is any-workspace, so an existence-revealing 403 would let one
+            # tenant enumerate another's sources one id at a time.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Data source {dataSourceId} not found",
@@ -277,12 +303,18 @@ async def get_placement(
         provider_id = str(getattr(ds, "provider_id", "") or "")
         keys = topology.placement_keys_for(ds)
     else:
+        # Free-form: a graph name with no row behind it, so there is nothing
+        # to check ownership against. Administrators only.
+        _require_system_admin(claims)
         provider_id, keys = str(providerId), [("source", str(graph))]
 
     instance = topology.instance_for_provider(snapshot, provider_id)
     placements = [
-        topology.placement_for_graph(snapshot, provider_id, key, role=role)
-        for role, key in keys
+        _redact(p, claims)
+        for p in (
+            topology.placement_for_graph(snapshot, provider_id, key, role=role)
+            for role, key in keys
+        )
     ]
     return GraphPlacementResponse(
         data_source_id=dataSourceId,
@@ -310,10 +342,13 @@ async def get_placement(
 )
 async def get_placements(
     dataSourceIds: str = Query(..., description="Comma-separated data source ids"),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> GraphPlacementsResponse:
     ids = [i.strip() for i in dataSourceIds.split(",") if i.strip()][:_MAX_BATCH]
     snapshot = await _snapshot()
-    rows = await _data_sources(ids)
+    # Ids the caller cannot see simply do not come back — the response is a
+    # map, so a missing key is the same answer a deleted source gives.
+    rows = await _data_sources(ids, _visible_workspace_ids(claims))
     out = {}
     for ds in rows:
         provider_id = str(getattr(ds, "provider_id", "") or "")
@@ -338,24 +373,80 @@ async def get_placements(
     )
 
 
-async def _data_source(ds_id: str):
-    rows = await _data_sources([ds_id])
+def _visible_workspace_ids(claims: PermissionClaims) -> Optional[set]:
+    """The workspaces this caller may read a data source in; ``None`` when
+    they may read every one.
+
+    ``_require_ingestion_read`` grants on the permission being held in ANY
+    workspace — its own docstring says the handler then filters to the
+    caller's visible workspaces, and placement is where that filtering
+    happens. Platform tiers only for the unrestricted answer, matching
+    ``workspace_visibility.compute_visible_data_source_ids``: a workspace
+    data source belongs to one workspace and is not a shared catalogue row,
+    so ``system:org-viewer`` sees the workspaces it is bound to like anyone
+    else.
+    """
+    if ("system:admin" in claims.global_perms
+            or "system:org-admin" in claims.global_perms):
+        return None
+    return set(claims.ws_perms.keys())
+
+
+def _require_system_admin(claims: PermissionClaims) -> None:
+    if "system:admin" in claims.global_perms:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "missing_permission",
+            "permission": "system:admin",
+            "scope": {"type": "global", "id": None},
+            "message": "Looking up a placement by graph name is administrators only",
+        },
+    )
+
+
+def _redact(placement, claims: PermissionClaims):
+    """Drop what shares the shard, unless the caller may see the fleet.
+
+    ``siblings_sample`` names up to eight OTHER graphs on the same shard —
+    their keys and their data sources' labels — and the shard a graph lands
+    on is arithmetic, not tenancy. So for anyone but an administrator it is
+    another tenant's row in a response about your own. The COUNT stays: "you
+    are sharing with 40 others" is the part that explains a slow shard, and
+    it names nobody.
+    """
+    if placement is None or "system:admin" in claims.global_perms:
+        return placement
+    return placement.model_copy(update={"siblings_sample": []})
+
+
+async def _data_source(ds_id: str, workspace_ids: Optional[set]):
+    rows = await _data_sources([ds_id], workspace_ids)
     return rows[0] if rows else None
 
 
-async def _data_sources(ids):
-    """The rows behind a placement question — read-only, one query."""
+async def _data_sources(ids, workspace_ids: Optional[set]):
+    """The rows behind a placement question — read-only, one query.
+
+    ``workspace_ids`` is the caller's visible set, or ``None`` for a platform
+    tier that sees every workspace. An empty set is a real answer (a user
+    bound to nothing) and must return nothing, not everything.
+    """
     from sqlalchemy import select
 
     from backend.app.db.models import WorkspaceDataSourceORM
 
-    if not ids:
+    if not ids or workspace_ids is not None and not workspace_ids:
         return []
+    where = [
+        WorkspaceDataSourceORM.id.in_(list(ids)),
+        WorkspaceDataSourceORM.deleted_at.is_(None),
+    ]
+    if workspace_ids is not None:
+        where.append(WorkspaceDataSourceORM.workspace_id.in_(list(workspace_ids)))
     factory = topology._session_factory()
     async with factory() as session:
         return list((await session.execute(
-            select(WorkspaceDataSourceORM).where(
-                WorkspaceDataSourceORM.id.in_(list(ids)),
-                WorkspaceDataSourceORM.deleted_at.is_(None),
-            )
+            select(WorkspaceDataSourceORM).where(*where)
         )).scalars().all())

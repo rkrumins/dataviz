@@ -95,7 +95,18 @@ def _wire(monkeypatch, snapshot=None, *, data_sources=(), boom=None, refreshing=
 
     class _Session:
         async def execute(self, query):
-            return _Result(list(data_sources))
+            # Apply the handler's own WHERE, so a route that forgets the
+            # workspace predicate fails here rather than passing on a fake
+            # that hands back every row whatever it was asked for.
+            params = dict(query.compile().params)
+            wanted_ids = params.get("id_1")
+            wanted_ws = params.get("workspace_id_1")
+            rows = [
+                ds for ds in data_sources
+                if (wanted_ids is None or ds.id in wanted_ids)
+                and (wanted_ws is None or ds.workspace_id in wanted_ws)
+            ]
+            return _Result(rows)
 
         async def __aenter__(self):
             return self
@@ -106,11 +117,26 @@ def _wire(monkeypatch, snapshot=None, *, data_sources=(), boom=None, refreshing=
     monkeypatch.setattr(topology, "_session_factory", lambda: (lambda: _Session()))
 
 
-def _ds(ds_id="ds1", *, provider="p1", graph="g1", mode=None, dedicated=None):
+def _ds(ds_id="ds1", *, provider="p1", graph="g1", mode=None, dedicated=None,
+        workspace="ws1"):
     return types.SimpleNamespace(
-        id=ds_id, provider_id=provider, graph_name=graph,
+        id=ds_id, provider_id=provider, graph_name=graph, workspace_id=workspace,
         projection_mode=mode, dedicated_graph_name=dedicated, deleted_at=None,
     )
+
+
+def _claims(*, global_perms=(), workspaces=("ws1",)):
+    """A caller. The default is the ordinary one this route exists for: no
+    platform grant, bound to one workspace."""
+    from backend.app.services.permission_service import PermissionClaims
+
+    return PermissionClaims(
+        sid="s1", global_perms=tuple(global_perms),
+        ws_perms={ws: ("workspace:provider:read",) for ws in workspaces},
+    )
+
+
+_ADMIN = _claims(global_perms=("system:admin",), workspaces=())
 
 
 # ── gates ────────────────────────────────────────────────────────────────
@@ -128,6 +154,80 @@ def test_placement_rides_the_ingestion_read_gate_not_system_admin():
         calls = _dep_calls(_route(path).dependant)
         assert gs._require_ingestion_read in calls, path
         assert gs._REQUIRE_SYSTEM_ADMIN not in calls, path
+
+
+def test_the_ingestion_gate_is_only_half_the_check(monkeypatch):
+    """``_require_ingestion_read`` grants on the permission being held in ANY
+    workspace — its own docstring says the handler then filters to the
+    caller's visible ones. These routes did not, so one tenant's binding read
+    every tenant's placement: the master's endpoint, its memory, every replica
+    and its lag, and the graphs sharing the shard. ``_MAX_BATCH`` is 200, so
+    enumerating the fleet cost one request per 200 ids."""
+    theirs = _ds("ds-theirs", graph="g1", workspace="ws-other")
+    _wire(monkeypatch, data_sources=[theirs])
+
+    # 404, not 403: an answer that differs by existence is an oracle over
+    # every other tenant's ids.
+    with pytest.raises(HTTPException) as exc:
+        _run(gs.get_placement(dataSourceId="ds-theirs", providerId=None, graph=None,
+                              claims=_claims(workspaces=("ws-mine",))))
+    assert exc.value.status_code == 404
+
+    # The batch answers about the ids it may: the rest are simply absent,
+    # which is the same shape a deleted source produces.
+    out = _run(gs.get_placements(dataSourceIds="ds-theirs",
+                                 claims=_claims(workspaces=("ws-mine",))))
+    assert out.placements == {}
+
+    # …and the platform tiers still see it, which is what the fleet pages read.
+    assert _run(gs.get_placement(dataSourceId="ds-theirs", providerId=None,
+                                 graph=None, claims=_ADMIN)).provider_id == "p1"
+
+
+def test_a_caller_bound_to_nothing_reads_nothing(monkeypatch):
+    """An empty ``ws_perms`` is a real answer, not a missing filter: a
+    workspace_id IN () must return no rows rather than every row."""
+    _wire(monkeypatch, data_sources=[_ds("ds1")])
+    with pytest.raises(HTTPException) as exc:
+        _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+                              claims=_claims(workspaces=())))
+    assert exc.value.status_code == 404
+
+
+def test_looking_a_graph_up_by_name_is_administrators_only(monkeypatch):
+    """The ``providerId``+``graph`` branch takes a free-form graph key with no
+    row behind it, so there is no owner to check it against — and it answers
+    with the node, its replicas and what shares the shard."""
+    _wire(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1",
+                              claims=_claims()))
+    assert exc.value.status_code == 403
+    assert _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1",
+                                 claims=_ADMIN)).placements[0].graph_key == "g1"
+
+
+def test_what_else_shares_the_shard_is_not_part_of_reading_your_own_source(monkeypatch):
+    """``siblings_sample`` names up to eight other graphs on the shard — their
+    keys and their data sources' labels. Which shard a graph lands on is a
+    hash, not a tenancy boundary, so for anyone but an administrator that is
+    another tenant's row inside a response about their own source. The COUNT
+    stays: it explains a busy shard and names nobody."""
+    from backend.app.services.graph_store.schemas import DataSourceRef
+
+    snapshot = _snapshot(graphs=("g1", "g-theirs"))
+    shard = snapshot.instances[0].shards[0]
+    shard.graphs[1].data_sources = [DataSourceRef(id="ds-theirs", label="Acme payroll")]
+    _wire(monkeypatch, snapshot, data_sources=[_ds("ds1", graph="g1")])
+
+    mine = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+                                 claims=_claims()))
+    assert mine.placements[0].siblings_sample == []
+    assert mine.placements[0].siblings == 1              # the count survives
+
+    admin = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+                                  claims=_ADMIN))
+    assert [g["label"] for g in admin.placements[0].siblings_sample] == ["Acme payroll"]
 
 
 # ── answers ──────────────────────────────────────────────────────────────
@@ -181,7 +281,8 @@ def test_a_refresh_behind_figures_already_on_screen_says_so(monkeypatch):
 def test_placement_answers_for_a_data_source_including_its_projection(monkeypatch):
     ds = _ds(graph="g1", mode="dedicated", dedicated="g1_proj")
     _wire(monkeypatch, _snapshot(graphs=("g1", "g1_proj")), data_sources=[ds])
-    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None))
+    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+                              claims=_claims()))
     assert out.provider_id == "p1" and out.mode == "cluster" and out.reachable
     assert [(p.role, p.graph_key) for p in out.placements] == [
         ("source", "g1"), ("projection", "g1_proj"),
@@ -192,7 +293,8 @@ def test_placement_answers_for_a_data_source_including_its_projection(monkeypatc
 
 def test_placement_by_provider_and_graph_serves_a_catalogue_keyed_view(monkeypatch):
     _wire(monkeypatch)
-    out = _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1"))
+    out = _run(gs.get_placement(dataSourceId=None, providerId="p1", graph="g1",
+                              claims=_ADMIN))
     assert [p.graph_key for p in out.placements] == ["g1"]
     assert out.data_source_id is None
 
@@ -200,14 +302,16 @@ def test_placement_by_provider_and_graph_serves_a_catalogue_keyed_view(monkeypat
 def test_placement_needs_something_to_look_up(monkeypatch):
     _wire(monkeypatch)
     with pytest.raises(HTTPException) as exc:
-        _run(gs.get_placement(dataSourceId=None, providerId=None, graph=None))
+        _run(gs.get_placement(dataSourceId=None, providerId=None, graph=None,
+                              claims=_claims()))
     assert exc.value.status_code == 400
 
 
 def test_an_unknown_data_source_is_a_404(monkeypatch):
     _wire(monkeypatch, data_sources=[])
     with pytest.raises(HTTPException) as exc:
-        _run(gs.get_placement(dataSourceId="ds-missing", providerId=None, graph=None))
+        _run(gs.get_placement(dataSourceId="ds-missing", providerId=None, graph=None,
+                              claims=_claims()))
     assert exc.value.status_code == 404
 
 
@@ -217,7 +321,8 @@ def test_the_batch_answers_one_chip_per_source_and_is_capped(monkeypatch):
     sources = [_ds(f"ds{i}", graph=f"g{i}") for i in range(5)]
     _wire(monkeypatch, _snapshot(graphs=tuple(f"g{i}" for i in range(5))),
           data_sources=sources)
-    out = _run(gs.get_placements(dataSourceIds="ds0, ds1 ,ds2,ds3,ds4"))
+    out = _run(gs.get_placements(dataSourceIds="ds0, ds1 ,ds2,ds3,ds4",
+                               claims=_claims()))
     assert set(out.placements) == {f"ds{i}" for i in range(5)}
     assert out.placements["ds2"].master == "10.0.0.1:6379"
     assert out.placements["ds2"].graph_key == "g2" and out.placements["ds2"].present
@@ -226,7 +331,8 @@ def test_the_batch_answers_one_chip_per_source_and_is_capped(monkeypatch):
 
 def test_a_provider_the_snapshot_never_read_still_answers_with_the_reason(monkeypatch):
     _wire(monkeypatch, data_sources=[_ds(provider="p-other")])
-    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None))
+    out = _run(gs.get_placement(dataSourceId="ds1", providerId=None, graph=None,
+                              claims=_claims()))
     assert not out.reachable
     assert "has not been read" in (out.error or "")
     assert out.placements and out.placements[0].master is None

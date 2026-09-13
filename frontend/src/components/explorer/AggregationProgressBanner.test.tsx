@@ -93,3 +93,53 @@ describe('AggregationProgressBanner while a rebuild runs', () => {
         expect(setJobLimits).toHaveBeenCalledWith('ds-1', 'agg_9', { timeoutSecs: 21_600 })
     })
 })
+
+/**
+ * `isReady` is `status === 'ready'` and nothing else, so every other settled
+ * state fell through to the in-progress branch: a 5s poll that never stopped,
+ * on an end-user surface, from backgrounded tabs — under a spinner claiming
+ * "we are pre-computing structural hierarchies… view creation is paused until
+ * this completes" for a source somebody had just explicitly skipped.
+ */
+describe('AggregationProgressBanner on a state that will never change', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        vi.useRealTimers()
+    })
+
+    const settled = (aggregationStatus: string) => ({
+        dataSourceId: 'ds-1', isReady: false, aggregationStatus,
+        canCreateViews: true, driftDetected: false, aggregationEdgeCount: 0,
+    })
+
+    it.each(['none', 'skipped', 'cancelled'])('stops polling on %s', async (status) => {
+        vi.useFakeTimers({ shouldAdvanceTime: true })
+        getReadiness.mockResolvedValue(settled(status))
+        renderBanner()
+
+        await vi.waitFor(() => expect(getReadiness).toHaveBeenCalledTimes(1))
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect(getReadiness).toHaveBeenCalledTimes(1)
+    })
+
+    it('never claims work is in flight, or that views are blocked, on a skipped source', async () => {
+        getReadiness.mockResolvedValue(settled('skipped'))
+        renderBanner()
+
+        expect(await screen.findByText(/Aggregation Skipped/)).toBeInTheDocument()
+        expect(screen.queryByText(/pre-computing structural hierarchies/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/View creation is paused/)).not.toBeInTheDocument()
+        expect(screen.getByText(/Views work as normal/)).toBeInTheDocument()
+    })
+
+    it('says what "none" and "cancelled" actually mean', async () => {
+        getReadiness.mockResolvedValue(settled('none'))
+        const { unmount } = renderBanner()
+        expect(await screen.findByText(/has not been set up/)).toBeInTheDocument()
+        unmount()
+
+        getReadiness.mockResolvedValue(settled('cancelled'))
+        renderBanner()
+        expect(await screen.findByText(/Nothing is running now/)).toBeInTheDocument()
+    })
+})

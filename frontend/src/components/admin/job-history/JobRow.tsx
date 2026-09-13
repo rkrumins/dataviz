@@ -193,8 +193,11 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     // Open the SSE stream only for actively-running jobs so terminal
     // rows (the bulk of Job History) don't open dead EventSources.
     // Phase 3's useJobsLive(scope) consolidates this to one connection
-    // per workspace; for Phase 1 we accept N connections per visible
-    // running row (HTTP/1.1 caps at 6, sufficient in practice).
+    // per workspace; until then useJob caps how many streams the tab holds
+    // at once and closes each one on its terminal event. The cap used to be
+    // left to the browser on the premise that "HTTP/1.1 caps at 6" — which
+    // is not true behind an HTTP/2 ingress, where a page of running rows
+    // opens one reader per row and keeps reconnecting to it forever.
     const isActive = jobFromList.status === 'running' || jobFromList.status === 'pending'
     const liveOverlay = useJob(
         jobFromList.dataSourceId,

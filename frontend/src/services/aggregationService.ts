@@ -487,7 +487,7 @@ export interface JobHistoryFilters {
 export interface DataSourceReadinessResponse {
   dataSourceId: string;
   isReady: boolean;
-  aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped';
+  aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped' | 'cancelled';
   canCreateViews: boolean;
   activeJob?: AggregationJobResponse;
   driftDetected: boolean;
@@ -520,6 +520,17 @@ export interface DataSourceReadinessResponse {
    *  under the same three unknown cases as `projectorCurrent`. */
   projectionCommitsBehind?: number | null;
   message: string;
+}
+
+/**
+ * The two catch-up fields on their own, from a route that reads nothing but
+ * the TTL-cached projection map. Same contract as the identically-named
+ * fields on readiness: null is UNKNOWN, never healthy.
+ */
+export interface ProjectionHealthResponse {
+  dataSourceId: string;
+  projectorCurrent?: boolean | null;
+  projectionCommitsBehind?: number | null;
 }
 
 export interface DriftCheckResponse {
@@ -835,6 +846,23 @@ class AggregationService {
   async getReadiness(dataSourceId: string): Promise<DataSourceReadinessResponse> {
     return authFetch<DataSourceReadinessResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/readiness`
+    );
+  }
+
+  /**
+   * Just "is this source's projection behind, and by how much".
+   *
+   * The canvas's catch-up notice used to read these two fields off
+   * `/readiness`, which on a READY source resolves the provider, reads the
+   * run meta and computes a graph fingerprint — three sequential 5s waits
+   * holding a graph-read session and issuing real queries on the shard. That
+   * poll only arms once a read came back short, so it was guaranteed to be
+   * running during exactly the degradation it was reporting on. This one
+   * answers from a TTL-cached control-plane read and touches no graph store.
+   */
+  async getProjectionHealth(dataSourceId: string): Promise<ProjectionHealthResponse> {
+    return authFetch<ProjectionHealthResponse>(
+      `/api/v1/admin/data-sources/${dataSourceId}/projection-health`
     );
   }
 

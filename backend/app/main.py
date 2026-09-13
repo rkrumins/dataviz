@@ -2710,7 +2710,13 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
-    expose_headers=["X-Provider-Health", "X-Cache-Status"],
+    #
+    # ``Retry-After`` is on this list even though it is a standard header:
+    # it is NOT one of the seven CORS-safelisted response headers, so
+    # without it ``parseRetryAfterMs`` reads null on every cross-origin
+    # answer and the client falls back to its own backoff — losing the
+    # server's pacing hint on exactly the 429/503/504 that carry one.
+    expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was
@@ -2821,7 +2827,7 @@ async def health_alias():
 
 @app.get("/health/deps", tags=["health"])
 @app.get("/api/v1/health/deps", tags=["health"], include_in_schema=False)
-async def dependency_health():
+async def dependency_health(request: Request):
     """Deep dependency report — for dashboards and on-call.
 
     Includes:
@@ -2899,15 +2905,25 @@ async def dependency_health():
     # and dialling a store that IS the incident is the last thing wanted. A
     # breaker state says a provider is unhappy; this says which nodes of which
     # cluster are answering, and what the sweep already found wrong.
-    try:
-        from backend.app.services.graph_store import topology as _gs_topology
+    #
+    # Behind the metrics gate, though: this endpoint is unauthenticated, and
+    # which nodes of which cluster are answering is the same class of internal
+    # state the scrape endpoint is opt-in for. Everything else here is about
+    # THIS process; this block is about the fleet.
+    from backend.app.api.v1.endpoints.metrics import metrics_authorized
 
-        summary = _gs_topology.cached_summary()
-        result["graph_store"] = summary if summary is not None else {
-            "status": "no reading yet in this process",
-        }
-    except Exception as exc:  # noqa: BLE001 — a report must not 500
-        result["graph_store"] = {"_error": str(exc)[:200]}
+    if not metrics_authorized(request):
+        result["graph_store"] = {"status": "restricted"}
+    else:
+        try:
+            from backend.app.services.graph_store import topology as _gs_topology
+
+            summary = _gs_topology.cached_summary()
+            result["graph_store"] = summary if summary is not None else {
+                "status": "no reading yet in this process",
+            }
+        except Exception as exc:  # noqa: BLE001 — a report must not 500
+            result["graph_store"] = {"_error": str(exc)[:200]}
 
     # Resilience counters (per process, monotonic since boot). How often the
     # breaker was asked to judge a slow or rejected query and correctly did

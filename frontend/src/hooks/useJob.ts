@@ -7,19 +7,48 @@
  * status; consumers (JobRow) merge the overlay onto the polling-derived
  * job object so the UI reflects mid-batch progress without a full refetch.
  *
- * Reconnection is browser-managed (``EventSource`` reconnects automatically
- * with the last received ``id`` in the ``Last-Event-ID`` header). The
- * backend's ``XRANGE`` backfill closes any gap; if MAXLEN truncation has
- * dropped events older than the reconnect cursor, the consumer emits a
- * synthetic ``resync`` event which we surface as ``needsResync=true`` so
- * the caller can refetch via REST.
+ * RECONNECTION IS OURS, NOT THE BROWSER'S. ``EventSource`` reconnects by
+ * itself, and that was the problem: roughly every 3 seconds, unjittered, for
+ * as long as the row is mounted, with no ceiling and no end — and ``onError``
+ * only flipped ``connected``, so nothing ever noticed. A control plane that
+ * is down therefore gets every running row in every open tab knocking on it
+ * three times a minute each, in lockstep, forever. So the stream is CLOSED on
+ * error and re-opened on a jittered backoff that widens to a ceiling, and it
+ * is closed for good once a ``terminal`` event lands (the durable values come
+ * from the polled row after that, so the socket has nothing left to carry).
  *
- * Phase 1 scope: one EventSource per row. With HTTP/1.1's 6-conn-per-
- * origin cap this limits us to ~6 visible running rows per browser tab,
- * which is fine in practice. Phase 3's ``useJobsLive(scope)`` collapses
- * this to one EventSource per workspace.
+ * The backend's ``XRANGE`` backfill closes any gap a reconnect leaves; if
+ * MAXLEN truncation has dropped events older than the reconnect cursor, the
+ * consumer emits a synthetic ``resync`` event which we surface as
+ * ``needsResync=true`` so the caller can refetch via REST.
+ *
+ * CONCURRENCY IS CAPPED HERE, per tab, across every mounted row. The original
+ * note said one stream per row was self-limiting because "HTTP/1.1 caps at
+ * 6" — which is not true behind an HTTP/2 ingress, where a tab will happily
+ * hold a hundred, each one pinning a server-side reader. A row that cannot
+ * get a slot simply runs on the polling fallback (which is the source of
+ * truth anyway) and tries again later. Phase 3's ``useJobsLive(scope)``
+ * collapses this to one EventSource per workspace.
  */
 import { useEffect, useRef, useState } from 'react'
+import { withJitter } from '@/config/polling'
+
+/**
+ * Live streams one tab may hold at once. Beyond this, rows fall back to the
+ * 5s job-history poll — which already owns the durable values, so the only
+ * thing lost is mid-batch progress on the rows past the cap.
+ */
+const MAX_CONCURRENT_STREAMS = 4
+
+/** Reconnect backoff: first gap, and the ceiling it widens to. */
+const RECONNECT_BASE_MS = 3_000
+const RECONNECT_MAX_MS = 60_000
+
+/** How long a row without a free slot waits before asking for one again. */
+const SLOT_RETRY_MS = 10_000
+
+/** Streams currently open across every mounted row in this tab. */
+let openStreams = 0
 
 export interface JobLiveOverlay {
     /** Whether the EventSource is currently connected. False during the
@@ -129,18 +158,42 @@ export function useJob(
             return
         }
         const url = `/api/v1/admin/data-sources/${encodeURIComponent(dataSourceId)}/aggregation-jobs/${encodeURIComponent(jobId)}/events`
-        const source = new EventSource(url, { withCredentials: true })
+
+        let cancelled = false
+        let source: EventSource | null = null
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let attempt = 0
+        let holdsSlot = false
+
+        const closeSource = () => {
+            if (source) {
+                source.close()
+                source = null
+            }
+            if (holdsSlot) {
+                openStreams -= 1
+                holdsSlot = false
+            }
+        }
 
         const onOpen = () => {
+            attempt = 0
             setState((prev) => ({ ...prev, connected: true }))
         }
 
         const onError = () => {
-            // Browser auto-reconnects via EventSource. Reflect the
-            // disconnected state so the caller can show a "live
-            // updates unavailable" badge while polling fallback owns
-            // the source of truth.
+            if (cancelled) return
+            // Reflect the disconnected state so the caller can show a "live
+            // updates unavailable" badge while the polling fallback owns the
+            // source of truth — then take the reconnect away from the browser,
+            // which retries every ~3s forever, unjittered, per row, per tab.
             setState((prev) => ({ ...prev, connected: false }))
+            closeSource()
+            attempt += 1
+            timer = setTimeout(
+                open,
+                withJitter(Math.min(RECONNECT_BASE_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS)),
+            )
         }
 
         const handleEvent = (ev: MessageEvent) => {
@@ -208,19 +261,42 @@ export function useJob(
                 terminal: parsed.type === 'terminal',
                 snapshot: { ...prev.snapshot, ...next },
             }))
+
+            // The run is over and the DB is the source of truth from here, so
+            // the stream has nothing left to carry. Left open, it was a socket
+            // per finished row plus the browser's reconnect loop behind it.
+            if (parsed.type === 'terminal') closeSource()
         }
 
-        source.addEventListener('open', onOpen)
-        source.addEventListener('error', onError as EventListener)
-        // SSE event types — we register listeners for the named events
-        // the backend produces. ``message`` is the catchall for events
-        // without a named ``event:`` line.
-        for (const type of ['state', 'progress', 'phase', 'terminal', 'resync', 'message'] as const) {
-            source.addEventListener(type, handleEvent as EventListener)
+        const open = () => {
+            if (cancelled) return
+            if (!holdsSlot) {
+                if (openStreams >= MAX_CONCURRENT_STREAMS) {
+                    // Every other row in the tab is already streaming. Polling
+                    // still has this row; ask again shortly.
+                    timer = setTimeout(open, withJitter(SLOT_RETRY_MS))
+                    return
+                }
+                openStreams += 1
+                holdsSlot = true
+            }
+            source = new EventSource(url, { withCredentials: true })
+            source.addEventListener('open', onOpen)
+            source.addEventListener('error', onError as EventListener)
+            // SSE event types — we register listeners for the named events
+            // the backend produces. ``message`` is the catchall for events
+            // without a named ``event:`` line.
+            for (const type of ['state', 'progress', 'phase', 'terminal', 'resync', 'message'] as const) {
+                source.addEventListener(type, handleEvent as EventListener)
+            }
         }
+
+        open()
 
         return () => {
-            source.close()
+            cancelled = true
+            if (timer) clearTimeout(timer)
+            closeSource()
             acceptedSeq.current = -1
         }
     }, [dataSourceId, jobId, enabled])

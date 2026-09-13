@@ -165,13 +165,53 @@ const AGG_EXPAND_LIMIT = 1000
 // visible container set — and so the cache key — doesn't change, so nothing would refetch.
 // Bumping the version gives `fetchAggregated` a new identity, re-running every canvas
 // effect that depends on it against a cleared cache.
-const useAggregatedCacheVersion = create<{ version: number }>(() => ({ version: 0 }))
+//
+// Versions are kept PER SCOPE, with `GLOBAL_SCOPE` as the one every canvas adds in.
+// The store used to hold a single counter, so every invalidation — including the ones
+// a single degraded graph's retry loop fires — refetched `POST /graph/edges/aggregated`
+// on every mounted canvas in the tab. That is the most expensive endpoint in the app,
+// fanned into chunks, and a POST, so the client response cache absorbs none of it.
+const GLOBAL_SCOPE = '*'
+const useAggregatedCacheVersion = create<{ versions: Record<string, number> }>(
+    () => ({ versions: {} }),
+)
+
+function bumpScope(scope: string): void {
+    useAggregatedCacheVersion.setState((s) => ({
+        versions: { ...s.versions, [scope]: (s.versions[scope] ?? 0) + 1 },
+    }))
+}
 
 /** Drop all cached aggregated edges and make every mounted canvas refetch. Call after
  *  any mutation that can change rollups (draft save, publish/merge). */
 export function invalidateAggregatedEdges(): void {
     aggregatedEdgeCache.clear()
-    useAggregatedCacheVersion.setState((s) => ({ version: s.version + 1 }))
+    bumpScope(GLOBAL_SCOPE)
+}
+
+/**
+ * The same thing for ONE provider scope: drop that scope's cached answers and
+ * refetch only the canvases reading it.
+ *
+ * For conditions that belong to a single graph — a node holding it being
+ * replaced, that source's projection catching up — this is what should run.
+ * The global version stays where it belongs: mutations that genuinely change
+ * what every canvas would see.
+ *
+ * An empty `scopeKey` means the provider did not declare one, and a cache key
+ * built from '' is shared rather than scoped — so fall back to the global
+ * drop rather than silently invalidating nothing.
+ */
+export function invalidateAggregatedEdgesForScope(scopeKey: string | undefined): void {
+    if (!scopeKey) {
+        invalidateAggregatedEdges()
+        return
+    }
+    const prefix = `${scopeKey}:`
+    for (const key of aggregatedEdgeCache.keys()) {
+        if (key.startsWith(prefix)) aggregatedEdgeCache.delete(key)
+    }
+    bumpScope(scopeKey)
 }
 
 // Server-driven epoch invalidation. Every /edges/aggregated response carries
@@ -195,9 +235,15 @@ function noteMaterializedEpoch(epoch: string | null | undefined): void {
 
 /** Reactive cache version. Canvases include it in their fetch-dedupe keys so an
  *  invalidation (draft save, publish/merge, aggregation job completion) defeats
- *  the "visible set unchanged → skip refetch" guard and actually refetches. */
-export function useAggregatedEdgesCacheVersion(): number {
-    return useAggregatedCacheVersion((s) => s.version)
+ *  the "visible set unchanged → skip refetch" guard and actually refetches.
+ *
+ *  Pass the provider's `scopeKey` to also pick up invalidations aimed at that
+ *  scope alone; without it only the global ones are seen. The sum re-renders
+ *  the caller on either, and never on another scope's. */
+export function useAggregatedEdgesCacheVersion(scopeKey?: string): number {
+    return useAggregatedCacheVersion(
+        (s) => (s.versions[GLOBAL_SCOPE] ?? 0) + (scopeKey ? (s.versions[scopeKey] ?? 0) : 0),
+    )
 }
 
 /**
@@ -236,8 +282,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
 
     const provider = useGraphProvider()
     // Bumped by invalidateAggregatedEdges() — flows into fetchAggregated's deps so canvas
-    // effects refetch against the cleared cache after a save.
-    const cacheVersion = useAggregatedCacheVersion((s) => s.version)
+    // effects refetch against the cleared cache after a save. Scoped to this provider so
+    // another graph's invalidation does not re-run this one's fetch.
+    const cacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
 
     // State
     const [aggregatedEdges, setAggregatedEdges] = useState<Map<string, AggregatedEdgeState>>(new Map())

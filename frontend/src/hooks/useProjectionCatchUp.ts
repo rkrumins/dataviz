@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { aggregationService } from '@/services/aggregationService'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 
@@ -34,6 +35,20 @@ import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
  * recovery edge drops that cache once: the refetch reads the now-complete
  * answer, the missing wires appear, and the notice clears itself with them.
  * Mirrors the readiness loop in `useSourceChangedRefresh`.
+ *
+ * WHAT IT ASKS, AND WHY NOT READINESS. It used to poll `/readiness`, which on
+ * a source whose status is `ready` resolves the provider, reads the run meta
+ * and computes a graph fingerprint — three sequential 5s waits holding a
+ * GRAPH_READ session and issuing real queries on the shard that is already
+ * the problem. This poll arms ONLY on a degraded board, so it was guaranteed
+ * to be running then, on every affected viewer at once: a status probe eating
+ * a large share of the same bulkhead the canvas reads through. It now asks
+ * `/projection-health`, which answers the two fields below out of a
+ * TTL-cached control-plane read and touches no graph store at all.
+ *
+ * The cadence is a minute, jittered, and skipped entirely while the tab is
+ * hidden — the condition clears in minutes, and every viewer of the affected
+ * shard arms within the same second of each other.
  */
 
 /**
@@ -92,10 +107,19 @@ export interface ProjectionCatchUp {
 
 const IDLE: ProjectionCatchUp = { catchingUp: false, commitsBehind: null }
 
+/**
+ * After three consecutive failures the poll drops to this floor instead of
+ * stopping for the life of the canvas. Stopping dead was the worse half of
+ * the old behaviour: the claim already on screen — "about 12,430 recent
+ * changes behind" — stayed there forever, including long after the source
+ * caught up, because nothing was left running to take it down.
+ */
+const AFTER_ERRORS_MS = 5 * 60_000
+
 export function useProjectionCatchUp(
   dataSourceId: string | null | undefined,
   staleReason: string | null | undefined,
-  pollMs = 15000,
+  pollMs: number = POLLING_INTERVALS.projectionCatchUp,
 ): ProjectionCatchUp {
   const [catchingUp, setCatchingUp] = useState(false)
   const [commitsBehind, setCommitsBehind] = useState<number | null>(null)
@@ -118,17 +142,22 @@ export function useProjectionCatchUp(
 
     let cancelled = false
     let consecutiveErrors = 0
-    let poll: ReturnType<typeof setInterval> | undefined
-    const stop = () => {
-      if (poll) {
-        clearInterval(poll)
-        poll = undefined
-      }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const arm = (baseMs: number) => {
+      if (cancelled) return
+      timer = setTimeout(check, withJitter(baseMs))
     }
 
     const check = async () => {
+      if (cancelled) return
+      // Nobody is reading a banner on a hidden tab, and every viewer of the
+      // affected shard is running this same loop. Re-arm without asking.
+      if (typeof document !== 'undefined' && document.hidden) {
+        arm(pollMs)
+        return
+      }
       try {
-        const res = await aggregationService.getReadiness(dataSourceId)
+        const res = await aggregationService.getProjectionHealth(dataSourceId)
         consecutiveErrors = 0
         if (cancelled) return
         // ONLY an explicit false. Null is unknown, and unknown is neither
@@ -138,18 +167,29 @@ export function useProjectionCatchUp(
         wasBehind.current = behind
         setCatchingUp(behind)
         setCommitsBehind(behind ? (res.projectionCommitsBehind ?? null) : null)
+        arm(pollMs)
       } catch {
-        // Readiness unreachable (or not permitted): stop after a few misses
-        // rather than hammer it. A later stale answer re-arms this effect.
-        if (++consecutiveErrors >= 3) stop()
+        // Unreachable, or not permitted. After a few misses back right off —
+        // but TAKE THE CLAIM DOWN FIRST. A frozen "12,430 changes behind" is
+        // worse than no notice: it is a specific number the board keeps
+        // asserting about a source that may have caught up an hour ago.
+        if (cancelled) return
+        if (++consecutiveErrors >= 3) {
+          consecutiveErrors = 0
+          wasBehind.current = false
+          setCatchingUp(false)
+          setCommitsBehind(null)
+          arm(AFTER_ERRORS_MS)
+          return
+        }
+        arm(pollMs)
       }
     }
 
     void check()
-    poll = setInterval(check, pollMs)
     return () => {
       cancelled = true
-      stop()
+      if (timer) clearTimeout(timer)
     }
   }, [ask, dataSourceId, pollMs])
 

@@ -22,8 +22,9 @@ BEFORE anything is set:
    ceiling needs the container's memory limit (the app cannot read it) and
    is refused when the formula's need exceeds it, with the shortfall;
    ``0`` (unlimited) is refused; lowering needs nothing.
-4. ``GRAPH.CONFIG SET`` on the owning node (or every primary in cluster
-   mode when asked), then a fresh read verifies each value landed.
+4. ``GRAPH.CONFIG SET`` on the owning node (or every node of its instance,
+   replicas included, when asked), then a fresh read of EACH node it went to
+   verifies every value landed there.
 5. Every provider on the node is told, so its per-query clamp follows the
    new cap on the next query; the fleet snapshot is dropped so the next
    view shows the new figures; the change is logged with its actor.
@@ -78,8 +79,20 @@ def _ms(ms: int) -> str:
 
 
 def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> ValidatedLimits:
-    """Pure. What ``patch`` would set on a node that reads as ``current``,
-    or :class:`GraphStoreLimitsError` with every number a person needs."""
+    """What ``patch`` would set on a node that reads as ``current``, or
+    :class:`GraphStoreLimitsError` with every number a person needs.
+
+    Reads one thing besides its arguments: ``FALKORDB_CONTAINER_MEMORY_BYTES``,
+    the container limit the DEPLOYMENT states. The guard used to size against
+    ``containerMemoryBytes`` alone — a number the client supplies, bounded
+    below at 1 and not at all above — so any ceiling this refused could be
+    passed by restating a larger container, and the env var the error text
+    names was never consulted. When it is set it is the authority: a bigger
+    ``containerMemoryBytes`` is refused outright, and the formula is applied
+    against the smaller of the two.
+    """
+    from .capacity import container_memory_bytes_env
+
     pairs: List[Tuple[str, int]] = []
     if patch.timeout_max_ms is not None:
         default_ms = current.timeout_default_ms
@@ -117,15 +130,41 @@ def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> Valid
                 "container and the node would be OOM-killed instead of refusing the "
                 "query. Set a ceiling instead."
             )
+        # An absolute ceiling, independent of any container figure: one query
+        # may not be allowed more working memory than the node's entire
+        # dataset budget. Above that the sizing formula is arithmetic about a
+        # shape nobody should deploy, and the schema's own bound is 1 TiB.
+        if maxmemory > 0 and new_cap > maxmemory:
+            raise GraphStoreLimitsError(
+                f"A per-query ceiling of {human_bytes(new_cap)} is above this node's own "
+                f"maxmemory of {human_bytes(maxmemory)}: one query would be permitted more "
+                f"memory than the whole dataset budget, so the node is OOM-killed before "
+                f"the ceiling ever refuses anything. Keep QUERY_MEM_CAPACITY at or below "
+                f"maxmemory."
+            )
         raising = current.query_mem_capacity is None or new_cap > int(current.query_mem_capacity)
         if raising:
-            if patch.container_memory_bytes is None:
+            env_container = container_memory_bytes_env()
+            if patch.container_memory_bytes is None and env_container is None:
                 raise GraphStoreLimitsError(
                     f"Raising the per-query memory ceiling to {human_bytes(new_cap)} needs "
                     f"the graph store container's memory limit (containerMemoryBytes): the "
                     f"application cannot read it, and a ceiling the container cannot back "
                     f"turns a refused query into an OOM-killed node. Enter the container "
                     f"limit, or set FALKORDB_CONTAINER_MEMORY_BYTES in the deployment."
+                )
+            if (env_container is not None and patch.container_memory_bytes is not None
+                    and int(patch.container_memory_bytes) > env_container):
+                # The deployment states the real limit. A client that can
+                # simply claim a bigger container turns this whole guard into
+                # a field it fills in.
+                raise GraphStoreLimitsError(
+                    f"containerMemoryBytes {human_bytes(int(patch.container_memory_bytes))} is "
+                    f"above the container limit this deployment declares "
+                    f"({human_bytes(env_container)} from FALKORDB_CONTAINER_MEMORY_BYTES). "
+                    f"The node is killed at the declared limit whatever this request says. "
+                    f"Raise the container and FALKORDB_CONTAINER_MEMORY_BYTES together, or "
+                    f"choose a smaller ceiling."
                 )
             if maxmemory <= 0:
                 raise GraphStoreLimitsError(
@@ -134,7 +173,12 @@ def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> Valid
                     f"applied. Set maxmemory on the node first."
                 )
             assert needed is not None
-            container = int(patch.container_memory_bytes)
+            # The smaller of what the deployment declares and what the request
+            # claims — never the larger, which is the whole point.
+            container = int(min(
+                c for c in (env_container, patch.container_memory_bytes)
+                if c is not None
+            ))
             if needed > container:
                 raise GraphStoreLimitsError(
                     f"A ceiling of {human_bytes(new_cap)} needs a container of at least "
@@ -289,14 +333,26 @@ async def apply_graph_store_limits(
             await discovery._aclose(client)
         applied_to.append(target_endpoint)
 
-    after = await _read(endpoint)
-    for name, value in validated.pairs:
-        seen = _reading_value(after, name)
-        if seen != value:
-            raise GraphStoreLimitsError(
-                f"{name} was set to {value} on {endpoint} but reads back as "
-                f"{seen if seen is not None else 'unlimited or unreadable'}; check the node."
-            )
+    # Verify EVERY node the change went to, not only the one named. A
+    # multi-node apply exists because a replica that missed the limit
+    # un-applies the change the next time it is promoted; re-reading just the
+    # original endpoint confirms the one node whose failure would have been
+    # visible anyway and says nothing about the rest.
+    after = None
+    for target_endpoint in applied_to:
+        reading = await _read(target_endpoint)
+        if target_endpoint == endpoint:
+            after = reading
+        for name, value in validated.pairs:
+            seen = _reading_value(reading, name)
+            if seen != value:
+                raise GraphStoreLimitsError(
+                    f"{name} was set to {value} on {target_endpoint} but reads back as "
+                    f"{seen if seen is not None else 'unlimited or unreadable'}; check the node."
+                    + (f" Applied on {', '.join(applied_to)}." if len(applied_to) > 1 else "")
+                )
+    if after is None:                                 # no targets: nothing ran
+        after = await _read(endpoint)
     for ref in instance.providers:
         for held in provider_manager.instantiated(ref.id):
             note = getattr(held, "note_server_limits", None)

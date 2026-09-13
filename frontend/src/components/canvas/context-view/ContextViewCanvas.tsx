@@ -231,6 +231,7 @@ import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { useFailoverRetry } from '@/hooks/useFailoverRetry'
+import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
 import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import {
@@ -746,8 +747,12 @@ export function ContextViewCanvas({
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
-  // when the visible container set (and so the URN key) hasn't changed.
-  const aggregatedCacheVersion = useAggregatedEdgesCacheVersion()
+  // when the visible container set (and so the URN key) hasn't changed. Scoped
+  // to this canvas's provider, so an invalidation aimed at one graph (a node
+  // holding it failing over) does not refetch every other mounted canvas's
+  // aggregated edges — the app's most expensive endpoint, and a POST, so no
+  // client cache absorbs the repeat.
+  const aggregatedCacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
@@ -3038,7 +3043,7 @@ export function ContextViewCanvas({
   // happening, and asks again on its own — no Retry button, and none of the
   // 30s "Circuit open" wall this used to be.
   const reconnecting = aggregationStaleReason === 'failing_over'
-  useFailoverRetry(aggregationStaleReason)
+  useFailoverRetry(aggregationStaleReason, provider?.scopeKey)
 
   // Connections-still-catching-up: when the rollup layer answers SHORT, ask
   // readiness whether this source is actually behind, and if it is, say so on
@@ -4875,6 +4880,20 @@ export function ContextViewCanvas({
             </span>
             <span>Showing the last answer; retrying automatically.</span>
           </div>
+        )}
+        {/* Served from the last-known-good copy. The header already arrives —
+            ``X-Cache-Status: stale-fallback`` into useCacheStalenessStore —
+            but nothing on the canvas subscribed to it, so a saved graph the
+            backend keeps for a DAY was drawn with no indication at all. The
+            pill says how long there has been no fresh answer; the copy is
+            careful that this is the outage's age, not the drawing's. */}
+        {!reconnecting && (
+          <StaleDataBanner
+            workspaceId={scopeWsId ?? undefined}
+            dataSourceId={dataSourceId ?? undefined}
+            subject="this canvas"
+            className="mx-4 mt-2 z-20"
+          />
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the
             canvas keeps serving the previous rollup (stale-while-revalidate)
