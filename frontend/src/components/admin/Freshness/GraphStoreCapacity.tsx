@@ -16,7 +16,7 @@
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowUpRight, Database, HardDrive, Loader2, RefreshCw, SlidersHorizontal } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, ChevronRight, Database, HardDrive, Loader2, RefreshCw, SlidersHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -24,6 +24,10 @@ import { DocsLink } from '@/components/help/DocsLink'
 import type { CapacitySource, ShardCapacity } from '@/services/aggregationService'
 import { compactBytes, compactEdges, heldByRebuilds } from '../shared/aggregationKnobs'
 import { useFleetCapacity, useRemeasureCapacity } from '../shared/useAggregationCapacity'
+
+//: Remembers the collapse per viewer. Not shared, not read back by the
+//: server — the numbers themselves always come from the capacity query.
+const _COLLAPSE_KEY = 'freshness.capacity.collapsed'
 
 /** Tone by how much of the room UNDER the reserve is still free. */
 function tone(shard: ShardCapacity) {
@@ -164,12 +168,33 @@ export function GraphStoreCapacity({ onOpenSource, onFacetWouldNotFit, onAdjustL
     const isSystemAdmin = usePermission('system:admin')
     const remeasure = useRemeasureCapacity()
     const [remeasuring, setRemeasuring] = useState(false)
+    // Collapsed state is a per-viewer convenience, so it lives in the
+    // browser. Every access is guarded: a private window, cleared site data
+    // or blocked storage throws on read, and this section must render either
+    // way — open, which is the state that shows the numbers.
+    const [collapsed, setCollapsed] = useState<boolean>(() => {
+        try { return localStorage.getItem(_COLLAPSE_KEY) === 'true' } catch { return false }
+    })
+    const toggle = () => setCollapsed(prev => {
+        const next = !prev
+        try { localStorage.setItem(_COLLAPSE_KEY, String(next)) } catch { /* per-viewer nicety only */ }
+        return next
+    })
     const data = capacity.data
 
     const refusedCount = data
         ? data.shards.reduce((n, s) => n + s.sources.filter(x => x.lastFailureCategory === 'write_budget').length, 0)
         : 0
     const bytesPerEdge = typeof data?.limits.bytesPerEdge.value === 'number' ? data.limits.bytesPerEdge.value : 512
+    // The node with the least room under the reserve: the one that decides
+    // whether the next rebuild on it is refused, and so the one fact worth
+    // keeping on screen when the section is collapsed. `filter` copies, so
+    // the sort never reorders the rows themselves.
+    const tightest = data
+        ? data.shards
+            .filter(s => s.measurable && typeof s.availableBytes === 'number')
+            .sort((x, y) => (x.availableBytes ?? 0) - (y.availableBytes ?? 0))[0]
+        : undefined
 
     const onRemeasure = async () => {
         setRemeasuring(true)
@@ -184,14 +209,43 @@ export function GraphStoreCapacity({ onOpenSource, onFacetWouldNotFit, onAdjustL
                 </div>
                 <div className="min-w-0 flex-1">
                     <h2 id="capacity-title" className="text-sm font-semibold text-ink flex items-center gap-2">
-                        Graph store capacity
+                        <button
+                            type="button"
+                            onClick={toggle}
+                            aria-expanded={!collapsed}
+                            aria-controls="capacity-body"
+                            data-testid="capacity-toggle"
+                            className="inline-flex items-center gap-1.5 -ml-1 px-1 py-0.5 rounded-md text-sm font-semibold text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                        >
+                            {collapsed
+                                ? <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+                                : <ChevronDown className="w-3.5 h-3.5 shrink-0" />}
+                            Graph store capacity
+                        </button>
                         <DocsLink slug="rollup-capacity" variant="icon" />
                     </h2>
-                    <p className="text-[12px] text-ink-muted mt-0.5">
-                        What every rebuild measures on the shard that owns its graph before it writes rollups: the memory
-                        left under the fleet reserve, and how many more rollup edges that is. Replicas, replication lag and
-                        the graphs on each shard are on the Graph store page.
-                    </p>
+                    {collapsed ? (
+                        // Collapsed still has to be worth reading: the shard
+                        // count and the tightest node are the two facts this
+                        // section exists to put in front of someone, and
+                        // hiding a full shard behind a chevron is how a
+                        // rebuild gets refused by a number nobody saw.
+                        <p className="text-[12px] text-ink-muted mt-0.5 tabular-nums" data-testid="capacity-collapsed-summary">
+                            {!data
+                                ? 'Capacity hidden — expand to measure the graph store.'
+                                : data.shards.length === 0
+                                    ? 'No source has rollups yet.'
+                                    : `${data.shards.length} shard${data.shards.length === 1 ? '' : 's'}`
+                                      + `${tightest ? ` · tightest ${tightest.endpoint} with ${compactBytes(tightest.availableBytes ?? 0)} free` : ''}`
+                                      + `${data.unresolved.length > 0 ? ` · ${data.unresolved.length} not placed` : ''}`}
+                        </p>
+                    ) : (
+                        <p className="text-[12px] text-ink-muted mt-0.5">
+                            What every rebuild measures on the shard that owns its graph before it writes rollups: the memory
+                            left under the fleet reserve, and how many more rollup edges that is. Replicas, replication lag and
+                            the graphs on each shard are on the Graph store page.
+                        </p>
+                    )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                     {isSystemAdmin && (
@@ -236,7 +290,7 @@ export function GraphStoreCapacity({ onOpenSource, onFacetWouldNotFit, onAdjustL
                 </div>
             </header>
 
-            <div className="px-4 pb-4">
+            <div className="px-4 pb-4" id="capacity-body" hidden={collapsed}>
                 {!data && capacity.isLoading ? (
                     <div className="flex items-center gap-2 py-4 text-[12px] text-ink-muted">
                         <Loader2 className="w-4 h-4 animate-spin" /> Measuring the graph store…
