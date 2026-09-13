@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from datetime import datetime, timedelta, timezone
 import json
 import types
 
@@ -176,8 +177,10 @@ def test_the_worker_learns_from_a_run_that_did_not_complete():
     )
     # It reads the row's OWN run_stats, which the checkpoints have been
     # writing all along: the pipeline's return value does not exist on a
-    # path that raised.
-    assert "_learned_from(\n                        self._job_run_stats(job)" in src
+    # path that raised. Matched with the indentation collapsed — the property
+    # is which argument it reads, not how deeply the block happens to nest.
+    flat = " ".join(src.split())
+    assert "_learned_from( self._job_run_stats(job)" in flat
 
 
 def test_a_failed_run_that_hit_pressure_has_a_lesson():
@@ -203,3 +206,36 @@ def test_a_failed_run_with_no_pressure_must_not_erase_the_last_lesson():
         "an empty lesson must not be written on the failure path — on the "
         "success path '{}' deliberately CLEARS, and that is the difference"
     )
+
+
+# ── The lesson has to be able to expire ─────────────────────────────────
+
+from backend.app.services.aggregation.worker import (      # noqa: E402
+    _LEARNED_TTL_SECS, _learned_is_stale, _now,
+)
+
+
+def test_a_fresh_lesson_still_steers_the_next_run():
+    assert _learned_is_stale({"observed_at": _now(), "scan_width": 500}) is False
+
+
+def test_a_lesson_older_than_its_ttl_stops_steering():
+    """Two of these knobs never re-grow inside a run — nothing resets the
+    extract-concurrency cap, nothing switches the reconcile strategy back to
+    "full" — so a hinted run reports them unchanged and the next write
+    persists them again, gated only on ANY single pressure event. Without an
+    expiry, one bad afternoon pinned a source to serial reads and keys-only
+    reconcile for good, with no control anywhere to clear it."""
+    old = datetime.now(timezone.utc) - timedelta(seconds=_LEARNED_TTL_SECS + 60)
+    assert _learned_is_stale({
+        "observed_at": old.isoformat(), "extract_concurrency": 1,
+    }) is True
+
+
+def test_an_unreadable_or_unstamped_lesson_is_kept():
+    """A lesson from before the stamp existed is still the best thing known
+    about the source, and reading a parse failure as expiry would quietly
+    un-narrow every graph in the fleet at once."""
+    assert _learned_is_stale({"scan_width": 1}) is False
+    assert _learned_is_stale({"observed_at": "not-a-date"}) is False
+    assert _learned_is_stale(None) is False

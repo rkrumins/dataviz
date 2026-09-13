@@ -235,6 +235,38 @@ def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     return out
 
 
+#: How long a lesson learned under pressure keeps steering later runs.
+#: Long enough that a source with a genuinely hard graph keeps its narrowing
+#: across a day's rebuilds; short enough that a one-off incident does not
+#: define the source forever. Re-measuring costs one run at the wider setting,
+#: which the pressure ladder narrows again within that run if it has to.
+_LEARNED_TTL_SECS: int = int(
+    os.getenv("AGGREGATION_LEARNED_TUNING_TTL_SECS", "604800")
+)
+
+
+def _learned_is_stale(learned: Any) -> bool:
+    """True when ``observed_tuning`` is too old to act on.
+
+    Unreadable or unstamped is NOT stale: a lesson from before the stamp
+    existed is still the best thing known about the source, and treating a
+    parse failure as expiry would quietly un-narrow every graph at once.
+    """
+    if not isinstance(learned, dict) or _LEARNED_TTL_SECS <= 0:
+        return False
+    stamped = learned.get("observed_at")
+    if not stamped:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(stamped))
+    except (TypeError, ValueError):
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - seen).total_seconds()
+    return age > _LEARNED_TTL_SECS
+
+
 def _merge_live_limits(stall_timeout: int, wall_base: int, fresh: dict) -> tuple:
     """``(stall, wall)`` after a live re-read: the row's ``timeout_secs``
     replaces the stall window when set; the raised wall clock (else the
@@ -1355,6 +1387,32 @@ class AggregationWorker:
         learned = self._job_tuning(types.SimpleNamespace(
             tuning_json=getattr(state, "observed_tuning", None),
         ))
+        if _learned_is_stale(learned):
+            # A lesson has to be able to expire, or it is a ratchet. Two of
+            # these knobs never re-grow inside a run — nothing resets the
+            # extract-concurrency cap, and nothing switches the reconcile
+            # strategy back to "full" — so a hinted run reports them in
+            # ``adapted`` unchanged and the next ``_learned_from`` writes them
+            # straight back, gated only on ANY single pressure event in the
+            # run. One bad afternoon (a QUERY_MEM_CAPACITY squeeze, a noisy
+            # neighbour on the shard) then pinned a source to serial reads and
+            # keys-only reconcile permanently: escaping needed a run with a
+            # completely empty pressure log, which on a shared cluster with
+            # hundreds of readers effectively never happens, and there is no
+            # control anywhere to clear it by hand.
+            #
+            # So the hints simply stop being applied once they are old. The
+            # next run starts unhinted and finds out for itself: if the
+            # narrowing is still needed it re-learns it within that run, and
+            # if it is not, the source is free of it. What was learned stays
+            # on the row either way — this decides whether to ACT on it, not
+            # whether to remember it.
+            logger.info(
+                "capacity hints for %s are older than %ds — running unhinted "
+                "so the narrowing is re-measured rather than inherited",
+                data_source_id, _LEARNED_TTL_SECS,
+            )
+            return hints
         for key in _LEARNED_KEYS:
             value = learned.get(key) if isinstance(learned, dict) else None
             if value:
