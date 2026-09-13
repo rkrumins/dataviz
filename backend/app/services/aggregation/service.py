@@ -487,6 +487,15 @@ def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
     return (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
 
 
+#: How far back to look for a run predictive enough to project from. The
+#: search skips runs that wrote nothing (a steady-state reconcile finds the
+#: cube already there and takes seconds), so it needs more than one candidate
+#: — but a source whose last five runs were all no-ops has no baseline worth
+#: reporting, and reading its whole history to discover that is the cost this
+#: bound exists to remove.
+_PRIOR_LEDGER_DEPTH = 5
+
+
 async def _prior_ledgers(
     session: AsyncSession, jobs: Any,
 ) -> Dict[str, Any]:
@@ -497,22 +506,47 @@ async def _prior_ledgers(
     this is a handful of ids. A failed previous run is never the baseline:
     it spent no time in the stages it never reached, and projecting from it
     reads every run as a catastrophic slowdown.
+
+    Bounded to the most recent ``_PRIOR_LEDGER_DEPTH`` completed runs per
+    source. The query used to return EVERY completed row of every running
+    source — ``run_stats`` included, which is tens of KB apiece — and throw
+    almost all of them away in the loop below. A source rebuilt hourly has
+    thousands of them within a year, so the cost of drawing one page of Job
+    History grew with a history it reads three fields of. The depth is small
+    because the loop only looks past a row when that run wrote nothing, and a
+    run of no-ops long enough to exhaust it has no baseline worth having.
     """
     ds_ids = {j.data_source_id for j in jobs if j.status == "running" and j.data_source_id}
     if not ds_ids:
         return {}
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=AggregationJobORM.data_source_id,
+            order_by=AggregationJobORM.completed_at.desc(),
+        )
+        .label("rank")
+    )
+    recent = (
+        select(
+            AggregationJobORM.data_source_id.label("data_source_id"),
+            AggregationJobORM.run_stats.label("run_stats"),
+            AggregationJobORM.completed_at.label("completed_at"),
+            rank,
+        )
+        .where(
+            AggregationJobORM.data_source_id.in_(ds_ids),
+            AggregationJobORM.status == "completed",
+        )
+        .subquery()
+    )
     try:
         rows = await session.execute(
             select(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.run_stats,
-                AggregationJobORM.completed_at,
+                recent.c.data_source_id, recent.c.run_stats, recent.c.completed_at,
             )
-            .where(
-                AggregationJobORM.data_source_id.in_(ds_ids),
-                AggregationJobORM.status == "completed",
-            )
-            .order_by(AggregationJobORM.completed_at.desc())
+            .where(recent.c.rank <= _PRIOR_LEDGER_DEPTH)
+            .order_by(recent.c.data_source_id, recent.c.completed_at.desc())
         )
     except Exception as exc:                      # noqa: BLE001 — an ETA is not worth a 500
         logger.debug("prior ledgers unavailable: %s", exc)
@@ -3986,21 +4020,38 @@ async def _latest_failure_map(
     One bounded query over the page's failed-status sources — the fleet
     table needs the cause without a per-row round-trip. Same classifier as
     the drawer. Best-effort: a query error returns ``{}``, never raises.
+
+    Only the newest row per source can win — the loop below marks a source
+    seen on its first row so an older failure cannot stand in for a newer
+    success — so the query asks for exactly that, rather than reading every
+    job the source has ever had and discarding all but one. On a fleet with
+    hundreds of sources and a year of hourly rebuilds those are different
+    queries by orders of magnitude, on a page that polls every 30 seconds.
     """
     if not ds_ids:
         return {}
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=AggregationJobORM.data_source_id,
+            order_by=AggregationJobORM.updated_at.desc().nullslast(),
+        )
+        .label("rank")
+    )
+    latest = (
+        select(
+            AggregationJobORM.data_source_id.label("data_source_id"),
+            AggregationJobORM.status.label("status"),
+            AggregationJobORM.error_message.label("error_message"),
+            rank,
+        )
+        .where(AggregationJobORM.data_source_id.in_(ds_ids))
+        .subquery()
+    )
     try:
         rows = (await session.execute(
-            select(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.status,
-                AggregationJobORM.error_message,
-            )
-            .where(AggregationJobORM.data_source_id.in_(ds_ids))
-            .order_by(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.updated_at.desc().nullslast(),
-            )
+            select(latest.c.data_source_id, latest.c.status, latest.c.error_message)
+            .where(latest.c.rank == 1)
         )).all()
     except Exception as exc:
         logger.warning("latest-failure map failed: %s", exc)
