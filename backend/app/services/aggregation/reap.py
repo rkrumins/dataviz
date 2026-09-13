@@ -46,6 +46,18 @@ logger = logging.getLogger(__name__)
 WORKER_LOST = "worker lost:"
 NEVER_DISPATCHED = "never dispatched:"
 
+#: The PUBLIC mirror's ``aggregation_status`` carries a CHECK constraint the
+#: private row does not (``ck_ds_aggregation_status``): it has no
+#: 'cancelled'. Forwarding the private value verbatim therefore writes a
+#: value the constraint REJECTS — and the violation lands at flush, outside
+#: ``sync_workspace_row``'s try/except, so it rolls back the caller's whole
+#: tick. Every job that tick reaped stays 'running', the source stays
+#: in-flight, and the next tick reaps the same row and fails identically.
+#: Mapped to what the event listener writes for the same terminal event
+#: (``job.cancelled`` -> 'none'), so a reaped cancel and an observed one
+#: leave the mirror saying the same thing.
+_MIRROR_STATUS = {"cancelled": "none"}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -101,8 +113,48 @@ async def release_source(session: Any, job: Any, status: str) -> None:
     )
     state.aggregation_status = "none" if never_ran else status
     await sync_workspace_row(
-        session, job.data_source_id, aggregation_status=state.aggregation_status,
+        session, job.data_source_id,
+        aggregation_status=_MIRROR_STATUS.get(
+            state.aggregation_status, state.aggregation_status,
+        ),
     )
+
+
+async def invalidate_reads(job: Any) -> None:
+    """The fourth thing the worker's ``finally`` does, for a reaper.
+
+    That block emits the terminal event, and ``event_listener`` turns it into
+    ``invalidate_aggregated_reads`` for job.failed and job.cancelled alike —
+    a dying run may have PARTIALLY written, so cached pre-run answers no
+    longer match the store. A reaper emits no event, so nothing invalidated.
+
+    Skipping it is worse than one stale TTL: ``graph_cache._promote_mirror``
+    reads an UNMOVED generation as proof the answer is still current and
+    re-promotes the pre-run view past every expiry, bounded only by
+    ``GRAPH_CACHE_LKG_TTL_S`` (24 h by default). Bumping the generation is
+    what ends that, so it belongs on every terminal path, reaped or not.
+
+    ``graph_cache`` is imported here rather than at module scope for the
+    reason the module docstring gives — the reconciler runs on the
+    crash-recovery path — and the whole call fails open: a reaper that
+    raises leaves the row ``running``, which is the state it exists to clear.
+    """
+    workspace_id = getattr(job, "workspace_id", None)
+    if not workspace_id:
+        # The cache keys are workspace-scoped, so there is no scope to
+        # build — the rule ``event_listener`` applies to the same gap.
+        return
+    try:
+        from backend.app.services import graph_cache
+
+        await graph_cache.invalidate_aggregated_reads(
+            str(workspace_id), str(job.data_source_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail a reap
+        logger.warning(
+            "reap: aggregated-read invalidation skipped for %s: %s",
+            job.data_source_id, exc,
+        )
 
 
 async def reap_job(
@@ -113,9 +165,10 @@ async def reap_job(
 
     The whole of what the worker's ``finally`` does that a reaper can still
     do: stamp the row, seal the open step so the ledger names the stage the
-    run died in, and release the source. Best-effort throughout — a reaper
-    that raises leaves the row ``running``, which is the state it exists to
-    clear. The caller commits.
+    run died in, release the source, and invalidate the aggregated read
+    caches the dying run may have already written past. Best-effort
+    throughout — a reaper that raises leaves the row ``running``, which is
+    the state it exists to clear. The caller commits.
     """
     now_iso = now_iso or _now()
     job.status = status
@@ -125,3 +178,4 @@ async def reap_job(
     job.updated_at = now_iso
     seal_steps(job, status, now=now_iso)
     await release_source(session, job, status)
+    await invalidate_reads(job)
