@@ -292,6 +292,13 @@ _CLUSTER_ROUTING_EXC_NAMES = frozenset({
     "MovedError", "AskError", "ClusterDownError", "TryAgainError",
 })
 
+#: Redis answers a write on a replica with ``-READONLY``. In sentinel and
+#: standalone that IS what a failover looks like from the client's side: the
+#: pool is still pointed at the node that was the master when it connected,
+#: and that node has been demoted. Matched by NAME, like the cluster routing
+#: errors, so the classifier needs no redis import.
+_ROLE_CHANGED_EXC_NAMES = frozenset({"ReadOnlyError"})
+
 # Short backoff schedule (seconds) for transparently retrying a transient
 # connection drop. Three attempts keeps the total well inside a single op's
 # budget while letting redis-py hand out a fresh pooled connection.
@@ -432,6 +439,28 @@ def _is_cluster_routing_error(exc: BaseException) -> bool:
         if seen is None:
             break
         if type(seen).__name__ in _CLUSTER_ROUTING_EXC_NAMES:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _is_role_changed_error(exc: BaseException) -> bool:
+    """True when the node we are talking to says it is a REPLICA.
+
+    A redirect, not a failure: re-resolve and retry, exactly as a cluster
+    MOVED is handled. ``ReadOnlyError`` is a ``ResponseError`` rather than a
+    ``ConnectionError``, so the transient ladder never caught it and a
+    sentinel failover mid-write failed hard — at the one moment
+    re-resolving would have fixed it, since redis-py re-runs
+    ``discover_master`` on reconnect and the rebuild lands on the node that
+    was just promoted. Cluster mode gets MOVED first and rarely reaches
+    here, but a demoted node is a demoted node in every mode.
+    """
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        if type(seen).__name__ in _ROLE_CHANGED_EXC_NAMES:
             return True
         seen = seen.__cause__ or seen.__context__
     return False
@@ -2342,10 +2371,35 @@ class FalkorDBProvider(GraphDataProvider):
     _replica_fallbacks: int = 0
 
     def _replica_reads_enabled(self) -> bool:
+        """Whether this provider may route a read off the master.
+
+        Cluster only, and not for want of asking: the read is pinned with
+        ``target_nodes``, which is a ``RedisCluster`` API. Sentinel reaches
+        its replicas through ``Sentinel.slave_for``, which picks one for you
+        and so cannot be vouched for per node, and a standalone client has
+        exactly one endpoint by definition.
+
+        Said ONCE per provider when an operator asked for replica reads and
+        the mode cannot give them: silence here reads as "the replicas are
+        busy" rather than "this deployment has no replica read path", and
+        those call for different actions.
+        """
         cfg = self._conn_cfg
-        if cfg is None or cfg.mode != "cluster":
+        if cfg is None:
             return False
-        return getattr(cfg, "read_from_replicas", "auto") != "never"
+        wanted = getattr(cfg, "read_from_replicas", "auto") != "never"
+        if cfg.mode != "cluster":
+            if wanted and not getattr(self, "_replica_mode_warned", False):
+                self._replica_mode_warned = True
+                logger.info(
+                    "FalkorDB %s: replica reads are not available in %s mode "
+                    "(the read is pinned with a cluster API); every read will "
+                    "go to the master. Failover and role changes are still "
+                    "handled — a demoted node re-resolves the master.",
+                    self._graph_name, cfg.mode,
+                )
+            return False
+        return wanted
 
     def _note_local_write(self, graph_key: Optional[str] = None) -> None:
         """This process just wrote to a graph: its reads stay on the master
@@ -2670,6 +2724,25 @@ class FalkorDBProvider(GraphDataProvider):
                             "client and retrying (%d/%d).",
                             self._graph_name, type(exc).__name__,
                             attempt, max_retries,
+                        )
+                        await self._rebuild_graph_client_for_failover(gen)
+                        continue
+                    # The node says it is a replica now: our pool is pointed
+                    # at a demoted master. Re-resolve and retry in ANY mode —
+                    # this is the sentinel/standalone shape of what MOVED is
+                    # for a cluster, and it is bounded by the same schedule so
+                    # a node that is never coming back cannot hold the
+                    # caller's whole budget.
+                    if _is_role_changed_error(exc):
+                        if attempt >= max_retries:
+                            raise
+                        gen = self._conn_generation
+                        attempt += 1
+                        logger.warning(
+                            "FalkorDB %s: the node answered READONLY — it has "
+                            "been demoted; re-resolving the master and "
+                            "retrying (%d/%d).",
+                            self._graph_name, attempt, max_retries,
                         )
                         await self._rebuild_graph_client_for_failover(gen)
                         continue

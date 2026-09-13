@@ -679,3 +679,25 @@ def test_the_reading_is_cached_for_the_sample_window():
     first = calls["n"]
     _run(p._vouched_replicas("g1", [R1, R2]))
     assert calls["n"] == first, "a second read inside the window re-asked every node"
+
+
+def test_a_mode_without_a_replica_read_path_says_so_once(caplog):
+    """Silence reads as "the replicas are busy" rather than "this deployment
+    has no replica read path", and those call for different actions."""
+    import logging
+
+    p = _provider(_Conn(), mode="sentinel")
+    with caplog.at_level(logging.INFO):
+        for _ in range(5):
+            assert _run(p._replica_for("g1")) is None
+    said = [r for r in caplog.records if "not available in sentinel mode" in r.getMessage()]
+    assert len(said) == 1, f"expected one line, got {len(said)}"
+
+
+def test_master_only_by_operator_choice_says_nothing():
+    """`read_from_replicas="never"` is a decision, not a limitation."""
+    import logging
+
+    p = _provider(_Conn(), mode="sentinel", read_from_replicas="never")
+    assert _run(p._replica_for("g1")) is None
+    assert getattr(p, "_replica_mode_warned", False) is False

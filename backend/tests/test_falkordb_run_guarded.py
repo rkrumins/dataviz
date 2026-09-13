@@ -187,3 +187,93 @@ async def test_inflight_counter_tracks_guarded_ops():
     await p._run_guarded(call)
     assert seen["during"] == 1
     assert p.inflight_ops() == 0
+
+
+# ── a demoted master is a redirect, not a failure ───────────────────────
+#
+# Redis answers a write on a replica with `-READONLY`, and in sentinel and
+# standalone that IS what a failover looks like from the client's side: the
+# pool is still pointed at the node that was the master when it connected,
+# and that node has been demoted. Cluster mode never sees it — it gets
+# MOVED first, which the branch above already handles — so the case was
+# invisible in the only mode the tests exercised.
+#
+# `ReadOnlyError` is a `ResponseError`, not a `ConnectionError`, so nothing
+# in the transient ladder caught it: the write failed hard, at the one
+# moment re-resolving would have fixed it. redis-py re-runs
+# `discover_master` on reconnect, so a rebuild lands on the node that was
+# just promoted.
+
+
+class _ReadOnlyError(Exception):
+    """Stands in for redis.exceptions.ReadOnlyError (matched by name, as the
+    cluster routing errors are, so the classifier needs no redis import)."""
+
+    def __init__(self, msg="READONLY You can't write against a read only replica."):
+        super().__init__(msg)
+
+
+_ReadOnlyError.__name__ = "ReadOnlyError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sentinel", "standalone", "cluster"])
+async def test_a_readonly_reply_re_resolves_the_master_and_retries(monkeypatch, mode):
+    """In EVERY mode: the node says it is a replica, so stop talking to it
+    and find the one that is not."""
+    p = _provider()
+
+    class _Cfg:
+        pass
+
+    _Cfg.mode = mode
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    rebuilds = {"n": 0}
+
+    async def fake_rebuild(gen):
+        rebuilds["n"] += 1
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _ReadOnlyError()
+        return "ok"
+
+    assert await p._run_guarded(call) == "ok"
+    assert calls["n"] == 2
+    assert rebuilds["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_node_that_stays_readonly_eventually_gives_up(monkeypatch):
+    """Retrying forever would hold the caller's whole budget against a node
+    that is never going to be the master again."""
+    p = _provider()
+
+    class _Cfg:
+        mode = "sentinel"
+
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    async def fake_rebuild(gen):
+        return None
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        raise _ReadOnlyError()
+
+    with pytest.raises(Exception):
+        await p._run_guarded(call)
+    assert calls["n"] > 1, "never retried at all"
+    assert calls["n"] <= 5, f"retried {calls['n']} times — unbounded"
