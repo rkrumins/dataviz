@@ -321,8 +321,16 @@ def test_the_canvas_says_why_the_answer_is_the_old_one():
     response = types.SimpleNamespace(headers={"X-Cache-Status": "stale-fallback"})
     graph_ep.label_failover(response, served, {"endpoint": "10.0.0.3:6379"})
     assert served.stale is True and served.stale_reason == "failing_over"
-    assert response.headers["Retry-After"] == "3"
     assert response.headers["X-Provider-Failing-Over"] == "10.0.0.3:6379"
+    # The SAME figure a 429 from the provider carries, derived from the
+    # cluster's node timeout. Hard-coding 3 here made the cached half of an
+    # outage contradict the refused half: against cluster-node-timeout 15000
+    # this route sent the client back at 3 s, before the cluster had begun
+    # to promote anything, and the retry was spent on a node still gone.
+    from backend.app.providers.falkordb_provider import _FAILOVER_RETRY_AFTER_S
+
+    assert response.headers["Retry-After"] == str(_FAILOVER_RETRY_AFTER_S)
+    assert "str(_FAILOVER_RETRY_AFTER_S)" in inspect.getsource(graph_ep.label_failover)
 
     # A failover the retries absorbed changed nothing on screen: no banner.
     fresh = types.SimpleNamespace(stale=False, stale_reason=None)

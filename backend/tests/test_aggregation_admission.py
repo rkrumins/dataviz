@@ -9,6 +9,7 @@ Redis is down.
 import asyncio
 import json
 import time
+import types
 
 import pytest
 
@@ -465,5 +466,88 @@ def test_read_slots_fail_open_when_redis_is_down():
         a = adm.AggregationAdmission(_DownRedis())
         async with a.read_slot(_FakeProvider()):
             pass          # a bus outage must never stop a scan
+
+    _run(scenario())
+
+
+# ── the slots and the node's threads, compared at last ───────────────────
+#
+# The slot envs live in a ConfigMap and THREAD_COUNT in a StatefulSet, set
+# by different people solving different problems. The shipped base pair
+# (2 + 4) is exactly the production-cluster overlay's whole query width, and
+# nothing anywhere compared the two numbers — the pipeline read the thread
+# count off the node on every write batch and never looked at it.
+
+
+def test_a_node_whose_threads_the_slots_would_fill_says_so_once():
+    adm._SLOTS_CHECKED.clear()
+    try:
+        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 2, 4
+        first = adm.check_slot_sizing("10.0.0.1:6379", 6)
+        assert first and "THREAD_COUNT 6" in first and "6 of 4 available" in first
+        # Once per node per process: this runs on every write batch.
+        assert adm.check_slot_sizing("10.0.0.1:6379", 6) is None
+        # …and per NODE, because the shards need not be sized alike.
+        assert adm.check_slot_sizing("10.0.0.2:6379", 6) is not None
+    finally:
+        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 2, 4
+        adm._SLOTS_CHECKED.clear()
+
+
+def test_slots_inside_the_budget_are_silent_and_so_is_an_unknown_count():
+    adm._SLOTS_CHECKED.clear()
+    orig = adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT
+    try:
+        # The overlay's own patch: 1 + 3 against THREAD_COUNT 6.
+        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 1, 3
+        assert adm.check_slot_sizing("10.0.0.1:6379", 6) is None
+        # Exactly at the line is inside it.
+        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 2, 2
+        assert adm.check_slot_sizing("10.0.0.2:6379", 6) is None
+        # A node that did not say is never warned about — and is not
+        # remembered either, so the next reading still gets to check.
+        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = 8, 8
+        assert adm.check_slot_sizing("10.0.0.3:6379", None) is None
+        assert adm.check_slot_sizing("10.0.0.3:6379", 0) is None
+        assert adm.check_slot_sizing("10.0.0.3:6379", 6) is not None
+    finally:
+        adm._SLOT_LIMIT, adm._READ_SLOT_LIMIT = orig
+        adm._SLOTS_CHECKED.clear()
+
+
+def test_the_check_runs_where_the_reading_lands():
+    """A check nobody calls is a comment. The governor's measured reading is
+    the only place the node's THREAD_COUNT and this pod's envs meet."""
+    import inspect
+
+    from backend.app.providers.falkordb_materialize import AggregationPipeline
+
+    src = inspect.getsource(AggregationPipeline._governor_reading)
+    assert "check_slot_sizing" in src
+
+
+def test_on_a_cluster_an_unnamed_node_reads_no_pressure_at_all():
+    """The stamp half refuses to WRITE the seed key on a cluster, because a
+    seed is shared by every shard and a stamp there tells all three shards'
+    writers to slow for one shard's starving readers. The reading half kept
+    falling back to it — and found whatever a pre-fix stamp had left, on a
+    key nothing keyed to a shard ever writes. It fell back exactly when the
+    governor had no measured reading to name a node with: under load."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        cluster = _FakeProvider()
+        cluster._conn_cfg = types.SimpleNamespace(mode="cluster", host="seed", port=6379)
+        await redis.set(adm.read_pressure_key("seed:6379"), "queue_full")
+
+        assert await a.read_pressure(cluster) is None
+        # Named node, named key: the signal still works where it is aimed.
+        await redis.set(adm.read_pressure_key("10.0.0.7:6379"), "queue_full")
+        assert await a.read_pressure(cluster, node="10.0.0.7:6379") == "queue_full"
+
+        # Standalone has one node, and the connection endpoint IS that node.
+        single = _FakeProvider()
+        single._conn_cfg = types.SimpleNamespace(mode="standalone", host="seed", port=6379)
+        assert await a.read_pressure(single) == "queue_full"
 
     _run(scenario())

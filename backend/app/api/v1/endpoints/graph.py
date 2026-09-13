@@ -24,7 +24,10 @@ from backend.app.models.graph import (
 )
 from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
 from backend.common.interfaces.provider import ProviderConfigurationError
-from backend.app.providers.falkordb_provider import CursorMismatchError
+from backend.app.providers.falkordb_provider import (
+    _FAILOVER_RETRY_AFTER_S,
+    CursorMismatchError,
+)
 from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
@@ -910,7 +913,12 @@ def label_failover(response: Response, target, seen: dict) -> None:
     target.stale = True
     if not getattr(target, "stale_reason", None):
         target.stale_reason = "failing_over"
-    response.headers["Retry-After"] = "3"
+    # The same figure the provider puts on a 429 during a failover, derived
+    # from the cluster's own node timeout. A flat 3 s here sent the client
+    # back before the cluster had begun to promote anything, so the retry
+    # was spent on a node still not there — and then the two halves of the
+    # same outage told the client two different numbers.
+    response.headers["Retry-After"] = str(_FAILOVER_RETRY_AFTER_S)
     if seen.get("endpoint"):
         response.headers["X-Provider-Failing-Over"] = seen["endpoint"]
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Response
 
 from backend.app.api.v1.endpoints.graph import (
     _cache_scope,
+    _compute_budget,
     _provider_health_header,
     get_context_engine,
 )
@@ -71,6 +72,10 @@ async def compute_assignments(
             params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
             compute=compute,
             model_cls=LayerAssignmentResult,
+            # Without this the cross-pod election falls back to its flat
+            # default wait, which is shorter than this compute — so every pod
+            # gives up watching and issues the same query anyway, late.
+            expected_compute_s=_compute_budget(ENDPOINT_LAYER_ASSIGNMENT),
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
     except HTTPException:

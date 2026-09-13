@@ -622,10 +622,18 @@ async def discover(
 def parse_graph_memory_reply(raw: Any) -> Tuple[Optional[int], Dict[str, int]]:
     """``GRAPH.MEMORY USAGE`` → ``(total_bytes, {field: bytes})``.
 
-    The server answers in megabytes, one ``*_sz_mb`` field per part of the
-    graph (matrices, node/edge blocks, attributes, indices). Any shape the
-    client hands back is accepted; an unrecognised reply yields no total,
-    never an exception.
+    One ``*_sz_mb`` field per part of the graph (matrices, node/edge blocks,
+    attributes, indices). **"mb" here is MEBIbytes** — the Redis-family
+    convention, the same one ``used_memory_human`` prints as ``M`` — so the
+    conversion below is ``1024**2`` deliberately and the earlier "megabytes"
+    in this docstring was the error, not the arithmetic. Reading it as
+    10^6 would understate every graph by 4.86%, and these bytes are compared
+    against ``maxmemory`` and the container limit, which are powers of two:
+    the two halves of that comparison have to be in the same units or the
+    shard budget is wrong by the difference.
+
+    Any shape the client hands back is accepted; an unrecognised reply
+    yields no total, never an exception.
     """
     pairs = info_parse.parse_config_pairs(raw)
     detail: Dict[str, int] = {}
@@ -672,6 +680,7 @@ async def read_node(
         "graphs": None,
         "graphMemory": None,
         "measured": {},
+        "commandStats": {},
     }
     if not node.dialable:
         out["status"] = "unreachable"
@@ -708,6 +717,23 @@ async def read_node(
         live_role = out["replication"].get("role")
         if live_role in ("master", "replica"):
             out["role"] = live_role
+
+        # Mean Cypher service time, which every capacity claim rests on and
+        # which nothing in the product used to capture. A separate section:
+        # ``commandstats`` is not in INFO's default set, and asking for it
+        # together with the default one would mean re-parsing a reply the
+        # lines above already have. Guarded on its own like CONFIG GET —
+        # every node answers the memory reading even where a managed
+        # instance blocks this section. Replicas too: "on the replicas, not
+        # only the master" is the check this exists to make answerable.
+        try:
+            async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
+                out["commandStats"] = info_parse.command_stats(
+                    info_parse.parse_info_text(await client.info("commandstats"))
+                )
+        except Exception as exc:                      # noqa: BLE001 — optional detail
+            logger.debug("graph store: INFO commandstats on %s failed: %s",
+                         node.endpoint, _err(exc))
 
         try:
             async with asyncio.timeout(max(0.1, deadline - time.monotonic())):

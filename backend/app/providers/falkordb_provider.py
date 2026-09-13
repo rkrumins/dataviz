@@ -348,6 +348,8 @@ _LABEL_WARMUP_TASKS: set = set()
 _REPLICA_SAMPLE_S = 5.0
 #: How long a replica that failed a read is skipped.
 _REPLICA_PENALTY_S = 30.0
+#: endpoint -> monotonic deadline, PROCESS-wide. See _penalise_replica.
+_REPLICA_PENALTY_BOX: Dict[str, float] = {}
 
 #: The deadline on the one ``INFO replication`` the router samples per shard
 #: per window. It was 1.0 s, which is not a p99 for this command against a
@@ -2737,16 +2739,26 @@ class FalkorDBProvider(GraphDataProvider):
         return candidates[self._replica_turn]
 
     def _replica_usable(self, node) -> bool:
-        until = getattr(self, "_replica_penalty", {}).get(f"{node.host}:{node.port}", 0.0)
+        until = _REPLICA_PENALTY_BOX.get(f"{node.host}:{node.port}", 0.0)
         return time.monotonic() >= until
 
     def _penalise_replica(self, node, exc: BaseException) -> None:
         """A replica that errored is skipped for a while. One bad node must
-        not be re-tried by every request that arrives."""
-        if not hasattr(self, "_replica_penalty"):
-            self._replica_penalty = {}
+        not be re-tried by every request that arrives.
+
+        The box is keyed by ENDPOINT and shared across the process, not held
+        per provider instance. A provider is cached per (provider_id, graph),
+        so with hundreds of data sources that was hundreds of independent
+        boxes for the same three replica endpoints — each having to learn
+        "this node is bad" separately, and each learning it by spending one
+        real read on it. When the failure is a timeout there is no budget
+        left to fall back to the master, so that read is a 504 a user sees;
+        thirty seconds later the whole set expired and the fleet paid the
+        tuition again. One node's failure now benches it for every provider
+        in the process, which is what "one bad node must not be re-tried by
+        every request" was always trying to say."""
         endpoint = f"{node.host}:{node.port}"
-        self._replica_penalty[endpoint] = time.monotonic() + _REPLICA_PENALTY_S
+        _REPLICA_PENALTY_BOX[endpoint] = time.monotonic() + _REPLICA_PENALTY_S
         logger.info(
             "FalkorDB %s: replica %s failed a read (%s) — master-only for %.0fs.",
             self._graph_name, endpoint, type(exc).__name__, _REPLICA_PENALTY_S,

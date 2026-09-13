@@ -74,6 +74,41 @@ def metrics_authorized(request) -> bool:
     return hmac.compare_digest(presented, expected)
 
 
+def _sample_process_counters(backend) -> None:
+    """Copy the process's plain-int resilience counters into the registry.
+
+    Three of the signals this branch exists to produce — breaker opens, the
+    preflight and slot shedding, the pool-exhaustion and deadline
+    classifications — are kept as module dicts of ints, read through
+    ``/health/deps``. That surface answers "how is this pod", one pod at a
+    time; there is no way to see the fleet's shape or a trend from it, which
+    is what the request path most needed.
+
+    Sampled here rather than emitted at each site on purpose.
+    ``common/adapters/circuit.py`` is below the app layer and imports nothing
+    from it, and threading a metrics façade down there to count something the
+    module already counts would buy a series at the price of the boundary.
+    A scrape is the natural moment to read a monotonic counter.
+
+    Gauges, not counters: these are absolute readings of a value the process
+    owns, so ``gauge_set`` keeps the registry's copy equal to the source
+    rather than adding one scrape's worth on top of the last. They are
+    monotonic since boot all the same, so ``rate()`` still reads correctly.
+    """
+    try:
+        from backend.app.providers.manager import provider_manager
+        from backend.common.adapters.circuit import breaker_stats
+
+        for event, count in breaker_stats().items():
+            backend.gauge_set("provider_breaker_events",
+                              {"event": str(event)}, float(count))
+        for event, count in dict(provider_manager.stats).items():
+            backend.gauge_set("provider_manager_events",
+                              {"event": str(event)}, float(count))
+    except Exception:  # noqa: BLE001 — a scrape must not 500 over telemetry
+        logger.debug("metrics: could not sample process counters", exc_info=True)
+
+
 @router.get(
     "/metrics",
     summary="Prometheus scrape endpoint (METRICS_ENABLED + METRICS_TOKEN)",
@@ -107,4 +142,5 @@ async def scrape(request: Request) -> PlainTextResponse:
             "# metrics backend not installed in this process\n",
             media_type=_CONTENT_TYPE,
         )
+    _sample_process_counters(backend)
     return PlainTextResponse(backend.render(), media_type=_CONTENT_TYPE)

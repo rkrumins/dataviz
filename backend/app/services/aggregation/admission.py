@@ -204,6 +204,55 @@ def endpoint_key(provider: Any) -> str:
     return f"graph:{getattr(provider, '_graph_name', 'unknown')}"
 
 
+#: Endpoints whose thread count has already been checked against the slot
+#: envs. Per process — one line per pod per node is the point.
+_SLOTS_CHECKED: set = set()
+
+#: Threads a node must keep for everything that is not a rebuild: the
+#: post-write settle window pins that graph's reads to the master, index DDL
+#: and the governor's own INFO land there, and so does every interactive read
+#: inside a settle window. Two is the floor, not a target.
+_THREADS_FOR_OTHERS = 2
+
+
+def check_slot_sizing(endpoint: str, thread_count: Optional[int]) -> Optional[str]:
+    """Warn once per node when this pod's slot envs would fill its query
+    threads. Returns the message logged, or None.
+
+    ``FALKORDB_ENDPOINT_WRITE_SLOTS`` and ``FALKORDB_ENDPOINT_READ_SLOTS``
+    are set in a ConfigMap and ``THREAD_COUNT`` in a StatefulSet, in
+    different files, by people solving different problems — and the shipped
+    base pair (2 + 4) is exactly the production-cluster overlay's whole
+    query width. Nothing anywhere compared them: the pipeline read the number
+    from the node on every batch and never looked at it. The node itself is
+    the only place the two facts meet, so the check belongs where the
+    reading arrives.
+
+    A log line and not a refusal: the numbers are an operator's to set, the
+    consequence is contention rather than damage, and a worker that refuses
+    to start because a node it has not met yet reports a smaller thread count
+    is a worse failure than the one being reported."""
+    if not thread_count or thread_count <= 0 or endpoint in _SLOTS_CHECKED:
+        return None
+    _SLOTS_CHECKED.add(endpoint)
+    budget = thread_count - _THREADS_FOR_OTHERS
+    if _SLOT_LIMIT + _READ_SLOT_LIMIT <= budget:
+        return None
+    msg = (
+        f"{endpoint} runs THREAD_COUNT {thread_count}, but this pod admits "
+        f"{_SLOT_LIMIT} write + {_READ_SLOT_LIMIT} scan slots against it "
+        f"({_SLOT_LIMIT + _READ_SLOT_LIMIT} of {budget} available). The whole "
+        f"rebuild pipeline reads under read_from_master_only, so those land on "
+        f"the master alongside index DDL, the governor's INFO and every "
+        f"interactive read inside a settle window — which then queue behind "
+        f"MAX_QUEUED_QUERIES against no free thread. Lower "
+        f"FALKORDB_ENDPOINT_WRITE_SLOTS + FALKORDB_ENDPOINT_READ_SLOTS to "
+        f"{budget} or fewer, or raise the node's THREAD_COUNT."
+    )
+    logger.warning("aggregation admission: %s", msg)
+    return msg
+
+
 class GraphLease:
     """Held per materialization job; renewed in the background.
 
@@ -583,9 +632,23 @@ class AggregationAdmission:
         else here.
 
         ``node`` is the graph-store node the caller's shard reading names,
-        as for ``write_slot``. Without it the key falls back to the
-        connection endpoint, which on a cluster is a seed shared by every
-        shard — pressure on one shard then slowed rebuilds on idle ones."""
+        as for ``write_slot``. Without it, outside a cluster, the key falls
+        back to the connection endpoint — which is the one node there is.
+
+        **On a cluster, no node means no read.** The connection endpoint is a
+        seed shared by every shard, so reading pressure there made one
+        shard's starving readers slow rebuilds on the two idle shards — the
+        regression ``read_pressure.py`` exists to have fixed. It fired
+        exactly when the governor had no measured reading to name a node
+        with, which is under the load this whole mechanism is for. The stamp
+        half already refuses to write that key (see
+        :func:`read_pressure.pressure_key`); reading it would find only a
+        stale one some other shard's stamp left behind before the fix. This
+        signal is lost and the next one lands."""
+        if node is None and getattr(
+            getattr(provider, "_conn_cfg", None), "mode", None,
+        ) == "cluster":
+            return None
         key = read_pressure_key(node or endpoint_key(provider))
         now = time.monotonic()
         memo = self._read_pressure_memo.get(key)

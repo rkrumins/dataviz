@@ -15,6 +15,15 @@ TTL feeds every surface (the Graph store page, rollup capacity, a data
 source's placement, a provider's node table), so a hundred viewers cost
 one sweep and nothing a viewer does can disturb a rebuild.
 
+That TTL is shared, not per process. The in-process cache is an L1 and
+twelve gunicorn workers each hold their own: against a 30s poll and a 30s
+TTL, consecutive polls land on different processes whose caches have both
+expired, so the fleet ran close to one full sweep per poll — six nodes x
+(PING + INFO + INFO commandstats + CONFIG GET), three masters x (GRAPH.LIST
++ GRAPH.CONFIG GET *), and up to fifty ``GRAPH.MEMORY USAGE`` each. The L2
+is the shared bus Redis (``seed_memory``'s store, for the same reasons), so
+one sweep per TTL serves every process and Re-measure means what it says.
+
 The snapshot is deliberately boring under failure: a node that cannot be
 read is listed with its reason, a refresh that fails keeps serving the
 last good reading, and the order never depends on live utilisation — a
@@ -24,6 +33,7 @@ changed, which is how "cannot be measured" became background noise.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -49,6 +59,7 @@ from .schemas import (
     GraphStoreShard,
     GraphStoreTopologyResponse,
     InstanceTotals,
+    NodeCommandStat,
     NodeLimits,
     NodeMemory,
     NodeReplicaLink,
@@ -389,7 +400,7 @@ def _carried_forward(
     if age > _CARRY_FORWARD_MAX_S:
         return read, None
     merged = dict(read)
-    for field in ("memory", "server", "replication", "limits"):
+    for field in ("memory", "server", "replication", "limits", "commandStats"):
         merged[field] = reading.get(field) or {}
     return merged, round(age, 1)
 
@@ -463,6 +474,11 @@ def _node_from_read(raw: RawNode, read: Dict[str, Any],
             replica_buffer_hard_bytes=limits.get("replicaBufferHardBytes"),
             cluster_node_timeout_ms=limits.get("clusterNodeTimeoutMs"),
         ),
+        command_stats={
+            name: NodeCommandStat(calls=stat.get("calls"),
+                                  usec_per_call=stat.get("usecPerCall"))
+            for name, stat in (read.get("commandStats") or {}).items()
+        },
         graph_count=len(read["graphs"]) if read.get("graphs") is not None else None,
         graph_memory=read.get("graphMemory"),
     )
@@ -599,14 +615,23 @@ def _shard_findings(
 
 
 def _human_bytes(n: Optional[int]) -> str:
+    """Bytes for a person, in the units the arithmetic is actually in.
+
+    Every figure these findings carry — a replication lag, an output-buffer
+    limit — divides by 1024 and is measured against a power-of-two ceiling,
+    so the labels are the binary ones. Labelling them "GB" understated each
+    by 7.4% at GB scale, and the same number printed one way here and
+    another on the capacity card. Kept in step with
+    ``shard_capacity.human_bytes``.
+    """
     if n is None:
         return "?"
     value = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(value) < 1024 or unit == "TB":
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(value) < 1024 or unit == "TiB":
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
-    return f"{value:.1f} TB"
+    return f"{value:.1f} TiB"
 
 
 # ── Building one snapshot ────────────────────────────────────────────────
@@ -621,6 +646,99 @@ _lock: Optional[asyncio.Lock] = None
 _lock_loop: Optional[asyncio.AbstractEventLoop] = None
 #: instance id → the connection settings that reached it, from the last build.
 _configs: Dict[str, FalkorDBConnConfig] = {}
+
+
+#: Where the fleet's snapshot lives between sweeps. One key: every process
+#: reads the same topology, and a second store would only be a second thing
+#: to invalidate.
+_SHARED_KEY = "graphstore:topology:snapshot"
+#: What one L2 read or write may cost. The shared cache is an OPTIMISATION —
+#: without it every process sweeps for itself, which is what it does today —
+#: so a bus that is merely unreachable must never be able to slow a sweep
+#: down, let alone a request waiting on one. Same discipline, and the same
+#: number, as ``seed_memory``.
+_SHARED_BUDGET_S = 0.5
+
+
+async def _shared_bus() -> Optional[Any]:
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        return get_redis()
+    except Exception as exc:                          # noqa: BLE001 — L2 is optional
+        logger.debug("graph store: no bus for the shared snapshot (%s)", exc)
+        return None
+
+
+async def _shared_recall() -> Optional[Tuple[float, GraphStoreTopologyResponse]]:
+    """The fleet's snapshot and a LOCAL monotonic stamp for it, or None.
+
+    The stored stamp is wall clock, because monotonic clocks are per process
+    and mean nothing to the reader. It is converted back to this process's
+    monotonic scale here so the age the page shows, the TTL checks and the
+    L1 entry all keep working on one clock.
+    """
+    redis = await _shared_bus()
+    if redis is None:
+        return None
+    try:
+        async with asyncio.timeout(_SHARED_BUDGET_S):
+            raw = await redis.get(_SHARED_KEY)
+    except Exception as exc:                          # noqa: BLE001 — L2 is optional
+        logger.debug("graph store: shared snapshot read failed (%s)", _err(exc))
+        return None
+    if not raw:
+        return None
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", "replace")
+        payload = json.loads(raw)
+        age = max(0.0, time.time() - float(payload["at"]))
+        if age >= _ttl_s():
+            return None
+        return (time.monotonic() - age,
+                GraphStoreTopologyResponse.model_validate(payload["snapshot"]))
+    except Exception as exc:                          # noqa: BLE001 — a bad blob is a miss
+        logger.debug("graph store: shared snapshot unreadable (%s)", _err(exc))
+        return None
+
+
+async def _shared_remember(snapshot: GraphStoreTopologyResponse) -> None:
+    """Publish what this sweep read, so the next process does not repeat it.
+
+    Expiry is the TTL plus a few seconds: the age check in
+    :func:`_shared_recall` is what decides freshness, and a key that outlives
+    it by a moment is a miss rather than a gap during which every process
+    sweeps at once.
+    """
+    redis = await _shared_bus()
+    if redis is None:
+        return
+    try:
+        payload = json.dumps({
+            "at": time.time(),
+            "snapshot": snapshot.model_dump(by_alias=True, mode="json"),
+        })
+        async with asyncio.timeout(_SHARED_BUDGET_S):
+            await redis.set(_SHARED_KEY, payload, ex=int(_ttl_s()) + 5)
+    except Exception as exc:                          # noqa: BLE001 — L2 is optional
+        logger.debug("graph store: shared snapshot write failed (%s)", _err(exc))
+
+
+#: Held so a drop scheduled from synchronous code is not garbage collected
+#: mid-flight — the one thing asyncio will not do for a fire-and-forget task.
+_shared_drops: Set["asyncio.Task"] = set()
+
+
+async def _shared_forget() -> None:
+    redis = await _shared_bus()
+    if redis is None:
+        return
+    try:
+        async with asyncio.timeout(_SHARED_BUDGET_S):
+            await redis.delete(_SHARED_KEY)
+    except Exception as exc:                          # noqa: BLE001 — L2 is optional
+        logger.debug("graph store: shared snapshot drop failed (%s)", _err(exc))
 
 
 def _build_lock() -> asyncio.Lock:
@@ -711,6 +829,7 @@ async def _read_all_nodes(
             "status": "unreachable", "error": "not read before the deadline",
             "memory": {}, "replication": {}, "server": {}, "limits": {},
             "graphs": None, "graphMemory": None, "measured": {},
+            "commandStats": {},
         })
     return results
 
@@ -774,6 +893,7 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
 
     previous = dict(_prev_nodes)
     reads = await _read_all_nodes(paired, measure_by_instance, previous)
+    _emit_command_stats(reads)
 
     bytes_per_edge = int(limits.bytes_per_edge.value or 512)
     assembled: List[Tuple[int, GraphStoreInstance]] = [
@@ -840,6 +960,45 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         measured_at=_now_iso(),
         ttl_s=_ttl_s(),
     )
+
+
+def _emit_command_stats(reads: Dict[Tuple[int, str], Dict[str, Any]]) -> None:
+    """Mean Cypher service time per node, as metrics.
+
+    ``CONCURRENCY_TUNING.md`` §1 parameterises its entire supported-user table
+    on this number and then tells the reader to measure it, with no way to do
+    so short of a shell on each pod — so in practice nobody did, and the
+    capacity table stayed arithmetic rather than measurement. The sweep visits
+    every node anyway; this is what turns that visit into the measurement.
+
+    Per NODE and per command, so the replicas are distinguishable from the
+    master — release notes §8 asks for exactly that comparison. Cardinality is
+    fleet size x 2, which is what the endpoint label everywhere else in this
+    codebase already costs.
+
+    ``calls`` is cumulative since the node started and ``usecPerCall`` is the
+    mean over the same window, so the useful queries are ``rate(calls)`` and
+    the gauge beside it, never one reading of either.
+    """
+    try:
+        from backend.app.jobs.metrics import gauge_set
+    except Exception:                                 # noqa: BLE001 — never the sweep
+        return
+    for read in reads.values():
+        endpoint = read.get("endpoint")
+        if not endpoint:
+            continue
+        for command, stats in (read.get("commandStats") or {}).items():
+            labels = {"endpoint": endpoint, "role": read.get("role") or "unknown",
+                      "command": command}
+            try:
+                if stats.get("calls") is not None:
+                    gauge_set("graph_store_command_calls", float(stats["calls"]), **labels)
+                if stats.get("usecPerCall") is not None:
+                    gauge_set("graph_store_command_usec_per_call",
+                              float(stats["usecPerCall"]), **labels)
+            except Exception:                         # noqa: BLE001 — never the sweep
+                continue
 
 
 def _remember(node: GraphStoreNode, prev: Dict[str, Any]) -> Dict[str, Any]:
@@ -1219,6 +1378,12 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
     a caller that waited for the lock takes whatever the holder built
     rather than building the same thing again — ``fresh`` included, which
     is what a room full of admins pressing Re-measure looks like.
+
+    The lock is per PROCESS, so everything above stops at the pod boundary:
+    the fleet's other eleven workers each have their own expired L1 and each
+    run the same sweep. Before building, this asks the shared cache what
+    another process read; ``fresh`` skips it, because an operator pressing
+    Re-measure is asking the store, not the cache.
     """
     global _cache, _last_error, _retry_not_before
 
@@ -1236,6 +1401,12 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
             return _with_age(_cache[1], _cache[0])
         if _cache is not None and time.monotonic() < _retry_not_before:
             return _with_age(_cache[1], _cache[0], stale=True)
+        if not fresh:
+            shared = await _shared_recall()
+            if shared is not None:
+                _cache = shared
+                _last_error = None
+                return _with_age(shared[1], shared[0])
         try:
             snapshot = await build_snapshot()
         except Exception as exc:                      # noqa: BLE001 — serve what we have
@@ -1248,6 +1419,7 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
         _last_error = None
         _retry_not_before = 0.0
         _cache = (time.monotonic(), snapshot)
+        await _shared_remember(snapshot)
         return _with_age(snapshot, _cache[0])
 
 
@@ -1355,12 +1527,23 @@ async def snapshot_for_request(
 
 def invalidate_topology_cache() -> None:
     """Drop the snapshot so the next view sweeps again — called after a
-    change that alters what the sweep would read (a limits change)."""
+    change that alters what the sweep would read (a limits change).
+
+    The shared copy goes too, on a task: this is called from synchronous
+    code, and leaving it would have the next sweep adopt the reading the
+    change just invalidated — for every process, not only this one.
+    """
     global _cache, _retry_not_before
     _cache = None
     # An operator who just changed something is owed a read, not the tail of
     # a backoff a failure minutes ago started.
     _retry_not_before = 0.0
+    try:
+        task = asyncio.get_running_loop().create_task(_shared_forget())
+    except RuntimeError:                              # no loop: nothing to schedule
+        return
+    _shared_drops.add(task)
+    task.add_done_callback(_shared_drops.discard)
 
 
 def cached_snapshot() -> Optional[GraphStoreTopologyResponse]:

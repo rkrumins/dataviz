@@ -1767,6 +1767,16 @@ _STATS_FLUSH_S = 1.0
 _STATS_MAX_PENDING = 10_000
 
 
+def _cache_metric(name: str, **labels: str) -> None:
+    """Emit, and never let emitting fail a read."""
+    try:
+        from backend.app.jobs.metrics import increment
+
+        increment(name, **labels)
+    except Exception:  # noqa: BLE001 — a counter is never worth a request
+        pass
+
+
 class _CacheStatsRecorder:
     """Fire-and-forget counter writes. Never delays or fails a request.
 
@@ -1789,6 +1799,13 @@ class _CacheStatsRecorder:
                endpoint: str, outcome: str) -> None:
         if outcome not in CACHE_OUTCOMES or not scope.workspace_id:
             return
+        # Also on the scrape, without the tenant. The Redis counters below
+        # are per (workspace, source) and answer "is THIS source's cache
+        # working"; the fleet's hit rate — the number that says whether 300
+        # users are being served from cache at all — had no series anywhere.
+        # Endpoint and outcome only: a workspace label would put a tenant
+        # list in the scrape and multiply the cardinality by the tenancy.
+        _cache_metric("graph_cache_reads_total", endpoint=endpoint, outcome=outcome)
         key = _stats_key(scope.workspace_id, scope.data_source_id, _current_bucket())
         field = (key, f"{endpoint}:{outcome}")
         if field not in self._pending and len(self._pending) >= _STATS_MAX_PENDING:

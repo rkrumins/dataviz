@@ -120,11 +120,19 @@ class _FakeNode:
 
     async def ping(self):
         self._me()
+        # Every node visit starts here, so this is the count of what a sweep
+        # actually costs the store.
+        self.state.setdefault("pings", []).append(self.endpoint)
         await self._maybe_hang()
         return True
 
     async def info(self, *sections):
         me = self._me()
+        # ``commandstats`` is not in INFO's default set, so it is asked for by
+        # name and answered on its own — a real server returns that section
+        # alone, and nothing of the default one.
+        if sections == ("commandstats",):
+            return dict(me.get("commandstats") or {})
         out = dict(me.get("info") or {})
         if me.get("loading"):
             out["loading"] = 1
@@ -837,7 +845,9 @@ def test_a_lagging_or_disconnected_replica_is_named(monkeypatch):
     assert shard.replication.max_lag_bytes == 200 * 1024 ** 2
     assert shard.replication.replicas_online == 1
     behind = next(f for f in shard.replication.findings if f.code == "replica_behind")
-    assert "10.0.0.4:6379" in behind.text and "200.0 MB" in behind.text
+    # MiB, not MB: the figure divides by 1024 and is measured against a
+    # power-of-two buffer limit, and the capacity card spells it the same way.
+    assert "10.0.0.4:6379" in behind.text and "200.0 MiB" in behind.text
 
 
 def test_a_failover_in_flight_keeps_the_shard_and_says_what_disagrees(monkeypatch):
@@ -1836,3 +1846,217 @@ def test_no_default_store_is_invented_where_every_source_has_a_provider(monkeypa
     snap = _run(topology.get_topology_snapshot())
     assert len(snap.instances) == 1
     assert {p.id for p in snap.instances[0].providers} == {"p1"}
+
+
+# ── Mean Cypher service time, which every capacity claim rests on ────────
+#
+# CONCURRENCY_TUNING.md §1 parameterises its whole supported-user table on
+# this number and then says nobody can derive it from the manifests. Nothing
+# in the product captured it either: INFO commandstats appeared only as a
+# shell command in a document. The sweep visits every node anyway.
+
+
+def test_command_stats_reads_both_graph_commands():
+    from backend.app.services.graph_store import info_parse
+
+    parsed = info_parse.command_stats(info_parse.parse_info_text(
+        "# Commandstats\r\n"
+        "cmdstat_graph.QUERY:calls=120,usec=2400000,usec_per_call=20000.00,"
+        "rejected_calls=0,failed_calls=0\r\n"
+        "cmdstat_graph.RO_QUERY:calls=9000,usec=450000,usec_per_call=50.00,"
+        "rejected_calls=3,failed_calls=0\r\n"
+        "cmdstat_info:calls=40,usec=400,usec_per_call=10.00\r\n"
+    ))
+    assert parsed == {
+        "graph.query": {"calls": 120, "usecPerCall": 20000.0},
+        "graph.ro_query": {"calls": 9000, "usecPerCall": 50.0},
+    }
+
+
+def test_a_node_that_will_not_say_is_absent_rather_than_zero():
+    """A managed instance can block the section and an older server has
+    fewer fields. Zero would read as "instant queries", which is the one
+    answer that must never be invented here."""
+    from backend.app.services.graph_store import info_parse
+
+    assert info_parse.command_stats({}) == {}
+    assert info_parse.command_stats({"cmdstat_graph.QUERY": "garbage"}) == {}
+    assert info_parse.command_stats(
+        {"cmdstat_graph.QUERY": {"calls": "7"}},
+    ) == {"graph.query": {"calls": 7, "usecPerCall": None}}
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_exports_service_time_for_replicas_too(monkeypatch):
+    """Release notes §8 asks for usec_per_call "on the replicas, not only on
+    the master" — the question that says whether replica reads are actually
+    happening. It was unanswerable without a shell on each pod."""
+    from backend.app.jobs import metrics as facade
+    from backend.app.jobs import metrics_prometheus as mp
+
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
+    for endpoint in nodes:
+        nodes[endpoint]["commandstats"] = {
+            "cmdstat_graph.RO_QUERY": {"calls": "500", "usec_per_call": "42.5"},
+        }
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    registry = mp.PrometheusBackend()
+    original = facade._backend
+    facade.set_backend(registry)
+    try:
+        await topology.build_snapshot()
+    finally:
+        facade.set_backend(original)
+
+    out = registry.render()
+    for endpoint, role in [(MASTERS[0], "master"), (REPLICAS_OF[MASTERS[0]][0], "replica")]:
+        assert (f'graph_store_command_usec_per_call{{command="graph.ro_query",'
+                f'endpoint="{endpoint}",role="{role}"}} 42.5') in out
+        assert (f'graph_store_command_calls{{command="graph.ro_query",'
+                f'endpoint="{endpoint}",role="{role}"}} 500') in out
+
+
+@pytest.mark.asyncio
+async def test_the_node_row_carries_service_time_to_the_operator_page(monkeypatch):
+    """A gauge answers an alert; the Graph store page answers the person
+    reading it. The figure was parsed and exported and then dropped on the
+    floor between the sweep and the response model, so the one surface an
+    operator actually opens showed nothing."""
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
+    nodes[MASTERS[0]]["commandstats"] = {
+        "cmdstat_graph.QUERY": {"calls": "120", "usec_per_call": "20000.0"},
+        "cmdstat_graph.RO_QUERY": {"calls": "9000", "usec_per_call": "50.0"},
+    }
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    snap = await topology.build_snapshot()
+    every = [n for i in snap.instances for sh in i.shards
+             for n in [sh.master, *sh.replicas] if n is not None]
+    row = [n for n in every if n.endpoint == MASTERS[0]][0]
+    assert row.command_stats["graph.ro_query"].usec_per_call == 50.0
+    assert row.command_stats["graph.ro_query"].calls == 9000
+    # It is serialised under the name the page reads, not the python one.
+    dumped = row.model_dump(by_alias=True)["commandStats"]["graph.query"]
+    assert dumped["usecPerCall"] == 20000.0
+
+    # A node that says nothing carries an empty mapping, never a zero.
+    quiet = [n for n in every if n.endpoint != MASTERS[0]][0]
+    assert quiet.command_stats == {}
+
+
+# ── One sweep per TTL for the whole fleet, not per process ──────────────
+#
+# _cache is per process and twelve gunicorn workers hold twelve of them.
+# Against a 30s poll and a 30s TTL, consecutive polls land on processes whose
+# caches have both expired, so the cluster saw close to one full sweep per
+# poll — up to ~174 commands each time.
+
+
+class _FakeBus:
+    """One string key, which is all the shared snapshot needs."""
+
+    def __init__(self):
+        self.store = {}
+        self.gets = 0
+
+    async def get(self, key):
+        self.gets += 1
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
+
+    async def delete(self, key):
+        self.store.pop(key, None)
+
+
+@pytest.fixture
+def bus(monkeypatch):
+    fake = _FakeBus()
+
+    async def _bus():
+        return fake
+
+    monkeypatch.setattr(topology, "_shared_bus", _bus)
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_a_second_process_takes_the_fleets_snapshot_instead_of_sweeping(
+    monkeypatch, bus,
+):
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
+    state = _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    first = await topology.get_topology_snapshot()
+    assert bus.store, "the sweep did not publish what it read"
+    swept_once = len(state["pings"])
+    assert swept_once >= 6, "the fixture's nodes were not actually visited"
+
+    # A cold process: same fleet, same bus, nothing in its own memory.
+    topology._cache = None
+    topology._prev_nodes = {}
+    second = await topology.get_topology_snapshot()
+
+    assert [i.id for i in second.instances] == [i.id for i in first.instances]
+    assert len(state["pings"]) == swept_once, (
+        "the second process ran its own sweep — the shared snapshot is not "
+        "being adopted, which is the whole point of the L2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_re_measure_still_reads_the_store(monkeypatch, bus):
+    """``fresh`` is an operator pressing Re-measure. They are asking the
+    store, not the cache — including somebody else's cache."""
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
+    state = _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    await topology.get_topology_snapshot()
+    swept_once = len(state["pings"])
+    topology._cache = None
+    topology._prev_nodes = {}
+
+    await topology.get_topology_snapshot(fresh=True)
+    assert len(state["pings"]) > swept_once
+
+
+@pytest.mark.asyncio
+async def test_a_bus_that_is_down_costs_the_sharing_and_never_the_sweep(monkeypatch):
+    """Same fail-open stance as ``seed_memory``: the L2 is an optimisation,
+    so a bus that is merely unreachable must never be able to slow a sweep —
+    let alone fail one."""
+    class _Dead:
+        async def get(self, key):
+            raise ConnectionError("no bus")
+
+        async def set(self, key, value, ex=None):
+            raise ConnectionError("no bus")
+
+    async def _dead_bus():
+        return _Dead()
+
+    monkeypatch.setattr(topology, "_shared_bus", _dead_bus)
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    snapshot = await topology.get_topology_snapshot()
+    assert snapshot.instances and snapshot.instances[0].reachable
+
+
+@pytest.mark.asyncio
+async def test_a_limits_change_drops_the_shared_snapshot_too(monkeypatch, bus):
+    """Otherwise the next sweep in ANY process adopts the reading the change
+    just invalidated, and every viewer sees the old figures for a TTL."""
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: ["g1"]}})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    await topology.get_topology_snapshot()
+    assert bus.store
+
+    topology.invalidate_topology_cache()
+    await asyncio.sleep(0)                     # the drop is scheduled, not awaited
+    await asyncio.sleep(0)
+    assert not bus.store
+

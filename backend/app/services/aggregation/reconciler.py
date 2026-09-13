@@ -431,6 +431,7 @@ async def prune_job_history(session_factory: Any) -> int:
             deleted = int(result.rowcount or 0)
     except Exception as exc:                      # noqa: BLE001 — housekeeping
         logger.warning("job-history prune failed (%s); retrying next sweep", exc)
+        metrics_increment("aggregation_job_history_pruned_total", outcome="failed")
         return 0
     if deleted:
         logger.info(
@@ -438,6 +439,15 @@ async def prune_job_history(session_factory: Any) -> int:
             "the most recent %d per source",
             deleted, _RETENTION_DAYS, _RETENTION_MIN_PER_SOURCE,
         )
+    # Always, deleted or not. A sweep that removes nothing is the normal
+    # state and a sweep that stops running looks exactly the same from a
+    # log — while the table it was bounding grows back under the
+    # reconciler's 30 s scans. A counter that stops advancing is visible;
+    # a log line that stops appearing is not.
+    metrics_increment(
+        "aggregation_job_history_pruned_total",
+        outcome="capped" if deleted >= _RETENTION_BATCH else "swept",
+    )
     return deleted
 
 

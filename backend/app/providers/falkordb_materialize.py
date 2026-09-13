@@ -1756,6 +1756,14 @@ class AggregationPipeline:
         if self._gov_reading.source == "measured":
             self._gov_measured = self._gov_reading
             self._gov_unmeasured = 0
+            # The one place this pod's slot envs and the node's real
+            # THREAD_COUNT are both in hand. Logs once per node; never
+            # raises — see check_slot_sizing.
+            from backend.app.services.aggregation.admission import check_slot_sizing
+
+            check_slot_sizing(
+                self._gov_reading.endpoint, self._gov_reading.thread_count,
+            )
         else:
             self._gov_unmeasured += 1
         # Who ELSE is writing this node, on the same cadence. The pacing
@@ -2008,6 +2016,8 @@ class AggregationPipeline:
             return
         if reason is not None:
             self._eases[reason] = self._eases.get(reason, 0) + 1
+            _metric("aggregation_governor_eases_total", reason=reason,
+                    node=self._gov_node() or "unknown")
             logger.info(
                 "aggregation pipeline on %s: easing off — %s on %s; half the batch "
                 "ceiling and twice the pause until the reading is back.",
