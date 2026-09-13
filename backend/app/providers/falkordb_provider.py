@@ -2991,13 +2991,42 @@ class FalkorDBProvider(GraphDataProvider):
                     # full rebuild when close() nulled it.
                     handle_lost = _is_null_handle_error(exc)
                     refused = cluster and _is_connection_refused_error(exc)
-                    if refused and schedule is not _REFUSED_RETRY_BACKOFFS:
+                    # A PINNED call is addressed to one node the READ ROUTER
+                    # chose — today always a replica — and its caller holds a
+                    # master to fall back on. None of the failover machinery
+                    # below is about that node, and all of it is harmful here:
+                    #
+                    #  * ``_failing_over`` is a verdict about the MASTER.
+                    #    ``_replica_at_fault`` says so and returns False for
+                    #    it, so minting one from a replica's refusal made
+                    #    ``_read_query`` re-raise instead of falling back —
+                    #    the healthy master never tried, the bad replica never
+                    #    benched (the raise happens before ``_penalise_replica``),
+                    #    so the very next read picked it again. The memo it set
+                    #    on the way out then failed the master-turn reads too.
+                    #    With ``--repl-timeout 300`` on the shipped overlay a
+                    #    replica whose node dies without a clean FIN stays
+                    #    ``state:online`` in the master's INFO for five minutes,
+                    #    and ``_replicas_in_step`` keeps admitting it for all of
+                    #    them: ~100% of that shard's reads 503 while its master
+                    #    sits idle.
+                    #  * the refused schedule (17.5s) and the topology
+                    #    re-resolve are for a node the provider has no
+                    #    alternative to. Spending either on a replica makes the
+                    #    caller wait out a failover window before reaching a
+                    #    master that could have answered at once.
+                    #
+                    # So a pinned call keeps the fast transient schedule and
+                    # raises the underlying error, which is what
+                    # ``_replica_at_fault`` reads to bench the node and re-run
+                    # on the master.
+                    if refused and not pinned and schedule is not _REFUSED_RETRY_BACKOFFS:
                         # Nothing is listening: give the cluster time to
                         # notice and promote, instead of spending the whole
                         # budget redialing a dead address.
                         schedule = _REFUSED_RETRY_BACKOFFS
                         max_retries = len(schedule)
-                    if refused and read_only and attempt >= _READ_REFUSED_RETRIES:
+                    if refused and read_only and not pinned and attempt >= _READ_REFUSED_RETRIES:
                         # One re-resolve was enough to know: the owner is not
                         # answering and someone is waiting on this read.
                         raise self._failing_over(exc) from exc
@@ -3016,7 +3045,8 @@ class FalkorDBProvider(GraphDataProvider):
                         # A refusal is proof the address is dead, so re-resolve
                         # from the FIRST retry; a reset may be one bad socket,
                         # which the cheap redial absorbs without pool churn.
-                        reresolve = cluster and not handle_lost and (refused or attempt >= 2)
+                        reresolve = (cluster and not pinned and not handle_lost
+                                     and (refused or attempt >= 2))
                         logger.warning(
                             "FalkorDB %s: %s (%s) — %s + retry %d/%d after %.2fs.",
                             self._graph_name,
@@ -3083,7 +3113,7 @@ class FalkorDBProvider(GraphDataProvider):
                                 tuple(_TRANSIENT_REDIS_EXC or ())
                                 + (ConnectionError, OSError, TimeoutError),
                             ) and not is_auth_error(reconnect_exc)
-                            if cluster and unreachable:
+                            if cluster and unreachable and not pinned:
                                 logger.warning(
                                     "FalkorDB %s: reconnect during retry failed "
                                     "(%s) — one shard of this cluster is not "
@@ -3117,7 +3147,12 @@ class FalkorDBProvider(GraphDataProvider):
                         # cluster the provider IS the single node, a host that
                         # cannot be reached is a dead provider, and the breaker
                         # is exactly the right place for it.
-                        raise self._failing_over(exc) from exc
+                        #
+                        # Never from a pinned call: see the note above. The
+                        # underlying error is what the caller needs to bench
+                        # this node and re-run the read on the master.
+                        if not pinned:
+                            raise self._failing_over(exc) from exc
                     raise
         finally:
             self._inflight -= 1

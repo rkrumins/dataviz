@@ -456,3 +456,75 @@ def test_a_standalone_store_that_cannot_be_reconnected_still_opens_it():
     finally:
         asyncio.sleep = original
     assert not isinstance(exc.value, ProviderFailingOver)
+
+
+# ── a pinned read is about the replica, never about the master ───────────
+#
+# ``_run_guarded`` takes ``pinned`` but used it only for the memo early-out,
+# so a refusal from a replica the READ ROUTER chose was minted as
+# ProviderFailingOver — a verdict ``_replica_at_fault`` documents as being
+# about the MASTER and therefore refuses to fall back on. Three things then
+# failed at once: the healthy master was never tried, the bad replica was
+# never benched (the raise happens before ``_penalise_replica``), and the
+# memo the raise set made the intervening master-turn reads 503 too.
+#
+# The shipped overlay makes this last five minutes, not seconds: with
+# ``--repl-timeout 300`` a replica whose node dies without a clean FIN stays
+# ``state:online`` in the master's INFO, so ``_replicas_in_step`` keeps
+# handing it every other read for the whole window.
+
+
+def test_a_refused_pinned_read_stays_the_replicas_problem():
+    p = _provider()
+    calls = []
+    slept = []
+
+    async def _call():
+        calls.append(1)
+        raise REFUSED
+
+    original = asyncio.sleep
+    asyncio.sleep = lambda s: slept.append(s) or _noop()
+
+    async def _noop():
+        return None
+
+    try:
+        with pytest.raises(RedisConnectionError):
+            _run(p._run_guarded(_call, read_only=True, pinned=True))
+    finally:
+        asyncio.sleep = original
+
+    # The underlying error, so _replica_at_fault says yes and the caller
+    # benches the node and re-runs on the master.
+    assert getattr(p, "rebuilds", 0) == 0, (
+        "a replica's refusal is not a topology problem — re-resolving tears\n"
+        "down and rebuilds BOTH cluster clients for a node the caller was\n"
+        "about to stop using anyway"
+    )
+    # And it fails FAST: the 17.5s refused schedule is for a node the
+    # provider has no alternative to. This one has a master right there.
+    assert sum(slept) <= 2.0
+    assert p._failing_over_until == 0.0, "a pinned call must never arm the memo"
+    assert len(calls) >= 1
+
+
+def test_an_unpinned_refused_read_still_reports_the_failover():
+    """The other half of the contract: nothing about the master's own path
+    changes, or the fix would trade one outage for another."""
+    p = _provider()
+    original = asyncio.sleep
+    asyncio.sleep = lambda s: _done()
+
+    async def _done():
+        return None
+
+    async def _call():
+        raise REFUSED
+
+    try:
+        with pytest.raises(ProviderFailingOver):
+            _run(p._run_guarded(_call, read_only=True))
+    finally:
+        asyncio.sleep = original
+    assert p.rebuilds == 1
