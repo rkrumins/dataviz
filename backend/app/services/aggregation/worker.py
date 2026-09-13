@@ -431,6 +431,10 @@ class AggregationWorker:
             # on the completion event so the read caches know whether the
             # hierarchy answers moved or only the rollup layer did.
             self._identity_stamped = 0
+            # What a write-budget refusal measured about this source, carried
+            # off the exception so the terminal block can store it. See the
+            # refusal handler below and MaterializationBudgetExceeded.
+            self._refused_cell_ratio: Optional[float] = None
 
             # Platform JobEmitter — the only path for live progress
             # updates. Seed its per-job sequence counter from the
@@ -1341,6 +1345,19 @@ class AggregationWorker:
                                 session, job.data_source_id,
                                 observed_tuning=json.dumps(learned),
                             )
+                        # A run refused by the write budget still MEASURED
+                        # this source: the upper bound during EXTRACT and the
+                        # exact cell count at the refusal. run_stats is
+                        # persisted on success only, so the ratio rides the
+                        # exception (see MaterializationBudgetExceeded) and
+                        # is stored here — otherwise the next run arrives
+                        # uncalibrated, pays the same EXTRACT and COMPUTE,
+                        # and refuses again, forever.
+                        if self._refused_cell_ratio is not None:
+                            await self._update_ds_state(
+                                session, job.data_source_id,
+                                observed_cell_ratio=self._refused_cell_ratio,
+                            )
                     job.updated_at = _now()
                     try:
                         await session.commit()
@@ -1817,6 +1834,12 @@ class AggregationWorker:
                 MaterializationPreconditionFailed,
                 MaterializationQueryMemoryExceeded,
             ) as e:
+                # The refusal is the only place this source's cell ratio was
+                # ever measured; hand it to the terminal block, which is the
+                # only place that can store it.
+                ratio = getattr(e, "cell_ratio_observed", None)
+                if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+                    self._refused_cell_ratio = float(ratio)
                 # All three are deterministic — every retry recomputes the
                 # same outcome and burns another full EXTRACT+COMPUTE pass.
                 # (The query-memory case additionally used to arrive here as

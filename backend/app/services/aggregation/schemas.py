@@ -398,6 +398,22 @@ class InternalTriggerRequest(BaseModel):
         populate_by_name = True
 
 
+class PurgeAggregationRequest(BaseModel):
+    """Body for a purge that is immediately followed by a rebuild.
+
+    ``reaggregate`` is the trigger the chained rebuild runs with. The purge
+    worker used to post a bare projection mode and batch size, so an operator
+    who purged from the re-trigger dialog had every override they had just
+    set silently dropped — and on a source that only completes at a narrowed
+    scan width, the rebuild the purge promised could not finish. Absent, the
+    chain keeps its previous defaults.
+    """
+    reaggregate: Optional["ResumeOverrides"] = Field(
+        None,
+        description="Trigger settings for the rebuild chained after the purge.",
+    )
+
+
 class ResumeOverrides(BaseModel):
     """Optional parameter overrides applied to a job before resuming it.
 
@@ -1995,3 +2011,7 @@ class BatchStatus(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# ``reaggregate`` forward-references ResumeOverrides, defined below it.
+PurgeAggregationRequest.model_rebuild()

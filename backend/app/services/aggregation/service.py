@@ -1875,6 +1875,7 @@ class AggregationService:
     async def claim_purge_job(
         self, ds_id: str, session: AsyncSession,
         *, skip_reaggregate: bool = False,
+        reaggregate: Optional[Dict[str, Any]] = None,
     ) -> AggregationJobORM:
         """Reserve a ``pending`` purge slot in ``aggregation_jobs``.
 
@@ -1960,9 +1961,18 @@ class AggregationService:
             # by default the purge worker triggers a fresh aggregation
             # job on completion (container-level lineage is blind until
             # the canonical cells are rebuilt); the UI can opt out.
+            # ``reaggregate`` is the trigger body the chained rebuild should
+            # run with — the overrides the operator set in the dialog that
+            # asked for the purge. Without it the chain posted a bare
+            # projectionMode+batchSize and every override was silently
+            # dropped, which on a source that needs a narrowed scan width to
+            # survive at all means the rebuild the purge promised fails.
             tuning_json=(
-                json.dumps({"skip_reaggregate": True})
-                if skip_reaggregate else None
+                json.dumps({
+                    **({"skip_reaggregate": True} if skip_reaggregate else {}),
+                    **({"reaggregate": reaggregate} if reaggregate else {}),
+                })
+                if (skip_reaggregate or reaggregate) else None
             ),
             created_at=now,
             updated_at=now,

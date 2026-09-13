@@ -39,6 +39,7 @@ from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import (
     GraphStoreLimitsPatch,
     JobLimitsPatch,
+    PurgeAggregationRequest,
     ResumeOverrides,
     SourceChangedRequest,
     SourceChangedResponse,
@@ -1096,6 +1097,7 @@ async def purge_aggregation(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
     skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
+    body: Optional[PurgeAggregationRequest] = Body(None),
 ):
     """Queue a purge job. Returns 202 with the job row immediately; the
     actual ``MATCH ... DELETE`` runs as a regular insights-service
@@ -1115,6 +1117,10 @@ async def purge_aggregation(
     try:
         job = await svc.claim_purge_job(
             ds_id, session, skip_reaggregate=skip_reaggregate,
+            reaggregate=(
+                body.reaggregate.model_dump(by_alias=True, exclude_none=True)
+                if body is not None and body.reaggregate is not None else None
+            ),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

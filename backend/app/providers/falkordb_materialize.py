@@ -754,7 +754,23 @@ class MaterializationBudgetExceeded(ValueError):
     shard cannot be measured, exceeds ``max_materialized_edges``.
 
     Deterministic: recomputing yields the same count, so the worker must
-    fail the job terminally instead of consuming its retry budget."""
+    fail the job terminally instead of consuming its retry budget.
+
+    ``cell_ratio_observed`` is the one thing a refused run still learned,
+    and it is carried on the exception because nothing else survives this
+    path: ``run_stats`` is persisted on success only. A forced full-detail
+    run counts the upper bound during EXTRACT for the stated purpose of
+    calibrating the source, then computes the exact cell count — and used
+    to throw both away on the refusal, so the next run arrived uncalibrated,
+    paid the same EXTRACT and COMPUTE, and refused again. With the ratio
+    stored, the next run refuses in the cheap pre-compute estimate, and
+    Auto's shard gate (which is deliberately bypassed while the ratio is
+    unknown) starts deciding for this source.
+    """
+
+    def __init__(self, *args: Any, cell_ratio_observed: Optional[float] = None) -> None:
+        super().__init__(*args)
+        self.cell_ratio_observed = cell_ratio_observed
 
 
 class MaterializationPreconditionFailed(ValueError):
@@ -4626,9 +4642,16 @@ class AggregationPipeline:
                 composition = f"{composition}; {note}"
             _metric('aggregation_write_budget_refusals_total',
                     node=self._gov_node() or 'unknown')
-            raise MaterializationBudgetExceeded(format_refusal(
-                budget, verdict, graph=self.p._graph_name, composition=composition,
-            ))
+            raise MaterializationBudgetExceeded(
+                format_refusal(
+                    budget, verdict, graph=self.p._graph_name,
+                    composition=composition,
+                ),
+                # ``projected`` IS the exact cell count this run computed, and
+                # the upper bound was counted during EXTRACT. Both are in hand
+                # exactly here, and this is the last place they exist.
+                cell_ratio_observed=self._observed_cell_ratio(projected),
+            )
         # Passed: hold what is still to land in the node's ledger.
         await self._reserve(budget.shard, int(verdict.needed_bytes or 0))
 

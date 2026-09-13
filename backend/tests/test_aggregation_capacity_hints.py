@@ -239,3 +239,64 @@ def test_an_unreadable_or_unstamped_lesson_is_kept():
     assert _learned_is_stale({"scan_width": 1}) is False
     assert _learned_is_stale({"observed_at": "not-a-date"}) is False
     assert _learned_is_stale(None) is False
+
+
+# ── a refused run is the only one that measured this source ─────────────
+#
+# A forced full-detail run counts the cube's upper bound during EXTRACT for
+# one stated reason: to calibrate the source so later runs can refuse in the
+# cheap pre-compute estimate. It then computes the exact cell count and, on a
+# write-budget refusal, used to throw both away — run_stats is persisted on
+# success only. So the next run arrived uncalibrated, paid the same EXTRACT
+# and COMPUTE, and refused again. Forever, on the graph least able to afford
+# it. It also kept Auto's shard gate switched off for that source, since Auto
+# deliberately ignores an uncalibrated estimate.
+
+
+def test_the_refusal_carries_what_the_run_measured():
+    from backend.app.providers.falkordb_materialize import (
+        MaterializationBudgetExceeded,
+    )
+
+    exc = MaterializationBudgetExceeded("would not fit", cell_ratio_observed=0.1335)
+    assert exc.cell_ratio_observed == 0.1335
+    assert "would not fit" in str(exc)
+    # An uncalibrated refusal (no upper bound counted) carries nothing, and
+    # None must never overwrite a figure a previous run measured.
+    assert MaterializationBudgetExceeded("would not fit").cell_ratio_observed is None
+
+
+def test_the_refusal_is_raised_with_the_exact_count_it_just_computed():
+    """``projected`` is the exact cell count, and the upper bound was counted
+    during EXTRACT — this is the last place both exist."""
+    src = inspect.getsource(
+        __import__(
+            "backend.app.providers.falkordb_materialize", fromlist=["x"],
+        ).AggregationPipeline._check_write_budget
+    )
+    flat = " ".join(src.split())
+    assert "cell_ratio_observed=self._observed_cell_ratio(projected)" in flat
+
+
+def test_the_worker_stores_it_from_the_terminal_block():
+    """The success path writes observed_cell_ratio from run_stats; a refusal
+    never reaches that path, so the terminal block has to do it."""
+    caught = " ".join(
+        inspect.getsource(AggregationWorker._materialize_with_retries).split()
+    )
+    assert "self._refused_cell_ratio = float(ratio)" in caught
+    flat = " ".join(inspect.getsource(AggregationWorker.run).split())
+    assert "observed_cell_ratio=self._refused_cell_ratio" in flat
+    # Only when there is one: None would clear a good figure, and
+    # _update_ds_state skips None anyway — the guard keeps the intent local.
+    assert "if self._refused_cell_ratio is not None:" in flat
+
+
+def test_a_stored_ratio_reaches_the_next_run_as_a_hint():
+    state = types.SimpleNamespace(
+        observed_bytes_per_edge=None, observed_tuning=None,
+        observed_cell_ratio=0.1335,
+    )
+    assert _run(_worker()._capacity_hints(_Session(state), "ds")) == {
+        "cell_ratio_observed": 0.1335,
+    }

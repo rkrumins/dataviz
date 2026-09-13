@@ -948,7 +948,14 @@ class AggregationService {
    */
   async purgeAggregation(
     dataSourceId: string,
-    opts?: { skipReaggregate?: boolean },
+    opts?: {
+      skipReaggregate?: boolean
+      /** Settings for the rebuild chained after the purge. Without this the
+       *  chain posts a bare body and every override the operator chose is
+       *  dropped — so a source that only completes at a narrowed scan width
+       *  gets the purge it asked for and a rebuild that cannot finish. */
+      reaggregate?: AggregationTriggerRequest
+    },
   ): Promise<{
     deletedEdges: number
     dataSourceId: string
@@ -958,7 +965,12 @@ class AggregationService {
     const qs = opts?.skipReaggregate ? '?skipReaggregate=true' : '';
     return authFetch(
       `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation${qs}`,
-      { method: 'POST' }
+      {
+        method: 'POST',
+        ...(opts?.reaggregate
+          ? { body: JSON.stringify({ reaggregate: opts.reaggregate }) }
+          : {}),
+      }
     );
   }
 
