@@ -262,3 +262,76 @@ def test_the_web_route_carries_the_manage_gate_and_forwards_the_actor(monkeypatc
 def test_the_control_plane_route_takes_the_patch_body():
     from backend.app.services.aggregation import controlplane as cp
     assert "patch" in inspect.signature(cp.set_job_limits).parameters
+
+
+# ── the two lists that have to agree ────────────────────────────────────
+#
+# Live overrides cross two lists. `_LIVE_PIPELINE_KEYS` says which keys the
+# watchdog tick copies into the pipeline's `_live` dict — and it lists the
+# replication ones. `_live_limits` builds the dict that tick reads FROM, and
+# it whitelisted nine keys and neither replication one. The tick guards with
+# `if key in fresh`, so the intersection is what actually works: setting
+# replicaAckMin on a running job was accepted, persisted and logged, and
+# never reached the pipeline.
+#
+# That is the one control shard_capacity.py documents as "the operator's
+# replicaAckMin 0 escape hatch, live on a running job" for a rebuild held
+# behind a lagging replica — so the documented way out of an indefinite hold
+# was a no-op.
+#
+# Both halves were tested, neither the seam: test_falkordb_replication.py
+# sets `pipe._live["replica_ack_min"]` directly, and the assertion above
+# pins `_LIVE_PIPELINE_KEYS` alone.
+
+
+def _worker_reading(doc, timeout_secs=None):
+    """A worker whose one job row carries ``doc`` as its live overrides."""
+    import json as _json
+
+    class _Result:
+        def first(self):
+            return (timeout_secs, _json.dumps(doc))
+
+    class _Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def execute(self, *a, **k): return _Result()
+
+    return AggregationWorker(
+        session_factory=lambda: _Session(), registry=None, event_publisher=None,
+    )
+
+
+def test_the_replication_knobs_reach_the_pipeline_at_all():
+    worker = _worker_reading({"replica_ack_min": 1, "replica_ack_timeout_ms": 9_000})
+    live = asyncio.run(worker._live_limits("J"))
+    assert live is not None
+    assert live.get("replica_ack_min") == 1
+    assert live.get("replica_ack_timeout_ms") == 9_000
+
+
+def test_lowering_the_acknowledgement_bar_to_zero_is_carried_not_dropped():
+    """0 is the escape hatch, and a positive-int guard silently discards it —
+    the same trap ``write_pacing_ratio`` already documents ("Pacing may be
+    set to 0")."""
+    worker = _worker_reading({"replica_ack_min": 0})
+    live = asyncio.run(worker._live_limits("J"))
+    assert live.get("replica_ack_min") == 0, (
+        "replicaAckMin=0 is the documented release for a run held behind a "
+        "lagging replica; dropped here it never reaches the pipeline"
+    )
+
+
+def test_every_live_pipeline_key_can_actually_be_carried():
+    """The allowlist and the reader must agree. Anything in
+    ``_LIVE_PIPELINE_KEYS`` that ``_live_limits`` cannot produce is a
+    control the UI offers and the run ignores."""
+    doc = {
+        "scan_timeout_s": 120, "write_timeout_s": 90, "write_pacing_ratio": 0.5,
+        "extract_concurrency": 2, "scan_width": 5_000,
+        "replica_ack_min": 1, "replica_ack_timeout_ms": 9_000,
+        "write_batch_max": 400, "write_batch_target_s": 0.75,
+    }
+    live = asyncio.run(_worker_reading(doc)._live_limits("J"))
+    missing = [k for k in _LIVE_PIPELINE_KEYS if k not in live]
+    assert not missing, f"_live_limits cannot carry {missing}"
