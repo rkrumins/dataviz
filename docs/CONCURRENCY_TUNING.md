@@ -800,7 +800,7 @@ produces is worth anything.
 ### The generator must not be the bottleneck
 
 Run it from outside the cluster or, better, as its own pods with the affinity rules in
-[`deploy/k8s/loadtest/`](../deploy/k8s/loadtest/README.md): one worker per node,
+`deploy/k8s/loadtest/` (its README has the reasoning): one worker per node,
 scheduled away from `viz-service` and `falkordb`, with CPU **requests** and not only
 limits. A generator that shares a node with the thing it measures, or that gets
 throttled by the kubelet under exactly the load it exists to produce, reports its own
@@ -837,7 +837,7 @@ SWEEP_TIERS='10 50 100 200' make sweep
 Holds, waits, read-pressure yields and write-budget refusals are **reported and not
 failed** — those are the protection working, and a gate that goes red when the system
 defends itself is a gate somebody switches off. See
-[`loadtest/README.md`](../loadtest/README.md) for the full table, and note that one
+`loadtest/README.md` for the full table, and note that one
 scrape covers one pod: the registry is per-process, so a fleet claim needs every pod's
 URL.
 
