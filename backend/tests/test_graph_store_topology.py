@@ -2060,3 +2060,93 @@ async def test_a_limits_change_drops_the_shared_snapshot_too(monkeypatch, bus):
     await asyncio.sleep(0)
     assert not bus.store
 
+
+
+# ── sentinel: the page must not blank at the moment it matters most ──────
+
+
+def test_seed_drift_is_a_cluster_question_only():
+    """A sentinel instance's seeds are its sentinel DAEMONS — a different
+    service on a different port — while the shards hold the data-plane
+    master those daemons named. The two sets are disjoint by construction,
+    so this check reported a CRITICAL on every sweep of a healthy store,
+    with text that is nonsense for the mode. A permanent critical on a
+    healthy store teaches an operator to ignore the findings list."""
+    from backend.app.services.graph_store import topology as topo
+    from backend.app.services.graph_store.discovery import RawNode, RawTopology
+
+    master = RawNode(host="falkor-0", port=6379, endpoint="falkor-0:6379",
+                     announced="falkor-0:6379", role="master")
+    seeds = ["sentinel-0:26379", "sentinel-1:26379", "sentinel-2:26379"]
+
+    sentinel = RawTopology(shards=[(master, [])], discovered_via="sentinel")
+    assert topo._seed_drift(sentinel, seeds) is None
+    fallback = RawTopology(shards=[(master, [])], discovered_via="info-fallback")
+    assert topo._seed_drift(fallback, seeds) is None
+
+    # Cluster is the case the check was written for and still fires.
+    cluster = RawTopology(shards=[(master, [])], discovered_via="clusterNodes")
+    drift = topo._seed_drift(cluster, ["other-0:6379", "other-1:6379"])
+    assert drift is not None and drift.severity == "critical"
+
+
+@pytest.mark.asyncio
+async def test_a_sentinel_outage_still_shows_the_nodes_that_are_up(monkeypatch):
+    """During a promotion — exactly when an operator opens the page —
+    resolve_sentinel_master raises. Discovery used to return zero shards, so
+    the sweep 'succeeded' with no nodes, no memory and no findings, and that
+    empty snapshot was cached as current. The surviving replica was
+    answering INFO the whole time."""
+    from backend.app.services.graph_store import discovery as disc
+
+    async def _boom(*a, **k):
+        raise ConnectionError("no sentinel reachable")
+
+    async def _replication(cfg, host, port, budget):
+        if host == "falkor-1":
+            return {"role": "slave", "masterEndpoint": "falkor-0:6379"}
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(disc, "resolve_sentinel_master", _boom)
+    monkeypatch.setattr(disc, "_read_replication", _replication)
+    monkeypatch.setattr(disc, "_replicas_from_info", lambda *a, **k: _none())
+
+    async def _none():
+        return []
+
+    cfg = types.SimpleNamespace(
+        mode="sentinel", sentinel_nodes=[("sentinel-0", 26379)],
+        sentinel_master="mymaster", host="falkor-0", port=6379,
+        address_remap=None,
+    )
+    raw = await disc.discover_sentinel(
+        cfg, 1.0, extra_seeds=[("falkor-0", 6379), ("falkor-1", 6379)],
+    )
+    assert raw.shards, "the live replica must appear"
+    assert raw.discovered_via == "info-fallback"
+    # …and the page still says the sentinels could not be reached.
+    assert raw.error and "sentinel" in raw.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_nothing_answering_is_still_unreachable(monkeypatch):
+    """The fallback must not manufacture a topology out of addresses that
+    are as dead as the sentinels."""
+    from backend.app.services.graph_store import discovery as disc
+
+    async def _boom(*a, **k):
+        raise ConnectionError("no sentinel reachable")
+
+    async def _nothing(cfg, host, port, budget):
+        return {}
+
+    monkeypatch.setattr(disc, "resolve_sentinel_master", _boom)
+    monkeypatch.setattr(disc, "_read_replication", _nothing)
+
+    cfg = types.SimpleNamespace(
+        mode="sentinel", sentinel_nodes=[("sentinel-0", 26379)],
+        sentinel_master="mymaster", host="falkor-0", port=6379,
+        address_remap=None,
+    )
+    raw = await disc.discover_sentinel(cfg, 1.0, extra_seeds=[("falkor-0", 6379)])
+    assert raw.reachable is False and not raw.shards

@@ -1113,8 +1113,24 @@ def _seed_drift(raw: RawTopology, seeds: Sequence[str]) -> Optional[ReplicationF
     addresses answers then, a healthy cluster reads as unreachable.
 
     So: some drifted is worth saying, all of them drifted is worth acting on.
+
+    CLUSTER ONLY, because the premise "the seeds ARE the masters" is only
+    true there. A sentinel instance's seeds are its sentinel DAEMONS — a
+    different service on a different port — while ``raw.shards`` holds the
+    data-plane master the daemons named. The two sets are disjoint by
+    construction and always will be, so every sweep of a perfectly healthy
+    sentinel store reported the critical, with text that is nonsense for the
+    mode: "None of the 3 configured startup nodes is a master of this
+    cluster any more." A permanent critical on a healthy store is worse
+    than no check: it is the one that teaches an operator to ignore the
+    findings list. (Standalone is unaffected — its single seed IS the
+    master.) The equivalent sentinel question — do the configured sentinel
+    addresses still answer — is a different check with a different code,
+    and is not this one.
     """
     if not seeds or not raw.shards:
+        return None
+    if raw.discovered_via in ("sentinel", "info-fallback"):
         return None
     masters = {m.endpoint for m, _replicas in raw.shards}
     live = {m.endpoint for m, _replicas in raw.shards if m.dialable}
