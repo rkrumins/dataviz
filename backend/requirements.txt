@@ -40,7 +40,7 @@ python3-saml>=1.16.0
 # so a libxml2 advisory is an lxml upgrade, and xmlsec wraps libxmlsec1.
 # Floors are the versions pip-audit reports clean (2026-08); the CI
 # pip-audit job is what raises them when that stops holding.
-lxml>=6.1.2
+lxml>=6.1.3
 xmlsec>=1.3.17
 
 # Local-dev .env auto-load. ``auth_service.core.config`` imports it
