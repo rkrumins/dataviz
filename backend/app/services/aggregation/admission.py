@@ -205,12 +205,25 @@ def endpoint_key(provider: Any) -> str:
 
 
 class GraphLease:
-    """Held per materialization job; renewed in the background."""
+    """Held per materialization job; renewed in the background.
+
+    ``lost`` is set when the renewer finds the key holding somebody else's
+    token — i.e. this run is no longer the graph's writer. Nothing stops a
+    write on its own: a lease is only a fence if the writer reads it, so the
+    pipeline is expected to check :meth:`is_lost` at every batch boundary and
+    stop. Until it does, the window between losing the lease and noticing is a
+    window in which two runs write the same ``:AGGREGATED`` edges.
+    """
 
     def __init__(self, key: str, token: str, renew_task: asyncio.Task) -> None:
         self.key = key
         self.token = token
         self.renew_task = renew_task
+        self.lost = asyncio.Event()
+
+    def is_lost(self) -> bool:
+        """True once the lease is provably held by someone else."""
+        return self.lost.is_set()
 
 
 class ShardReservation:
@@ -310,6 +323,7 @@ class AggregationAdmission:
             holder_job = ""
             holder_value = None
             ttl_desc = ""
+            ttl_ms: Any = None
             try:
                 raw = await self._redis.get(key)
                 if raw is not None:
@@ -328,17 +342,41 @@ class AggregationAdmission:
             except Exception:
                 pass
             # SELF-REACQUIRE: the holder is THIS job (a retry after a
-            # crash / failed release of its own previous attempt). Take
-            # the lease over instead of parking on ourselves for up to a
-            # full TTL — the previous attempt is dead by definition
-            # (one executor per job, enforced by the exec lock).
-            if owner and holder_job == owner and holder_value is not None:
+            # crash / failed release of its own previous attempt). Take the
+            # lease over instead of parking on ourselves for up to a full TTL.
+            #
+            # The old reasoning here was that "the previous attempt is dead by
+            # definition (one executor per job, enforced by the exec lock)".
+            # It is not. The exec lock guarantees the predecessor has been
+            # ASKED to stop — its renewer cancels the run task — but the
+            # cancel lands at that task's next await, the Cypher already on
+            # the wire completes server-side, and a worker stalled long enough
+            # to lose its lock is a worker that may not act on the cancel for
+            # a while yet. Taking the lease here handed the successor the key
+            # to a graph the predecessor was still writing, and the writes
+            # carry no fence, so both runs' MERGEs interleaved into weights
+            # that were neither run's, under a `completed` record.
+            #
+            # So: prove the predecessor is gone before taking its place. A
+            # live holder refreshes the lease every _GRAPH_LEASE_RENEW_SECS,
+            # so its observed TTL never falls below TTL minus one renew
+            # interval. A TTL that has decayed past two of them means at
+            # least one refresh did not happen — the renewer is gone, and
+            # with it the task it would have cancelled. Otherwise park: the
+            # ProviderBusy below is a quiesce, not a retry, and the next
+            # attempt costs one interval rather than a corrupt cube.
+            _decayed_ms = _GRAPH_LEASE_TTL_MS - int(_GRAPH_LEASE_RENEW_SECS * 1000 * 2)
+            if (
+                owner and holder_job == owner and holder_value is not None
+                and isinstance(ttl_ms, int) and 0 < ttl_ms <= _decayed_ms
+            ):
                 took = await self._try_take_over(key, holder_value, token)
                 if took:
                     logger.info(
-                        "aggregation admission: re-acquired own graph "
-                        "lease for job %s (previous attempt's lease had "
-                        "not expired).", owner,
+                        "aggregation admission: re-acquired own graph lease "
+                        "for job %s — the previous attempt stopped renewing "
+                        "it (%dms left of %dms).",
+                        owner, ttl_ms, _GRAPH_LEASE_TTL_MS,
                     )
                     return self._start_renew(key, token)
             from backend.common.adapters import ProviderBusy
@@ -353,7 +391,9 @@ class AggregationAdmission:
 
         return self._start_renew(key, token)
 
-    def _start_renew(self, key: str, token: str) -> GraphLease:
+    def _start_renew(
+        self, key: str, token: str, on_lost: Optional[Any] = None,
+    ) -> GraphLease:
         async def _renew() -> None:
             try:
                 while True:
@@ -368,6 +408,15 @@ class AggregationAdmission:
                                 "aggregation admission: graph lease %s lost "
                                 "(holder changed); stopping renewal.", key,
                             )
+                            lease.lost.set()
+                            if on_lost is not None:
+                                try:
+                                    on_lost()
+                                except Exception:       # noqa: BLE001
+                                    logger.debug(
+                                        "graph-lease on_lost callback raised",
+                                        exc_info=True,
+                                    )
                             return
                         await self._redis.pexpire(key, _GRAPH_LEASE_TTL_MS)
                     except Exception as exc:
@@ -375,8 +424,12 @@ class AggregationAdmission:
             except asyncio.CancelledError:
                 pass
 
-        task = asyncio.create_task(_renew())
-        return GraphLease(key, token, task)
+        # The lease object has to exist before the renewer can publish a loss
+        # onto it, so the task is attached after construction rather than
+        # passed in.
+        lease = GraphLease(key, token, None)   # type: ignore[arg-type]
+        lease.renew_task = asyncio.create_task(_renew())
+        return lease
 
     async def _try_take_over(
         self, key: str, expected_value: str, new_token: str,

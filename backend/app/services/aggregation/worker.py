@@ -35,7 +35,7 @@ import types
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.adapters import (
@@ -61,6 +61,7 @@ from backend.app.jobs.audit import record_terminal
 from backend.app.jobs.metrics import increment as metrics_increment
 
 from .cancel import JobCancelled, get_registry as get_cancel_registry
+from .reap import WORKER_LOST
 from .models import AggregationJobORM
 from .fingerprint import compute_graph_fingerprint
 
@@ -392,6 +393,8 @@ class AggregationWorker:
             cancel_event = cancel_registry.register(job_id)
             provider = None
             admission_attached = False
+            # Set only by the eviction path, which settles the row itself.
+            terminal_written = False
 
             # Platform JobEmitter — the only path for live progress
             # updates. Seed its per-job sequence counter from the
@@ -1145,6 +1148,59 @@ class AggregationWorker:
                         data_source_id=job.data_source_id,
                     )
 
+            except asyncio.CancelledError:
+                # This worker was EVICTED, not asked to stop: the exec-lock
+                # heartbeat lost its lease (or Redis went away for longer than
+                # the TTL) and cancelled the run so a single executor stays
+                # single. ``CancelledError`` is a ``BaseException``, so it
+                # passes every clause above and, without this, reaches the
+                # ``finally`` with ``job.status`` still ``running`` — which
+                # seals the open step as in-flight forever and, worse, commits
+                # THIS attempt's uncommitted checkpoint columns (cursor,
+                # processed_edges, progress, current_phase, run_stats) onto a
+                # row the successor already owns. A resume then reads a cursor
+                # from a range the successor never scanned.
+                #
+                # So: discard our uncommitted work, and write the terminal
+                # state through a statement PINNED to our own worker id. If
+                # the successor has already claimed the row the UPDATE matches
+                # nothing, which is the correct outcome — the row is no longer
+                # ours to describe.
+                await session.rollback()
+                terminal_written = True
+                try:
+                    await session.execute(
+                        update(AggregationJobORM)
+                        .where(
+                            AggregationJobORM.id == job_id,
+                            AggregationJobORM.worker_id == self._worker_id,
+                            AggregationJobORM.status == "running",
+                        )
+                        .values(
+                            status="failed",
+                            error_message=(
+                                f"{WORKER_LOST} this worker lost its execution lease and "
+                                f"was stopped mid-run. Progress up to the last checkpoint "
+                                f"is preserved; resume re-runs from there."
+                            )[:2000],
+                            completed_at=_now(),
+                            updated_at=_now(),
+                        )
+                    )
+                    await session.commit()
+                except Exception as write_exc:      # noqa: BLE001 — we are unwinding
+                    logger.warning(
+                        "Aggregation job %s: could not record the eviction (%s); "
+                        "the stuck-job reconciler will reap it",
+                        job_id, write_exc,
+                    )
+                    await session.rollback()
+                logger.warning(
+                    "Aggregation job %s stopped: execution lease lost by worker %s",
+                    job_id, self._worker_id,
+                )
+                raise
+
             except Exception as e:
                 job.status = "failed"
                 job.error_message = str(e)[:2000]
@@ -1184,29 +1240,40 @@ class AggregationWorker:
                 # outage — passes through. A failed run's ledger then NAMES
                 # the step it died in, which is the first question anyone
                 # asks of a failure.
-                ledger.seal(job.status)
-                _record_steps(job, ledger)
-                # What a run that did NOT complete learned under pressure.
-                # The success path writes ``observed_tuning`` unconditionally
-                # (``{}`` clears the previous lesson, because a hinted run
-                # re-grows its width and so proves it no longer needs the
-                # narrowing). A failed run proves no such thing, and it is the
-                # run with the most to teach: an hour spent halving the scan
-                # width down to 500 before dying was thrown away, so the retry
-                # started wide and hit the same wall. Written only when it is
-                # non-empty, so a run that failed for an unrelated reason — an
-                # ontology error, a dead node — cannot erase a valid lesson.
-                if job.status != "completed":
-                    learned = _learned_from(
-                        self._job_run_stats(job), job_id=job.id,
-                    )
-                    if learned:
-                        await self._update_ds_state(
-                            session, job.data_source_id,
-                            observed_tuning=json.dumps(learned),
+                #
+                # An EVICTED worker is the one path that skips all of it. It
+                # has already written its terminal state through a statement
+                # pinned to its own worker id, and rolled back everything else
+                # deliberately, because the row may now belong to a successor.
+                # Re-recording here would put back exactly what that rollback
+                # removed. The cleanup below still runs. (Never ``return``
+                # from this block: that would discard the ``CancelledError``
+                # the eviction path exists to re-raise.)
+                if not terminal_written:
+                    ledger.seal(job.status)
+                    _record_steps(job, ledger)
+                    # What a run that did NOT complete learned under pressure.
+                    # The success path writes ``observed_tuning``
+                    # unconditionally (``{}`` clears the previous lesson,
+                    # because a hinted run re-grows its width and so proves it
+                    # no longer needs the narrowing). A failed run proves no
+                    # such thing, and it is the run with the most to teach: an
+                    # hour spent halving the scan width down to 500 before
+                    # dying was thrown away, so the retry started wide and hit
+                    # the same wall. Written only when it is non-empty, so a
+                    # run that failed for an unrelated reason — an ontology
+                    # error, a dead node — cannot erase a valid lesson.
+                    if job.status != "completed":
+                        learned = _learned_from(
+                            self._job_run_stats(job), job_id=job.id,
                         )
-                job.updated_at = _now()
-                await session.commit()
+                        if learned:
+                            await self._update_ds_state(
+                                session, job.data_source_id,
+                                observed_tuning=json.dumps(learned),
+                            )
+                    job.updated_at = _now()
+                    await session.commit()
                 # Always unregister the cancel event, including on
                 # uncaught exceptions, so a future job re-using this
                 # job_id (resume) starts with a fresh event.

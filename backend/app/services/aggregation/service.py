@@ -3168,6 +3168,43 @@ class AggregationService:
                 if job.trigger_source == "purge":
                     continue
 
+                # Is a worker STILL RUNNING this? The control plane restarts
+                # on every rolling deploy, and the worker fleet does not
+                # restart with it — so without this check every live job is
+                # flipped to ``pending``, burns one of its five auto-resumes,
+                # and then sits mislabelled for the rest of its run: the
+                # readiness endpoint tells users it "is queued and will start
+                # shortly" while it is 60% through writing FalkorDB, and the
+                # stuck-job reconciler cannot see it either, because that
+                # loop matches ``running`` only. The reconciler already
+                # treats the exec lock as the liveness oracle (reconciler.py);
+                # recovery has to read the same one, or the two disagree
+                # about which jobs are alive.
+                #
+                # No Redis means no oracle: skip rather than re-dispatch. A
+                # genuinely dead job is still reaped by the reconciler's
+                # staleness fallback, which is the path that exists for
+                # exactly this case.
+                if job.status == "running":
+                    try:
+                        from .redis_client import exec_lock_key, get_redis
+
+                        if await get_redis().exists(exec_lock_key(job.id)):
+                            logger.info(
+                                "Crash recovery: job %s still holds its "
+                                "execution lock — leaving it to its worker",
+                                job.id,
+                            )
+                            continue
+                    except Exception as exc:      # noqa: BLE001 — never fail startup
+                        logger.warning(
+                            "Crash recovery: cannot read the execution lock "
+                            "for %s (%s) — leaving it for the stuck-job "
+                            "reconciler rather than re-dispatching blind",
+                            job.id, exc,
+                        )
+                        continue
+
                 was_making_progress = (
                     job.status == "running"
                     and job.last_cursor is not None

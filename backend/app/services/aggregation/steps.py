@@ -167,8 +167,20 @@ class StepLedger:
     def seal(self, status: str) -> bool:
         """Close the open step with the run's terminal state. ``completed``
         closes it as done; anything else closes it as itself, so the ledger
-        names the step the run died in."""
+        names the step the run died in.
+
+        A status that is not terminal is sealed as ``failed``. The worker's
+        ``finally`` runs on paths where nothing had a chance to set one —
+        an exec-lock eviction raises ``CancelledError``, which is a
+        ``BaseException`` and so passes every ``except`` clause with
+        ``job.status`` still ``running``. Sealing the step AS ``running``
+        leaves it in :data:`_OPEN`, so it reads as in-flight forever and
+        ``failed_stage`` answers ``None`` — the exact lie the ledger was
+        added to remove, on the one path most likely to produce it.
+        """
         final = "done" if status == "completed" else (status or "failed")
+        if final in _OPEN:
+            final = "failed"
         changed = self._close_open(self._clock(), final)
         self._open = None
         return changed

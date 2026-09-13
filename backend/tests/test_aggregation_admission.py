@@ -30,6 +30,8 @@ class _FakeRedis:
         self.zsets = {}
         self.hashes = {}
         self.hset_calls = 0
+        # Full TTL by default: a holder that is still renewing.
+        self.pttl_ms = adm._GRAPH_LEASE_TTL_MS
 
     async def set(self, key, value, nx=False, px=None):
         if nx and key in self.kv:
@@ -41,7 +43,17 @@ class _FakeRedis:
         return self.kv.get(key)
 
     async def pexpire(self, key, ms):
+        self.pttl_ms = ms
         return key in self.kv
+
+    async def pttl(self, key):
+        """Milliseconds left on the lease. A LIVE holder keeps refreshing it,
+        so its observed TTL never falls much below the full value; a dead
+        one's decays. Which of those the caller sees is the whole liveness
+        test in ``acquire_graph_lease``, so the fake has to model it."""
+        if key not in self.kv:
+            return -2
+        return self.pttl_ms
 
     async def eval(self, script, numkeys, *args):
         key = args[0]
@@ -142,9 +154,9 @@ def test_graph_lease_conflict_names_the_holder():
 
 
 def test_own_stale_lease_is_reacquired_not_parked():
-    """A retry of the SAME job must not park on its own previous
-    attempt's unexpired lease — it takes it over (the previous attempt
-    is dead by definition; the exec lock enforces one executor/job)."""
+    """A retry of the SAME job must not park for a full TTL on a lease its own
+    previous attempt left behind — once that attempt has provably stopped
+    renewing it, the retry takes it over."""
     async def scenario():
         redis = _FakeRedis()
         a = adm.AggregationAdmission(redis)
@@ -152,11 +164,69 @@ def test_own_stale_lease_is_reacquired_not_parked():
 
         first = await a.acquire_graph_lease(provider, owner="agg_self")
         assert first is not None
-        first.renew_task.cancel()   # simulate dead attempt, lease left behind
+        first.renew_task.cancel()   # the attempt is gone …
+        # … and its lease has decayed past two renew intervals, which is what
+        # says so: a live renewer would have pushed it back to the full TTL.
+        redis.pttl_ms = adm._GRAPH_LEASE_TTL_MS - int(
+            adm._GRAPH_LEASE_RENEW_SECS * 1000 * 2
+        ) - 1
 
         second = await a.acquire_graph_lease(provider, owner="agg_self")
         assert second is not None   # took over, no ProviderBusy
         await a.release_graph_lease(second)
+
+    _run(scenario())
+
+
+def test_a_still_renewing_predecessor_is_not_taken_over():
+    """The dangerous case the self-reacquire used to wave through. The exec
+    lock only guarantees the predecessor has been ASKED to stop; its cancel
+    lands at the next await and the Cypher already on the wire completes
+    server-side. Handing the successor the key while that is true put two
+    runs' MERGEs into one graph, interleaving weights that were neither
+    run's — under a ``completed`` record, with a fresh fingerprint that then
+    suppressed drift detection. A lease whose TTL is still being refreshed is
+    proof the predecessor is alive, so the successor parks instead."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+
+        first = await a.acquire_graph_lease(provider, owner="agg_self")
+        assert first is not None
+        # The renewer is still running, so the TTL stays at its full value.
+        with pytest.raises(ProviderBusy):
+            await a.acquire_graph_lease(provider, owner="agg_self")
+        first.renew_task.cancel()
+
+    _run(scenario())
+
+
+def test_a_lease_lost_to_another_holder_is_published_to_the_writer():
+    """A lease is only a fence if the writer reads it. The renewer stops when
+    the key holds somebody else's token; it must also SAY so, or the pipeline
+    keeps writing a graph it no longer owns."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+
+        # Drive the renewer on a test cadence rather than the production 20s:
+        # a unit test that sleeps a renew interval is a unit test nobody runs.
+        original = adm._GRAPH_LEASE_RENEW_SECS
+        adm._GRAPH_LEASE_RENEW_SECS = 0.01
+        try:
+            lease = await a.acquire_graph_lease(provider, owner="agg_one")
+            assert lease is not None and not lease.is_lost()
+            redis.kv[lease.key] = "somebody-else|agg_two|other-host"
+            for _ in range(200):
+                if lease.is_lost():
+                    break
+                await asyncio.sleep(0.01)
+            assert lease.is_lost()
+            lease.renew_task.cancel()
+        finally:
+            adm._GRAPH_LEASE_RENEW_SECS = original
 
     _run(scenario())
 

@@ -171,6 +171,23 @@ def test_the_seal_carries_the_runs_terminal_state(status, expected):
     assert _by_id(ledger)["finalizing"]["state"] == expected
 
 
+@pytest.mark.parametrize("status", ["running", "waiting", "", None])
+def test_a_seal_with_no_terminal_state_still_closes_the_step(status):
+    """The eviction path reaches the worker's ``finally`` with ``job.status``
+    still ``running``: ``CancelledError`` is a ``BaseException``, so it passes
+    every ``except`` clause and nothing had a chance to set a terminal state.
+    Sealing the step AS ``running`` left it in the open set, so it read as
+    in-flight forever and ``failed_stage`` answered ``None`` — the exact lie
+    the ledger exists to remove, on the path most likely to produce it."""
+    ledger = StepLedger(clock=_Clock())
+    ledger.enter("applying")
+    ledger.seal(status)
+
+    step = _by_id(ledger)["applying"]
+    assert step["state"] == "failed"
+    assert ledger.open_step is None
+
+
 def test_an_unknown_step_is_refused_rather_than_invented():
     ledger = StepLedger(clock=_Clock())
     ledger.enter("extracting")
