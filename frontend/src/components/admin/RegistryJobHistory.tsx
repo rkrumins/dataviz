@@ -39,7 +39,7 @@ import { JobHistoryFilterBar } from './job-history/JobHistoryFilterBar'
 import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
 import { NodeLoadPanel } from './job-history/NodeLoadPanel'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
-import { gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { balancedPreset, gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import { extendStallPatch } from './job-history/timeLimits'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -47,6 +47,36 @@ import { PageContainer } from '@/components/layout/PageContainer'
 const DEFAULT_TIMEOUT_SECS = 10800
 const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_BATCH_SIZE = 5000
+
+/**
+ * What a manually triggered run opens on: the Balanced profile, with one
+ * replica acknowledgement.
+ *
+ * None of it is new behaviour. Balanced's knobs ARE the server's environment
+ * defaults, and ``AGGREGATION_REPLICA_ACK_MIN`` is already 1 — a trigger that
+ * sent no tuning at all ran exactly this. What it fixes is the dialog, which
+ * seeded the stored global alone: with nothing stored, every profile knob was
+ * undefined, no profile matched, and the operator was shown "Custom" over the
+ * defaults. Rollup storage is NOT set here — it resolves against the server's
+ * effective default (Full detail) in the form, and writing it would overrule a
+ * fleet-wide choice to run Auto.
+ *
+ * The stored global goes on TOP, because a fleet default an operator set is
+ * the answer to this question; Balanced only fills what they left alone.
+ *
+ * ``undefined`` — the settings fetch has not landed, or failed — stays
+ * ``undefined``. Seeding through a failed fetch would send this profile as an
+ * explicit per-job override and overrule the very stored globals it is meant
+ * to agree with. Loaded-and-empty is a different thing, and does get the seed.
+ */
+function triggerTuning(defaultTuning?: AggregationTuning): AggregationTuning | undefined {
+    if (defaultTuning === undefined) return undefined
+    return {
+        ...balancedPreset().tuning,
+        replicaAckMin: 1,
+        ...defaultTuning,
+    }
+}
 
 /** Only send ``tuning`` when the user actually set an override. */
 function tuningForRequest(tuning: AggregationTuning | undefined): AggregationTuning | undefined {
@@ -95,7 +125,7 @@ export function buildInitialOverridesFromJob(
         ...base,
         maxRetries: DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
-        tuning: defaultTuning,
+        tuning: triggerTuning(defaultTuning),
     }
 }
 
@@ -145,7 +175,7 @@ function buildInitialOverridesForDataSource(
         projectionMode: projectionMode === 'dedicated' ? 'dedicated' : 'in_source',
         maxRetries: DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
-        tuning: defaultTuning,
+        tuning: triggerTuning(defaultTuning),
     }
 }
 
@@ -898,7 +928,7 @@ export function RegistryJobHistory() {
                     projectionMode: 'in_source',
                     maxRetries: DEFAULT_MAX_RETRIES,
                     timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
-                    tuning: defaultTuning,
+                    tuning: triggerTuning(defaultTuning),
                 }}
                 originatingJob={retriggerCtx?.kind === 'job' ? {
                     id: retriggerCtx.job.id,

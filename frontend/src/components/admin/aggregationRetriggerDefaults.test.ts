@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { buildInitialOverridesFromJob, gentleRetryReason, retryPresetReason } from './RegistryJobHistory'
+import { balancedPreset, presetIdFor } from './shared/AggregationOverridesForm'
 import type { AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 
 const CONFIGURED_DEFAULTS: AggregationTuning = {
@@ -18,6 +19,15 @@ const CONFIGURED_DEFAULTS: AggregationTuning = {
     extractConcurrency: 1,
     maxPendingPairs: 50_000_000,
 }
+
+/**
+ * What the dialog should end up holding: the configured defaults, over a
+ * Balanced seed. Here the two are the same knobs (Balanced IS the server's
+ * environment default), so the only visible addition is the replica
+ * acknowledgement — which the server already defaults to 1, and which the
+ * dialog now states rather than leaving to a placeholder.
+ */
+const SEEDED_DEFAULTS: AggregationTuning = { ...CONFIGURED_DEFAULTS, replicaAckMin: 1 }
 
 /** A job frozen with cramped settings — the shape that keeps re-failing. */
 const jobWithStaleTuning = {
@@ -34,11 +44,38 @@ const jobWithStaleTuning = {
     },
 } as unknown as AggregationJobResponse
 
+describe('what a manual trigger opens on', () => {
+    it('is the Balanced profile, at one replica acknowledgement', () => {
+        // Settings loaded, nothing stored: the operator used to be shown
+        // "Custom" over settings that were exactly Balanced, because the
+        // dialog seeded that empty global and no profile matched.
+        const value = buildInitialOverridesFromJob(jobWithStaleTuning, {})
+
+        expect(presetIdFor(value)).toBe('balanced')
+        expect(value.tuning).toEqual({ ...balancedPreset().tuning, replicaAckMin: 1 })
+        // Rollup storage stays unstated, so the form resolves it against the
+        // server's effective default (Full detail). Writing it here would
+        // overrule a fleet that had deliberately chosen Auto.
+        expect(Object.hasOwn(value.tuning ?? {}, 'materializeFinePairs')).toBe(false)
+    })
+
+    it('lets a fleet default win over the seed', () => {
+        // A stored global is the operator's answer to this question; Balanced
+        // only fills in what they left alone.
+        const value = buildInitialOverridesFromJob(
+            jobWithStaleTuning, { ...CONFIGURED_DEFAULTS, writePacingRatio: 2.0, replicaAckMin: 0 },
+        )
+        expect(value.tuning?.writePacingRatio).toBe(2.0)
+        expect(value.tuning?.replicaAckMin).toBe(0)
+        expect(presetIdFor(value)).toBeNull()          // and it says so: Custom
+    })
+})
+
 describe('buildInitialOverridesFromJob', () => {
     it('seeds tuning from the configured defaults, not the job row', () => {
         const value = buildInitialOverridesFromJob(jobWithStaleTuning, CONFIGURED_DEFAULTS)
 
-        expect(value.tuning).toEqual(CONFIGURED_DEFAULTS)
+        expect(value.tuning).toEqual(SEEDED_DEFAULTS)
         // The cramped 2M ceiling on the job row is exactly what fails a
         // 1M-node / 2M-edge graph; it must not come back. With no ceiling
         // configured, the measured shard budget governs the re-run.
@@ -63,6 +100,8 @@ describe('buildInitialOverridesFromJob', () => {
         // A failed settings fetch must not pin the job to the stale values
         // either — omitting `tuning` lets the control plane apply the
         // stored globals.
+        // Loaded-and-empty is a different thing and DOES get the Balanced
+        // seed — see the first describe. Only a missing fetch stays silent.
         expect(buildInitialOverridesFromJob(jobWithStaleTuning).tuning).toBeUndefined()
     })
 
@@ -93,7 +132,7 @@ describe('a retry after the graph store kept refusing starts from the Gentle pro
         const away = {
             ...jobWithStaleTuning, status: 'failed', failureCategory: 'provider_unavailable',
         } as AggregationJobResponse
-        expect(buildInitialOverridesFromJob(away, CONFIGURED_DEFAULTS).tuning).toEqual(CONFIGURED_DEFAULTS)
+        expect(buildInitialOverridesFromJob(away, CONFIGURED_DEFAULTS).tuning).toEqual(SEEDED_DEFAULTS)
         expect(gentleRetryReason(away)).toBeNull()          // not a Gentle case
         expect(retryPresetReason(away)).toMatch(/not answering/)
         expect(retryPresetReason(away)).toMatch(/checkpoint/)
@@ -106,7 +145,7 @@ describe('a retry after the graph store kept refusing starts from the Gentle pro
             { ...jobWithStaleTuning, status: 'failed', failureCategory: 'write_budget' },
             { ...jobWithStaleTuning, status: 'completed', failureCategory: null },
         ] as AggregationJobResponse[]) {
-            expect(buildInitialOverridesFromJob(job, CONFIGURED_DEFAULTS).tuning).toEqual(CONFIGURED_DEFAULTS)
+            expect(buildInitialOverridesFromJob(job, CONFIGURED_DEFAULTS).tuning).toEqual(SEEDED_DEFAULTS)
             expect(gentleRetryReason(job)).toBeNull()
         }
     })
