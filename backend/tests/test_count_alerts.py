@@ -1332,3 +1332,82 @@ def test_the_overlay_split_reads_the_row_not_its_neighbours():
         edge_type_counts="not json", type_deltas="not json",
     )
     assert shr.overlay_count_of(junk) == 0 and shr.overlay_delta_of(junk) == 0
+
+
+# ── the findings already stuck on screen ─────────────────────────────
+
+
+def _overlay_migration_source() -> str:
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic" / "versions" / "20260915_1000_overlay_findings.py"
+    )
+    assert path.exists(), "the overlay-findings cleanup migration is missing"
+    return path.read_text()
+
+
+def test_the_overlay_cleanup_narrows_to_edge_type_gone_findings():
+    """`20260902_1000_derived_artifacts` filtered on DERIVED_LABELS — the node
+    labels — and so acknowledged the `_AggMeta` findings and left every
+    `AGGREGATED` one standing. `purge_alerts` only deletes ACKNOWLEDGED rows,
+    so they never aged out: months later the band still reads
+    "AGGREGATED gone · severe" about a rebuild that worked.
+
+    Narrower than its sibling on purpose. These are EDGE types, and a
+    customer entity label spelled AGGREGATED is their data — its findings
+    are theirs to keep."""
+    src = _overlay_migration_source()
+    assert "finding = 'type_gone'" in src
+    assert "metric = 'edges'" in src
+    assert "UPPER(subject_type) IN :types" in src, (
+        "a case-sensitive match misses a graph an external system loaded with "
+        "different casing — is_derived_edge_type upper-cases for that reason"
+    )
+
+
+def test_the_overlay_cleanup_acknowledges_rather_than_deletes():
+    """The audit trail has to survive a wrong exclusion list."""
+    src = _overlay_migration_source()
+    assert "acknowledged_by = 'system'" in src
+    assert "acknowledged_at IS NULL" in src, "re-stamping a human's ack"
+    assert "DELETE FROM" not in src.upper(), "the cleanup destroys the trail"
+
+
+def test_the_overlay_cleanup_does_not_reseed_the_drift_baselines():
+    """THE trap in copying the sibling. It nulled every `raw_fingerprint`
+    because `raw_fingerprint_from_counts` had CHANGED under it. That function
+    has excluded AGGREGATED since it was written, so nothing here invalidates
+    a baseline — and nulling the fleet's fingerprints with nothing to fix
+    queues a rebuild per source."""
+    src = _overlay_migration_source()
+    assert "raw_fingerprint = NULL" not in src
+    assert "raw_fingerprint" in src, (
+        "the decision not to re-seed is load-bearing and must be stated, not "
+        "merely absent"
+    )
+
+
+def test_the_overlay_cleanup_reads_the_one_definition():
+    """One definition of the derived types, imported — not a second copy of
+    the list, which is the exact failure `common/derived_artifacts` exists to
+    stop."""
+    src = _overlay_migration_source()
+    assert "from backend.common.derived_artifacts import DERIVED_EDGE_TYPES" in src
+    # Bound, not interpolated, and taken from the import rather than a second
+    # copy of the list spelled into the SQL.
+    assert "value=types, expanding=True" in src
+    assert "[t.upper() for t in DERIVED_EDGE_TYPES]" in src
+
+
+def test_the_overlay_cleanup_silences_the_bell_too():
+    """`20260902_1000_derived_artifacts` records why: the bell has to agree
+    with the band, and there is no FK from a notification to its alert, so
+    the match is kind-first plus the title phrase."""
+    src = _overlay_migration_source()
+    assert "kind = 'insights.counts_anomaly'" in src
+    assert "IS GONE%" in src
+    assert src.index("kind = 'insights.counts_anomaly'") < src.index("IS GONE%"), (
+        "narrow by kind before the title, or a user-authored title is swept up"
+    )

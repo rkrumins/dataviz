@@ -18,7 +18,7 @@ from typing import Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260913_1100_invalidated_fingerprint"
+revision: str = "20260913_1100_invalidated_fp"
 down_revision: Union[str, None] = "20260913_1000_job_scan_indexes"
 branch_labels = None
 depends_on = None

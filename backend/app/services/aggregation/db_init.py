@@ -255,7 +255,7 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS observed_tuning TEXT NULL",
                 # The fingerprint the read caches were last invalidated for
                 # (2026-09-13), mirrored in alembic
-                # 20260913_1100_invalidated_fingerprint. Stops a rebuild
+                # 20260913_1100_invalidated_fp. Stops a rebuild
                 # deferred by the cooldown from re-bumping the generation on
                 # every sweep, which capped the cache's life at the detection
                 # cadence instead of its TTL.
