@@ -29,10 +29,11 @@ Architecture: In-process via asyncio.create_task() on startup.
 For K8s: extract to a standalone cron-job pod or use K8s CronJob.
 """
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import and_, select
 
@@ -43,6 +44,19 @@ logger = logging.getLogger(__name__)
 # ``_reconcile_stale_markers``). A cancel is a person stopping THAT job, not
 # automation; it is retried like a failure, with the same backoff and cap.
 _RETRY_AFTER = ("failed", "cancelled")
+#: Statuses a run is DONE in. ``_converging`` compares consecutive ones, and
+#: a pending or running job between them carries no baseline to compare.
+_TERMINAL = ("completed", "failed", "cancelled")
+
+#: How many times in a row the breaker may be cleared for "it is converging"
+#: before the clearing itself is treated as the loop it has become. Without
+#: it, "converging" is an unbounded licence: a source whose stored cube grows
+#: by one cell an attempt retries every cadence forever and nothing ever asks
+#: a person. At the default cadence (900s) this is a little over two hours of
+#: automatic retries before the source is suspended like any other.
+_CONVERGING_CLEAR_CAP = int(
+    os.getenv("AGGREGATION_CONVERGING_CLEAR_CAP", "10")
+)
 
 
 async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool:
@@ -93,50 +107,69 @@ async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool
     return elapsed < interval_secs
 
 
+def _edges_before(run_stats: Any) -> Optional[int]:
+    """``run_stats.edges_before`` — how many rollup edges the graph STORED
+    when that run started — or None when the run never got far enough to
+    read it. Stamped on every checkpoint by the pipeline's
+    ``_capacity_baseline``, so a run the watchdog killed still carries it."""
+    try:
+        value = (json.loads(run_stats or "{}") or {}).get("edges_before")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return int(value) if isinstance(value, (int, float)) else None
+
+
 async def _converging(session: Any, state: Any) -> bool:
-    """True when the source's most recent attempt FAILED but wrote rollup
-    edges — it was converging, not stuck.
+    """True when the source's most recent attempt FAILED but the STORED
+    rollup grew since the attempt before it — it was converging, not stuck.
 
     The breaker exists for a source that fails the same way forever. A
     rebuild of a graph too large for one wall clock fails in exactly the
-    same SHAPE every time and is the opposite case: every attempt writes
+    same SHAPE every time and is the opposite case: every attempt stores
     what the previous one did not, because APPLY writes only the cells the
     reconcile scan did not find, and the writes are durable. Counting those
     attempts against the breaker suspends a source for making progress, and
     the bigger the graph the more certainly it happens — which is what "with
     too low values it will never complete" means in practice.
 
-    ``run_stats.writes`` is committed at every checkpoint, so a run killed
-    by the watchdog leaves an honest count behind. Never raises: unreadable
-    reads as "not converging", the conservative direction (the breaker still
-    bounds the retries).
+    ``run_stats.writes`` was the wrong test, in both directions. APPLY
+    re-MERGEs every cell RECONCILE did not find, so a run that dies in the
+    same place every time writes a healthy number and stores nothing new —
+    forever, since the clear below zeroes the count on every cycle. And
+    across a genuinely converging sequence ``writes`` DECREASES, because
+    each run finds more of its work already done. The number that actually
+    says "the cube grew" is the stored count, which each run reads at its
+    own start: run N+1's ``edges_before`` is what run N left behind.
+
+    Never raises: unreadable reads as "not converging", the conservative
+    direction (the breaker still bounds the retries).
     """
     if state is None:
         return False
     from .models import AggregationJobORM
 
     try:
-        row = (await session.execute(
+        rows = (await session.execute(
             select(AggregationJobORM.status, AggregationJobORM.run_stats)
             .where(AggregationJobORM.data_source_id == state.data_source_id)
+            .where(AggregationJobORM.status.in_(_TERMINAL))
             .order_by(AggregationJobORM.updated_at.desc().nullslast())
-            .limit(1)
-        )).first()
+            .limit(2)
+        )).all()
     except Exception:
         logger.warning(
             "stale-marker reconcile: progress lookup failed for %s",
             state.data_source_id, exc_info=True,
         )
         return False
-    if row is None or row[0] not in _RETRY_AFTER or not row[1]:
+    if len(rows) < 2 or rows[0][0] not in _RETRY_AFTER:
+        # One terminal run is no sequence to judge: the first failure is
+        # counted, and the second is where a converging source proves it.
         return False
-    try:
-        import json
-
-        writes = int((json.loads(row[1]) or {}).get("writes") or 0)
-    except (TypeError, ValueError, AttributeError):
+    latest, previous = _edges_before(rows[0][1]), _edges_before(rows[1][1])
+    if latest is None or previous is None:
         return False
-    return writes > 0
+    return latest > previous
 
 
 async def _suspend(session: Any, state: Any, ds: str) -> None:
@@ -411,23 +444,38 @@ class AggregationScheduler:
                         state is not None
                         and state.aggregation_status in _RETRY_AFTER
                     )
-                    # A retry that WROTE is converging: the previous
-                    # attempt landed rollup cells the one before it had
-                    # not, and the next one writes strictly less. Clear
+                    # A retry that GREW THE STORED CUBE is converging: the
+                    # previous attempt landed rollup cells the one before it
+                    # had not, and the next one writes strictly less. Clear
                     # the breaker rather than count it — otherwise a graph
                     # too large for one wall clock is suspended precisely
                     # for making progress.
                     converging = retrying and await _converging(s2, state)
+                    clears = getattr(state, "reconcile_converging_clears", 0) or 0
+                    if converging and clears >= _CONVERGING_CLEAR_CAP:
+                        # Converging, but not fast enough to be worth waiting
+                        # out unattended. Growing by a cell an attempt is
+                        # progress by this test and a loop by any other, so
+                        # past the cap it counts against the breaker like any
+                        # other failure and a person is asked.
+                        logger.warning(
+                            "stale-marker reconcile: %s has been converging "
+                            "across %d cleared retries without completing — "
+                            "letting the breaker count this one.", ds, clears,
+                        )
+                        converging = False
                     if converging and (
                         getattr(state, "reconcile_consecutive_actions", 0) or 0
                     ):
                         logger.info(
-                            "stale-marker reconcile: %s failed but wrote rollup "
-                            "edges — converging, not stuck; clearing the retry "
-                            "count so the breaker cannot suspend it for making "
-                            "progress.", ds,
+                            "stale-marker reconcile: %s failed but its stored "
+                            "rollup grew — converging, not stuck; clearing the "
+                            "retry count (%d of %d) so the breaker cannot "
+                            "suspend it for making progress.",
+                            ds, clears + 1, _CONVERGING_CLEAR_CAP,
                         )
                         state.reconcile_consecutive_actions = 0
+                        state.reconcile_converging_clears = clears + 1
                         await s2.commit()
                     if (
                         retrying

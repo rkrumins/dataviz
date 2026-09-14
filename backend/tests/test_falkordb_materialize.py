@@ -2418,6 +2418,37 @@ def test_checkpoints_carry_the_snapshot_and_the_adaptation_and_the_result_keeps_
     assert result["run_stats"]["adapted"]["scan_width_min"] == 100_000
 
 
+def test_every_checkpoint_carries_what_the_graph_already_stored():
+    """The reconcile breaker compares this number across consecutive FAILED
+    runs to tell a rebuild too large for one wall clock (the stored cube
+    grows every attempt) from one that writes the same cells and dies. So it
+    has to survive a run the watchdog kills, which means every checkpoint and
+    not the result — a killed run never reaches the result.
+
+    The FIRST checkpoint fires before any graph work, deliberately (a
+    parseable cursor before an early crash), so it has nothing to stamp — and
+    stamping a 0 placeholder there would read as "the graph stored nothing"
+    and clear the breaker for a source that never started."""
+    seen = []
+
+    async def progress(*args, **kw):
+        seen.append(kw.get("stats") or {})
+
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    _run(_materialize(p, progress=progress))
+
+    assert seen, "no checkpoints at all"
+    assert "edges_before" not in seen[0], (
+        "the pre-graph-work checkpoint stamped a placeholder as a reading"
+    )
+    stamped = [s["edges_before"] for s in seen if "edges_before" in s]
+    assert stamped, "no checkpoint carried the stored rollup count"
+    # One run reads it once: the baseline cannot move under a single run.
+    assert len(set(stamped)) == 1 and all(isinstance(v, int) for v in stamped)
+
+
 # ── per-query budgets raised on a running job ──────────────────────────
 
 

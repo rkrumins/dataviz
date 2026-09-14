@@ -2208,6 +2208,7 @@ class AggregationService:
                 f"Data source {ds_id} not found in aggregation state"
             )
         state.reconcile_consecutive_actions = 0
+        state.reconcile_converging_clears = 0
         if state.drift_state == "suspended":
             state.drift_state = None
         await session.commit()
@@ -5024,13 +5025,17 @@ async def save_reconcile_policy(
         fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
 
     if "reset_breaker" in sent and body.reset_breaker:
-        # The two fields ``reset_source_breaker`` zeroes per source, for every
-        # suspended source at once — one statement, so re-enabling after an
-        # incident is not one drawer per source.
+        # The same fields ``reset_source_breaker`` zeroes per source, for
+        # every suspended source at once — one statement, so re-enabling after
+        # an incident is not one drawer per source.
         lifted = await session.execute(
             update(AggregationDataSourceStateORM)
             .where(AggregationDataSourceStateORM.drift_state == "suspended")
-            .values(reconcile_consecutive_actions=0, drift_state=None)
+            .values(
+                reconcile_consecutive_actions=0,
+                reconcile_converging_clears=0,
+                drift_state=None,
+            )
             .execution_options(synchronize_session=False)
         )
         logger.info(

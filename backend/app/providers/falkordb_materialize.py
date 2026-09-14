@@ -1181,6 +1181,11 @@ class AggregationPipeline:
         self._lease: Optional[Any] = None
         self._used_before: Optional[int] = None
         self._edges_before: int = 0
+        # Whether ``_edges_before`` is a READING or still its 0 placeholder —
+        # the two are indistinguishable on an empty graph, and the scheduler's
+        # convergence test compares this number ACROSS runs, where "unknown"
+        # and "nothing stored" must not read the same.
+        self._edges_before_read: bool = False
         self._calibration: Optional[Dict[str, Any]] = None
         #: What the cube would cost in time, and why Auto stepped off it.
         self._cube_projection: Optional[Dict[str, Any]] = None
@@ -2739,6 +2744,15 @@ class AggregationPipeline:
             self._writes, phase_label,
         )
         live_stats: Dict[str, Any] = {"writes": self._writes, "deletes": self._deletes}
+        # What the graph already STORED when this run started. Durable on
+        # every checkpoint, so a run the watchdog kills still leaves it: the
+        # reconcile breaker compares it across consecutive failed runs to tell
+        # a rebuild too large for one wall clock (the stored cube grows every
+        # attempt) from one that writes the same cells and dies (it does not).
+        # ``writes`` cannot answer that — APPLY re-MERGEs cells RECONCILE did
+        # not find, so a stuck run writes every time while storing nothing new.
+        if self._edges_before_read:
+            live_stats["edges_before"] = int(self._edges_before)
         # Which graph store node this run is writing. It is on the run's own
         # record rather than only inside ``write_budget`` because it is the
         # answer to "what else is on this shard right now", which is asked
@@ -4141,6 +4155,7 @@ class AggregationPipeline:
         the calibration on a FRESH run only (a resumed run's start is gone).
         Also the run's first look at how the write node replicates."""
         self._edges_before = await self._count_aggregated()
+        self._edges_before_read = True
         if self._fresh_run:
             shard = await self._read_shard()
             self._used_before = shard.used if shard.measurable else None

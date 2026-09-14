@@ -625,8 +625,11 @@ class ReconciliationSweeper:
                         self._adopt(state, obs)
                     elif verdict.skip == "in_sync":
                         # A clean pass clears the breaker: whatever was wrong
-                        # is fixed, so the next real finding starts fresh.
+                        # is fixed, so the next real finding starts fresh —
+                        # including the converging-clear budget, which is only
+                        # meaningful within one unfinished rebuild sequence.
                         state.reconcile_consecutive_actions = 0
+                        state.reconcile_converging_clears = 0
                         self._adopt(state, obs)
                     elif verdict.skip == "platform_mastered":
                         # Never acted on, but keep the baseline moving with the

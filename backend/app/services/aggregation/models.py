@@ -364,6 +364,12 @@ class AggregationDataSourceStateORM(Base):
     # evaluation finds nothing wrong. At the cap the source is suspended, so
     # a finding we can never clear cannot rebuild a huge graph hourly forever.
     reconcile_consecutive_actions = Column(Integer, nullable=True, default=0)
+    # How many times that count has been cleared for "it is converging".
+    # Bounds the clearing itself: growing the stored cube by a cell an attempt
+    # is progress by that test and a loop by any other, so past
+    # ``_CONVERGING_CLEAR_CAP`` the source is suspended like any other. Reset
+    # wherever the breaker count is.
+    reconcile_converging_clears = Column(Integer, nullable=True, default=0)
 
 
 class ReconcileRunORM(Base):

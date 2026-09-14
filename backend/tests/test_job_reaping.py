@@ -118,8 +118,9 @@ def test_the_sealed_stage_keeps_how_far_it_got():
 
 
 def test_reaping_keeps_the_rest_of_the_run_record():
-    """``run_stats.writes`` is what the scheduler's converging check reads
-    off a failed job to decide whether the breaker should count it."""
+    """Reaping seals the step ledger; it must not drop the counters the run
+    committed on its way down (``writes`` on the record, and beside it the
+    ``edges_before`` the scheduler's converging check compares across runs)."""
     job = _job()
     _run(reap_job(_Session(_State()), job, status="failed"))
     assert json.loads(job.run_stats)["writes"] == 9000

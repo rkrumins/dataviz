@@ -206,6 +206,9 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS reconcile_consecutive_actions "
                 "INTEGER NULL DEFAULT 0",
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS reconcile_converging_clears "
+                "INTEGER NULL DEFAULT 0",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS last_finding_at TEXT NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS last_finding_reason TEXT NULL",
