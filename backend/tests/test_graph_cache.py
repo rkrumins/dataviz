@@ -2446,6 +2446,107 @@ async def test_a_stale_fallback_is_not_counted_as_a_hit() -> None:
     assert f"{ENDPOINT_CHILDREN}:hit" not in fields
 
 
+@pytest.mark.asyncio
+async def test_how_big_the_answer_was_is_recorded_whether_or_not_it_fit() -> None:
+    """``too_large`` says WHETHER an answer fit under the payload cap. Nothing
+    said by how much, and that is the number any change to what an endpoint
+    returns turns on: an answer that grows past the cap is deleted and never
+    cached at all, so a change meant to improve cache keys can silently stop
+    an endpoint caching. Measured in ``_set``, where the bytes already are."""
+    redis = _stats_redis()
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+    # The recorder is a module singleton: start from a clean map so this
+    # asserts on what THIS read produced.
+    graph_cache._stats_recorder._pending.clear()
+
+    await cache.get_or_compute(
+        scope=scope, endpoint=ENDPOINT_CHILDREN, params={"urn": "x"},
+        compute=AsyncMock(return_value=_Result(value=1)), model_cls=_Result,
+    )
+    await graph_cache._stats_recorder.flush(cache)
+
+    calls = {c.args[1]: c.args[2] for c in redis.stats_pipe.hincrby.call_args_list}
+    assert f"{ENDPOINT_CHILDREN}:sz:64k" in calls, calls
+    assert calls[f"{ENDPOINT_CHILDREN}:szn"] == 1
+    assert calls[f"{ENDPOINT_CHILDREN}:szsum"] > 0
+    # The rollup key carries it too, or the fleet card has nothing to read.
+    keys = {c.args[0] for c in redis.stats_pipe.hincrby.call_args_list}
+    assert any(":ws1:-:" in k for k in keys) and any(":ws1:ds1:" in k for k in keys)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_over_the_cap_is_still_measured(monkeypatch) -> None:
+    """THE sample that matters most: the one that did not fit. Recording it
+    only on the stored path would leave the distribution blind exactly where
+    the decision is."""
+    monkeypatch.setattr(graph_cache, "_MAX_PAYLOAD_BYTES", 8)
+    redis = _stats_redis()
+    cache = GraphCache(redis)
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=AsyncMock(return_value=_Result(value=1)), model_cls=_Result,
+    )
+    await graph_cache._stats_recorder.flush(cache)
+
+    fields = [c.args[1] for c in redis.stats_pipe.hincrby.call_args_list]
+    assert f"{ENDPOINT_CHILDREN}:too_large" in fields
+    assert f"{ENDPOINT_CHILDREN}:szn" in fields
+
+
+def test_the_size_buckets_are_read_back_beside_the_ratio() -> None:
+    """The hash fields and the parser have to agree, and the parser splits on
+    the LAST colon — so a size field must not be mistaken for an outcome."""
+    from backend.app.services import graph_cache as gc
+
+    assert gc.SIZE_BUCKET_LABELS[-1] == "over"
+    assert gc._size_bucket(0) == "64k"
+    assert gc._size_bucket(64 * 1024) == "64k"
+    assert gc._size_bucket(64 * 1024 + 1) == "256k"
+    assert gc._size_bucket(4 * 1024 * 1024) == "4m"
+    assert gc._size_bucket(4 * 1024 * 1024 + 1) == "over"
+    # A size field must never land in the outcome map.
+    for label in gc.SIZE_BUCKET_LABELS:
+        assert label not in gc.CACHE_OUTCOMES
+    for suffix in ("szsum", "szn"):
+        assert suffix not in gc.CACHE_OUTCOMES
+
+
+@pytest.mark.asyncio
+async def test_reading_the_stats_back_reports_the_distribution() -> None:
+    """End to end through the parser: what the card renders."""
+    from backend.app.services.graph_cache import read_cache_stats
+
+    from unittest.mock import MagicMock, patch
+
+    redis = _make_redis()
+    ep = ENDPOINT_CHILDREN
+    stored = {
+        f"{ep}:hit": "7", f"{ep}:miss": "3",
+        f"{ep}:sz:64k": "8", f"{ep}:sz:4m": "1", f"{ep}:sz:over": "1",
+        f"{ep}:szn": "10", f"{ep}:szsum": str(10 * 1024),
+    }
+    pipe = MagicMock()
+    pipe.hgetall = MagicMock()
+    pipe.execute = AsyncMock(return_value=[stored])
+    redis.pipeline = MagicMock(return_value=pipe)
+    cache = GraphCache(redis)
+    with patch(
+        "backend.app.services.graph_cache.get_graph_cache", return_value=cache,
+    ):
+        out = await read_cache_stats("ws1", buckets=1)
+
+    row = out["endpoints"][ep]
+    assert row["hit_ratio"] == 0.7
+    assert row["payload"]["samples"] == 10
+    assert row["payload"]["mean_bytes"] == 1024
+    assert row["payload"]["buckets"]["over"] == 1
+    assert row["payload"]["buckets"]["4m"] == 1
+    assert out["totals"]["payload"]["samples"] == 10
+    assert out["payload_cap_bytes"] == graph_cache._MAX_PAYLOAD_BYTES
+
+
 def test_the_ratio_excludes_stale_bypass_and_too_large() -> None:
     """hit / (hit + miss + stale). A bypass is not a cache outcome at all —
     the endpoint was off or Redis was unreachable — so it must not dilute the
@@ -3340,10 +3441,18 @@ def test_the_workspace_rollup_is_what_the_fleet_card_reads():
 
     src = inspect.getsource(gc._CacheStatsRecorder.record)
     assert '_stats_key(scope.workspace_id, "", bucket)' in src
-    # And the memory bound covers it: a rollup outside the cap would be the
-    # unbounded map the cap exists to prevent.
     assert "for entry in (field, rollup):" in src
-    assert "len(self._pending) >= _STATS_MAX_PENDING" in src
+    # And the memory bound covers it — and every other writer. A field that
+    # reaches the pending map without passing the cap is the unbounded map
+    # the cap exists to prevent, which is exactly how the rollup was added
+    # the first time.
+    bound = inspect.getsource(gc._CacheStatsRecorder._add)
+    assert "len(self._pending) >= _STATS_MAX_PENDING" in bound
+    for writer in (gc._CacheStatsRecorder.record, gc._CacheStatsRecorder.record_size):
+        body = inspect.getsource(writer)
+        assert "self._pending[" not in body, (
+            f"{writer.__name__} writes the pending map without the bound"
+        )
 
 
 def test_the_built_stamp_never_shortens_itself():

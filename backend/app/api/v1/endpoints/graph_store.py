@@ -122,6 +122,13 @@ async def get_cache_stats(
     ``hitRatio`` counts real hits only. A stale-fallback is reported beside
     it but never folded in: it kept the user moving while the provider could
     not answer, and counting it would make an outage read as a cache win.
+
+    ``payload`` is how big the answers actually are, bucketed, beside the cap
+    they are measured against. ``tooLarge`` already says whether an answer
+    fit; nothing said BY HOW MUCH, and an answer that grows past the cap is
+    deleted and never cached at all — so any change to what an endpoint
+    returns is a change that can silently stop it caching, and this is the
+    distribution that decides it.
     """
     from backend.app.services.graph_cache import read_cache_stats
 
@@ -133,6 +140,7 @@ async def get_cache_stats(
         "windowSeconds": stats.get("window_seconds"),
         "totals": stats.get("totals", {}),
         "endpoints": stats.get("endpoints", {}),
+        "payloadCapBytes": stats.get("payload_cap_bytes"),
     }
 
 

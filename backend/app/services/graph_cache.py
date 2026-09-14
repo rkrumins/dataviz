@@ -46,7 +46,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional, Sequence, TypeVar
+from typing import Any, Awaitable, Callable, Optional, Sequence, Tuple, TypeVar
 
 from pydantic import BaseModel
 from redis import asyncio as aioredis
@@ -568,7 +568,10 @@ class GraphCache:
             # other request on it, for every other data source, in proportion
             # to the biggest response any one of them returned.
             payload = await asyncio.to_thread(result.model_dump_json, by_alias=True)
-            stored = await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
+            stored = await self._set(
+                cache_key, result, ttl_seconds, endpoint,
+                payload=payload, scope=scope,
+            )
             await self._set_lkg(scope, endpoint, params, result, gen, payload=payload)
             if stored == "stored":
                 # Only when something actually landed: an answer that was
@@ -1088,6 +1091,7 @@ class GraphCache:
         ttl_seconds: Optional[int],
         endpoint: str,
         payload: Optional[str] = None,
+        scope: Optional[CacheScope] = None,
     ) -> str:
         """Persist `result`, serializing it only if the caller has not already
         (see the single off-loop serialization in ``get_or_compute``). Failures
@@ -1104,6 +1108,10 @@ class GraphCache:
         try:
             if payload is None:
                 payload = result.model_dump_json(by_alias=True)
+            # Before the cap decides anything: the size of an answer that was
+            # REFUSED is the one most worth knowing, and it is in hand here.
+            if scope is not None:
+                _stats_recorder.record_size(self, scope, endpoint, len(payload))
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 logger.warning(
                     "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (dropping stale entry + skipping cache write)",
@@ -1297,6 +1305,9 @@ class GraphCache:
             # exactly the behaviour without it.
             logger.warning("graph_cache: mirror read failed (%s)", exc)
             return None
+        # No ``scope``: the size histogram counts answers as COMPUTED, and
+        # these bytes were already measured when they were. A promotion
+        # re-storing them is not a second answer of that size.
         await self._set(cache_key, warm, ttl_seconds, endpoint, payload=body)
         # A promotion IS a fill: the bytes now under the primary key were put
         # there just now, which is what "built" claims. Without this the stamp
@@ -1856,6 +1867,28 @@ _STATS_TTL_S = _STATS_BUCKET_S * _STATS_BUCKETS_KEPT
 #: working as intended, so it never counts toward the hit ratio.
 CACHE_OUTCOMES = ("hit", "miss", "stale", "bypass", "too_large")
 
+#: Serialized answer sizes, bucketed. ``too_large`` already says WHETHER an
+#: answer fit under ``_MAX_PAYLOAD_BYTES``; nothing said by how much, which is
+#: the number any decision about widening what an endpoint returns turns on —
+#: an answer that grows past the cap is deleted and never cached at all, so a
+#: change that looks like a cache-key improvement can silently stop an
+#: endpoint caching. Upper bound per bucket, in bytes; anything above the last
+#: one lands in ``over``.
+_SIZE_BUCKETS: Tuple[Tuple[int, str], ...] = (
+    (64 * 1024, "64k"),
+    (256 * 1024, "256k"),
+    (1024 * 1024, "1m"),
+    (4 * 1024 * 1024, "4m"),
+)
+SIZE_BUCKET_LABELS = tuple(label for _, label in _SIZE_BUCKETS) + ("over",)
+
+
+def _size_bucket(nbytes: int) -> str:
+    for upper, label in _SIZE_BUCKETS:
+        if nbytes <= upper:
+            return label
+    return "over"
+
 
 def _stats_key(workspace_id: str, data_source_id: str, bucket: int) -> str:
     return f"{_STATS_PREFIX}:{workspace_id}:{data_source_id or '-'}:{bucket}"
@@ -1936,9 +1969,37 @@ class _CacheStatsRecorder:
         # the rollup grow past _STATS_MAX_PENDING while the bus was down,
         # which is the unbounded map this cap exists to prevent.
         for entry in (field, rollup):
-            if entry not in self._pending and len(self._pending) >= _STATS_MAX_PENDING:
-                continue
-            self._pending[entry] = self._pending.get(entry, 0) + 1
+            self._add(entry, 1)
+        self._arm(cache)
+
+    def record_size(self, cache: "GraphCache", scope: CacheScope,
+                    endpoint: str, nbytes: int) -> None:
+        """How big one computed answer serialized to, whether or not it fit.
+
+        Rides the same pending map and the same flush, so it costs no extra
+        round trip: three more HINCRBY fields in a batch that is already
+        keyed by (bucket key, field)."""
+        if not scope.workspace_id or nbytes < 0:
+            return
+        bucket = _current_bucket()
+        label = _size_bucket(nbytes)
+        for key in (
+            _stats_key(scope.workspace_id, scope.data_source_id, bucket),
+            _stats_key(scope.workspace_id, "", bucket),
+        ):
+            self._add((key, f"{endpoint}:sz:{label}"), 1)
+            self._add((key, f"{endpoint}:szsum"), nbytes)
+            self._add((key, f"{endpoint}:szn"), 1)
+        self._arm(cache)
+
+    def _add(self, entry: tuple, amount: int) -> None:
+        """One pending count, under the bound. A map that grows while the bus
+        is down is the leak ``_STATS_MAX_PENDING`` exists to prevent."""
+        if entry not in self._pending and len(self._pending) >= _STATS_MAX_PENDING:
+            return
+        self._pending[entry] = self._pending.get(entry, 0) + amount
+
+    def _arm(self, cache: "GraphCache") -> None:
         if self._flusher is None or self._flusher.done():
             try:
                 loop = asyncio.get_running_loop()
@@ -2001,6 +2062,13 @@ async def read_cache_stats(
     Empty rather than raising when the bus is unavailable — this is telemetry.
     """
     out: dict[str, Any] = {"endpoints": {}, "totals": {o: 0 for o in CACHE_OUTCOMES}}
+    sizes: dict[str, dict[str, int]] = {}
+
+    def _size_row(endpoint: str) -> dict[str, int]:
+        return sizes.setdefault(
+            endpoint, {**{b: 0 for b in SIZE_BUCKET_LABELS}, "sum": 0, "n": 0},
+        )
+
     if not workspace_id:
         return out
     try:
@@ -2017,6 +2085,12 @@ async def read_cache_stats(
             for field, count in (entry or {}).items():
                 field = field.decode() if isinstance(field, bytes) else str(field)
                 endpoint, _, outcome = field.rpartition(":")
+                if endpoint.endswith(":sz"):
+                    _size_row(endpoint[:-3])[outcome] += int(count)
+                    continue
+                if outcome in ("szsum", "szn"):
+                    _size_row(endpoint)[outcome[2:]] += int(count)
+                    continue
                 if outcome not in CACHE_OUTCOMES:
                     continue
                 row = out["endpoints"].setdefault(
@@ -2035,6 +2109,35 @@ async def read_cache_stats(
     for row in out["endpoints"].values():
         row["hit_ratio"] = _ratio(row)
     out["totals"]["hit_ratio"] = _ratio(out["totals"])
+
+    # How big the answers actually are, per endpoint. ``over`` is the count
+    # that never reached the cache at all: the entry is deleted and the
+    # compute repeats on every read.
+    total_sizes = {**{b: 0 for b in SIZE_BUCKET_LABELS}, "sum": 0, "n": 0}
+    for endpoint, row in sizes.items():
+        samples = row["n"]
+        if endpoint not in out["endpoints"]:
+            # Sizes without counts: the bucket keys rolled over between the
+            # two writes. An endpoint row with no reads still beats dropping
+            # the measurement.
+            out["endpoints"][endpoint] = {
+                **{o: 0 for o in CACHE_OUTCOMES}, "hit_ratio": None,
+            }
+        out["endpoints"][endpoint]["payload"] = {
+            "buckets": {b: row[b] for b in SIZE_BUCKET_LABELS},
+            "samples": samples,
+            "mean_bytes": round(row["sum"] / samples) if samples else None,
+        }
+        for field in (*SIZE_BUCKET_LABELS, "sum", "n"):
+            total_sizes[field] += row[field]
+    out["totals"]["payload"] = {
+        "buckets": {b: total_sizes[b] for b in SIZE_BUCKET_LABELS},
+        "samples": total_sizes["n"],
+        "mean_bytes": (
+            round(total_sizes["sum"] / total_sizes["n"]) if total_sizes["n"] else None
+        ),
+    }
+    out["payload_cap_bytes"] = _MAX_PAYLOAD_BYTES
     out["window_seconds"] = _STATS_BUCKET_S * min(buckets, _STATS_BUCKETS_KEPT)
     return out
 

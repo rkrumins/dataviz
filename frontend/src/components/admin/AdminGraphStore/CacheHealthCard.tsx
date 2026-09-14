@@ -43,6 +43,46 @@ function pct(ratio: number | null): string {
     return ratio == null ? '—' : `${Math.round(ratio * 100)}%`
 }
 
+/** Bytes, at the precision an operator reads rather than the one JS returns. */
+function bytes(n: number | null | undefined): string {
+    if (n == null) return '—'
+    if (n >= 1024 * 1024) {
+        const mb = n / (1024 * 1024)
+        return `${mb >= 10 || Number.isInteger(mb) ? Math.round(mb) : mb.toFixed(1)} MB`
+    }
+    if (n >= 1024) return `${Math.round(n / 1024)} KB`
+    return `${n} B`
+}
+
+/** How big this endpoint's answers are, and how much room is left.
+ *
+ * The number that decides whether an endpoint can be asked to return MORE.
+ * An answer over the payload cap is deleted and never stored, so every repeat
+ * of that read recomputes — a change that widens a response can stop an
+ * endpoint caching entirely, and `tooLarge` alone only says it already has.
+ */
+function Size({ stats }: { stats: CacheEndpointStats }) {
+    const payload = stats.payload
+    if (!payload || payload.samples === 0) return <span className="text-[10px] text-ink-muted">—</span>
+    const over = payload.buckets.over ?? 0
+    const near = payload.buckets['4m'] ?? 0
+    return (
+        <span className="text-[10px] tabular-nums text-ink-muted">
+            ~{bytes(payload.mean_bytes)}
+            {over > 0 && (
+                <span className="ml-1.5 font-semibold text-rose-600 dark:text-rose-400">
+                    {over.toLocaleString()} over cap
+                </span>
+            )}
+            {over === 0 && near > 0 && (
+                <span className="ml-1.5 font-semibold text-amber-600 dark:text-amber-400">
+                    {near.toLocaleString()} near cap
+                </span>
+            )}
+        </span>
+    )
+}
+
 function Ratio({ stats, big = false }: { stats: CacheEndpointStats; big?: boolean }) {
     const served = stats.hit + stats.miss + stats.stale
     return (
@@ -210,6 +250,32 @@ export function CacheHealthCard({
                                 </div>
                             </HoverTip>
                         )}
+                        {totals?.payload && totals.payload.samples > 0 && (
+                            <HoverTip
+                                label="How big the answers are"
+                                detail={
+                                    'The mean size of the answers computed in this window, against '
+                                    + 'the payload cap they are stored under. An answer over the cap '
+                                    + 'is deleted and never cached, so every repeat of it recomputes. '
+                                    + 'This is the headroom any change that widens a response spends '
+                                    + '— read it before changing what an endpoint returns.'
+                                }
+                            >
+                                <div>
+                                    <p className="text-[10px] uppercase tracking-wide text-ink-muted">
+                                        Answer size
+                                    </p>
+                                    <span className="text-sm font-semibold tabular-nums text-ink-secondary">
+                                        ~{bytes(totals.payload.mean_bytes)}
+                                        {stats?.payloadCapBytes ? (
+                                            <span className="ml-1 text-[10px] font-normal text-ink-muted">
+                                                of {bytes(stats.payloadCapBytes)}
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </div>
+                            </HoverTip>
+                        )}
                         {totals && totals.bypass > 0 && (
                             <HoverTip
                                 label="Cache not consulted"
@@ -238,6 +304,7 @@ export function CacheHealthCard({
                                     </span>
                                     <span className="ml-1.5 font-mono text-[10px] text-ink-muted">{endpoint}</span>
                                 </span>
+                                <Size stats={row} />
                                 <Ratio stats={row} />
                             </li>
                         ))}
