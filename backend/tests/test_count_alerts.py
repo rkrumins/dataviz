@@ -32,7 +32,8 @@ async def _snap(session: AsyncSession, *, at: str, nodes: int,
                 provider_id: str = "prov_a1", graph_name: str = "alert-graph",
                 edges: int = 0, edge_delta: int | None = None,
                 entity_types: dict | None = None,
-                edge_types: dict | None = None):
+                edge_types: dict | None = None,
+                edge_type_deltas: dict | None = None):
     session.add(DataSourceCountSnapshotORM(
         id=f"snp_{ds_id}_{at}",
         data_source_id=ds_id,
@@ -53,7 +54,7 @@ async def _snap(session: AsyncSession, *, at: str, nodes: int,
         node_delta=delta,
         type_deltas=json.dumps({
             "nodes": {"added": {}, "removed": {}, "changed": {}},
-            "edges": {"added": {}, "removed": {}, "changed": {}},
+            "edges": edge_type_deltas or {"added": {}, "removed": {}, "changed": {}},
         }) if delta is not None else None,
     ))
     await session.flush()
@@ -1201,3 +1202,133 @@ async def test_a_vanished_aggregated_edge_type_raises_nothing(
         db_session, DS_ID, _policy(),
     )
     assert not [n for n in notices if n.finding == "type_gone"]
+
+
+# ── the platform's own rebuild is not the source losing data ─────────
+
+
+async def _steady_edges_then(db_session, *rows):
+    """Ten ordinary observations with a SMALL raw churn, then the rows given.
+
+    The small churn is the point: ``change_baseline`` is the median non-zero
+    delta, so a window whose only movement is the event under test makes the
+    baseline equal the event and nothing is ever unusual. Ten deltas of 10
+    give a baseline of 10, against which the movements below are enormous.
+    """
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_000, delta=0,
+            edges=3_500_000, edge_delta=10,
+            edge_types={"LINKS": 1_500_000, "AGGREGATED": 2_000_000},
+        )
+    for row in rows:
+        await _snap(db_session, nodes=10_000, delta=0, **row)
+
+
+async def test_a_rebuild_of_the_overlay_raises_no_movement(db_session: AsyncSession):
+    """THE REGRESSION. A rebuild wipes and rewrites every :AGGREGATED edge,
+    and ``edge_count`` includes them by design, so judging movement on the
+    total reported the platform's own work as a CRITICAL loss of the
+    customer's relationships — a finding plus a bell notification, on every
+    rebuild of every source.
+
+    The strip that landed in f89b679d only ever covered ``type_gone``. This
+    is the same noise arriving under a different finding kind, and it is on
+    screen today as "~5.6M relationships · critical".
+    """
+    await _steady_edges_then(
+        db_session,
+        # The overlay is wiped: 2M relationships vanish, none of them the
+        # source's. Against a baseline of 10 this is 200,000x — the old code
+        # called it critical.
+        dict(at=_iso(3), edges=1_500_000, edge_delta=-2_000_000,
+             edge_types={"LINKS": 1_500_000},
+             edge_type_deltas={"added": {}, "changed": {},
+                               "removed": {"AGGREGATED": 2_000_000}}),
+        # ...and rebuilt, slightly bigger than before.
+        dict(at=_iso(2), edges=3_600_000, edge_delta=2_100_000,
+             edge_types={"LINKS": 1_500_000, "AGGREGATED": 2_100_000},
+             edge_type_deltas={"added": {"AGGREGATED": 2_100_000},
+                               "removed": {}, "changed": {}}),
+    )
+
+    notices = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert [n for n in notices if n.finding == "movement"] == [], (
+        "a rebuild of the platform's own overlay was reported as source movement"
+    )
+    # Not under the other kind either — the overlay is stripped there.
+    assert [n for n in notices if n.finding == "type_gone"] == []
+
+
+async def test_a_real_loss_still_alerts_while_the_overlay_swings(
+    db_session: AsyncSession,
+):
+    """The other half: taking the overlay out must not blind the detector.
+
+    The source loses two thirds of its own relationships in the same window
+    the overlay rebuilds, and the TOTAL barely moves — 3.5M to 3.6M. That is
+    precisely the failure the overlay's noise used to bury.
+    """
+    await _steady_edges_then(
+        db_session,
+        dict(at=_iso(2), edges=3_600_000, edge_delta=100_000,
+             edge_types={"LINKS": 500_000, "AGGREGATED": 3_100_000},
+             edge_type_deltas={"added": {}, "removed": {}, "changed": {
+                 "LINKS": [1_500_000, 500_000],
+                 "AGGREGATED": [2_000_000, 3_100_000],
+             }}),
+    )
+
+    notices = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    movement = [n for n in notices if n.finding == "movement"]
+    assert movement, (
+        "a 1M-relationship loss hidden behind an overlay rebuild went unreported"
+    )
+    assert movement[0].metric == "edges"
+    assert movement[0].direction == "drop"
+    # The finding reports the SOURCE's numbers, not the totals it hid behind
+    # — the field is named node_delta/node_count but carries whichever metric
+    # the notice is about (see PendingNotice.metric).
+    assert movement[0].node_delta == -1_000_000
+    assert movement[0].node_count == 500_000
+
+
+def test_the_overlay_split_reads_the_row_not_its_neighbours():
+    """``overlay_delta_of`` comes off the row's OWN type_deltas, so the first
+    row of a window keeps the real movement it was stored with. Differencing
+    neighbours would discard it."""
+    import types
+
+    from backend.app.db.repositories import stats_history_repo as shr
+
+    row = types.SimpleNamespace(
+        edge_count=3_600_000,
+        edge_delta=2_100_000,
+        edge_type_counts=json.dumps({"LINKS": 1_500_000, "AGGREGATED": 2_100_000}),
+        type_deltas=json.dumps({
+            "edges": {"added": {"AGGREGATED": 2_100_000}, "removed": {}, "changed": {}},
+        }),
+    )
+    assert shr.overlay_count_of(row) == 2_100_000
+    assert shr.overlay_delta_of(row) == 2_100_000
+    assert shr.source_count_of(row, "edges") == 1_500_000
+    assert shr.source_delta_of(row, "edges") == 0
+    # Nodes are untouched: the derived LABELS never reach the store.
+    assert shr.source_count_of(row, "nodes") == shr.count_of(row, "nodes")
+
+    # Casing is not ours to assume — the type arrives via type(r) from a scan
+    # of a graph an external system may have loaded.
+    lower = types.SimpleNamespace(
+        edge_count=10, edge_delta=None,
+        edge_type_counts=json.dumps({"aggregated": 4}), type_deltas=None,
+    )
+    assert shr.overlay_count_of(lower) == 4
+    # "We cannot say" must never become "nothing moved".
+    assert shr.source_delta_of(lower, "edges") is None
+
+    # A corrupt column degrades to "we knew nothing", never blows up.
+    junk = types.SimpleNamespace(
+        edge_count=10, edge_delta=5,
+        edge_type_counts="not json", type_deltas="not json",
+    )
+    assert shr.overlay_count_of(junk) == 0 and shr.overlay_delta_of(junk) == 0
