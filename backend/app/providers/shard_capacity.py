@@ -611,9 +611,13 @@ def hold_reason(
       full-sync. Writing through a fork is what turns the dataset's size
       into twice the dataset's size.
     * ``replica_lost`` — fewer replicas attached than the run started with.
-      A replica that vanishes during a rebuild almost always vanished
-      BECAUSE of it (dropped for an overflowing output buffer); writing on
-      is what makes its return a full-sync fork under load.
+      A replica that vanishes during a rebuild may well have vanished
+      BECAUSE of it (dropped for an overflowing output buffer), so the
+      first minutes are worth not writing through. It is the one kind the
+      caller eventually FORGIVES rather than stopping for: past that grace
+      the replica's return is a full resync whatever the run did meanwhile,
+      and ``fork`` holds for that resync once it starts. See
+      ``_forgo_replicas`` in ``falkordb_materialize``.
     * ``replica_lag`` — a replica owes the stream more than a fraction of
       the limit the master drops it at.
     * ``memory`` — RSS is already past what the container could survive a

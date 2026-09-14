@@ -135,6 +135,18 @@ describe('adaptationSentences — replicas and a node that went away', () => {
             .toContain('Paced against the graph store’s replicas (2s in total)')
     })
 
+    it('says when a run finished having written without them', () => {
+        // The hold line alone reads as a wait that ended well. A rollup
+        // written with replication backpressure off is the one thing an
+        // operator cannot infer from a run that simply succeeded.
+        const s = adaptationSentences({
+            replica_holds: 1, replica_wait_s: 300, replicas_forgone: 1,
+        })
+        expect(s).toContain('Carried on without the graph store’s replicas 1 time — they did not come back in time')
+        expect(adaptationSentences({ replica_holds: 1, replica_wait_s: 300 })
+            .some(l => l.startsWith('Carried on'))).toBe(false)
+    })
+
     it('says which node went away, for how long, and that the run kept its place', () => {
         const s = adaptationSentences({
             store_outage_holds: 2, store_outage_s: 92,

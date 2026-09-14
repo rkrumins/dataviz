@@ -281,6 +281,16 @@ export function adaptationSentences(
         }
         out.push(detail.length ? `${lead} (${detail.join(', ')})` : lead)
     }
+    if (adapted?.replicas_forgone) {
+        // Not a wait that ended well: the replicas never came back inside the
+        // grace and the run wrote the rest without them. A completed rollup
+        // written with replication backpressure off has to say so here — the
+        // line above reads as a wait, and an operator would not know.
+        out.push(
+            `Carried on without the graph store’s replicas ${plural(adapted.replicas_forgone, 'time', 'times')}`
+            + ' — they did not come back in time',
+        )
+    }
     if (adapted?.store_outage_holds || adapted?.node_restarts?.length) {
         // Not pressure and not a failure: the node the run writes to went
         // away, the run waited, and it carried on at the same width.
