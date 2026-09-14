@@ -29,7 +29,11 @@ import { RetriggerDialog } from './RetriggerDialog'
 // The form is owned by Wave-1 FE-1 and has its own tests; here we only
 // need the dialog's button-visibility logic.
 vi.mock('../shared/AggregationOverridesForm', () => ({
-  AggregationOverridesForm: () => <div data-testid="overrides-form" />,
+  // Renders the tuning it was handed, so a test can see what the dialog is
+  // actually holding without reaching into the form's own controls.
+  AggregationOverridesForm: ({ value }: { value?: { tuning?: unknown } }) => (
+    <div data-testid="overrides-form">{JSON.stringify(value?.tuning ?? null)}</div>
+  ),
 }))
 
 const baseValue = {
@@ -211,5 +215,49 @@ describe('RetriggerDialog — what "from scratch" means, and the purge option', 
     const purgeBtn = screen.getByRole('button', { name: /purge, then re-trigger/i })
     await user.click(purgeBtn)
     expect(onConfirm).toHaveBeenLastCalledWith(baseValue, { purgeFirst: true })
+  })
+})
+
+describe('RetriggerDialog — putting the last run\u2019s settings back', () => {
+  const lastRun = {
+    ...baseValue,
+    maxRetries: 1,
+    tuning: { scanRangeWidth: 250_000, writePacingRatio: 0.5 },
+  }
+
+  it('offers the control and loads the run\u2019s settings on click', async () => {
+    // Re-entering eleven knobs from a screenshot is its own kind of wrong
+    // answer; the defaults staying the DEFAULT is why this is a button.
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        previousRun={lastRun}
+        title="Re-trigger aggregation"
+        onConfirmRetrigger={noop}
+      />,
+    )
+
+    expect(screen.getByTestId('overrides-form')).toHaveTextContent('null')
+    await userEvent.click(screen.getByRole('button', { name: /use the last run/i }))
+    expect(screen.getByTestId('overrides-form')).toHaveTextContent('250000')
+  })
+
+  it('says nothing when the run recorded no settings', () => {
+    // A job from before the self-tuning pipeline: the control would put back
+    // nothing, and an operator would be right to expect it to do something.
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        previousRun={null}
+        title="Re-trigger aggregation"
+        onConfirmRetrigger={noop}
+      />,
+    )
+
+    expect(screen.queryByTestId('retrigger-previous-run')).not.toBeInTheDocument()
   })
 })

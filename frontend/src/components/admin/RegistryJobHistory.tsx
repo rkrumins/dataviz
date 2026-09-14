@@ -40,6 +40,7 @@ import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
 import { NodeLoadPanel } from './job-history/NodeLoadPanel'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
 import { balancedPreset, gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { TUNING_KNOBS } from './shared/aggregationKnobs'
 import { extendStallPatch } from './job-history/timeLimits'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -75,6 +76,61 @@ function triggerTuning(defaultTuning?: AggregationTuning): AggregationTuning | u
         ...balancedPreset().tuning,
         replicaAckMin: 1,
         ...defaultTuning,
+    }
+}
+
+/** ``scanRangeWidth`` → ``scan_range_width``. The run records its settings in
+ *  the server's spelling; the form speaks the client's. */
+function snake(key: string): string {
+    return key.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`)
+}
+
+/**
+ * What a finished run ACTUALLY ran with, in the shape the form takes.
+ *
+ * Deliberately not what the dialog opens on — see the note on
+ * ``buildInitialOverridesFromJob``: seeding a re-trigger from the job row is
+ * how a graph that failed under bad settings kept failing under those same
+ * settings, and an operator who fixed the fleet Defaults got the old values
+ * back without being told. So this is a control the operator reaches for, not
+ * a default they have to notice and undo.
+ *
+ * What it is for is the other half of that: a run whose settings were dialled
+ * in by hand and WORKED. Re-entering eleven knobs from a screenshot is its own
+ * kind of wrong answer.
+ *
+ * ``null`` when the run recorded no settings at all — a job from before the
+ * self-tuning pipeline, or one that never reached its first checkpoint.
+ */
+export function overridesFromRun(
+    job: Pick<AggregationJobResponse, 'tuning' | 'maxRetries' | 'timeoutSecs' | 'batchSize' | 'projectionMode'>,
+): AggregationOverridesValue | null {
+    const ran = job.tuning
+    if (!ran || typeof ran !== 'object' || Object.keys(ran).length === 0) return null
+
+    const tuning: AggregationTuning = {}
+    for (const knob of TUNING_KNOBS) {
+        const v = (ran as Record<string, unknown>)[snake(knob.key)]
+        if (typeof v === 'number' && Number.isFinite(v)) tuning[knob.key] = v
+    }
+    // Rollup storage is the one setting that is not a number, and the one an
+    // operator most often means by "the same as last time": a run forced to
+    // full detail must come back forced, not resolved against today's default.
+    const fine = (ran as Record<string, unknown>)['materialize_fine_pairs']
+    if (fine === 'auto' || fine === 'true' || fine === 'false') {
+        tuning.materializeFinePairs = fine === 'auto' ? 'auto' : fine === 'true'
+    } else if (typeof fine === 'boolean') {
+        tuning.materializeFinePairs = fine
+    }
+    if (Object.keys(tuning).length === 0) return null
+
+    const batch = job.batchSize ?? DEFAULT_BATCH_SIZE
+    return {
+        batchSize: batch < 100 ? DEFAULT_BATCH_SIZE : batch,
+        projectionMode: job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source',
+        maxRetries: typeof job.maxRetries === 'number' ? job.maxRetries : DEFAULT_MAX_RETRIES,
+        timeoutMinutes: Math.round((job.timeoutSecs ?? DEFAULT_TIMEOUT_SECS) / 60),
+        tuning,
     }
 }
 
@@ -935,6 +991,9 @@ export function RegistryJobHistory() {
                     lastCursor: retriggerCtx.job.lastCursor ?? null,
                     status: retriggerCtx.job.status,
                 } : undefined}
+                previousRun={
+                    retriggerCtx?.kind === 'job' ? overridesFromRun(retriggerCtx.job) : null
+                }
                 defaultFinePairs={envFinePairs}
                 dataSourceId={
                     retriggerCtx?.kind === 'job'

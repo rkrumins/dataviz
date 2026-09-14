@@ -56,6 +56,10 @@ export interface RetriggerDialogProps {
      *  form's placeholders tell the truth. */
     envDefaults?: EnvTuningDefaults | null
     storedGlobal?: AggregationTuning | null
+    /** What the originating run ACTUALLY ran with, when it recorded it, so a
+     *  set of settings that were dialled in by hand and worked can be put back
+     *  in one click. Never seeded automatically — see ``overridesFromRun``. */
+    previousRun?: AggregationOverridesValue | null
     /** Why the form opened on a profile the operator did not pick (a Gentle
      *  retry after a per-query memory or timeout failure). */
     presetReason?: string | null
@@ -96,6 +100,7 @@ export function RetriggerDialog({
     dataSourceId,
     envDefaults,
     storedGlobal,
+    previousRun,
     presetReason,
     presetAction,
     onConfirmRetrigger,
@@ -216,6 +221,25 @@ export function RetriggerDialog({
                                             {presetAction === 'raise-per-query-limit' && dataSourceId && (
                                                 <RaisePerQueryLimitLink dataSourceId={dataSourceId} />
                                             )}
+                                        </div>
+                                    )}
+                                    {previousRun && (
+                                        <div
+                                            data-testid="retrigger-previous-run"
+                                            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2"
+                                        >
+                                            <p className="text-[11px] text-ink-secondary leading-relaxed">
+                                                The form opens on the configured defaults, not on what
+                                                the last run used — a run that failed under bad settings
+                                                would otherwise keep failing under them.
+                                            </p>
+                                            <button
+                                                type="button"
+                                                className="shrink-0 rounded-lg border border-glass-border px-3 py-1.5 text-xs font-medium text-ink-secondary transition-colors hover:bg-canvas-sunken hover:text-ink-primary"
+                                                onClick={() => setValue(previousRun)}
+                                            >
+                                                Use the last run&rsquo;s settings
+                                            </button>
                                         </div>
                                     )}
                                     {dataSourceId && (
