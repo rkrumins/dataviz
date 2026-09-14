@@ -1177,6 +1177,73 @@ observable contract: exact cells/weights/level stamps under mixed
 casing, exact deltas on re-run, zero-touch no-op runs, and complete
 apply after resume.
 
+## A rebuild that sits in Compute and then retries
+
+The report: the worker shows **Compute** for 10-15 minutes, then the job row
+reads `Retry 1/3: UNBLOCKED force unblock from blocking operation, instance
+state changed (master -> replica?)`, and the worker log carries
+`Provider ... idle for >900s — closing to reclaim its connections` and
+redis-py's `Failed to enable maintenance notifications`.
+
+**Compute is supposed to be quiet.** It is the only stage that issues no graph
+I/O at all — `_rollup_base` and `_closure` are dict merges and set work over
+what EXTRACT already read. So for its whole duration the provider has nothing
+in flight, and on a large cube it can legitimately run for many minutes: the
+cube is edges × depth², and `AGGREGATION_MATERIALIZE_FINE_PAIRS` defaults to
+storing all of it.
+
+Two separate defects turned that quiet stage into a failure loop. Both are
+fixed; the history is here because the symptoms are not obviously related.
+
+**1. A demotion read as a job failure.** FalkorDB runs `GRAPH.*` on a module
+thread pool and blocks the client for the query's duration, so a long query is
+a blocked client in Redis's own sense — and Redis force-unblocks a blocked
+client when the instance changes role, answering `-UNBLOCKED`. There is no
+redis-py exception class for it, so it arrived as a bare `ResponseError`, and
+`_is_role_changed_error` matched only on class NAME. The one branch that fixes
+a demotion in under a second — re-resolve the topology and retry inside the
+same operation — was therefore skipped for exactly the case it exists for. The
+error escaped to the worker's retry mill instead, and **a retry re-runs EXTRACT
+and COMPUTE from zero**: the attempt budget only resets when `processed_edges`
+advances past its high-water mark, which a from-zero re-run never does. One
+routine shard rotation became three hours of repeated work and then a failed
+job. `-UNBLOCKED` is now matched by message, like `-LOADING` and `-NOREPLICAS`.
+
+**2. The idle reaper closing a provider mid-job.** `PROVIDER_CACHE_IDLE_TTL_SECS`
+defaults to 900 — the source of the `>900s` line, and the same 15 minutes.
+"Idle" was measured from `_last_used`, which is stamped when a provider is
+CHECKED OUT and nowhere else; the worker checks out once per job. `inflight_ops()`
+did not save it either: that answers "busy this instant", and Compute is not.
+So a run longer than the TTL had its provider and its pools closed underneath
+it. The reaper now takes the later of the checkout stamp and the provider's
+last completed operation, and the worker ConfigMap raises the TTL to 7200 to
+match `AGGREGATION_JOB_TIMEOUT_SECS` — the web tier keeps 900, which is the
+right number for a tier that touches many sources briefly.
+
+`Failed to enable maintenance notifications` is redis-py's own DEBUG line, not
+ours. It is benign — the client asks a managed Redis to tell it before a
+maintenance move, and logs if the server does not answer `OK`. It matters only
+as evidence: it says a managed endpoint refused that handshake, which is a
+strong hint that the `-UNBLOCKED` above was a real maintenance failover rather
+than anything this pipeline did.
+
+### If Compute itself is the slow part
+
+None of the above makes Compute faster. If `run_stats.compute_s` is genuinely
+minutes, the lever is the cube:
+
+| Setting | Try | What it costs |
+|---|---|---|
+| `materializeFinePairs` | `auto` | The estimator falls back to the depth-diagonal above `maxCubeEdges` and derives finer granularities on demand. Drills at some granularities are then served on demand rather than from storage, and on self-nesting types the on-demand reader can return mixed-granularity answers. That is why the shipped default is full detail |
+| `maxCubeEdges` | a deliberate number, e.g. 8M | Pointless to set `auto` without it: the default IS the upper bound (50M), so `auto` has nothing to refuse against and picks the cube anyway |
+| `maxRetries` | leave at 3 | Raising it buys more wasted hours, not a better chance: each retry re-runs EXTRACT and COMPUTE from zero |
+
+Before changing any of them, read `run_stats` on a failed run: `compute_s`,
+`store_holds`, `outage_holds` and `effective_tuning.stall_timeout_secs`. Three
+different causes produce the same 10-15 minute window — CPU-bound cube
+expansion, a 900s outage hold on a flush write, and a low per-job
+`timeoutSecs` — and those fields separate them.
+
 ## Finding the cluster from a cold start
 
 Seeds are tried in this order, first that answers wins:

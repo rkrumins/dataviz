@@ -1486,7 +1486,7 @@ class ProviderManager:
         now = time.monotonic()
         stale = [
             key for key in self._idle_keys_lru_first()
-            if now - self._last_used.get(key, now) > ttl
+            if now - self._touched_at(key, now) > ttl
         ]
         for key in stale:
             logger.info(
@@ -1495,6 +1495,26 @@ class ProviderManager:
             )
             await self._close_and_forget(key)
         return len(stale)
+
+    def _touched_at(self, key: tuple, default: float) -> float:
+        """When this provider was last USED — checked out, or last finished an
+        operation, whichever is later.
+
+        ``_last_used`` alone is a CHECKOUT stamp, written in
+        ``get_provider_for_workspace`` and nowhere else. The aggregation
+        worker checks a provider out ONCE per job and then holds the
+        reference, so a run longer than the idle TTL read as untouched since
+        minute zero and had its provider — and its pools — closed underneath
+        it. ``inflight_ops()`` did not save it either: that is busy RIGHT NOW,
+        and the compute stage is minutes of Python with no graph I/O.
+        """
+        checked_out = self._last_used.get(key, default)
+        provider = self._providers.get(key)
+        try:
+            last_op = provider.last_op_at() if provider is not None else None
+        except Exception:                 # noqa: BLE001 — a provider without it
+            last_op = None
+        return max(checked_out, last_op) if last_op is not None else checked_out
 
     async def _close_when_idle(
         self, cache_key: tuple, provider: Any, *, timeout_s: float = 600.0,

@@ -300,6 +300,19 @@ _CLUSTER_ROUTING_EXC_NAMES = frozenset({
 #: errors, so the classifier needs no redis import.
 _ROLE_CHANGED_EXC_NAMES = frozenset({"ReadOnlyError"})
 
+#: The OTHER spelling of the same demotion, and the one a rebuild actually
+#: meets. FalkorDB runs ``GRAPH.*`` on a module thread pool and BLOCKS the
+#: client for the duration, so a long query is a blocked client in Redis's
+#: own sense — and Redis force-unblocks a blocked client when the instance
+#: changes role, with ``-UNBLOCKED force unblock from blocking operation,
+#: instance state changed (master -> replica?)``. There is no redis-py class
+#: for it: it arrives as a bare ``ResponseError``, so the name match above
+#: cannot see it and the failover branch was skipped for exactly the case it
+#: exists for. Matched on the verb, not on "instance state changed", so it
+#: stays narrow; nothing in this repo issues ``CLIENT UNBLOCK``, so there is
+#: no legitimate ``-UNBLOCKED`` this could swallow.
+_ROLE_CHANGED_TEXT = ("unblocked force unblock",)
+
 #: Sentinel could not tell us who the master IS. Distinct from a data node
 #: that will not answer: that node is being replaced and a promotion is
 #: under way, while this is the discovery tier itself being unreachable or
@@ -716,12 +729,20 @@ def _is_role_changed_error(exc: BaseException) -> bool:
     ``discover_master`` on reconnect and the rebuild lands on the node that
     was just promoted. Cluster mode gets MOVED first and rarely reaches
     here, but a demoted node is a demoted node in every mode.
+
+    ``-UNBLOCKED`` is the same event reaching a client that was mid-query
+    rather than mid-write — see ``_ROLE_CHANGED_TEXT``. It has no exception
+    class of its own, so it is matched by message like the ``-LOADING`` and
+    ``-NOREPLICAS`` families.
     """
     seen = exc
     for _ in range(4):  # walk a short __cause__/__context__ chain
         if seen is None:
             break
         if type(seen).__name__ in _ROLE_CHANGED_EXC_NAMES:
+            return True
+        msg = str(seen).lower()
+        if any(marker in msg for marker in _ROLE_CHANGED_TEXT):
             return True
         seen = seen.__cause__ or seen.__context__
     return False
@@ -1777,6 +1798,8 @@ class FalkorDBProvider(GraphDataProvider):
         # defers close() while this is > 0 so it cannot tear the pool out from
         # under a running aggregation job (the 'NoneType has no query' race).
         self._inflight = 0
+        #: See ``last_op_at``.
+        self._last_op_at: Optional[float] = None
         # The graph store's own limits per node (``host:port``), as the
         # capacity sweep and the write budget read them
         # (``note_server_limits``): the per-query time cap (``TIMEOUT_MAX``)
@@ -1919,6 +1942,17 @@ class FalkorDBProvider(GraphDataProvider):
         """Number of guarded graph ops currently executing. The manager uses
         this to avoid closing a provider mid-job during recovery eviction."""
         return self._inflight
+
+    def last_op_at(self) -> Optional[float]:
+        """When this provider last finished talking to the store
+        (``time.monotonic``), or None if it never has.
+
+        The idle reaper's real question. ``inflight_ops()`` answers "is it
+        busy THIS INSTANT", which a rebuild is not for most of a run — the
+        compute stage is minutes of Python with no graph I/O at all — and the
+        manager's own ``_last_used`` is stamped at checkout, which for a job
+        that checks out once is minute zero for ever."""
+        return self._last_op_at
 
     async def preflight(self, *, deadline_s: float = 1.5):
         """Fast reachability probe — TCP connect + Redis PING within
@@ -3728,6 +3762,10 @@ class FalkorDBProvider(GraphDataProvider):
                     raise
         finally:
             self._inflight -= 1
+            # What the idle reaper measures. ``_last_used`` in the manager is
+            # a CHECKOUT stamp, and a rebuild checks out once and then works
+            # for an hour, so a long run read as untouched since minute zero.
+            self._last_op_at = time.monotonic()
 
     async def _guarded_timed(
         self,

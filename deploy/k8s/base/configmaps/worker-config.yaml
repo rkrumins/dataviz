@@ -19,6 +19,16 @@ data:
   # control plane's stale-job backstop starts failing wedged jobs first.
   AGGREGATION_STALL_TIMEOUT_SECS: "10800"
   AGGREGATION_JOB_MAX_WALL_SECS: "86400"
+  # How long a cached provider may go untouched before the reaper closes it
+  # and reclaims its pools. The 900s default is a WEB-tier number: that tier
+  # touches many sources briefly and wants the sockets back. A worker holds
+  # ONE provider for the length of a job, and the compute stage is minutes of
+  # Python with no graph I/O at all — so at 900s the reaper closed the
+  # provider underneath a running rebuild. The code no longer counts that as
+  # idle (see ProviderManager._touched_at), and this lines the bound up with
+  # the longest job the control plane expects above, so the two agree.
+  # Worker only: do NOT add this to viz-config.yaml.
+  PROVIDER_CACHE_IDLE_TTL_SECS: "7200"
   # Cross-pod concurrent aggregation budget per FalkorDB NODE. Writes and
   # scans are counted separately; scans get the larger number because a
   # rebuild reads far more than it writes, and reads from the master (the
