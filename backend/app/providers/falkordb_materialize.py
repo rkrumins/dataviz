@@ -5481,13 +5481,15 @@ class AggregationPipeline:
         await self._ensure_agg_index()
         # Below the gate the keyed deletes can afford to scan the cube while
         # the index builds; above it they cannot (see ``_INDEX_GATE_EDGES``),
-        # so a large cube waits for the index as long as one hold may last
-        # and then stops for a person, checkpoint kept, rather than write
-        # unindexed into a master the cluster is about to demote.
+        # so a large cube waits for the index — for the rest of the job's
+        # wall clock, since the index builds at the provider's pace and a
+        # cube the provider can hold is one it can index — and then stops
+        # for a person, checkpoint kept, rather than write unindexed into a
+        # master the cluster is about to demote.
         large = self._edges_before >= _INDEX_GATE_EDGES
         waited_from = time.monotonic()
         state = await self._await_agg_index_ready(
-            budget_s=float(self._hold_max_s) if large else 60.0,
+            budget_s=self._index_wait_budget_s() if large else 60.0,
         )
         self._index_wait_s += time.monotonic() - waited_from
         if state in ("building", "absent"):
@@ -5878,6 +5880,17 @@ class AggregationPipeline:
                 return True
         return False
 
+    def _index_wait_budget_s(self) -> float:
+        """How long a large cube may wait for the aggKey index: what is
+        left of the job's wall clock, never less than one hold. Waiting is
+        always cheaper than the scan it replaces, and the index builds at
+        the provider's pace — a 20M-edge cube on a slow indexer is still a
+        cube the provider can hold — so the only bound worth having is the
+        one the operator set for the whole job (``maxWallSecs``)."""
+        wall = float(self._knob_int("max_wall_secs", _max_wall_secs, 3_600, 604_800))
+        spent = max(0.0, time.monotonic() - self._started_mono)
+        return max(float(self._hold_max_s), wall - spent)
+
     async def _await_agg_index_ready(
         self, *, budget_s: float = 60.0, interval_s: float = 2.0,
     ) -> str:
@@ -5913,7 +5926,7 @@ class AggregationPipeline:
             if time.monotonic() >= deadline:
                 return "building"
             polls += 1
-            if polls % 30 == 0:
+            if polls % 150 == 0:
                 logger.warning(
                     "aggregation pipeline on %s: waiting for the "
                     "AGGREGATED(aggKey) index to build — %.0fs so far, up to "

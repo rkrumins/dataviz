@@ -1489,6 +1489,10 @@ class CapacitySource(BaseModel):
     last_cube_estimate: Optional[int] = Field(None, alias="lastCubeEstimate")
     last_regime: Optional[str] = Field(None, alias="lastRegime")
     last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    #: Distinct property names the graph had registered when its last
+    #: completed rebuild looked — against FalkorDB's ceiling of 65,533, which
+    #: a source's per-node metadata keys spend and a graph never gets back.
+    attribute_names: Optional[int] = Field(None, alias="attributeNames")
 
     class Config:
         populate_by_name = True

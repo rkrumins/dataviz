@@ -17,7 +17,7 @@ from collections import defaultdict, deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import (
-    Awaitable, Callable, Dict, Any, List, NamedTuple, Optional, Sequence, Set, Tuple,
+    Awaitable, Callable, Dict, Any, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
 )
 
 
@@ -1368,6 +1368,78 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 })
 
 
+#: How many DISTINCT property names one graph may hold as native node
+#: properties before a new name is stored as a value in ``propertiesRaw``
+#: instead. FalkorDB numbers names with a 16-bit id per graph and never
+#: frees one: a source whose nodes carry thousands of per-node metadata keys
+#: spends the graph's 65,533 ids on keys that appear once, after which no
+#: rollup can be written or indexed and the graph can only be recreated. The
+#: budget keeps the names that carry the graph native (searchable,
+#: indexable) and puts the long tail where the Properties panel still shows
+#: it and only search predicates cannot reach it. Counted against every name
+#: the graph has registered, platform names included. Applies as a graph is
+#: written, and a name already registered stays native — so raising it
+#: takes full effect only on a recreated graph.
+_NATIVE_PROPERTY_BUDGET_DEFAULT = 8_000
+
+
+def _native_property_budget() -> int:
+    """``FALKORDB_NATIVE_PROPERTY_BUDGET``, clamped 100-60,000: the ceiling
+    less the room the platform's own names and a margin need."""
+    try:
+        raw = int(os.getenv(
+            "FALKORDB_NATIVE_PROPERTY_BUDGET", str(_NATIVE_PROPERTY_BUDGET_DEFAULT),
+        ))
+    except ValueError:
+        raw = _NATIVE_PROPERTY_BUDGET_DEFAULT
+    return max(100, min(60_000, raw))
+
+
+def _is_native_value(v: Any) -> bool:
+    """A value FalkorDB stores as a node property: a scalar, or a flat list
+    of scalars. Everything else goes to the ``propertiesRaw`` blob."""
+    if isinstance(v, bool) or isinstance(v, (str, int, float)):
+        return True
+    return isinstance(v, list) and all(
+        isinstance(x, (str, int, float, bool)) for x in v
+    )
+
+
+def _admit_native_keys(
+    props_iter: Iterable[Optional[Dict[str, Any]]], *,
+    registered: Set[str], budget: int, reserve: Iterable[str] = (),
+) -> Tuple[Set[str], List[str]]:
+    """Which user property keys one writer call writes natively.
+
+    A name the graph has already registered stays native — its id is spent,
+    and a key's storage form must never flip on a node once chosen: a native
+    value left behind under a newer blob value is what a search predicate
+    would then match. The reserve — the source's identity and name
+    properties, and the name fallbacks the read path checks — is always
+    native, because the read path reads those BEFORE it merges the blob
+    back. Every other key is admitted by how many nodes in this call carry
+    it, ties by name, until the budget is full: deterministic on re-ingest,
+    and the long tail is what gets demoted.
+
+    Returns ``(native_keys, demoted)`` — the admitted names, and the keys
+    stored as values this call, most common first.
+    """
+    counts: Dict[str, int] = {}
+    for props in props_iter:
+        for k, v in (props or {}).items():
+            if v is None or k in _RESERVED_NODE_KEYS or not _is_native_value(v):
+                continue
+            counts[k] = counts.get(k, 0) + 1
+    native: Set[str] = set(registered)
+    native.update(r for r in reserve if r)
+    ranked = sorted(
+        (k for k in counts if k not in native), key=lambda k: (-counts[k], k),
+    )
+    room = max(0, budget - len(native))
+    native.update(ranked[:room])
+    return native, ranked[room:]
+
+
 # One-time warning latch (W1.3): logged once per provider boot when we
 # encounter a pre-refactor node that still carries the ``n.properties``
 # JSON blob. The read path no longer hydrates from the blob — operators
@@ -1376,9 +1448,14 @@ _logged_legacy_blob: bool = False
 
 
 def _split_user_properties(
-    props: Optional[Dict[str, Any]],
+    props: Optional[Dict[str, Any]], native_keys: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Split a user-supplied `properties` dict into (native_scalar, residual_json).
+
+    ``native_keys`` — when given, the names ``_admit_native_keys`` admitted
+    for this write: a scalar under any other key is stored as a value in the
+    residual instead of becoming a node property, which is how the graph's
+    attribute ids are kept for the names that carry it.
 
     Returns
     -------
@@ -1406,11 +1483,7 @@ def _split_user_properties(
         if k in _RESERVED_NODE_KEYS:
             collided.append(k)
             continue
-        if isinstance(v, bool) or isinstance(v, (str, int, float)):
-            native[k] = v
-        elif isinstance(v, list) and all(
-            isinstance(x, (str, int, float, bool)) for x in v
-        ):
+        if _is_native_value(v) and (native_keys is None or k in native_keys):
             native[k] = v
         else:
             residual[k] = v
@@ -13418,6 +13491,57 @@ class FalkorDBProvider(GraphDataProvider):
     # an out-of-band writer's new spelling is picked up quickly.
     _TYPE_CASING_TTL_S = 60.0
 
+    _PROPERTY_NAMES_TTL_S = 60.0
+
+    async def _registered_property_names(self, *, fresh: bool = True) -> Set[str]:
+        """Every attribute name the graph has registered — what the native
+        property budget counts against (``_admit_native_keys``). ``CALL
+        db.propertyKeys()`` enumerates the attribute map: exact, one round
+        trip, and read on the WRITE node so a name the previous batch
+        registered is already in it (a replica can lag a batch behind, and
+        a key one batch admits and the next demotes is the split state the
+        budget exists to prevent). The graph is the only counter — a copy
+        kept anywhere else drifts on every recreate. A bulk write reads it
+        fresh; ``create_node`` may reuse a reading for a short while, adding
+        the names it admits."""
+        now = time.monotonic()
+        cached = getattr(self, "_property_names_cache", None)
+        if (
+            not fresh and cached is not None
+            and now - cached[0] < self._PROPERTY_NAMES_TTL_S
+        ):
+            return cached[1]
+        res = await self._query(
+            "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey",
+        )
+        names = {
+            str(row[0]) for row in (res.result_set or []) if row and row[0] is not None
+        }
+        self._property_names_cache = (now, names)
+        return names
+
+    def _native_key_reserve(self) -> Set[str]:
+        """Names the read path reads natively BEFORE it merges the blob back
+        (``_node_from_props``): the source's identity and name properties,
+        and the name fallbacks. Always admitted."""
+        return {
+            getattr(self, "_node_identity_property", "") or "",
+            getattr(self, "_name_property", "") or "",
+            "name", "title", "label",
+        } - {""}
+
+    def _log_demoted_keys(
+        self, where: str, demoted: List[str], native: Set[str], budget: int,
+    ) -> None:
+        logger.warning(
+            "%s on %s: %d property key(s) stored as values in propertiesRaw "
+            "rather than as node properties — shown in the Properties panel, "
+            "not reachable by search predicates. The graph holds %d of the %d "
+            "native property names FALKORDB_NATIVE_PROPERTY_BUDGET allows. "
+            "Most common first: %s",
+            where, self._graph_name, len(demoted), len(native), budget, demoted[:5],
+        )
+
     async def _type_casing_maps(self) -> Tuple[Dict[str, str], Dict[str, str]]:
         """``casefold(name) → observed spelling`` for relationship types and
         labels, TTL-cached per provider instance. Newly-written spellings are
@@ -13553,13 +13677,27 @@ class FalkorDBProvider(GraphDataProvider):
         # logical type/label never fragments across case variants.
         rel_casing, label_casing = await self._type_casing_maps()
 
+        # Which user property keys this call writes natively — see
+        # ``_admit_native_keys``. The graph's registered names are read on
+        # the write node once per call.
+        native_keys: Optional[Set[str]] = None
+        if nodes:
+            budget = _native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                (node.properties for node in nodes),
+                registered=await self._registered_property_names(),
+                budget=budget, reserve=self._native_key_reserve(),
+            )
+            if demoted:
+                self._log_demoted_keys("save_custom_graph", demoted, native_keys, budget)
+
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
             label = self._consistent_casing(
                 _sanitize_label(str(node.entity_type)), label_casing,
             )
-            native_props, residual_blob = _split_user_properties(node.properties)
+            native_props, residual_blob = _split_user_properties(node.properties, native_keys)
             nodes_by_label[label].append({
                 "urn": node.urn,
                 "displayName": node.display_name or "",
@@ -13722,7 +13860,15 @@ class FalkorDBProvider(GraphDataProvider):
             label = self._consistent_casing(
                 _sanitize_label(str(node.entity_type)), label_casing,
             )
-            native_props, residual_blob = _split_user_properties(node.properties)
+            budget = _native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                [node.properties],
+                registered=await self._registered_property_names(fresh=False),
+                budget=budget, reserve=self._native_key_reserve(),
+            )
+            if demoted:
+                self._log_demoted_keys("create_node", demoted, native_keys, budget)
+            native_props, residual_blob = _split_user_properties(node.properties, native_keys)
             # Reserved fields go into the merge map alongside native user
             # props — `SET n += $p` writes them all in one pass. The native
             # user props sit at the top level of the map (they ARE the new
@@ -13757,6 +13903,9 @@ class FalkorDBProvider(GraphDataProvider):
                 f"MERGE (n:{label} {{urn: $urn}}) SET n += $p REMOVE n.properties",
                 params={"urn": node.urn, "p": params},
             )
+            cached = getattr(self, "_property_names_cache", None)
+            if cached is not None:
+                cached[1].update(native_props)    # what this write just registered
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
                 rel_type = self._consistent_casing(

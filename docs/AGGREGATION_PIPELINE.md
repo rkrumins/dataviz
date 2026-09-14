@@ -1448,11 +1448,13 @@ So two gates, both before the phase's first write:
   `attribute_limit` failure category, which offers no Resume.
 * **The index gate, above 100,000 existing rollup edges.** Reconcile asks
   `CALL db.indexes()` for the `aggKey` index. Operational → proceed. Still
-  `UNDER CONSTRUCTION` → wait for it, heartbeating, for as long as one hold
-  may last (`AGGREGATION_HOLD_MAX_SECS`, 30 min by default), and if it is
-  still building then stop with `MaterializationStoreUnstable` — checkpoint
-  kept, the worker's ordinary resume path — rather than scan. Absent → the
-  same stop. Below the gate a cube is small enough that scanning while the
+  `UNDER CONSTRUCTION` → wait for it, heartbeating, for what is left of the
+  job's wall clock (`maxWallSecs`, 24 h by default; never less than one
+  hold, `AGGREGATION_HOLD_MAX_SECS`), and if it is still building then stop
+  with `MaterializationStoreUnstable` — checkpoint kept, the worker's
+  ordinary resume path — rather than scan. The index builds at the
+  provider's pace, and a cube the provider can hold is one it can index, so
+  the only bound is the one set for the whole job. Absent → the same stop. Below the gate a cube is small enough that scanning while the
   index builds does not matter, and the run proceeds after the sixty-second
   wait it always had. `run_stats.index_wait_s` records what a run waited. A
   probe the build cannot answer stops nothing: the gate needs evidence to
@@ -1471,14 +1473,49 @@ a build (`UNDER CONSTRUCTION`) or ready (`OPERATIONAL`). A run that stopped at
 the gate resumes cleanly once that reads `OPERATIONAL`; nothing it wrote is
 lost, because it wrote nothing.
 
-**Recreating a graph at the ceiling** means purging the data source's graph
-and ingesting the source again — and that helps only if the second ingest
-does not spend the ids the same way. The long tail has to stop becoming
-property names: a key that appears on a handful of nodes belongs in the
-node's `propertiesRaw` blob, where the Properties panel still shows it and
-only search predicates cannot reach it, and the ids stay for the keys that
-carry the graph. Until ingest draws that line, re-ingesting the same source
-rebuilds the same 65,000 names.
+### The native property budget, and recreating a graph at the ceiling
+
+Recreating a graph helps only if the second ingest does not spend the ids the
+same way, so both writers now draw the line at ingest. `FALKORDB_NATIVE_PROPERTY_BUDGET`
+(default 8,000; clamped 100–60,000) is how many distinct property names one
+graph may hold as native node properties. Each write call reads the graph's
+registered names (`CALL db.propertyKeys()`, on the write node, one round trip)
+and admits this call's keys against what is left: a name the graph already
+holds stays native (its id is spent, and a key's storage form never flips on
+a node once chosen); the source's identity and name properties and the
+`name`/`title`/`label` fallbacks the read path checks are always native; every
+other key is admitted by how many nodes in the call carry it, ties by name,
+until the budget is full. The rest are stored as values in the node's
+`propertiesRaw` blob, where the Properties panel still shows them and only
+search predicates, sorts and display rules cannot reach them. The same rule
+runs in `save_custom_graph` and `create_node` (a direct load) and in the
+versioning projector's apply pass (a versioned graph), so both kinds of graph
+spend their ids the same way; the graph itself is the only counter, so a
+recreate is correct by construction. A writer that demotes keys says so once
+per call, at WARNING, with the count, the budget and the most common keys it
+demoted. Because a registered name stays native, raising the budget takes
+full effect only on a recreated graph. A graph written by something other
+than this product's writers is outside the budget: its writer has to stop
+registering names, or the pre-flight refuses its rebuilds until it is
+recreated.
+
+**Recreating** a graph at the ceiling:
+
+* **A version-controlled source**: Data health → Rebuild. It drops the graph
+  (`GRAPH.DELETE`), re-seeds it from the version store through the projector
+  under the budget, and queues the rollup rebuild through the rollups-stale
+  hook. Postgres must be current — a direct load done after the source was
+  bootstrapped is not in the version store and would be lost; the tab's
+  Reconcile check says whether it is.
+* **A source loaded directly** (no version store): there is no product
+  action, and this destroys the only copy. Find the owning shard (the
+  Placement row on the capacity card), delete the graph there
+  (`redis-cli -h <shard> GRAPH.DELETE <graph>`), run the loader again — it
+  goes through `save_custom_graph`, now budgeted — then
+  `python -m backend.scripts.signal_data_changed --graph <name> --force` to
+  clear the content caches and queue the rollup rebuild.
+
+Neither Purge in Job history (rollups only) nor Clear cache frees a name.
 
 ## Index policy, and cleaning up the retired ones
 

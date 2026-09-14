@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import func, literal, or_, select
 
@@ -43,7 +43,9 @@ from .service import GraphVersioningService, _is_edge_payload
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
+    _admit_native_keys,
     _compute_searchable_text,
+    _native_property_budget,
     _sanitize_label,
     _split_user_properties,
 )
@@ -117,6 +119,21 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
         if not read_only or "empty key" not in str(exc).lower():
             raise
         return await _send(False)
+
+
+#: Names the read path checks natively for a node's label before it merges
+#: the blob back. The projector keys every node by ``urn`` itself, so the
+#: source's identity property needs no place here.
+_NAME_FALLBACK_KEYS = ("name", "title", "label")
+
+
+async def _registered_property_names(client) -> Set[str]:
+    """Every attribute name the graph has registered — what the native
+    property budget counts against (``_admit_native_keys``). Read on the
+    write node, so the previous pass's names are in it; a graph a full seed
+    just dropped has none."""
+    res = await _q(client, "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey")
+    return {str(r[0]) for r in (getattr(res, "result_set", None) or []) if r and r[0] is not None}
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
@@ -195,8 +212,9 @@ def _node_urn(entity_id: str, payload: Optional[dict]) -> str:
 
 
 def _node_item(entity_id: str, urn: str, payload: dict,
-               level_map: Optional[Dict[str, int]] = None) -> dict:
-    native, residual = _split_user_properties(payload.get("properties"))
+               level_map: Optional[Dict[str, int]] = None,
+               native_keys: Optional[Set[str]] = None) -> dict:
+    native, residual = _split_user_properties(payload.get("properties"), native_keys)
     dn = payload.get("displayName") or ""
     qn = payload.get("qualifiedName") or ""
     desc = payload.get("description") or ""
@@ -1471,10 +1489,30 @@ class FalkorProjector:
         # Nodes in (grouped by label), edges in (grouped by type + endpoint
         # labels — the per-label URN indexes drive every node match), edges
         # out, nodes out.
+        # Which user property keys this pass writes natively — the same
+        # budget the provider's own writers apply, so a versioned graph and
+        # a direct-load graph spend their attribute ids the same way.
+        native_keys: Optional[Set[str]] = None
+        if node_upserts:
+            budget = _native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                [p.get("properties") for _, _, p in node_upserts],
+                registered=await _registered_property_names(client),
+                budget=budget, reserve=_NAME_FALLBACK_KEYS,
+            )
+            if demoted:
+                logger.warning(
+                    "projection: %d property key(s) stored as values in "
+                    "propertiesRaw rather than as node properties — shown in "
+                    "the Properties panel, not reachable by search predicates. "
+                    "The graph holds %d of the %d native property names "
+                    "FALKORDB_NATIVE_PROPERTY_BUDGET allows. Most common first: %s",
+                    len(demoted), len(native_keys), budget, demoted[:5],
+                )
         by_label: Dict[str, list] = {}
         for eid, urn, p in node_upserts:
             by_label.setdefault(_sanitize_label(p.get("entityType") or "Entity"), []).append(
-                _node_item(eid, urn, p, level_map)
+                _node_item(eid, urn, p, level_map, native_keys)
             )
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):

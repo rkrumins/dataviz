@@ -109,6 +109,14 @@ export function SourceCapacityBlock({ dsId }: { dsId: string }) {
                                 </>
                             ) : '—'}
                         </Row>
+                        <Row label="Property names">
+                            {doc.source.attributeNames != null
+                                ? <>
+                                    {doc.source.attributeNames.toLocaleString()} of 65,533 the graph store allows a graph
+                                    <span className="text-ink-muted"> (at the last completed rebuild)</span>
+                                </>
+                                : 'not measured until a rebuild completes'}
+                        </Row>
                         <Row label="Last decision">
                             {doc.source.lastRegime
                                 ? (

@@ -451,3 +451,269 @@ async def test_legacy_blob_stripped_on_write(fresh_provider):
         f"legacy n.properties blob was not stripped: {legacy_blob!r}"
     )
     assert native == "TABLE"
+
+
+# ---------------------------------------------------------------------------
+# The native property budget — _admit_native_keys, and the writers that
+# apply it: save_custom_graph, create_node and the versioning projector.
+#
+# FalkorDB numbers property names with a 16-bit id per graph and never frees
+# one. A source whose nodes carry thousands of per-node metadata keys spent
+# a 241k-node graph's 65,533 ids on keys that appear once, after which the
+# rollups could be neither written nor indexed. The budget keeps the names
+# that carry the graph native and stores the long tail as values.
+# ---------------------------------------------------------------------------
+
+import asyncio
+import types
+
+from backend.app.providers.falkordb_provider import (
+    FalkorDBProvider,
+    _admit_native_keys,
+    _native_property_budget,
+)
+from backend.common.models.graph import GraphNode
+
+
+class TestAdmitNativeKeys:
+    def test_registered_names_stay_native_whatever_the_budget(self):
+        """A name the graph already holds has spent its id, and flipping its
+        storage form would leave a native value under a blob value — the one
+        state a search predicate then matches wrongly."""
+        native, demoted = _admit_native_keys(
+            [{"a": 1, "b": 2}], registered={"a", "urn"}, budget=2,
+        )
+        assert "a" in native
+        assert demoted == ["b"]
+
+    def test_the_reserve_is_always_native(self):
+        native, demoted = _admit_native_keys(
+            [{"id": "x", "zzz": 1}], registered=set(), budget=1, reserve=("id", ""),
+        )
+        assert "id" in native
+        assert demoted == ["zzz"]
+
+    def test_keys_are_admitted_by_how_many_nodes_carry_them_then_by_name(self):
+        rows = [{"common": 1, "rare_b": 1}, {"common": 1, "rare_a": 1}, {"common": 1}]
+        native, demoted = _admit_native_keys(rows, registered=set(), budget=2)
+        assert native == {"common", "rare_a"}
+        assert demoted == ["rare_b"]
+
+    def test_values_that_cannot_be_native_take_no_slot(self):
+        native, demoted = _admit_native_keys(
+            [{"nested": {"x": 1}, "flat": 1, "none": None, "urn": "u"}],
+            registered=set(), budget=1,
+        )
+        assert native == {"flat"}
+        assert demoted == []
+
+    def test_a_full_budget_demotes_every_new_key_most_common_first(self):
+        rows = [{"p": 1, "q": 1}, {"p": 1}]
+        native, demoted = _admit_native_keys(rows, registered={"x"}, budget=1)
+        assert native == {"x"}
+        assert demoted == ["p", "q"]
+
+    def test_the_budget_env_is_clamped_and_defaults(self, monkeypatch):
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "10")
+        assert _native_property_budget() == 100
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "nope")
+        assert _native_property_budget() == 8_000
+        monkeypatch.delenv("FALKORDB_NATIVE_PROPERTY_BUDGET")
+        assert _native_property_budget() == 8_000
+
+
+class TestSplitUnderBudget:
+    def test_a_scalar_outside_the_native_set_is_stored_as_a_value(self):
+        native, residual = _split_user_properties(
+            {"keep": 1, "drop": "v", "nested": {"a": 1}}, native_keys={"keep"},
+        )
+        assert native == {"keep": 1}
+        assert json.loads(residual) == {"drop": "v", "nested": {"a": 1}}
+
+    def test_no_native_set_means_the_split_it_always_was(self):
+        native, residual = _split_user_properties({"a": 1, "b": [1, 2]})
+        assert native == {"a": 1, "b": [1, 2]}
+        assert residual == "{}"
+
+    def test_the_properties_panel_still_sees_a_demoted_key(self):
+        native, residual = _split_user_properties(
+            {"keep": 1, "drop": "v"}, native_keys={"keep"},
+        )
+        node = _node_from_props(
+            {"urn": "urn:x", "displayName": "X", **native, "propertiesRaw": residual},
+            "T",
+        )
+        assert node.properties == {"keep": 1, "drop": "v"}
+
+
+def _stubbed_provider(registered):
+    """A provider whose graph reads answer from ``registered`` and whose
+    writes are recorded — enough to see what save_custom_graph and
+    create_node put on the wire."""
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p._entity_type_levels = {}
+    calls = {"batches": [], "queries": []}
+
+    async def _ensure_connected():
+        return None
+
+    async def _type_casing_maps():
+        return {}, {}
+
+    async def _query(cypher, params=None, **kw):
+        calls["queries"].append((cypher, params))
+        if "db.propertyKeys" in cypher:
+            return types.SimpleNamespace(result_set=[[n] for n in sorted(registered)])
+        return types.SimpleNamespace(result_set=[])
+
+    async def ensure_indices(labels):
+        return None
+
+    async def _bulk_write_batch(cypher, params, *, what):
+        calls["batches"].append((cypher, params))
+
+    async def _cache_urn_labels_bulk(mapping):
+        return None
+
+    async def _cache_urn_label(urn, label):
+        return None
+
+    async def _resolve_urn_labels_bulk(urns):
+        return {}
+
+    p._ensure_connected = _ensure_connected
+    p._type_casing_maps = _type_casing_maps
+    p._query = _query
+    p.ensure_indices = ensure_indices
+    p._bulk_write_batch = _bulk_write_batch
+    p._cache_urn_labels_bulk = _cache_urn_labels_bulk
+    p._cache_urn_label = _cache_urn_label
+    p._resolve_urn_labels_bulk = _resolve_urn_labels_bulk
+    return p, calls
+
+
+def _node(urn, props):
+    return GraphNode(urn=urn, entityType="Table", displayName=urn, properties=props)
+
+
+class TestWritersUnderBudget:
+    def test_save_custom_graph_keeps_the_common_keys_and_stores_the_long_tail(
+        self, monkeypatch, caplog,
+    ):
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+        registered = {f"platform{i}" for i in range(90)}
+        p, calls = _stubbed_provider(registered)
+        room = 100 - 90 - len(p._native_key_reserve())
+        assert room >= 2
+        tail = [f"k{i:02d}" for i in range(12)]
+        nodes = [_node(f"urn:{i}", {"owner": "x", tail[i]: i}) for i in range(12)]
+
+        with caplog.at_level("WARNING"):
+            assert asyncio.run(p.save_custom_graph(nodes, []))
+
+        # One read of the graph's names, on the write node.
+        assert sum(1 for c, _ in calls["queries"] if "db.propertyKeys" in c) == 1
+        items = [it for _, params in calls["batches"] for it in params["batch"]]
+        assert len(items) == 12
+        native_seen = set().union(*(it["nativeProps"].keys() for it in items))
+        # owner is on every node → first in; then the tail by name until full.
+        assert native_seen == {"owner", *tail[:room - 1]}
+        for it in items:
+            blob = json.loads(it["propertiesRaw"])
+            for k, v in blob.items():
+                assert k in tail[room - 1:] and k not in it["nativeProps"]
+        assert any(
+            "stored as values in propertiesRaw" in r.getMessage() for r in caplog.records
+        )
+
+    def test_a_registered_name_stays_native_on_a_full_graph(self, monkeypatch):
+        """The user's graph: every id spent. Nothing already native may move
+        to the blob, and nothing new may be registered."""
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+        registered = {f"platform{i}" for i in range(100)} | {"owner"}
+        p, calls = _stubbed_provider(registered)
+        nodes = [_node("urn:1", {"owner": "x", "brand_new": 1})]
+        asyncio.run(p.save_custom_graph(nodes, []))
+        (item,) = [it for _, params in calls["batches"] for it in params["batch"]]
+        assert item["nativeProps"] == {"owner": "x"}
+        assert json.loads(item["propertiesRaw"]) == {"brand_new": 1}
+
+    def test_edges_alone_read_no_names(self):
+        p, calls = _stubbed_provider(set())
+        asyncio.run(p.save_custom_graph([], []))
+        assert not any("db.propertyKeys" in c for c, _ in calls["queries"])
+
+    def test_create_node_reuses_its_reading_and_counts_what_it_admitted(
+        self, monkeypatch,
+    ):
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+        registered = {f"platform{i}" for i in range(90)}
+        p, calls = _stubbed_provider(registered)
+        room = 100 - 90 - len(p._native_key_reserve())
+        first = {f"a{i}": i for i in range(room)}            # fills the budget
+        asyncio.run(p.create_node(_node("urn:1", first)))
+        asyncio.run(p.create_node(_node("urn:2", {**first, "late": 1})))
+        assert sum(1 for c, _ in calls["queries"] if "db.propertyKeys" in c) == 1
+        merges = [params for c, params in calls["queries"] if "MERGE (n:" in c]
+        assert set(merges[0]["p"]) >= set(first)
+        # The second node's keys were admitted by the first write and stay
+        # native; the newcomer has no room and is stored as a value.
+        assert set(first) <= set(merges[1]["p"])
+        assert "late" not in merges[1]["p"]
+        assert json.loads(merges[1]["p"]["propertiesRaw"]) == {"late": 1}
+
+
+class TestProjectorUnderBudget:
+    def test_a_seed_spends_the_same_budget_as_a_direct_load(self, monkeypatch, caplog):
+        """A versioned graph and a direct-load graph must spend their
+        attribute ids the same way: the projector is the writer behind the
+        one in-product recreate (Data health → Rebuild)."""
+        from backend.app.services.versioning import projection as proj
+
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def query(self, cypher, params=None, timeout=None):
+                self.calls.append((cypher, params))
+                if "db.propertyKeys" in cypher:
+                    return types.SimpleNamespace(result_set=[[f"n{i}"] for i in range(96)])
+                return types.SimpleNamespace(result_set=[])
+
+        client = Client()
+        projector = proj.FalkorProjector.__new__(proj.FalkorProjector)
+        projector._batch = 1000
+        upserts = [
+            ("e1", "urn:1", {"entityType": "T", "properties": {"common": 1, "rare": 1}}),
+            ("e2", "urn:2", {"entityType": "T", "properties": {"common": 1}}),
+        ]
+        with caplog.at_level("WARNING"):
+            asyncio.run(projector._apply(client, upserts, [], [], []))
+
+        # 96 registered + the three name fallbacks = 99 → room for one.
+        (batch,) = [params["batch"] for c, params in client.calls if "MERGE (n:" in c]
+        by_urn = {it["urn"]: it for it in batch}
+        assert by_urn["urn:1"]["nativeProps"] == {"common": 1}
+        assert json.loads(by_urn["urn:1"]["propertiesRaw"]) == {"rare": 1}
+        assert by_urn["urn:2"]["nativeProps"] == {"common": 1}
+        assert any("projection:" in r.getMessage() and "rare" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_a_pass_with_no_node_upserts_reads_no_names(self):
+        from backend.app.services.versioning import projection as proj
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def query(self, cypher, params=None, timeout=None):
+                self.calls.append(cypher)
+                return types.SimpleNamespace(result_set=[])
+
+        client = Client()
+        projector = proj.FalkorProjector.__new__(proj.FalkorProjector)
+        projector._batch = 1000
+        asyncio.run(projector._apply(client, [], [], [], []))
+        assert not any("db.propertyKeys" in c for c in client.calls)

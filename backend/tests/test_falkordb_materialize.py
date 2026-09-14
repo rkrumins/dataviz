@@ -3423,11 +3423,12 @@ def test_a_small_cube_reconciles_while_the_index_builds(monkeypatch):
     assert asked["budget_s"] == 60.0
 
 
-def test_a_large_cube_waits_a_hold_for_the_index_and_then_stops(monkeypatch):
-    """Above the gate the wait is one hold long, and a run that is still
-    waiting at the end of it stops for a person — checkpoint kept, through
-    the worker's ordinary resume path — instead of writing unindexed into a
-    master the cluster is about to demote."""
+def test_a_large_cube_waits_its_wall_clock_for_the_index_and_then_stops(monkeypatch):
+    """Above the gate the wait is the rest of the job's wall clock (never
+    less than one hold), and a run still waiting at the end of it stops for
+    a person — checkpoint kept, through the worker's ordinary resume path —
+    instead of writing unindexed into a master the cluster is about to
+    demote."""
     monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
     asked = _patched_wait(monkeypatch, "building")
     fake = _FakeFalkor()
@@ -3437,8 +3438,19 @@ def test_a_large_cube_waits_a_hold_for_the_index_and_then_stops(monkeypatch):
         _run(_materialize(p))
     msg = str(exc.value)
     assert "still building" in msg and "db.indexes()" in msg and "1 rollup edge" in msg
-    assert asked["budget_s"] == float(mat._store_hold_max_s())
+    assert float(mat._store_hold_max_s()) <= asked["budget_s"] <= float(mat._max_wall_secs())
     assert fake.write_queries == 0
+
+
+def test_the_index_wait_is_what_is_left_of_the_wall_clock(monkeypatch):
+    fake = _FakeFalkor()
+    pipe, _ = _gate_pipeline(fake, index_rows=[])
+    pipe._tuning = {**getattr(pipe, "_tuning", {}), "max_wall_secs": 7_200}
+    pipe._started_mono = time.monotonic() - 3_600
+    assert 3_500 < pipe._index_wait_budget_s() <= 3_600
+    # Never less than one hold, however little wall clock is left.
+    pipe._started_mono = time.monotonic() - 7_100
+    assert pipe._index_wait_budget_s() == float(pipe._hold_max_s)
 
 
 def test_a_large_cube_stops_when_the_index_is_not_there(monkeypatch):

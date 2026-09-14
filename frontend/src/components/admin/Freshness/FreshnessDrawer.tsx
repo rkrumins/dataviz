@@ -1055,8 +1055,8 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         // (or the store refused the first name it needed), and no retry
         // changes the count — so no Retry, and the way out is a recreate.
         why: 'The graph has used almost every one of the 65,533 distinct property names the graph store allows a graph. The source’s per-node metadata keys became property names, and the rollups need a few names of their own that the graph can no longer register — nor can it index them.',
-        how: 'Property names are never freed, so this graph has to be recreated: purge it, re-ingest the source so its metadata long tail is stored as values rather than as separate property names, then rebuild the rollups. The technical details below give the count the rebuild measured.',
-        note: 'Retrying or resuming reaches the same ceiling — nothing changes until the graph is recreated.',
+        how: 'Property names are never freed, so this graph has to be recreated, and the recreate keeps the long tail out of the names: writes now hold a graph to FALKORDB_NATIVE_PROPERTY_BUDGET native property names (8,000 by default) and store the rest as values. For a version-controlled source, Data health → Rebuild drops the graph, re-seeds it from the version store under that budget and queues the rollups. For a source loaded directly, delete the graph on its shard (GRAPH.DELETE), run the loader again, then signal the change — the runbook is in docs/AGGREGATION_PIPELINE.md. The technical details below give the count the rebuild measured.',
+        note: 'Retrying or resuming reaches the same ceiling, Purge in Job history removes only the rollups, and Clear cache clears caches — none of them frees a property name.',
         showClear: true, showRetry: false, primary: 'clear',
     },
     unknown: {

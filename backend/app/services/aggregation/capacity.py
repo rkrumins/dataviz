@@ -280,6 +280,7 @@ def source_row(
     else:
         bpe, bpe_source = _int_or(limits.bytes_per_edge.value, bytes_per_edge_default()), "default"
     estimate = stats.get("cube_estimate")
+    names = stats.get("attribute_names")
     return CapacitySource(
         data_source_id=ds.id,
         label=getattr(ds, "label", None),
@@ -296,6 +297,7 @@ def source_row(
         last_cube_estimate=int(estimate) if isinstance(estimate, (int, float)) else None,
         last_regime=stats.get("regime") if isinstance(stats.get("regime"), str) else None,
         last_failure_category=failure.get("category"),
+        attribute_names=int(names) if isinstance(names, (int, float)) else None,
     )
 
 
