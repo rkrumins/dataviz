@@ -181,6 +181,29 @@ class AggregationJobORM(Base):
         Index("ix_agg_jobs_ds_status", "data_source_id", "status"),
         Index("ix_agg_jobs_created_at", "created_at"),
         Index("ix_agg_jobs_workspace", "workspace_id"),
+        # The stuck-job reconciler asks "which rows are pending or running?"
+        # every 30 seconds, forever. ``ix_agg_jobs_ds_status`` leads with
+        # data_source_id, so it cannot serve that question at all and the
+        # sweep was a sequential scan of the whole table — hydrating full ORM
+        # entities, ``run_stats`` (tens of KB per row) included. With hundreds
+        # of sources the table grows by 10²-10³ rows a day, so the cost of the
+        # loop grows with the history it has no interest in. Partial, because
+        # active rows are a vanishing fraction of the table and the index
+        # should stay the size of the working set rather than the archive.
+        Index(
+            "ix_agg_jobs_active",
+            "status",
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+        # "The last completed run of this source" (the ETA baseline) and "the
+        # last failure of this source" (the freshness reason), both once per
+        # source per page of the fleet view. Without these each one sorts an
+        # unindexed TEXT column across every historical row of the source.
+        Index(
+            "ix_agg_jobs_ds_completed",
+            "data_source_id", "completed_at",
+        ),
+        Index("ix_agg_jobs_ds_updated", "data_source_id", "updated_at"),
         Index(
             "ix_agg_jobs_idem_active",
             "data_source_id",
@@ -268,6 +291,16 @@ class AggregationDataSourceStateORM(Base):
     # stricter (never widen a knob); ``"{}"`` = the last run needed nothing.
     observed_tuning = Column(Text, nullable=True)
     graph_fingerprint = Column(Text, nullable=True)
+    #: The fingerprint the read caches were last INVALIDATED for.
+    #:
+    #: ``graph_fingerprint`` only advances when a rebuild COMPLETES, so while
+    #: one is deferred by the rebuild cooldown the change gate keeps reading
+    #: "changed" on every sweep — and each pass bumped the generation again,
+    #: making every entry re-warmed since unreachable. The cache's effective
+    #: lifetime became the detection cadence rather than its TTL. This
+    #: records what we have already thrown the cache away for, so the same
+    #: change costs one invalidation rather than one per tick.
+    invalidated_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
     # Per-source rebuild-cooldown override (seconds). NULL = fall through to
     # the persisted global cadence, then the env default. Resolved by
@@ -331,6 +364,12 @@ class AggregationDataSourceStateORM(Base):
     # evaluation finds nothing wrong. At the cap the source is suspended, so
     # a finding we can never clear cannot rebuild a huge graph hourly forever.
     reconcile_consecutive_actions = Column(Integer, nullable=True, default=0)
+    # How many times that count has been cleared for "it is converging".
+    # Bounds the clearing itself: growing the stored cube by a cell an attempt
+    # is progress by that test and a loop by any other, so past
+    # ``_CONVERGING_CLEAR_CAP`` the source is suspended like any other. Reset
+    # wherever the breaker count is.
+    reconcile_converging_clears = Column(Integer, nullable=True, default=0)
 
 
 class ReconcileRunORM(Base):

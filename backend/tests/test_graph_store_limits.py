@@ -174,6 +174,19 @@ def _apply(endpoint, patch):
     return _run(gsl.apply_graph_store_limits(object(), endpoint, patch))
 
 
+def _claims(*, global_perms=(), workspaces=("ws1",)):
+    from backend.app.services.permission_service import PermissionClaims
+
+    return PermissionClaims(
+        sid="s1", global_perms=tuple(global_perms),
+        ws_perms={ws: ("workspace:datasource:manage",) for ws in workspaces},
+    )
+
+
+def _admin_claims():
+    return _claims(global_perms=("system:admin",), workspaces=())
+
+
 # ── the change ───────────────────────────────────────────────────────
 
 
@@ -216,7 +229,7 @@ def test_raising_the_ceiling_needs_the_container_limit_and_refuses_a_shortfall_w
     with pytest.raises(gsl.GraphStoreLimitsError) as exc:
         _apply(ENDPOINT, _patch(queryMemCapacity=GB, containerMemoryBytes=11 * GB))
     msg = str(exc.value)
-    assert "short by" in msg and "4 concurrent queries" in msg and "11.0 GB" in msg and "6.0 GB maxmemory" in msg
+    assert "short by" in msg and "4 concurrent queries" in msg and "11.0 GiB" in msg and "6.0 GiB maxmemory" in msg
     assert conn.sets == []
     # … while planning for 2 concurrent queries (the guide's figure, ≈ 10.35 GiB) does.
     out = _apply(ENDPOINT, _patch(queryMemCapacity=GB, containerMemoryBytes=11 * GB, concurrentQueries=2))
@@ -233,9 +246,53 @@ def test_concurrency_is_capped_at_the_thread_count_and_an_unreported_thread_coun
     assert out.thread_count_assumed is True and out.concurrent_queries == gsl.THREAD_COUNT_ASSUMED
     assert out.container_needed_bytes == sc.container_memory_needed(
         6 * GB, gsl.THREAD_COUNT_ASSUMED, 512 * MB)
+    # 1.25 × 6 GiB + 8 × 1.3 × 2 GiB + 256 MiB ≈ 28.6 GiB does not fit 10 GiB,
+    # and the refusal says the 8 was an assumption rather than a reading.
     with pytest.raises(gsl.GraphStoreLimitsError,
                        match=f"assumed {gsl.THREAD_COUNT_ASSUMED}"):
-        _apply(ENDPOINT, _patch(queryMemCapacity=8 * GB, containerMemoryBytes=10 * GB))
+        _apply(ENDPOINT, _patch(queryMemCapacity=2 * GB, containerMemoryBytes=10 * GB))
+
+
+def test_a_ceiling_above_the_nodes_own_maxmemory_is_refused_whatever_the_container(monkeypatch):
+    """A per-query ceiling above ``maxmemory`` lets ONE query be allotted more
+    than the node's whole dataset budget, so the node is OOM-killed long
+    before the ceiling refuses anything. No container figure buys past it —
+    which matters because the container figure is the client's to state."""
+    conn = _Conn(maxmemory=6 * GB)
+    _wire(monkeypatch, {ENDPOINT: conn})
+    with pytest.raises(gsl.GraphStoreLimitsError, match="above this node's own maxmemory"):
+        _apply(ENDPOINT, _patch(queryMemCapacity=8 * GB, containerMemoryBytes=1024 * GB))
+    assert conn.sets == []
+    # At maxmemory exactly it is the sizing formula's call again, not this one.
+    with pytest.raises(gsl.GraphStoreLimitsError, match="short by"):
+        _apply(ENDPOINT, _patch(queryMemCapacity=6 * GB, containerMemoryBytes=7 * GB))
+
+
+def test_the_deployments_container_limit_outranks_the_one_the_client_states(monkeypatch):
+    """THE GUARD USED TO BE A FIELD THE CALLER FILLED IN. It sized against
+    ``containerMemoryBytes`` — client-supplied, ``ge=1``, no upper bound — so
+    any ceiling it refused was passed by restating a larger container, while
+    ``FALKORDB_CONTAINER_MEMORY_BYTES``, which the deployment does set and
+    which the error text names, was never read."""
+    conn = _Conn(maxmemory=6 * GB)
+    _wire(monkeypatch, {ENDPOINT: conn})
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(11 * GB))
+
+    # Claiming more than the deployment declares is refused on its face: the
+    # node is killed at the declared limit whatever the request says.
+    with pytest.raises(gsl.GraphStoreLimitsError, match="FALKORDB_CONTAINER_MEMORY_BYTES"):
+        _apply(ENDPOINT, _patch(queryMemCapacity=GB, containerMemoryBytes=1024 * GB))
+    assert conn.sets == []
+
+    # The smaller of the two governs, so the env alone refuses what 11 GiB
+    # cannot back at four concurrent queries…
+    with pytest.raises(gsl.GraphStoreLimitsError, match="short by"):
+        _apply(ENDPOINT, _patch(queryMemCapacity=GB, containerMemoryBytes=11 * GB))
+
+    # …and with the env set, the caller need not state it at all.
+    out = _apply(ENDPOINT, _patch(queryMemCapacity=GB, concurrentQueries=2))
+    assert conn.sets == [("QUERY_MEM_CAPACITY", GB, None)]
+    assert out.container_needed_bytes == sc.container_memory_needed(6 * GB, 2, GB)
 
 
 def test_a_node_without_maxmemory_cannot_have_its_ceiling_raised(monkeypatch):
@@ -456,7 +513,42 @@ def test_the_capacity_routes_are_served_in_process_in_every_mode(monkeypatch):
     monkeypatch.setattr(cap_mod, "assemble_fleet_capacity", fleet)
     monkeypatch.setattr(cap_mod, "assemble_source_capacity", one)
     assert asyncio.run(agg_mod.get_aggregation_capacity(session=None, fresh=False)) == "fleet"
-    assert asyncio.run(agg_mod.get_data_source_capacity("ds-1", session=None)) == "source"
+    assert asyncio.run(agg_mod.get_data_source_capacity(
+        "ds-1", session=None, claims=_admin_claims(),
+    )) == "source"
+
+
+def test_one_sources_capacity_is_checked_against_the_callers_workspaces(monkeypatch):
+    """The gate on this route is ``_require_ingestion_read`` — any of the
+    Ingestion permissions, held in ANY workspace — and the handler answered
+    for any id in the fleet: the source's label, its provider, its edge counts
+    and its rollup footprint. 404, never 403, or the route reads back which
+    ids exist somewhere else."""
+    from fastapi import HTTPException
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+    from backend.app.services import workspace_visibility as vis
+
+    async def visible(session, claims):
+        return {"ds-mine"}
+
+    monkeypatch.setattr(vis, "compute_visible_data_source_ids", visible)
+
+    from backend.app.services.aggregation import capacity as cap_mod
+
+    async def one(session, ds_id):
+        return "source"
+
+    monkeypatch.setattr(cap_mod, "assemble_source_capacity", one)
+
+    bound = _claims(workspaces=("ws-mine",))
+    assert asyncio.run(agg_mod.get_data_source_capacity(
+        "ds-mine", session=None, claims=bound,
+    )) == "source"
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(agg_mod.get_data_source_capacity(
+            "ds-theirs", session=None, claims=bound,
+        ))
+    assert exc.value.status_code == 404
 
 
 def test_the_control_plane_route_takes_the_patch_body():

@@ -57,6 +57,52 @@ describe('CacheHealthCard', () => {
         expect(screen.getByText('Fell back')).toBeInTheDocument()
     })
 
+    it('shows how big the answers are, against the cap that decides whether they cache', async () => {
+        // The number any decision to widen a response turns on. `tooLarge`
+        // says an answer already stopped caching; this says how much room is
+        // left before one does.
+        vi.mocked(graphStoreService.getCacheStats).mockResolvedValue(stats({
+            payloadCapBytes: 4 * 1024 * 1024,
+            totals: {
+                hit: 80, miss: 20, stale: 0, bypass: 0, hit_ratio: 0.8,
+                payload: { buckets: { '64k': 18, '256k': 2 }, samples: 20, mean_bytes: 96 * 1024 },
+            },
+            endpoints: {
+                aggregated: {
+                    hit: 5, miss: 15, stale: 0, bypass: 0, hit_ratio: 0.25,
+                    payload: {
+                        buckets: { '1m': 10, '4m': 3, over: 2 }, samples: 15,
+                        mean_bytes: 2 * 1024 * 1024,
+                    },
+                },
+            },
+        }) as never)
+        render(<CacheHealthCard workspaceId="ws1" canRefresh={false} />)
+
+        expect(await screen.findByText('Answer size')).toBeInTheDocument()
+        expect(screen.getByText(/96 KB/)).toBeInTheDocument()
+        expect(screen.getByText(/of 4 MB/)).toBeInTheDocument()
+        // An endpoint whose answers are already past the cap says so loudly:
+        // those computes are thrown away and every repeat recomputes.
+        expect(screen.getByText('2 over cap')).toBeInTheDocument()
+    })
+
+    it('says how close to the cap an endpoint is before anything is over it', async () => {
+        vi.mocked(graphStoreService.getCacheStats).mockResolvedValue(stats({
+            endpoints: {
+                aggregated: {
+                    hit: 5, miss: 15, stale: 0, bypass: 0, hit_ratio: 0.25,
+                    payload: {
+                        buckets: { '1m': 10, '4m': 4, over: 0 }, samples: 14,
+                        mean_bytes: 1_500_000,
+                    },
+                },
+            },
+        }) as never)
+        render(<CacheHealthCard workspaceId="ws1" canRefresh={false} />)
+        expect(await screen.findByText('4 near cap')).toBeInTheDocument()
+    })
+
     it('says nothing was served rather than showing a misleading zero', async () => {
         vi.mocked(graphStoreService.getCacheStats).mockResolvedValue(stats({
             totals: { hit: 0, miss: 0, stale: 0, bypass: 0, hit_ratio: null },

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.endpoints.graph import (
     _bounded_compute,
     _cache_scope,
+    _compute_budget,
     _enforce_fair_share,
     _provider_health_header,
     get_context_engine,
@@ -48,9 +49,30 @@ from backend.common.models.graph import (
     AggregatedEdgeResult,
     EdgeQuery,
     GraphEdge,
+    NodeQuery,
+    TopLevelNodesResult,
 )
 
 router = APIRouter()
+
+
+def _root_query_params(query: Optional[NodeQuery]) -> Optional[dict]:
+    """Cache params for the ``rootQuery`` leg, list filters normalised.
+
+    The same normalisation ``/nodes/query`` does for the same reason: the
+    query is a SET of URNs, entity types and tags, the answer does not depend
+    on the order they arrived in, and the canvas builds them by expansion
+    order. Only the cache key is normalised — the query handed to the engine
+    is untouched, in case any filter is ever order-sensitive.
+    """
+    if query is None:
+        return None
+    dumped = query.model_dump(mode="json", by_alias=True, exclude_none=True)
+    for field in ("urns", "entityTypes", "tags"):
+        value = dumped.get(field)
+        if isinstance(value, list):
+            dumped[field] = sorted(value)
+    return dumped
 
 
 def _merge_aggregated(
@@ -127,11 +149,24 @@ async def canvas_bootstrap(
     scope = _cache_scope(engine)
 
     async def compute() -> CanvasBootstrapResult:
-        # Wave 1 — roots page (materialized-serve fast path when eligible,
-        # else the live label-union read).
+        # Wave 1 — the roots page.
+        #
+        # Two modes, and they are not interchangeable. ``rootQuery`` asks for
+        # the nodes the caller NAMES (explicit URNs, or entity types
+        # including non-root ones) — the question the canvas actually asks.
+        # Without it, the structural "no incoming containment edge" query
+        # stands, unchanged, for callers that want the graph's own shape.
         roots = None
+        if request.root_query is not None:
+            nodes = await engine.get_nodes_query(request.root_query)
+            roots = TopLevelNodesResult(
+                nodes=nodes,
+                totalCount=None,
+                hasMore=len(nodes) >= (request.root_query.limit or request.limit),
+            )
         if (
-            scope is not None
+            roots is None
+            and scope is not None
             and not scope.branch_id
             and scope.data_source_id
             and not request.search_query
@@ -152,10 +187,16 @@ async def canvas_bootstrap(
                 include_child_count=True,
             )
 
-        root_urns = [n.urn for n in roots.nodes]
+        # Roots ∪ what the caller already has on screen. A root page loaded
+        # into a populated canvas needs the edges BETWEEN the two, which is
+        # what the client's own getEdgesBetween(new ∪ existing) asks for.
+        # Deduplicated while keeping order, so the query is stable.
+        root_urns = list(dict.fromkeys(
+            [n.urn for n in roots.nodes] + list(request.visible_urns)
+        ))
 
-        # Wave 2 — edges among roots + aggregated lineage among roots,
-        # both bounded by the root set and run CONCURRENTLY.
+        # Wave 2 — edges among that set + aggregated lineage among it,
+        # both bounded by it and run CONCURRENTLY.
         async def _edges() -> List[GraphEdge]:
             if len(root_urns) < 2:
                 return []
@@ -195,10 +236,18 @@ async def canvas_bootstrap(
             "includeAggregated": request.include_aggregated,
             "lineageEdgeTypes": sorted(request.lineage_edge_types) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types) if request.containment_edge_types else None,
+            # Both are SETS: the answer does not depend on the order they
+            # arrived in, and the canvas builds them by expansion order — so
+            # two users who reached the identical view by different routes
+            # must share one entry rather than hold two. Every neighbouring
+            # endpoint already normalises this way.
+            "rootQuery": _root_query_params(request.root_query),
+            "visibleUrns": sorted(request.visible_urns) or None,
         },
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=CanvasBootstrapResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_CANVAS_BOOTSTRAP),
     )
     label_failover(response, result.freshness, failing_over)
     await _apply_stale_overlay(scope, result.freshness, result.aggregated)
@@ -283,6 +332,7 @@ async def canvas_expand(
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=CanvasExpandResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_CANVAS_EXPAND),
     )
     label_failover(response, result.freshness, failing_over)
     await _apply_stale_overlay(scope, result.freshness, result.aggregated_delta)

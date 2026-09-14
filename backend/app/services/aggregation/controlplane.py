@@ -301,6 +301,7 @@ async def _get_session(request: Request):
 from .schemas import (  # noqa: E402
     GraphStoreLimitsPatch,
     GraphStoreLimitsResponse,
+    PurgeAggregationRequest,
     JobLimitsPatch,
     AggregationTriggerRequest,
     AggregationSettingsRequest,
@@ -590,6 +591,7 @@ async def purge_aggregation(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
     skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
+    body: Optional[PurgeAggregationRequest] = Body(None),
 ):
     """Claim a purge slot and hand off to the insights-service worker.
     The provider DELETE runs as a Redis Streams job with retry, DLQ,
@@ -599,6 +601,10 @@ async def purge_aggregation(
     try:
         job = await svc.claim_purge_job(
             ds_id, session, skip_reaggregate=skip_reaggregate,
+            reaggregate=(
+                body.reaggregate.model_dump(by_alias=True, exclude_none=True)
+                if body is not None and body.reaggregate is not None else None
+            ),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

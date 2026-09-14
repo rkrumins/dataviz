@@ -554,6 +554,30 @@ def _ranges_of(slots: set) -> List[List[int]]:
 # ── Sentinel and standalone ──────────────────────────────────────────────
 
 
+async def _read_replication(
+    cfg: FalkorDBConnConfig, host: str, port: int, budget: float,
+) -> Dict[str, Any]:
+    """``INFO replication`` off one node, parsed, or ``{}``.
+
+    What a node says about ITSELF — role, master link, the replicas it
+    lists. The sentinel seed fallback asks exactly this of a remembered
+    address, because it is the same question sentinel was being asked and
+    the node can answer it when the sentinels cannot.
+    """
+    client = node_client(cfg, host, port, socket_timeout=budget)
+    try:
+        async with asyncio.timeout(budget):
+            return info_parse.replication_stats(
+                info_parse.parse_info_text(await client.info("replication")),
+            )
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.debug("graph store: replication read on %s:%s failed: %s",
+                     host, port, _err(exc))
+        return {}
+    finally:
+        await _aclose(client)
+
+
 async def _replicas_from_info(
     cfg: FalkorDBConnConfig, host: str, port: int, budget: float,
 ) -> List[RawNode]:
@@ -584,15 +608,86 @@ async def _replicas_from_info(
     return out
 
 
-async def discover_sentinel(cfg: FalkorDBConnConfig, budget: float) -> RawTopology:
+async def discover_sentinel(
+    cfg: FalkorDBConnConfig, budget: float,
+    extra_seeds: Sequence[Tuple[str, int]] = (),
+) -> RawTopology:
+    """The data nodes behind a sentinel service.
+
+    Asking a sentinel is the first move, not the only one. The sweep already
+    holds every node a previous pass saw up (``_seeds_last_seen`` plus the
+    cross-process seed memory), and the cluster arm uses them to rescue a
+    reading when the configured seeds are unreachable. Sentinel used to throw
+    them away, so discovery was "ask a sentinel or report nothing": during
+    the 10-30s of a promotion — precisely when an operator opens Admin →
+    Graph store to see what is happening — ``resolve_sentinel_master``
+    raises, the sweep completes "successfully" with no shards, no nodes, no
+    memory and no findings, and that empty snapshot is cached as current.
+    The surviving replica is up and answering INFO the whole time and is not
+    shown at all.
+
+    So on failure we dial the remembered addresses in turn and build the
+    topology from the first that answers. Its own ``INFO replication`` says
+    whether it is a master or a replica, which is the same question sentinel
+    was being asked. The error rides along, so the page says the sentinels
+    could not be reached AND shows the nodes that are up.
+    """
     try:
         host, port = await resolve_sentinel_master(cfg, budget)
     except Exception as exc:                          # noqa: BLE001 — by contract
+        fallback = await _sentinel_seed_fallback(cfg, budget, extra_seeds)
+        if fallback is not None:
+            fallback.error = _err(exc)
+            return fallback
         return RawTopology(reachable=False, error=_err(exc), discovered_via="sentinel")
     master = RawNode(host=host, port=int(port), endpoint=f"{host}:{port}",
                      announced=f"{host}:{port}", role="master")
     replicas = await _replicas_from_info(cfg, host, int(port), budget)
     return RawTopology(shards=[(master, replicas)], discovered_via="sentinel")
+
+
+async def _sentinel_seed_fallback(
+    cfg: FalkorDBConnConfig, budget: float,
+    extra_seeds: Sequence[Tuple[str, int]],
+) -> Optional[RawTopology]:
+    """A topology built from the remembered DATA nodes, or None if none
+    answers. Never raises: this is already the failure path."""
+    for host, port in extra_seeds or ():
+        try:
+            info = await _read_replication(cfg, str(host), int(port), budget)
+        except Exception:                             # noqa: BLE001 — try the next
+            continue
+        if not info:
+            continue
+        role = str(info.get("role") or "").lower()
+        if role == "slave" or role == "replica":
+            # A replica knows its master's address, so prefer to anchor the
+            # shard there; if the master is the node that is gone, the
+            # replica still stands as the one copy that is answering.
+            master_ep = info.get("masterEndpoint")
+            if master_ep:
+                m_host, _, m_port = str(master_ep).rpartition(":")
+                m_host, m_port = remap_address(cfg, m_host, int(m_port or 0))
+                master = RawNode(
+                    host=m_host, port=int(m_port), endpoint=f"{m_host}:{m_port}",
+                    announced=str(master_ep), role="master",
+                )
+                this = RawNode(
+                    host=str(host), port=int(port), endpoint=f"{host}:{port}",
+                    announced=f"{host}:{port}", role="replica",
+                )
+                return RawTopology(
+                    shards=[(master, [this])], discovered_via="info-fallback",
+                )
+        master = RawNode(
+            host=str(host), port=int(port), endpoint=f"{host}:{port}",
+            announced=f"{host}:{port}", role="master",
+        )
+        replicas = await _replicas_from_info(cfg, str(host), int(port), budget)
+        return RawTopology(
+            shards=[(master, replicas)], discovered_via="info-fallback",
+        )
+    return None
 
 
 async def discover_standalone(cfg: FalkorDBConnConfig, budget: float) -> RawTopology:
@@ -612,7 +707,7 @@ async def discover(
     if cfg.mode == "cluster":
         return await discover_cluster(cfg, b, extra_seeds)
     if cfg.mode == "sentinel":
-        return await discover_sentinel(cfg, b)
+        return await discover_sentinel(cfg, b, extra_seeds)
     return await discover_standalone(cfg, b)
 
 
@@ -622,10 +717,18 @@ async def discover(
 def parse_graph_memory_reply(raw: Any) -> Tuple[Optional[int], Dict[str, int]]:
     """``GRAPH.MEMORY USAGE`` → ``(total_bytes, {field: bytes})``.
 
-    The server answers in megabytes, one ``*_sz_mb`` field per part of the
-    graph (matrices, node/edge blocks, attributes, indices). Any shape the
-    client hands back is accepted; an unrecognised reply yields no total,
-    never an exception.
+    One ``*_sz_mb`` field per part of the graph (matrices, node/edge blocks,
+    attributes, indices). **"mb" here is MEBIbytes** — the Redis-family
+    convention, the same one ``used_memory_human`` prints as ``M`` — so the
+    conversion below is ``1024**2`` deliberately and the earlier "megabytes"
+    in this docstring was the error, not the arithmetic. Reading it as
+    10^6 would understate every graph by 4.86%, and these bytes are compared
+    against ``maxmemory`` and the container limit, which are powers of two:
+    the two halves of that comparison have to be in the same units or the
+    shard budget is wrong by the difference.
+
+    Any shape the client hands back is accepted; an unrecognised reply
+    yields no total, never an exception.
     """
     pairs = info_parse.parse_config_pairs(raw)
     detail: Dict[str, int] = {}
@@ -672,6 +775,7 @@ async def read_node(
         "graphs": None,
         "graphMemory": None,
         "measured": {},
+        "commandStats": {},
     }
     if not node.dialable:
         out["status"] = "unreachable"
@@ -708,6 +812,23 @@ async def read_node(
         live_role = out["replication"].get("role")
         if live_role in ("master", "replica"):
             out["role"] = live_role
+
+        # Mean Cypher service time, which every capacity claim rests on and
+        # which nothing in the product used to capture. A separate section:
+        # ``commandstats`` is not in INFO's default set, and asking for it
+        # together with the default one would mean re-parsing a reply the
+        # lines above already have. Guarded on its own like CONFIG GET —
+        # every node answers the memory reading even where a managed
+        # instance blocks this section. Replicas too: "on the replicas, not
+        # only the master" is the check this exists to make answerable.
+        try:
+            async with asyncio.timeout(max(0.1, deadline - time.monotonic())):
+                out["commandStats"] = info_parse.command_stats(
+                    info_parse.parse_info_text(await client.info("commandstats"))
+                )
+        except Exception as exc:                      # noqa: BLE001 — optional detail
+            logger.debug("graph store: INFO commandstats on %s failed: %s",
+                         node.endpoint, _err(exc))
 
         try:
             async with asyncio.timeout(max(0.1, deadline - time.monotonic())):

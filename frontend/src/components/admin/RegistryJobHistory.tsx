@@ -503,20 +503,33 @@ export function RegistryJobHistory() {
         }
     }, [showLoading, hideLoading, notify, setViewMode, fetchJobs])
 
-    const handleConfirmRetrigger = useCallback(async (overrides: AggregationOverridesValue) => {
+    const handleConfirmRetrigger = useCallback(async (
+        overrides: AggregationOverridesValue,
+        opts?: { purgeFirst?: boolean },
+    ) => {
         if (!retriggerCtx) return
         const dsId = retriggerCtx.kind === 'job' ? retriggerCtx.job.dataSourceId : retriggerCtx.dataSourceId
+        const request = {
+            projectionMode: overrides.projectionMode,
+            batchSize: overrides.batchSize,
+            maxRetries: overrides.maxRetries,
+            timeoutSecs: overrides.timeoutMinutes * 60,
+            tuning: tuningForRequest(overrides.tuning),
+        }
+        // Purge-then-rebuild goes through the purge endpoint, which chains the
+        // rebuild itself once the delete lands — the same settings ride along
+        // so the run the purge promised is the run the operator configured.
         await runDialogAction(
             `retrigger-${dsId}`,
-            () => aggregationService.triggerAggregation(dsId, {
-                projectionMode: overrides.projectionMode,
-                batchSize: overrides.batchSize,
-                maxRetries: overrides.maxRetries,
-                timeoutSecs: overrides.timeoutMinutes * 60,
-                tuning: tuningForRequest(overrides.tuning),
-            }, 'manual'),
-            'Aggregation triggered',
-            'Could not trigger the aggregation.',
+            () => opts?.purgeFirst
+                ? aggregationService.purgeAggregation(dsId, { reaggregate: request })
+                : aggregationService.triggerAggregation(dsId, request, 'manual'),
+            opts?.purgeFirst
+                ? 'Purging rollup edges — the rebuild starts when it finishes'
+                : 'Aggregation triggered',
+            opts?.purgeFirst
+                ? 'Could not start the purge.'
+                : 'Could not trigger the aggregation.',
         )
     }, [retriggerCtx, runDialogAction])
 

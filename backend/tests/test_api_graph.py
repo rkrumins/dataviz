@@ -557,8 +557,10 @@ async def test_trace_closure_cache_hit_deserializes_the_subclass(test_client: As
         frontierDown=[],
         seedTruncated=True,
     ).model_dump_json(by_alias=True)
-    # get_or_compute reads the generation counter first, the cache key second.
-    redis.get.side_effect = [b"7", cached]
+    # get_or_compute reads the generation counters first, the cache key second.
+    # Two counters here: trace/closure reads the :AGGREGATED layer for its
+    # coarse page, so its key carries the rollup counter as well as content.
+    redis.get.side_effect = [b"7", b"3", cached]
 
     async def _override():
         return mock_engine
@@ -854,7 +856,8 @@ class _PassthroughGraphCache:
         self.count_sets: list = []
 
     async def get_or_compute(self, *, scope, endpoint, params, compute, model_cls,
-                              ttl_seconds=None, on_stale=None):
+                              ttl_seconds=None, on_stale=None,
+                              expected_compute_s=None):
         return await compute()
 
     @staticmethod

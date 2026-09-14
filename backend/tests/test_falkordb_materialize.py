@@ -1752,8 +1752,9 @@ def test_auto_mode_materializes_full_cube_within_budget():
     # fallback must never be a silent log line.
     assert result["run_stats"]["regime"] == "cube"
     assert result["run_stats"]["cube_estimate"] >= len(agg)
-    # The DEFAULT budget (no tuning override here) — sized per shard.
-    assert result["run_stats"]["materialize_budget"] == 25_000_000
+    # The DEFAULT budget (no tuning override here) — what the apply could
+    # write inside the job's wall clock, per shard.
+    assert result["run_stats"]["materialize_budget"] == mat._wall_clock_edges()
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.
@@ -2417,6 +2418,37 @@ def test_checkpoints_carry_the_snapshot_and_the_adaptation_and_the_result_keeps_
     assert result["run_stats"]["adapted"]["scan_width_min"] == 100_000
 
 
+def test_every_checkpoint_carries_what_the_graph_already_stored():
+    """The reconcile breaker compares this number across consecutive FAILED
+    runs to tell a rebuild too large for one wall clock (the stored cube
+    grows every attempt) from one that writes the same cells and dies. So it
+    has to survive a run the watchdog kills, which means every checkpoint and
+    not the result — a killed run never reaches the result.
+
+    The FIRST checkpoint fires before any graph work, deliberately (a
+    parseable cursor before an early crash), so it has nothing to stamp — and
+    stamping a 0 placeholder there would read as "the graph stored nothing"
+    and clear the breaker for a source that never started."""
+    seen = []
+
+    async def progress(*args, **kw):
+        seen.append(kw.get("stats") or {})
+
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    _run(_materialize(p, progress=progress))
+
+    assert seen, "no checkpoints at all"
+    assert "edges_before" not in seen[0], (
+        "the pre-graph-work checkpoint stamped a placeholder as a reading"
+    )
+    stamped = [s["edges_before"] for s in seen if "edges_before" in s]
+    assert stamped, "no checkpoint carried the stored rollup count"
+    # One run reads it once: the baseline cannot move under a single run.
+    assert len(set(stamped)) == 1 and all(isinstance(v, int) for v in stamped)
+
+
 # ── per-query budgets raised on a running job ──────────────────────────
 
 
@@ -2707,7 +2739,7 @@ def test_another_rebuilds_hold_on_the_node_counts_as_used_memory(monkeypatch):
         _run(_materialize(p, tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}, job_id="job-2"))
 
     msg = str(exc.value)
-    assert "49.5 KB held by 1 other rebuild still writing" in msg and "short by" in msg
+    assert "49.5 KiB held by 1 other rebuild still writing" in msg and "short by" in msg
     assert fake.agg == {}
     assert not any(c[0] in ("reserve", "update", "release") for c in ledger.calls)
 
@@ -3161,3 +3193,75 @@ def test_the_worker_passes_the_stamp_a_heartbeat():
     assert "except TypeError:" in src, (
         "a provider that predates the keyword must still be called the old way"
     )
+
+
+# ── a lost write lease stops the run, it does not just stop renewing ────
+#
+# The per-graph write lease is the only thing standing between two rebuilds
+# and one master. Losing it used to stop the background renewal task and
+# nothing else: the pipeline captured the lease once at the top of ``run``
+# and touched it again only to release it in ``finally``, so it kept
+# MERGEing while a second run held the lease and MERGEd the same pairs.
+#
+# ``_write_items`` sets ``r.weight = item.w`` on a first touch and
+# ``coalesce(r.weight, 0) + item.w`` on a repeat, so the stored weight of
+# every pair BOTH runs touch is neither run's computed weight — a silently
+# wrong rollup that survives until a full fresh rebuild.
+#
+# The check rides ``_cancel_check``, which every phase and every write path
+# already calls, and raises ``MaterializationStoreUnstable`` — "the run keeps
+# its checkpoint and stops for a person", which is exactly right here: the
+# progress is good, the graph just is not ours to write any more.
+
+
+def _lost_lease():
+    from backend.app.services.aggregation.admission import GraphLease
+
+    lease = GraphLease("agg:graphwrite:n:g", "tok")
+    lease.mark_lost("holder changed, or the lease expired")
+    return lease
+
+
+def test_a_lost_lease_stops_the_pipeline_at_its_next_checkpoint():
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        pipe._cancel_check()
+    assert "lease" in str(exc.value).lower()
+
+
+def test_a_lost_lease_keeps_the_checkpoint_and_asks_for_a_person():
+    """``MaterializationStoreUnstable`` subclasses
+    ``MaterializationStoreUnreachable`` -> ``ConnectionError``, which is the
+    worker's resumable path — the run keeps every byte of progress."""
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    with pytest.raises(ConnectionError):
+        pipe._cancel_check()
+
+
+def test_a_held_lease_does_not_stop_the_pipeline():
+    from backend.app.services.aggregation.admission import GraphLease
+
+    pipe = _make_pipeline()
+    pipe._lease = GraphLease("agg:graphwrite:n:g", "tok")
+    pipe._cancel_check()            # must not raise
+
+
+def test_no_lease_at_all_does_not_stop_the_pipeline():
+    """Admission is optional — ``acquire_graph_lease`` returns None when the
+    bus is down (fail open), and a run with no lease is the behaviour that
+    existed before any of this."""
+    pipe = _make_pipeline()
+    assert getattr(pipe, "_lease", None) is None
+    pipe._cancel_check()            # must not raise
+
+
+def test_a_user_cancel_still_wins_over_a_lost_lease():
+    """A person pressing Cancel gets ``JobCancelled``, not a store error —
+    the status an operator reads must name what actually happened."""
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    pipe._should_cancel = lambda: True
+    with pytest.raises(JobCancelled):
+        pipe._cancel_check()

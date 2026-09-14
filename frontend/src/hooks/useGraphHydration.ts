@@ -67,6 +67,19 @@ const HYDRATION_CONCURRENCY = (() => {
     return Number.isFinite(fromEnv) && fromEnv >= 1 ? fromEnv : 4
 })()
 
+/**
+ * Ask `/canvas/bootstrap` for a root page instead of making the three calls
+ * (`getNodes`, `getEdgesBetween`, and the aggregated read behind them)
+ * separately. On by default; set `VITE_CANVAS_BOOTSTRAP=0` to go back.
+ *
+ * The three fire together and queue on the browser's six HTTP/1.1
+ * connections, so over real network RTT what one request saves is the
+ * queueing, not the query time — the backend runs the same engine methods in
+ * two concurrent waves. A flag and not a rewrite: the fallback below is the
+ * old path unchanged, so a regression is a config flip rather than a revert.
+ */
+const USE_CANVAS_BOOTSTRAP = import.meta.env?.VITE_CANVAS_BOOTSTRAP !== '0'
+
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
 interface LoadChildrenOptions {
@@ -960,11 +973,47 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         return queueRef.current.submit('ROOT', async (signal) => {
             setLoadingNodes(prev => new Set(prev).add('ROOT'))
             try {
-                const roots = await provider.getNodes({
-                    entityTypes: typesToLoad as any[],
-                    limit: ROOT_PAGE_SIZE,
-                    offset,
-                })
+                // What is already painted. The edges leg has always covered
+                // new ∪ existing, whichever path fetches it.
+                const existingUrns = useCanvasStore.getState().nodes.map(n => n.id)
+
+                let roots: GraphNode[] | null = null
+                let backendEdges: GraphEdge[] | null = null
+
+                // One request for the page, its edges and its aggregated
+                // lineage — see USE_CANVAS_BOOTSTRAP. Any failure falls
+                // through to the three calls below rather than surfacing:
+                // the batched endpoint is an optimisation, never a new way
+                // for a canvas to fail to open.
+                if (USE_CANVAS_BOOTSTRAP && provider.canvasBootstrap) {
+                    try {
+                        const batched = await provider.canvasBootstrap({
+                            rootQuery: {
+                                entityTypes: typesToLoad as string[],
+                                limit: ROOT_PAGE_SIZE,
+                                offset,
+                            },
+                            visibleUrns: existingUrns,
+                        })
+                        if (signal.aborted) return
+                        roots = batched.roots.nodes
+                        backendEdges = batched.edges
+                    } catch (err) {
+                        console.warn(
+                            '[useGraphHydration] canvas/bootstrap failed; '
+                            + 'falling back to the per-purpose calls', err,
+                        )
+                    }
+                    if (signal.aborted) return
+                }
+
+                if (roots === null) {
+                    roots = await provider.getNodes({
+                        entityTypes: typesToLoad as any[],
+                        limit: ROOT_PAGE_SIZE,
+                        offset,
+                    })
+                }
                 if (signal.aborted) return
 
                 // Full page ⇒ more likely exist beyond it (same heuristic
@@ -976,13 +1025,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 if (roots.length > 0) {
                     const nodesToAdd = roots.map(root => toCanvasNode(root))
 
-                    // Fetch real edges from backend
-                    const existingUrns = useCanvasStore.getState().nodes.map(n => n.id)
-                    const allUrns = [...new Set([...roots.map(r => r.urn), ...existingUrns])]
-                    const backendEdges = await provider.getEdgesBetween(allUrns).catch((err: unknown) => {
-                        useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
-                        return [] as GraphEdge[]
-                    })
+                    if (backendEdges === null) {
+                        const allUrns = [...new Set([...roots.map(r => r.urn), ...existingUrns])]
+                        backendEdges = await provider.getEdgesBetween(allUrns).catch((err: unknown) => {
+                            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                            return [] as GraphEdge[]
+                        })
+                    }
                     if (signal.aborted) return
 
                     useCanvasStore.getState().addGraph(nodesToAdd, backendEdges.map(e => toCanvasEdge(e)))

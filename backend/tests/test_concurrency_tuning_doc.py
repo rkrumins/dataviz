@@ -48,6 +48,11 @@ def test_the_ladder_table_matches_the_code(doc):
         (r"Provider semaphore \|[^|]*?\*\*(\d+)\*\*", M._MAX_PROVIDER_CONCURRENCY),
         (r"Provider semaphore \|[^|]*?\+(\d+) waiters", M._SLOT_MAX_WAITERS),
         (r"Provider semaphore \|[^|]*?(\d+)s wait", M._SEMAPHORE_ACQUIRE_BUDGET_S),
+        # Row 4b: the only ceiling in the table that is NOT multiplied by the
+        # worker count. A drift here is the one that reads as "we are bounded"
+        # when the fleet is not.
+        (r"Provider fleet count \|[^|]*?= \*\*(\d+)\*\*", M._FLEET_MAX_CONCURRENCY),
+        (r"Provider fleet count \|[^|]*?floor (\d+)", M._FLEET_MIN_CONCURRENCY),
     ]
     drifted = []
     for pattern, actual in documented:
@@ -64,6 +69,59 @@ def test_the_ladder_table_matches_the_code(doc):
     # The per-source reserve is stated in prose in §2, not in the table.
     assert re.search(rf"default `pool // 8` = {reserved}\)", doc), (
         f"§2 no longer states the per-source reserve as {reserved}"
+    )
+
+
+def test_the_store_rows_match_the_overlay_the_doc_names(doc):
+    """Rows 7 and 8 are the two ceilings the app cannot move — the graph store's
+    own query width and its queue — and the doc names the production-cluster
+    overlay for both. Nothing compared them to that overlay, so the manifest
+    could change with CI green while the table an on-call reads at 3am went
+    quietly wrong. Reads the SAME file `test_thread_count_assumption.py` reads.
+
+    THREAD_COUNT in particular is not a number on its own: it is paired with
+    the pod's memory limit by the sizing rule, so 'the doc says 6 and the shard
+    runs 8' is also 'the doc's user-count table is derived from the wrong
+    thread count and the shard is one load spike from an OOM kill'.
+    """
+    shards = (_DOC.parents[1]
+              / "deploy/k8s/overlays/production-cluster/resources"
+              / "falkordb-cluster-statefulsets.yaml").read_text()
+
+    for label, pattern, row in [
+        ("THREAD_COUNT", r"(?<!OMP_)\bTHREAD_COUNT (\d+)",
+         r"FalkorDB query threads \|[^|]*?`THREAD_COUNT` \*\*(\d+)\*\* per node"),
+        ("MAX_QUEUED_QUERIES", r"\bMAX_QUEUED_QUERIES (\d+)",
+         r"FalkorDB queue \|[^|]*?`MAX_QUEUED_QUERIES` \*\*(\d+)\*\* per node"),
+    ]:
+        shipped = {int(m) for m in re.findall(pattern, shards)}
+        assert shipped, f"no {label} found in the cluster StatefulSets"
+        assert len(shipped) == 1, f"the three shards disagree on {label}: {shipped}"
+        found = re.search(row, doc)
+        assert found, f"§1 has no cluster-overlay row stating {label}"
+        assert int(found.group(1)) == shipped.pop(), (
+            f"§1 says {label} is {found.group(1)}; the production-cluster shards "
+            f"run something else. Every capacity figure below that table is "
+            f"derived from these two numbers."
+        )
+
+
+def test_the_two_shipped_topologies_are_not_conflated(doc):
+    """The base single instance and the cluster shards ship DIFFERENT pairs
+    (8 threads on 14Gi, 6 on 56Gi), and applying the base pair to a shard needs
+    more memory than the shard has. The doc has to say which topology rows 7-8
+    describe, or a reader applies the only numbers on the page."""
+    assert re.search(r"production-cluster", doc), (
+        "§1 no longer names the topology rows 7-8 come from, so the only "
+        "THREAD_COUNT on the page reads as the one to apply everywhere"
+    )
+    base = (_DOC.parents[1]
+            / "deploy/k8s/base/infrastructure/falkordb/statefulset.yaml").read_text()
+    base_threads = {int(m) for m in re.findall(r"(?<!OMP_)\bTHREAD_COUNT (\d+)", base)}
+    assert base_threads, "no THREAD_COUNT in the base StatefulSet"
+    assert re.search(rf"`THREAD_COUNT {base_threads.pop()}`", doc), (
+        "§1 no longer states the base/Helm single-instance thread count beside "
+        "the cluster one, so the two topologies are indistinguishable on the page"
     )
 
 
@@ -130,8 +188,15 @@ def test_the_fleet_arithmetic_is_self_consistent(doc):
         f"{total} workers × {hard} admitted (deployed pool {pool})"
     )
     assert re.search(rf"{total} ×\s+{M._MAX_PROVIDER_CONCURRENCY}\s+=\s+{total * M._MAX_PROVIDER_CONCURRENCY} per provider", doc), (
-        "the concurrent-FalkorDB-calls line in §1 no longer matches "
+        "the provider-semaphore line in §1 no longer matches "
         f"{total} workers × {M._MAX_PROVIDER_CONCURRENCY} slots"
+    )
+    # And the point of that line: it is what the processes HOLD, not what the
+    # store is asked to execute. §1 has to say what actually bounds the store,
+    # or the arithmetic above reads as the conclusion.
+    assert re.search(r"fleet-wide[^\n]*\n", doc) and "PROVIDER_FLEET_MAX_CONCURRENCY" in doc, (
+        "§1 multiplies the per-process cap by the worker count without naming "
+        "the fleet-wide count that is the real ceiling"
     )
 
 
@@ -148,6 +213,7 @@ def test_the_changed_values_table_matches_the_code(doc):
         ("`FALKORDB_NODES_QUERY_TIMEOUT`", int(R.FALKORDB_NODES_QUERY_TIMEOUT_SECS)),
         ("`HTTP_TIMEOUT_GRAPH_SECS`", int(R.HTTP_TIMEOUT_GRAPH_SECS)),
         ("`PROVIDER_SLOT_MAX_WAITERS`", M._SLOT_MAX_WAITERS),
+        ("`PROVIDER_FLEET_MAX_CONCURRENCY`", M._FLEET_MAX_CONCURRENCY),
     ]:
         row = re.search(rf"^\| {re.escape(label)} \|.*?\| \*\*([\d.]+)\*\* \|", doc, re.M)
         assert row, f"§3 has no row for {label}"

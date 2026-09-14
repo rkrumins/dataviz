@@ -45,6 +45,9 @@ BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_
 # PROVIDER_MAX_CONCURRENCY (8) outbound calls in flight per data source; a
 # request that finds every slot busy waits up to PROVIDER_SEMAPHORE_BUDGET_S
 # (2.0) for one before being shed with ProviderBusy (HTTP 429 + Retry-After).
+# That cap is per PROCESS; PROVIDER_FLEET_MAX_CONCURRENCY counts the same
+# admission once for the whole fleet (sized from the node's THREAD_COUNT),
+# which is the number that actually bounds what the store is asked to run.
 
 # ── FalkorDB-specific query timeouts ────────────────────────────────
 # Read-only Cypher queries (MATCH ... RETURN).

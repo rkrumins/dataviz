@@ -102,7 +102,16 @@ export interface FreshnessRow {
     lastAggregatedAt?: string | null
     /** Currently always null server-side — use lastAggregatedAt for age. */
     lastMaterializedAt?: string | null
+    /** When the cache was last INVALIDATED (the last generation bump) — NOT
+     *  when it was last filled. Nothing writes this on a cache write. */
     cacheAsOf?: string | null
+    /** When a compute was last STORED for this source. Carries the entries'
+     *  own TTL, so its absence means nothing warm is left to serve. */
+    cacheBuiltAt?: string | null
+    /** The cache version that stored answer was built at. Behind
+     *  `generation` means the newest readers are recomputing. */
+    cacheBuiltGeneration?: string | null
+    /** The version a reader is served now — part of every cache key. */
     generation?: number | null
     staleReason?: string | null
     /** Currently always null — derive "since" from lastEvent when accepted. */
@@ -395,7 +404,7 @@ export interface FreshnessSummary {
     /** A stale marker is present. */
     recomputing: number
     needsAttention: number
-    /** Rows with a non-null ``cacheAsOf``. */
+    /** Rows with something WARM stored (a non-null ``cacheBuiltAt``). */
     cacheStamped: number
     /** Rows whose last reconciliation check found the rollups out of step
      *  (``drifting`` or ``overlayMissing``). */

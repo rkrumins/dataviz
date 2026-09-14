@@ -1,0 +1,42 @@
+# Aggregation's per-node share of a CLUSTER shard's query threads.
+#
+# The base worker-config sizes its slots against the base StatefulSet's
+# THREAD_COUNT 8: 2 writes + 4 scans = 6, two threads left over. This
+# overlay's shards run THREAD_COUNT 6 (falkordb-cluster-statefulsets.yaml,
+# doc §7.2 — 6 of 8 cores, the rest reserved for Redis I/O, AOF rewrite and
+# replication), so the same pair is the WHOLE query width of a master.
+#
+# That is the bug this patch closes. The entire rebuild pipeline reads under
+# read_from_master_only — deliberately, because it reads what it has just
+# written — so all six land on the master and nothing else can get on:
+#
+#   - the 10s post-write settle window, which pins that graph's reads to the
+#     master until it elapses,
+#   - index DDL, issued once per graph,
+#   - the write governor's INFO, once per batch,
+#   - the probe lane's get_counts_fast,
+#   - and every interactive read inside a settle window.
+#
+# All of them then queue behind MAX_QUEUED_QUERIES 150 against zero free
+# threads. The read slots exist to "leave threads for the readers rather
+# than apologise to them"; at 6 of 6 they were doing neither.
+#
+#   write + read <= THREAD_COUNT - 2  ->  1 + 3 = 4 of 6
+#
+# Reads keep the larger share because a rebuild reads far more than it
+# writes (EXTRACT scans every lineage edge, RECONCILE scans the stored
+# cube) and because AGGREGATION_EXTRACT_CONCURRENCY must stay under it.
+# Writes drop to one per node: cross-pod, and with the write lease already
+# one rebuild per graph, the second slot only ever admitted a SECOND graph's
+# batch onto the same master — which is the share worth giving back first.
+#
+# Re-derive BOTH numbers if this overlay's THREAD_COUNT changes;
+# test_configmap_matches_manifests.py fails if they drift apart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+  namespace: synodic
+data:
+  FALKORDB_ENDPOINT_WRITE_SLOTS: "1"
+  FALKORDB_ENDPOINT_READ_SLOTS: "3"

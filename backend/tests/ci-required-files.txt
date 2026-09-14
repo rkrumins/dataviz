@@ -42,6 +42,7 @@ tests/test_falkordb_materialize.py
 tests/test_falkordb_ondemand_pairs.py
 tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
+tests/test_falkordb_run_guarded.py
 tests/test_falkordb_store_outage.py
 tests/test_freshness_endpoints.py
 tests/test_freshness_source_doc.py
@@ -62,7 +63,9 @@ tests/test_nav_catalogue.py
 tests/test_process_memory.py
 tests/test_projection_stalled_reconcile.py
 tests/test_provider_failover_pause.py
+tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
+tests/test_purge_then_rebuild.py
 tests/test_read_pressure_yield.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py

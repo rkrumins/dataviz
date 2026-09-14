@@ -138,6 +138,46 @@ def server_stats(info: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+#: The two commands every Cypher read and write arrives as. Nothing else in
+#: ``commandstats`` says anything about graph service time.
+_QUERY_COMMANDS = ("graph.query", "graph.ro_query")
+
+
+def command_stats(info: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Calls and mean service time per graph command, from ``INFO commandstats``.
+
+    ``docs/CONCURRENCY_TUNING.md`` §1 parameterises the whole supported-user
+    table on mean Cypher service time and then says nobody can derive it from
+    the manifests. It was never derivable from the PRODUCT either: this
+    section appeared only as a shell command in a runbook. The sweep already
+    visits every node, so it is one more field on a call already being made —
+    and per node, which is what makes "on the replicas, not only the master"
+    a question with an answer.
+
+    Cumulative since the node started, like every Redis counter: ``usec_per_call``
+    is the mean over the node's whole uptime, so read it beside the RATE of
+    ``calls`` rather than as a current figure. Absent section, absent command
+    (a node that has served none) and an older server all yield ``{}`` — the
+    same "not said" rule as everything else here.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, value in info.items():
+        if not isinstance(key, str) or not key.lower().startswith("cmdstat_"):
+            continue
+        name = key[len("cmdstat_"):].lower()
+        if name not in _QUERY_COMMANDS:
+            continue
+        if isinstance(value, str):
+            value = parse_info_text(f"cmd:{value}").get("cmd")
+        if not isinstance(value, dict):
+            continue
+        out[name] = {
+            "calls": as_int(value.get("calls")),
+            "usecPerCall": as_float(value.get("usec_per_call")),
+        }
+    return out
+
+
 def _replica_entry(value: Any) -> Optional[Dict[str, Any]]:
     """One ``slaveN`` entry → ``{endpoint, ip, port, state, offset, lag}``."""
     if isinstance(value, str):

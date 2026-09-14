@@ -234,8 +234,20 @@ export interface CacheEndpointStats {
      *  Counted beside its own miss rather than inside the ratio: it says why
      *  every repeat of that read will miss too. */
     too_large?: number
+    /** Sizes of the answers computed for this endpoint in the window. */
+    payload?: CachePayloadStats
     /** hit / (hit + miss + stale); null when nothing was served. */
     hit_ratio: number | null
+}
+
+/** How big this endpoint's computed answers serialize to. Counts, not bytes:
+ *  `buckets` is how many answers landed in each size band, and `over` is the
+ *  band above the payload cap — those were deleted and never cached, so every
+ *  repeat of that read recomputes. */
+export interface CachePayloadStats {
+    buckets: Record<string, number>
+    samples: number
+    mean_bytes: number | null
 }
 
 export interface CacheStatsResponse {
@@ -244,6 +256,8 @@ export interface CacheStatsResponse {
     windowSeconds: number | null
     totals: CacheEndpointStats
     endpoints: Record<string, CacheEndpointStats>
+    /** GRAPH_CACHE_MAX_PAYLOAD_BYTES — what `over` is measured against. */
+    payloadCapBytes?: number | null
 }
 
 export interface CacheRefreshResponse {

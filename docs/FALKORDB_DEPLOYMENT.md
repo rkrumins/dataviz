@@ -582,12 +582,24 @@ Two pairings that do NOT fit, and why they are worth knowing:
   the near miss this table exists to catch: raising replication buffers is a
   memory decision, not just a durability one.
 
-> **The in-app guard does not know your replication.** *Adjust limits* on
-> Admin → Graph store refuses a `QUERY_MEM_CAPACITY` raise the container cannot
-> back, but it computes **dataset + query memory + overhead** only — it cannot
-> read the container limit, and the reading it works from carries no replica
-> count. On a master with replicas, subtract the two replication terms from the
-> container figure you type in, or size with the table above.
+> **The in-app guard counts your replication — when the node will say.**
+> *Adjust limits* on Admin → Graph store refuses a `QUERY_MEM_CAPACITY` raise
+> the container cannot back, and it applies the **whole** rule above:
+> `validate_limits` passes the backlog size, the connected replica count and
+> the replica output-buffer hard limit from that node's own `INFO` and
+> `CONFIG GET` into the formula. **Do not subtract the replication terms from
+> the container figure you type in** — an earlier revision of this callout said
+> to, and doing it now double-subtracts ~5 GiB on a cluster shard and refuses a
+> ceiling that fits.
+>
+> The residual gap is silent, which is why it is stated here. All three
+> replication inputs default to **zero**: a node whose `INFO`/`CONFIG` read
+> fails or is blocked — a managed instance, a permissions change, a timeout
+> mid-sweep — is planned by the single-instance rule alone, under-booking by
+> those same ~5 GiB, and the refusal (or approval) names no reason for the
+> difference. Before trusting a raise that only just fits, check that the node
+> shows its replicas and its buffer limits on Admin → Graph store; if it shows
+> neither, size with the table above by hand.
 
 **Raising `QUERY_MEM_CAPACITY` alone converts a caught query error into an
 OOM-killed pod.** Raise the container limit with it, and prefer lowering
@@ -631,7 +643,11 @@ naming the shard, the bytes needed, what was free and the shortfall. So:
 - **Set `maxmemory` on every instance you want measured.** Without it (the
   `deploy/topologies/docker-compose.falkordb-*.yml` files do not pass it) the
   budget cannot read headroom and falls back to the static edge cap
-  `AGGREGATION_MAX_MATERIALIZED_EDGES`, and the refusal says so.
+  `AGGREGATION_MAX_MATERIALIZED_EDGES`, and the refusal says so. That cap no
+  longer has a fixed default: it derives from how much a rebuild could write
+  inside `AGGREGATION_JOB_MAX_WALL_SECS` (15,552,000 edges at the shipped 24
+  hours), so raising or lowering the job wall clock moves it. Set the env var
+  only to override that deliberately.
 - **Adding memory to a shard is enough.** Raise `maxmemory` (live, via
   `CONFIG SET`, sized per the formula above) and the next rebuild sees it —
   no application setting has to move. Lower the reserve, or clear an explicit

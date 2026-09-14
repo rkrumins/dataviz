@@ -422,6 +422,38 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
+def _liveness_is_stale(job) -> bool:
+    """True when nothing has been heard from this run's worker for longer than
+    the stuck-job reconciler's own threshold.
+
+    The same threshold the reaper uses, deliberately: a run this side of it is
+    one the platform still believes in, and a run past it is one the platform
+    is about to end.
+
+    Only ``last_checkpoint_at`` counts. ``started_at`` never advances, so a
+    run that legitimately takes hours — the ordinary case on a large graph,
+    and every resumed run — would read as dead from its second hour onward,
+    which is precisely when its estimate is worth the most. A missing
+    checkpoint is not evidence of death either: a run that has not reached
+    its first one yet has nothing to be stale about, and the reaper's own
+    staleness path is what covers a job that dies before it.
+    """
+    stamp = getattr(job, "last_checkpoint_at", None)
+    if not stamp:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    from .reconciler import _HEARTBEAT_THRESHOLD_SECS
+
+    return (
+        datetime.now(timezone.utc) - seen
+    ).total_seconds() > _HEARTBEAT_THRESHOLD_SECS
+
+
 def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
     """When this run should finish, projected off its STEP LEDGER against
     the previous completed run's on the same source.
@@ -443,6 +475,14 @@ def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
     """
     if job.status != "running":
         return None
+    # A row reads ``running`` until something ends it, and the thing that ends
+    # it is the worker — so a job whose worker died keeps that status until a
+    # reaper notices. Projecting a finish time for it is the most confident
+    # lie the API tells: the number moves, so it looks live. If the run has
+    # not checkpointed within the window the stuck-job reconciler uses to
+    # decide a worker is gone, say nothing rather than promise a clock time.
+    if _liveness_is_stale(job):
+        return None
     try:
         steps = (json.loads(getattr(job, "run_stats", None) or "{}") or {}).get("steps")
     except (TypeError, ValueError):
@@ -451,6 +491,15 @@ def _estimate_completion(job, prior_steps: Any = None) -> Optional[str]:
     if remaining is None:
         return None
     return (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
+
+
+#: How far back to look for a run predictive enough to project from. The
+#: search skips runs that wrote nothing (a steady-state reconcile finds the
+#: cube already there and takes seconds), so it needs more than one candidate
+#: — but a source whose last five runs were all no-ops has no baseline worth
+#: reporting, and reading its whole history to discover that is the cost this
+#: bound exists to remove.
+_PRIOR_LEDGER_DEPTH = 5
 
 
 async def _prior_ledgers(
@@ -463,22 +512,47 @@ async def _prior_ledgers(
     this is a handful of ids. A failed previous run is never the baseline:
     it spent no time in the stages it never reached, and projecting from it
     reads every run as a catastrophic slowdown.
+
+    Bounded to the most recent ``_PRIOR_LEDGER_DEPTH`` completed runs per
+    source. The query used to return EVERY completed row of every running
+    source — ``run_stats`` included, which is tens of KB apiece — and throw
+    almost all of them away in the loop below. A source rebuilt hourly has
+    thousands of them within a year, so the cost of drawing one page of Job
+    History grew with a history it reads three fields of. The depth is small
+    because the loop only looks past a row when that run wrote nothing, and a
+    run of no-ops long enough to exhaust it has no baseline worth having.
     """
     ds_ids = {j.data_source_id for j in jobs if j.status == "running" and j.data_source_id}
     if not ds_ids:
         return {}
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=AggregationJobORM.data_source_id,
+            order_by=AggregationJobORM.completed_at.desc(),
+        )
+        .label("rank")
+    )
+    recent = (
+        select(
+            AggregationJobORM.data_source_id.label("data_source_id"),
+            AggregationJobORM.run_stats.label("run_stats"),
+            AggregationJobORM.completed_at.label("completed_at"),
+            rank,
+        )
+        .where(
+            AggregationJobORM.data_source_id.in_(ds_ids),
+            AggregationJobORM.status == "completed",
+        )
+        .subquery()
+    )
     try:
         rows = await session.execute(
             select(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.run_stats,
-                AggregationJobORM.completed_at,
+                recent.c.data_source_id, recent.c.run_stats, recent.c.completed_at,
             )
-            .where(
-                AggregationJobORM.data_source_id.in_(ds_ids),
-                AggregationJobORM.status == "completed",
-            )
-            .order_by(AggregationJobORM.completed_at.desc())
+            .where(recent.c.rank <= _PRIOR_LEDGER_DEPTH)
+            .order_by(recent.c.data_source_id, recent.c.completed_at.desc())
         )
     except Exception as exc:                      # noqa: BLE001 — an ETA is not worth a 500
         logger.debug("prior ledgers unavailable: %s", exc)
@@ -504,14 +578,33 @@ async def _prior_ledgers(
     return out
 
 
+#: Failure categories a resume cannot get past, so the affordance must not be
+#: offered for them. ``ontology`` means the run's frozen ontology no longer
+#: matches the source's — resuming re-runs the same validation and fails the
+#: same way; the source needs a fresh trigger against the new ontology.
+#: ``never_dispatched`` means no executor ever saw the row, so there is no
+#: checkpoint to resume FROM and re-dispatching it is what the operator
+#: actually wants.
+_UNRESUMABLE_CATEGORIES = frozenset({"ontology", "never_dispatched"})
+
+
 def _is_resumable(job) -> bool:
     """Whether a job can be MANUALLY resumed/restarted from its checkpoint.
 
-    A user restart is always allowed for a failed or cancelled job — the
+    A user restart is allowed for a failed or cancelled job — the
     ``max_retries`` cap bounds only AUTOMATED retries (crash recovery /
     delivery attempts), never the user. (Drives the UI's resume affordance.)
+
+    Except where resuming provably cannot help. Offering the button on a run
+    that will fail again identically is not a neutral default: the operator
+    presses it, waits, and gets the same failure, having been told by the UI
+    that this was the way out.
     """
-    return job.status in ("failed", "cancelled")
+    if job.status not in ("failed", "cancelled"):
+        return False
+    return classify_failure(getattr(job, "error_message", None)) not in (
+        _UNRESUMABLE_CATEGORIES
+    )
 
 
 #: Origins whose ONLY evidence that a source changed is the fingerprint
@@ -1782,6 +1875,7 @@ class AggregationService:
     async def claim_purge_job(
         self, ds_id: str, session: AsyncSession,
         *, skip_reaggregate: bool = False,
+        reaggregate: Optional[Dict[str, Any]] = None,
     ) -> AggregationJobORM:
         """Reserve a ``pending`` purge slot in ``aggregation_jobs``.
 
@@ -1867,9 +1961,18 @@ class AggregationService:
             # by default the purge worker triggers a fresh aggregation
             # job on completion (container-level lineage is blind until
             # the canonical cells are rebuilt); the UI can opt out.
+            # ``reaggregate`` is the trigger body the chained rebuild should
+            # run with — the overrides the operator set in the dialog that
+            # asked for the purge. Without it the chain posted a bare
+            # projectionMode+batchSize and every override was silently
+            # dropped, which on a source that needs a narrowed scan width to
+            # survive at all means the rebuild the purge promised fails.
             tuning_json=(
-                json.dumps({"skip_reaggregate": True})
-                if skip_reaggregate else None
+                json.dumps({
+                    **({"skip_reaggregate": True} if skip_reaggregate else {}),
+                    **({"reaggregate": reaggregate} if reaggregate else {}),
+                })
+                if (skip_reaggregate or reaggregate) else None
             ),
             created_at=now,
             updated_at=now,
@@ -2105,6 +2208,7 @@ class AggregationService:
                 f"Data source {ds_id} not found in aggregation state"
             )
         state.reconcile_consecutive_actions = 0
+        state.reconcile_converging_clears = 0
         if state.drift_state == "suspended":
             state.drift_state = None
         await session.commit()
@@ -2348,13 +2452,34 @@ class AggregationService:
                 marker_set = True
             else:
                 await clear_source_stale(workspace_id, ds_id)
-        if provider is not None:
+        # Invalidate once per CHANGE, not once per detection of it.
+        #
+        # ``stored_fp`` only advances when a rebuild COMPLETES, so while one
+        # is deferred by the rebuild cooldown the gate above keeps answering
+        # "changed" on every sweep — and this block used to bump the
+        # generation each time, making every entry re-warmed since
+        # unreachable. Against a 30s reconcile tick and a 900s cooldown that
+        # is thirty invalidations for one change, and a cache whose effective
+        # life is the detection cadence rather than its TTL. The data really
+        # did change, so the FIRST invalidation is right and the stale marker
+        # stays set throughout; the repeats bought nothing and cost every
+        # reader a recompute.
+        already = getattr(state, "invalidated_fingerprint", None) if state else None
+        reinvalidate = force or not fingerprints_match(already, current_fp)
+        if provider is not None and reinvalidate:
             await provider.clear_content_caches()
             content_cleared = True
-        if workspace_id:
+        if workspace_id and reinvalidate:
             purge_count = await invalidate_hierarchy_reads(workspace_id, ds_id)
             gen_bumped = purge_count is not None
             lkg_purged = purge_count or 0
+            if state is not None:
+                state.invalidated_fingerprint = current_fp
+        elif workspace_id:
+            logger.debug(
+                "signal_source_changed: caches already invalidated for %s at "
+                "this fingerprint — not bumping again", ds_id,
+            )
         if workspace_id:
             stats_nudged = True
             try:
@@ -2883,7 +3008,7 @@ class AggregationService:
 
         signals = (await _gc.read_freshness_signals(
             [(ds.workspace_id, ds.id)]
-        )).get((str(ds.workspace_id), str(ds.id)), (None, None, None))
+        )).get((str(ds.workspace_id), str(ds.id)), (None, None, None, None))
         running = await _running_job_map(session, [ds.id])
         # Resolved rebuild window for this source (per-source override →
         # persisted global → env), so the badge matches the cooldown gate.
@@ -3167,6 +3292,43 @@ class AggregationService:
                 # gone) via the standard delivery-attempt path.
                 if job.trigger_source == "purge":
                     continue
+
+                # Is a worker STILL RUNNING this? The control plane restarts
+                # on every rolling deploy, and the worker fleet does not
+                # restart with it — so without this check every live job is
+                # flipped to ``pending``, burns one of its five auto-resumes,
+                # and then sits mislabelled for the rest of its run: the
+                # readiness endpoint tells users it "is queued and will start
+                # shortly" while it is 60% through writing FalkorDB, and the
+                # stuck-job reconciler cannot see it either, because that
+                # loop matches ``running`` only. The reconciler already
+                # treats the exec lock as the liveness oracle (reconciler.py);
+                # recovery has to read the same one, or the two disagree
+                # about which jobs are alive.
+                #
+                # No Redis means no oracle: skip rather than re-dispatch. A
+                # genuinely dead job is still reaped by the reconciler's
+                # staleness fallback, which is the path that exists for
+                # exactly this case.
+                if job.status == "running":
+                    try:
+                        from .redis_client import exec_lock_key, get_redis
+
+                        if await get_redis().exists(exec_lock_key(job.id)):
+                            logger.info(
+                                "Crash recovery: job %s still holds its "
+                                "execution lock — leaving it to its worker",
+                                job.id,
+                            )
+                            continue
+                    except Exception as exc:      # noqa: BLE001 — never fail startup
+                        logger.warning(
+                            "Crash recovery: cannot read the execution lock "
+                            "for %s (%s) — leaving it for the stuck-job "
+                            "reconciler rather than re-dispatching blind",
+                            job.id, exc,
+                        )
+                        continue
 
                 was_making_progress = (
                     job.status == "running"
@@ -3720,6 +3882,18 @@ def _projection_wire_fields(health) -> dict:
     )
 
 
+def _split_built_at(raw: Any) -> tuple:
+    """``"<iso>|<generation>"`` → ``(iso, generation)``, or ``(None, None)``.
+
+    Tolerates the un-suffixed form and anything unparseable: this is a
+    display signal, and a cockpit row is never worth failing over the shape
+    of a stamp."""
+    if not raw or not isinstance(raw, str):
+        return None, None
+    iso, _, gen = raw.partition("|")
+    return (iso or None), (gen or None)
+
+
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
@@ -3746,7 +3920,16 @@ def _freshness_row_kwargs(
     hold map (``holds.read_scope_holds``), read once per request by the
     caller; the row reports the RESOLVED hold, widest scope first, so the
     operator is pointed at the control that will actually release it."""
-    generation, cache_as_of, stale_reason = signals
+    # Padded rather than unpacked: this is display plumbing reached from
+    # several paths, and a signals tuple one element short must not cost the
+    # operator a whole cockpit row.
+    generation, cache_as_of, stale_reason, built_raw = (
+        tuple(signals) + (None,) * 4
+    )[:4]
+    # "<iso>|<generation>" — when a compute was last STORED, and at which
+    # version. Split here so the row carries two plain fields rather than a
+    # packed string the UI would have to know the shape of.
+    cache_built_at, cache_built_generation = _split_built_at(built_raw)
     st = state_row or {}
     auto_reconcile = resolve_reconcile_enabled(
         st.get("reconcile_enabled"), reconcile_enabled_global,
@@ -3776,6 +3959,13 @@ def _freshness_row_kwargs(
         # freshness paths.
         last_materialized_at=None,
         cache_as_of=cache_as_of,
+        # Three different questions, three different fields. cache_as_of is
+        # when the cache was last THROWN AWAY; cache_built_at is when one was
+        # last BUILT; generation is which version a reader is served. One
+        # word for all three is what made a month-old invalidation read as a
+        # month-old refresh.
+        cache_built_at=cache_built_at,
+        cache_built_generation=cache_built_generation,
         generation=generation,
         stale_reason=stale_reason,
         stale_since=None,
@@ -3896,21 +4086,38 @@ async def _latest_failure_map(
     One bounded query over the page's failed-status sources — the fleet
     table needs the cause without a per-row round-trip. Same classifier as
     the drawer. Best-effort: a query error returns ``{}``, never raises.
+
+    Only the newest row per source can win — the loop below marks a source
+    seen on its first row so an older failure cannot stand in for a newer
+    success — so the query asks for exactly that, rather than reading every
+    job the source has ever had and discarding all but one. On a fleet with
+    hundreds of sources and a year of hourly rebuilds those are different
+    queries by orders of magnitude, on a page that polls every 30 seconds.
     """
     if not ds_ids:
         return {}
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=AggregationJobORM.data_source_id,
+            order_by=AggregationJobORM.updated_at.desc().nullslast(),
+        )
+        .label("rank")
+    )
+    latest = (
+        select(
+            AggregationJobORM.data_source_id.label("data_source_id"),
+            AggregationJobORM.status.label("status"),
+            AggregationJobORM.error_message.label("error_message"),
+            rank,
+        )
+        .where(AggregationJobORM.data_source_id.in_(ds_ids))
+        .subquery()
+    )
     try:
         rows = (await session.execute(
-            select(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.status,
-                AggregationJobORM.error_message,
-            )
-            .where(AggregationJobORM.data_source_id.in_(ds_ids))
-            .order_by(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.updated_at.desc().nullslast(),
-            )
+            select(latest.c.data_source_id, latest.c.status, latest.c.error_message)
+            .where(latest.c.rank == 1)
         )).all()
     except Exception as exc:
         logger.warning("latest-failure map failed: %s", exc)
@@ -4438,8 +4645,8 @@ def _summarize_freshness(
             pending += 1
         if status in (None, "none", "skipped"):
             not_built += 1
-        _gen, cache_as_of, stale_reason = signals.get(
-            (str(ws_id), str(ds_id)), (None, None, None),
+        _gen, cache_as_of, stale_reason, built_at = signals.get(
+            (str(ws_id), str(ds_id)), (None, None, None, None),
         )
         marker = bool(stale_reason)
         if marker:
@@ -4466,7 +4673,14 @@ def _summarize_freshness(
             or is_stalled
         ):
             needs_attention += 1
-        if cache_as_of:
+        # The BUILT stamp, not the invalidation one. Counting cache_as_of
+        # made this "sources invalidated at least once, ever", which every
+        # source satisfies permanently after its first rebuild — hence
+        # "58/58 cached" over a fleet of cold caches. The rows now count the
+        # built stamp, so a summary on the old signal would put two numbers
+        # on one screen that disagree by the whole fleet, with the larger and
+        # more prominent one wrong.
+        if built_at:
             cache_stamped += 1
     return FreshnessSummary(
         total=len(full_rows),
@@ -4811,13 +5025,17 @@ async def save_reconcile_policy(
         fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
 
     if "reset_breaker" in sent and body.reset_breaker:
-        # The two fields ``reset_source_breaker`` zeroes per source, for every
-        # suspended source at once — one statement, so re-enabling after an
-        # incident is not one drawer per source.
+        # The same fields ``reset_source_breaker`` zeroes per source, for
+        # every suspended source at once — one statement, so re-enabling after
+        # an incident is not one drawer per source.
         lifted = await session.execute(
             update(AggregationDataSourceStateORM)
             .where(AggregationDataSourceStateORM.drift_state == "suspended")
-            .values(reconcile_consecutive_actions=0, drift_state=None)
+            .values(
+                reconcile_consecutive_actions=0,
+                reconcile_converging_clears=0,
+                drift_state=None,
+            )
             .execution_options(synchronize_session=False)
         )
         logger.info(

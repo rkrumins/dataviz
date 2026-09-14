@@ -172,3 +172,70 @@ def test_a_resumed_run_keeps_what_the_previous_attempt_recorded():
     doc = json.loads(job.run_stats)
     assert doc["effective_tuning"]["scan_range_width"] == 1
     assert doc["adapted"] == {"scan_width": 3}
+
+
+# ── A status the API reports has to be one a worker could be in ─────────
+
+from datetime import datetime, timedelta, timezone   # noqa: E402
+
+from backend.app.services.aggregation.service import (   # noqa: E402
+    _estimate_completion, _is_resumable, _liveness_is_stale,
+)
+
+
+class _Row:
+    def __init__(self, **kw):
+        self.status = kw.pop("status", "failed")
+        self.error_message = kw.pop("error_message", None)
+        self.last_checkpoint_at = kw.pop("last_checkpoint_at", None)
+        self.started_at = kw.pop("started_at", None)
+        self.run_stats = kw.pop("run_stats", None)
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_resume_is_not_offered_where_it_cannot_help():
+    """The button is not a neutral default. Offered on a run that will fail
+    again identically, the operator presses it, waits, and gets the same
+    failure — having been told by the UI that this was the way out."""
+    assert _is_resumable(_Row(error_message="ontology_resolution_changed: x")) is False
+    assert _is_resumable(_Row(error_message="never dispatched: no worker")) is False
+
+
+def test_resume_is_still_offered_for_the_failures_it_does_fix():
+    assert _is_resumable(_Row(error_message="worker lost: pod evicted")) is True
+    assert _is_resumable(_Row(error_message="Connection refused")) is True
+    assert _is_resumable(_Row(status="cancelled")) is True
+    assert _is_resumable(_Row(status="running")) is False
+    assert _is_resumable(_Row(status="completed")) is False
+
+
+def test_no_finish_time_is_promised_for_a_run_nobody_is_running():
+    """A row reads ``running`` until something ends it, and the thing that
+    ends it is the worker — so a job whose worker died keeps that status until
+    a reaper notices. An estimate there is the most confident lie the API
+    tells, because the number moves and so looks live."""
+    dead = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    job = _Row(status="running", last_checkpoint_at=dead, run_stats="{}")
+    assert _liveness_is_stale(job) is True
+    assert _estimate_completion(job, prior_steps=None) is None
+
+
+def test_a_run_that_has_not_checkpointed_yet_is_not_called_dead():
+    """A missing checkpoint is not evidence of death — a run that has not
+    reached its first one has nothing to be stale about, and the reaper's own
+    staleness path is what covers a job that dies before it."""
+    assert _liveness_is_stale(_Row(status="running")) is False
+    assert _liveness_is_stale(
+        _Row(status="running", last_checkpoint_at="nonsense")
+    ) is False
+
+
+def test_a_long_run_is_judged_on_its_checkpoints_not_its_start():
+    """started_at never advances, so judging liveness by it would read every
+    run as dead from its second hour onward — which on a large graph, and on
+    every resumed run, is exactly when the estimate is worth the most."""
+    long_ago = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    alive = _Row(status="running", started_at=long_ago, last_checkpoint_at=recent)
+    assert _liveness_is_stale(alive) is False

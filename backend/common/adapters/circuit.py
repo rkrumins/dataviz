@@ -151,6 +151,35 @@ def _capacity_reply(exc: BaseException) -> str | None:
     return None
 
 
+def is_queue_full_reply(exc: BaseException) -> bool:
+    """True for the store's ``MAX_QUEUED_QUERIES`` refusal.
+
+    The proxy relabels this reply to ``ProviderBusy`` — but only for what
+    reaches it. Code INSIDE a provider that catches broadly (a read ladder
+    keeping the prefix it has, say) swallows the refusal first and answers
+    200 with part of the rollup. A shed is flow control, not a short
+    answer, so those call sites ask this and re-raise instead.
+    """
+    return _capacity_reply(exc) == "queue_full"
+
+
+# Client-side pool exhaustion. redis-py raises ``MaxConnectionsError`` when a
+# pool hands out its last socket, and it SUBCLASSES redis ``ConnectionError``
+# — so it landed in ``_NETWORK_EXCEPTIONS`` below and a healthy store read as
+# unreachable: three of them opened the breaker for every shard while the
+# only thing wrong was that this process asked for more sockets than its own
+# pool holds. It is the local mirror of the server's queue-full reply, and it
+# is treated the same way: shed as busy, never counted, never a reconnect
+# (rebuilding the client discards the pooled sockets that were the scarce
+# resource in the first place).
+def _pool_exhausted_exceptions() -> tuple[type[BaseException], ...]:
+    try:
+        from redis.exceptions import MaxConnectionsError as _MaxConnectionsError
+    except ImportError:  # pragma: no cover
+        return ()
+    return (_MaxConnectionsError,)
+
+
 # The caller's own deadline firing (``asyncio.wait_for`` around a Cypher
 # query) is NOT evidence that the downstream is unreachable — it is evidence
 # that ONE query was too slow for its budget. Keyed by class identity: redis's
@@ -211,6 +240,7 @@ def _default_network_exceptions() -> tuple[type[BaseException], ...]:
 
 _NETWORK_EXCEPTIONS = _default_network_exceptions()
 _QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
+_POOL_EXHAUSTED_EXCEPTIONS = _pool_exhausted_exceptions()
 
 
 # Process-wide counters, monotonic since boot, surfaced on /health/deps so a
@@ -222,6 +252,7 @@ _QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
 _STATS: dict[str, int] = {
     "deadline_timeouts_not_counted": 0,
     "queue_full_not_counted": 0,
+    "pool_exhaustion_not_counted": 0,
     "query_errors_not_counted": 0,
     "network_failures_counted": 0,
     "breaker_opens": 0,
@@ -710,6 +741,31 @@ class CircuitBreakerProxy:
                 raise ProviderTimeout(
                     provider_name=proxy._name,
                     reason=f"{name} exceeded its deadline: {exc}" if str(exc) else f"{name} exceeded its deadline",
+                ) from exc
+            except _POOL_EXHAUSTED_EXCEPTIONS as exc:
+                # OUR pool ran out of sockets. That is a fact about this
+                # process's sizing, not about the store, so it must not
+                # count: the breaker is per provider and on a cluster a
+                # provider is every shard, so counting local saturation
+                # took a healthy fleet down. Shed as busy (429 +
+                # Retry-After) — the same answer the store's own queue-full
+                # gets — and leave the client alone.
+                _STATS["pool_exhaustion_not_counted"] += 1
+                logger.warning(
+                    "Provider %s connection pool exhausted on %s: %s (breaker=%s, "
+                    "not counted; shed as busy — raise FALKORDB_POOL_SIZE)",
+                    proxy._name,
+                    name,
+                    exc,
+                    proxy._breaker.current_state,
+                )
+                # Deliberately NOT a capacity signal: the capacity listener
+                # makes the aggregation writers yield to relieve the STORE,
+                # and this says nothing about the store.
+                raise ProviderBusy(
+                    provider_name=proxy._name,
+                    reason=f"{name} deferred: this process's connection pool is full",
+                    retry_after_seconds=1,
                 ) from exc
             except _NETWORK_EXCEPTIONS as exc:
                 _STATS["network_failures_counted"] += 1

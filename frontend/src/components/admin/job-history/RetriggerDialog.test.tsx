@@ -12,6 +12,7 @@
  * which add noise without buying coverage of the dialog's own logic.
  */
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
@@ -148,5 +149,67 @@ describe('RetriggerDialog', () => {
     const link = await screen.findByTestId('raise-per-query-limit')
     expect(link).toHaveAttribute('href', '/admin/graph-store?limits=10.0.0.1%3A6379')
     expect(screen.getByTestId('retrigger-preset-reason')).toHaveTextContent(/Gentle profile/)
+  })
+})
+
+describe('RetriggerDialog — what "from scratch" means, and the purge option', () => {
+  it('says plainly that it does not empty the store first', () => {
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        title="Re-trigger aggregation"
+        onConfirmRetrigger={noop}
+      />,
+    )
+
+    // The words an operator reads "from scratch" as, contradicted where
+    // they will see it: a refusal message is a bad place to learn this.
+    const note = screen.getByTestId('retrigger-explainer')
+    expect(note).toHaveTextContent(/does\s+not\s+empty/i)
+    expect(note).toHaveTextContent(/only the difference is written/i)
+  })
+
+  it('offers the purge UNTICKED, and says it needs more memory rather than less', () => {
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        title="Re-trigger aggregation"
+        onConfirmRetrigger={noop}
+      />,
+    )
+
+    const box = screen.getByTestId('retrigger-purge-first').querySelector('input')!
+    expect(box).not.toBeChecked()
+    // The trap this option sets: an operator who has just been refused for
+    // memory reaches for "clear it all first" and makes the run need MORE.
+    expect(screen.getByTestId('retrigger-purge-first'))
+      .toHaveTextContent(/needs more memory, not less/i)
+  })
+
+  it('passes the choice to the parent, and the button says which it will do', async () => {
+    const onConfirm = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        title="Re-trigger aggregation"
+        onConfirmRetrigger={onConfirm}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /re-trigger from scratch/i }))
+    expect(onConfirm).toHaveBeenLastCalledWith(baseValue, { purgeFirst: false })
+
+    await user.click(screen.getByTestId('retrigger-purge-first').querySelector('input')!)
+    // A destructive action must not hide behind the same label as the safe one.
+    const purgeBtn = screen.getByRole('button', { name: /purge, then re-trigger/i })
+    await user.click(purgeBtn)
+    expect(onConfirm).toHaveBeenLastCalledWith(baseValue, { purgeFirst: true })
   })
 })

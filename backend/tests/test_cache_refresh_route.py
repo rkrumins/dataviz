@@ -16,6 +16,8 @@ Two properties decide whether it is safe to put in front of an operator:
   outage from a stale answer into an error. Clearing it is a separate,
   deliberate choice.
 """
+import inspect
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -62,8 +64,6 @@ async def test_the_outage_fallback_survives_by_default():
 
     # Calling the handler directly bypasses FastAPI's default resolution, so
     # the DECLARED default is what an operator actually gets — assert that.
-    import inspect
-
     declared = inspect.signature(gs.refresh_cache).parameters["keepFallback"].default
     assert getattr(declared, "default", declared) is True, (
         "keepFallback must default to True: an operator reaching for 'refresh' "
@@ -98,6 +98,25 @@ async def test_refresh_does_not_scan_or_delete_the_primary_keyspace():
     cache.delete = AsyncMock(side_effect=AssertionError("must not delete"))
     with patch.object(gs, "get_graph_cache", return_value=cache):
         await gs.refresh_cache(workspaceId="ws1", dataSourceId="ds1")
+
+
+def test_the_scope_ids_cannot_carry_glob_metacharacters():
+    """``keepFallback=false`` turns this scope into a Redis ``SCAN MATCH``
+    pattern (``purge_lkg_scope``), so ``workspaceId=*&dataSourceId=*`` deleted
+    the last-known-good mirror for EVERY workspace, every source and every
+    branch — and answered 200 with a count. The ids are bound to the shape the
+    schema mints them in, and the refusal happens in validation, before
+    anything is built out of them."""
+    route = next(r for r in gs.router.routes if getattr(r, "path", "") == "/cache/refresh")
+    fields = {f.name: f for f in route.dependant.query_params}
+
+    for name in ("workspaceId", "dataSourceId"):
+        field = fields[name]
+        value, errors = field.validate("ws_0f1e2d3c4b5a")
+        assert not errors and value == "ws_0f1e2d3c4b5a"
+        for hostile in ("*", "ws_*", "ws[12]", "ws?", "a\\b", "ws 1"):
+            _, errors = field.validate(hostile)
+            assert errors, f"{name}={hostile!r} must not reach the glob"
 
 
 def test_the_route_is_admin_gated():

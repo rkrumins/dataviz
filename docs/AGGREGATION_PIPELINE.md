@@ -158,14 +158,26 @@ the next rebuild of that graph then uses; and **`maxMaterializedEdges`**
 is an OPTIONAL explicit ceiling on the total, layered over the measured
 budget for a graph you want held BELOW what its shard could take. No
 preset sets it — a ceiling on the job wins over the measurement, which is
-exactly how a pinned 25M made adding shard memory change nothing.
+exactly how a pinned 25,000,000 made adding shard memory change nothing.
 
 When the shard cannot be measured — no `maxmemory` configured (the five
 `deploy/topologies/docker-compose.falkordb-*.yml` files), or the read
 timed out — the budget degrades to the static count rule: the explicit
-ceiling if set, else `AGGREGATION_MAX_MATERIALIZED_EDGES` (25M, ~12.5GB
-at the default bytes/edge), and the message says that the static cap
-governed and why.
+ceiling if set, else `AGGREGATION_MAX_MATERIALIZED_EDGES`, and the message
+says that the static cap governed and why.
+
+**That default is derived from the clock, not from memory.** It is
+`300 rows/s × 0.6 of the wall clock × AGGREGATION_JOB_MAX_WALL_SECS` —
+**15,552,000** at the shipped 24 hours — so it moves when the wall clock
+does. It used to be a flat 25,000,000 (~12.5GB at the default bytes/edge),
+which contradicted the pipeline's own projection: 25M rows only land inside
+24 hours if a 500-row batch costs ≤ 0.839 s, against the 1.0 s the batch
+sizer steers toward and the ~0.336 s it would need once the read-pressure
+ratio is in force — which, with hundreds of concurrent readers, is the
+steady state rather than the exception. A cap the apply can never reach is
+not a backstop; it is a number that never fires. Raising
+`AGGREGATION_JOB_MAX_WALL_SECS` raises it proportionally, and an operator
+whose runs measure a faster apply sets the env knob explicitly.
 
 Because keyslot placement is deterministic rather than load-aware, the
 case to watch is two graphs landing on the same shard. Two rebuilds racing
@@ -762,15 +774,17 @@ pipeline).
 | `AGGREGATION_SHARD_RESERVE_PCT` | 20 | Write budget: share of the owning shard's `maxmemory` a rebuild must leave free. New rollup edges are allowed while they fit under it (0-90). Per-job / Defaults as `shardReservePct` |
 | `AGGREGATION_BYTES_PER_EDGE` | 512 | Write budget: bytes one stored `:AGGREGATED` edge is assumed to cost until a fresh rebuild has calibrated the figure for that graph (64-16384). Per-job / Defaults as `bytesPerEdge`, which also overrides the calibrated value |
 | `AGGREGATION_ESTIMATE_MARGIN_PCT` | 25 | Write budget: slack applied to the pre-write UPPER-BOUND estimate (and to the static cap) so a loose estimate does not refuse a cube the exact post-compute check would pass (0-100). Fleet-wide from Defaults as `estimateMarginPct` |
-| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Static edge cap, in force ONLY when the owning shard cannot be measured (no `maxmemory`, or the `INFO` read failed). Per-job / Defaults as `maxMaterializedEdges` it is instead an optional explicit ceiling layered over the measured budget; no preset sets it. Bound 500M |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | **derived: 300 × 0.6 × `AGGREGATION_JOB_MAX_WALL_SECS`** = 15552000 at the shipped 24h | Static edge cap, in force ONLY when the owning shard cannot be measured (no `maxmemory`, or the `INFO` read failed). Derived from the wall clock rather than from memory so the cap and the apply projection cannot contradict each other — the old flat 25000000 was a count the apply provably could not reach inside 24h, so the refusal it promised never fired. Setting the env var is an explicit override and is not clamped to the derivation. Per-job / Defaults as `maxMaterializedEdges` it is instead an optional explicit ceiling layered over the measured budget; no preset sets it. Bound 500M |
 | `AGGREGATION_MAX_CUBE_EDGES` | 50000000 | OPTIONAL appetite ceiling on Auto's full cube (10k-50M), defaulting to its bound so it does not bind. It used to default to 8M and was what actually decided whether a graph got full detail; two measurements do that now — the write budget (can the owning shard hold the cube) and the apply projection (can this job's wall clock finish writing it, at the rate this source measured last run). A fixed cell count answers neither for any particular graph. Fleet-wide from Defaults as `maxCubeEdges`; not per-job |
 | `AGGREGATION_BUDGET_RECHECK_EDGES` | 1000000 | Write budget: how many first-touch edges APPLY writes between re-reads of the owning shard. A shard that fills up mid-run (another graph landing on it) is refused loudly after a checkpoint — resumable from the cursor — instead of at its cap (100k-100M) |
+| `AGGREGATION_GOVERNOR_READ_TIMEOUT_S` | 10 | Write governor: budget for the per-batch shard `INFO` (and the `CONFIG` read beside it). It used to borrow `FALKORDB_INIT_TIMEOUT`, a 3s CONNECT budget — so a node stalled by a fork, which is exactly when the reading matters, timed the read out and the run escaped its own fork hold. Clamp 1-120 |
 | `AGGREGATION_CAPACITY_CACHE_TTL_S` | 10 | Capacity API: how long one fleet sweep is served to every viewer before the next |
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | 30 | How long one reading of every node is served to every viewer (and to the capacity API) before the next |
 | `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | 8 | Deadline for one wave of nodes (8 are read at a time), so the whole sweep scales with the fleet instead of starving the same tail nodes every time; capped at 60s. A node not read in time is reported as unreachable with that reason, never dropped |
 | `AGGREGATION_REPLICA_ACK_MIN` | 1 | Replicas of the write node that must acknowledge each rollup batch before the next is sent (0-5). 0 disables the gate. Per-job / Defaults as `replicaAckMin`, and raisable or clearable on a RUNNING job |
 | `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
 | `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |
+| `AGGREGATION_STORE_LOADING_HOLD_S` | 3600 | How long one run waits out a node **replaying its dataset** (`-LOADING`) before giving up and keeping its checkpoint (60-14400). Longer than the plain outage hold on purpose: a silent node might never come back, while one answering `-LOADING` has said it is coming back and roughly when. A rotated pod replaying a multi-GB AOF incremental takes about an hour |
 | `AGGREGATION_HOLD_MAX_SECS` | 1800 | The write governor: how long ONE hold may last — the run waiting, before a write batch, for the node to come back inside the envelope (a fork to finish, the replicas it started with to reattach and catch up, RSS to drop under the container's line) — before it stops for a person with its checkpoint intact (60-21600). Per hold, not per run |
 | `AGGREGATION_FORK_COW_PCT` | 125 | Copy-on-write allowance over RSS that a fork is budgeted at, for the container-aware write budget and the memory hold line (100-200). 125 is the deployment guide's figure, and is valid only because the pipeline holds its writes through a fork |
 | `AGGREGATION_REPLICA_LAG_HOLD_BYTES` | derived | How far behind a replica may fall before the governor holds. Unset: a quarter of the replica output-buffer hard limit or half the backlog, whichever is smaller — both read from the node — so the master never drops a replica because of a rebuild |
@@ -782,8 +796,8 @@ pipeline).
 | `FALKORDB_ENDPOINT_READ_SLOTS` | 4 | Cross-pod SCAN budget per graph-store node: rebuild range scans in flight at once. Every scan-heavy phase runs under `read_from_master_only`, so this is a cap on the master's query threads, not the replicas'. Keep it above `AGGREGATION_EXTRACT_CONCURRENCY` or one job's own waves fill the node's allowance |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |
 | `AGGREGATION_IDENTITY_STAMP_PACING_RATIO` | 0.5 | Gap after each conformance-stamp chunk, as a share of the time that chunk took. The stamp is a write pass over the whole node ID space for any source not keyed by `urn`, on every run; it used to go out flat out. 0 restores that exactly
-| `METRICS_ENABLED` | false | Serve the Prometheus scrape endpoint. Off by default: it reads internal state. Web tier and control plane at `/api/v1/metrics`; the worker starts its own server on `METRICS_PORT` |
-| `METRICS_TOKEN` | — | When set, the scrape must present it as a bearer token |
+| `METRICS_ENABLED` | false | Serve the Prometheus scrape endpoint. Off by default: it reads internal state. Requires `METRICS_TOKEN` — enabled without one answers 404. Web tier and control plane at `/api/v1/metrics`; the worker starts its own server on `METRICS_PORT` |
+| `METRICS_TOKEN` | — | **Required** whenever `METRICS_ENABLED` is on; the scrape must present it as a bearer token. Without it the endpoint stays 404: the labels carry every graph store node's `host:port`, the governor's hold counts and fleet load, and the worker's copy is bound to `0.0.0.0` with no ingress in front of it |
 | `METRICS_PORT` | 9100 | The aggregation worker's scrape port — it has no other HTTP server |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. The job's `timeoutSecs` wins; a job that sends none (the machine paths: reconciliation, Refresh rollups, the projector heal hook) takes the fleet Defaults' `stallTimeoutSecs`, then this. Bound 7 days. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS`. Raisable on a running job |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net; per-job / Defaults as `maxWallSecs` (1h-7d), never lower than the job's stall window. Raisable on a running job |

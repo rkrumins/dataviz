@@ -200,10 +200,14 @@ def test_the_endpoint_is_absent_unless_enabled(monkeypatch, backend):
     )
 
 
+_BEARER = {"authorization": "Bearer s3cret"}
+
+
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
 def test_the_usual_spellings_of_on_all_work(monkeypatch, backend, value):
     facade.increment("agg_probe_total")
-    response, status = _scrape(monkeypatch, enabled=value)
+    response, status = _scrape(monkeypatch, enabled=value, token="s3cret",
+                               headers=_BEARER)
     assert status is None and "agg_probe_total" in response.body.decode()
 
 
@@ -214,12 +218,25 @@ def test_a_token_is_required_once_one_is_set(monkeypatch, backend):
                         headers={"authorization": "Bearer wrong"})
     assert status == 401
     response, status = _scrape(monkeypatch, enabled="1", token="s3cret",
-                               headers={"authorization": "Bearer s3cret"})
+                               headers=_BEARER)
     assert status is None and response is not None
 
 
+def test_enabled_without_a_token_serves_nothing(monkeypatch, backend):
+    """THE COMBINATION THAT WAS OPEN. Enabled + no token skipped the compare
+    entirely and served every FalkorDB node's ``host:port``, the governor's
+    hold counts and the fleet's load to anyone who could reach the port — and
+    the aggregation worker publishes this same app on 0.0.0.0 with no other
+    HTTP server in front of it. It now reads exactly like "off": 404, not an
+    empty 200 and not a 401 that confirms the endpoint is there."""
+    _, status = _scrape(monkeypatch, enabled="1")
+    assert status == 404
+    _, status = _scrape(monkeypatch, enabled="1", headers=_BEARER)
+    assert status == 404, "a token the deployment never set must not open it"
+
+
 def test_the_scrape_carries_prometheus_content_type(monkeypatch, backend):
-    response, _ = _scrape(monkeypatch, enabled="1")
+    response, _ = _scrape(monkeypatch, enabled="1", token="s3cret", headers=_BEARER)
     assert "version=0.0.4" in response.media_type
 
 
@@ -227,9 +244,25 @@ def test_enabled_but_never_installed_says_so(monkeypatch):
     """A process that skipped its startup wiring. Better than serving a
     convincing empty page that reads as "nothing is happening"."""
     monkeypatch.setattr(mp, "_INSTALLED", None)
-    response, status = _scrape(monkeypatch, enabled="1")
+    response, status = _scrape(monkeypatch, enabled="1", token="s3cret",
+                               headers=_BEARER)
     assert status is None
     assert "not installed" in response.body.decode()
+
+
+def test_the_graph_store_block_on_health_deps_stands_behind_the_same_door(monkeypatch):
+    """``/health/deps`` is unauthenticated by design — it is where on-call
+    looks — but it grew a ``graph_store`` block naming which nodes of which
+    cluster are answering. That is the same class of internal state the scrape
+    endpoint is opt-in for, so it reads through the same gate."""
+    from backend.app.api.v1.endpoints import metrics as route
+
+    for name, value in (("METRICS_ENABLED", "1"), ("METRICS_TOKEN", "s3cret")):
+        monkeypatch.setenv(name, value)
+    assert route.metrics_authorized(_request(_BEARER))
+    assert not route.metrics_authorized(_request())
+    monkeypatch.delenv("METRICS_TOKEN")
+    assert not route.metrics_authorized(_request(_BEARER))
 
 
 def test_every_emitting_process_installs_the_backend():
@@ -284,3 +317,88 @@ def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatc
 
     monkeypatch.setattr(builtins, "__import__", _no_uvicorn)
     assert asyncio.run(worker_main._serve_metrics()) is None   # and never raises
+
+
+# ── the request path, which had no series at all ─────────────────────────
+#
+# Every emit site in the codebase was in the worker or the control plane, so
+# a web pod rendered a registry with nothing about the thing it spends its
+# life doing: serving cached views and shedding when the store is unhappy.
+
+
+def test_a_cache_read_is_counted_by_endpoint_and_outcome_without_the_tenant():
+    """The Redis counters beside this one are per (workspace, source) and
+    answer "is THIS source cached". The fleet's hit rate — whether 300 users
+    are being served from cache at all — had no series. The tenant stays out
+    of it: a workspace label would put a customer list in the scrape."""
+    from backend.app.jobs import metrics as facade
+    from backend.app.jobs import metrics_prometheus as mp
+    from backend.app.services import graph_cache as gc
+
+    registry = mp.PrometheusBackend()
+    original = facade._backend
+    facade.set_backend(registry)
+    try:
+        scope = gc.CacheScope(workspace_id="ws1", data_source_id="ds1")
+        recorder = gc._CacheStatsRecorder()
+        recorder.record(None, scope, gc.ENDPOINT_AGGREGATED, "hit")
+        recorder.record(None, scope, gc.ENDPOINT_AGGREGATED, "hit")
+        recorder.record(None, scope, gc.ENDPOINT_AGGREGATED, "miss")
+    finally:
+        facade.set_backend(original)
+
+    out = registry.render()
+    assert (f'graph_cache_reads_total{{endpoint="{gc.ENDPOINT_AGGREGATED}",'
+            f'outcome="hit"}} 2') in out
+    assert (f'graph_cache_reads_total{{endpoint="{gc.ENDPOINT_AGGREGATED}",'
+            f'outcome="miss"}} 1') in out
+    assert "ws1" not in out and "ds1" not in out
+
+
+def test_the_breaker_and_the_shedding_reach_the_scrape():
+    """Both are plain int dicts read through /health/deps, which answers
+    "how is this pod" one pod at a time. They are sampled at scrape rather
+    than emitted at each site: circuit.py sits below the app layer and
+    imports nothing from it."""
+    from backend.app.api.v1.endpoints import metrics as metrics_ep
+    from backend.app.jobs import metrics_prometheus as mp
+    from backend.app.providers.manager import provider_manager
+    from backend.common.adapters import circuit
+
+    registry = mp.PrometheusBackend()
+    circuit._STATS["breaker_opens"] += 1
+    provider_manager.stats["slots_shed_queue_full"] += 1
+    try:
+        metrics_ep._sample_process_counters(registry)
+        out = registry.render()
+        assert 'provider_breaker_events{event="breaker_opens"}' in out
+        assert 'provider_manager_events{event="slots_shed_queue_full"}' in out
+        # Absolute, not accumulated: two scrapes of an unchanged counter must
+        # not read as twice the value.
+        before = out
+        metrics_ep._sample_process_counters(registry)
+        assert registry.render() == before
+    finally:
+        circuit._STATS["breaker_opens"] -= 1
+        provider_manager.stats["slots_shed_queue_full"] -= 1
+
+
+def test_sampling_never_fails_a_scrape():
+    class _Broken:
+        def gauge_set(self, *a, **k):
+            raise RuntimeError("registry is unhappy")
+
+    from backend.app.api.v1.endpoints import metrics as metrics_ep
+
+    metrics_ep._sample_process_counters(_Broken())    # and never raises
+
+
+def test_an_ease_is_counted_where_it_is_decided():
+    """The governor's holds had a counter and its eases — the graded step
+    short of a hold, and the earlier warning — had only a log line."""
+    import inspect
+
+    from backend.app.providers.falkordb_materialize import AggregationPipeline
+
+    src = inspect.getsource(AggregationPipeline._note_easing)
+    assert "aggregation_governor_eases_total" in src

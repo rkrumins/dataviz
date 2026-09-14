@@ -146,6 +146,41 @@ end
 return 0
 """
 
+# Atomic renew: extend the TTL only while the slot still holds OUR token.
+# GET-then-PEXPIRE is check-then-act — between the two the lease can expire
+# and be taken over, and the renewal then extends the SUCCESSOR's lease,
+# keeping a second writer alive on the strength of our heartbeat. Returns 1
+# when renewed, -1 when the slot is not ours (changed hands, or expired).
+_RENEW_IF_OWNED_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return -1
+"""
+
+
+async def take_slot_once(
+    redis_client: Any, key: str, limit: int, member: str, *, stale: float,
+) -> bool:
+    """One attempt at a counted slot on ``key``. True when ``member`` took it.
+
+    The counter is a sorted set scored by wall clock, so a holder that dies
+    without releasing is pruned after ``stale`` instead of leaking the slot
+    for good — which is the whole reason this is not an INCR. Raises whatever
+    the bus raises: every caller has its own fail-open policy (the worker
+    waits, the web tier sheds) and neither belongs here.
+    """
+    got = await redis_client.eval(
+        _ACQUIRE_SLOT_LUA, 1, key, time.time(), stale, limit, member,
+    )
+    return int(got or 0) == 1
+
+
+async def drop_slot(redis_client: Any, key: str, member: str) -> None:
+    """Give back a slot taken by :func:`take_slot_once`. Raises on a bus
+    error; score-based pruning reclaims the entry either way."""
+    await redis_client.zrem(key, member)
+
 
 def reservation_key(endpoint: str) -> str:
     """The ledger of one graph-store node — keyed by the node the shard
@@ -204,13 +239,82 @@ def endpoint_key(provider: Any) -> str:
     return f"graph:{getattr(provider, '_graph_name', 'unknown')}"
 
 
-class GraphLease:
-    """Held per materialization job; renewed in the background."""
+#: Endpoints whose thread count has already been checked against the slot
+#: envs. Per process — one line per pod per node is the point.
+_SLOTS_CHECKED: set = set()
 
-    def __init__(self, key: str, token: str, renew_task: asyncio.Task) -> None:
+#: Threads a node must keep for everything that is not a rebuild: the
+#: post-write settle window pins that graph's reads to the master, index DDL
+#: and the governor's own INFO land there, and so does every interactive read
+#: inside a settle window. Two is the floor, not a target.
+_THREADS_FOR_OTHERS = 2
+
+
+def check_slot_sizing(endpoint: str, thread_count: Optional[int]) -> Optional[str]:
+    """Warn once per node when this pod's slot envs would fill its query
+    threads. Returns the message logged, or None.
+
+    ``FALKORDB_ENDPOINT_WRITE_SLOTS`` and ``FALKORDB_ENDPOINT_READ_SLOTS``
+    are set in a ConfigMap and ``THREAD_COUNT`` in a StatefulSet, in
+    different files, by people solving different problems — and the shipped
+    base pair (2 + 4) is exactly the production-cluster overlay's whole
+    query width. Nothing anywhere compared them: the pipeline read the number
+    from the node on every batch and never looked at it. The node itself is
+    the only place the two facts meet, so the check belongs where the
+    reading arrives.
+
+    A log line and not a refusal: the numbers are an operator's to set, the
+    consequence is contention rather than damage, and a worker that refuses
+    to start because a node it has not met yet reports a smaller thread count
+    is a worse failure than the one being reported."""
+    if not thread_count or thread_count <= 0 or endpoint in _SLOTS_CHECKED:
+        return None
+    _SLOTS_CHECKED.add(endpoint)
+    budget = thread_count - _THREADS_FOR_OTHERS
+    if _SLOT_LIMIT + _READ_SLOT_LIMIT <= budget:
+        return None
+    msg = (
+        f"{endpoint} runs THREAD_COUNT {thread_count}, but this pod admits "
+        f"{_SLOT_LIMIT} write + {_READ_SLOT_LIMIT} scan slots against it "
+        f"({_SLOT_LIMIT + _READ_SLOT_LIMIT} of {budget} available). The whole "
+        f"rebuild pipeline reads under read_from_master_only, so those land on "
+        f"the master alongside index DDL, the governor's INFO and every "
+        f"interactive read inside a settle window — which then queue behind "
+        f"MAX_QUEUED_QUERIES against no free thread. Lower "
+        f"FALKORDB_ENDPOINT_WRITE_SLOTS + FALKORDB_ENDPOINT_READ_SLOTS to "
+        f"{budget} or fewer, or raise the node's THREAD_COUNT."
+    )
+    logger.warning("aggregation admission: %s", msg)
+    return msg
+
+
+class GraphLease:
+    """Held per materialization job; renewed in the background.
+
+    ``lost`` is the part the pipeline reads. Stopping the renewal task on a
+    lost lease is not enough on its own: the run captured this object once
+    and would otherwise keep writing a graph another run now owns, and two
+    runs MERGEing the same pairs leave a stored weight that is neither
+    run's computed weight. ``__main__._renew_exec_lock`` aborts its run on
+    the same two conditions for the same reason.
+    """
+
+    def __init__(
+        self, key: str, token: str, renew_task: Optional[asyncio.Task] = None,
+    ) -> None:
         self.key = key
         self.token = token
         self.renew_task = renew_task
+        self.lost = False
+        self.lost_reason: Optional[str] = None
+        #: When ownership was last CONFIRMED — the deadline a bus outage is
+        #: measured against, since an outage longer than the TTL means the
+        #: key expired whatever the renewal task believes.
+        self.last_ok: Optional[float] = None
+
+    def mark_lost(self, reason: str) -> None:
+        if not self.lost:
+            self.lost, self.lost_reason = True, reason
 
 
 class ShardReservation:
@@ -310,6 +414,7 @@ class AggregationAdmission:
             holder_job = ""
             holder_value = None
             ttl_desc = ""
+            ttl_ms: Any = None
             try:
                 raw = await self._redis.get(key)
                 if raw is not None:
@@ -328,17 +433,41 @@ class AggregationAdmission:
             except Exception:
                 pass
             # SELF-REACQUIRE: the holder is THIS job (a retry after a
-            # crash / failed release of its own previous attempt). Take
-            # the lease over instead of parking on ourselves for up to a
-            # full TTL — the previous attempt is dead by definition
-            # (one executor per job, enforced by the exec lock).
-            if owner and holder_job == owner and holder_value is not None:
+            # crash / failed release of its own previous attempt). Take the
+            # lease over instead of parking on ourselves for up to a full TTL.
+            #
+            # The old reasoning here was that "the previous attempt is dead by
+            # definition (one executor per job, enforced by the exec lock)".
+            # It is not. The exec lock guarantees the predecessor has been
+            # ASKED to stop — its renewer cancels the run task — but the
+            # cancel lands at that task's next await, the Cypher already on
+            # the wire completes server-side, and a worker stalled long enough
+            # to lose its lock is a worker that may not act on the cancel for
+            # a while yet. Taking the lease here handed the successor the key
+            # to a graph the predecessor was still writing, and the writes
+            # carry no fence, so both runs' MERGEs interleaved into weights
+            # that were neither run's, under a `completed` record.
+            #
+            # So: prove the predecessor is gone before taking its place. A
+            # live holder refreshes the lease every _GRAPH_LEASE_RENEW_SECS,
+            # so its observed TTL never falls below TTL minus one renew
+            # interval. A TTL that has decayed past two of them means at
+            # least one refresh did not happen — the renewer is gone, and
+            # with it the task it would have cancelled. Otherwise park: the
+            # ProviderBusy below is a quiesce, not a retry, and the next
+            # attempt costs one interval rather than a corrupt cube.
+            _decayed_ms = _GRAPH_LEASE_TTL_MS - int(_GRAPH_LEASE_RENEW_SECS * 1000 * 2)
+            if (
+                owner and holder_job == owner and holder_value is not None
+                and isinstance(ttl_ms, int) and 0 < ttl_ms <= _decayed_ms
+            ):
                 took = await self._try_take_over(key, holder_value, token)
                 if took:
                     logger.info(
-                        "aggregation admission: re-acquired own graph "
-                        "lease for job %s (previous attempt's lease had "
-                        "not expired).", owner,
+                        "aggregation admission: re-acquired own graph lease "
+                        "for job %s — the previous attempt stopped renewing "
+                        "it (%dms left of %dms).",
+                        owner, ttl_ms, _GRAPH_LEASE_TTL_MS,
                     )
                     return self._start_renew(key, token)
             from backend.common.adapters import ProviderBusy
@@ -353,30 +482,63 @@ class AggregationAdmission:
 
         return self._start_renew(key, token)
 
+    async def _renew_once(
+        self, lease: GraphLease, *, now: Optional[float] = None,
+    ) -> bool:
+        """One atomic renewal. True while the lease is still ours.
+
+        Marks it lost on the two conditions the exec lock aborts its run on:
+        the slot no longer holds our token, or we have not been able to
+        CONFIRM ownership for longer than the TTL — past which the key has
+        certainly expired and another run may already hold it. A shorter
+        bus blip is unknown, not lost, so it fails open and retries.
+        """
+        clock = time.monotonic() if now is None else now
+        if lease.last_ok is None:
+            lease.last_ok = clock
+        ttl_s = _GRAPH_LEASE_TTL_MS / 1000
+        try:
+            res = await self._redis.eval(
+                _RENEW_IF_OWNED_LUA, 1, lease.key, lease.token,
+                str(_GRAPH_LEASE_TTL_MS),
+            )
+        except Exception as exc:
+            if clock - lease.last_ok >= ttl_s:
+                lease.mark_lost(
+                    f"could not renew for more than the {ttl_s:.0f}s TTL ({exc})"
+                )
+                return False
+            self._warn_fail_open("graph-lease renew", exc)
+            return True
+        try:
+            renewed = int(res) == 1
+        except (TypeError, ValueError):
+            renewed = False
+        if not renewed:
+            lease.mark_lost("holder changed, or the lease expired")
+            return False
+        lease.last_ok = clock
+        return True
+
     def _start_renew(self, key: str, token: str) -> GraphLease:
+        lease = GraphLease(key, token)
+
         async def _renew() -> None:
             try:
                 while True:
                     await asyncio.sleep(_GRAPH_LEASE_RENEW_SECS)
-                    try:
-                        # Refresh TTL only while we still own the lease.
-                        current = await self._redis.get(key)
-                        if isinstance(current, (bytes, bytearray)):
-                            current = current.decode()
-                        if current != token:
-                            logger.warning(
-                                "aggregation admission: graph lease %s lost "
-                                "(holder changed); stopping renewal.", key,
-                            )
-                            return
-                        await self._redis.pexpire(key, _GRAPH_LEASE_TTL_MS)
-                    except Exception as exc:
-                        self._warn_fail_open("graph-lease renew", exc)
+                    if not await self._renew_once(lease):
+                        logger.error(
+                            "aggregation admission: graph lease %s lost (%s) — "
+                            "the run must stop writing this graph.",
+                            lease.key, lease.lost_reason,
+                        )
+                        return
             except asyncio.CancelledError:
                 pass
 
-        task = asyncio.create_task(_renew())
-        return GraphLease(key, token, task)
+        lease.renew_task = asyncio.create_task(_renew())
+        return lease
 
     async def _try_take_over(
         self, key: str, expected_value: str, new_token: str,
@@ -431,7 +593,8 @@ class AggregationAdmission:
     async def release_graph_lease(self, lease: Optional[GraphLease]) -> None:
         if lease is None:
             return
-        lease.renew_task.cancel()
+        if lease.renew_task is not None:
+            lease.renew_task.cancel()
         try:
             await self._redis.eval(
                 _RELEASE_IF_OWNED_LUA, 1, lease.key, lease.token,
@@ -530,9 +693,23 @@ class AggregationAdmission:
         else here.
 
         ``node`` is the graph-store node the caller's shard reading names,
-        as for ``write_slot``. Without it the key falls back to the
-        connection endpoint, which on a cluster is a seed shared by every
-        shard — pressure on one shard then slowed rebuilds on idle ones."""
+        as for ``write_slot``. Without it, outside a cluster, the key falls
+        back to the connection endpoint — which is the one node there is.
+
+        **On a cluster, no node means no read.** The connection endpoint is a
+        seed shared by every shard, so reading pressure there made one
+        shard's starving readers slow rebuilds on the two idle shards — the
+        regression ``read_pressure.py`` exists to have fixed. It fired
+        exactly when the governor had no measured reading to name a node
+        with, which is under the load this whole mechanism is for. The stamp
+        half already refuses to write that key (see
+        :func:`read_pressure.pressure_key`); reading it would find only a
+        stale one some other shard's stamp left behind before the fix. This
+        signal is lost and the next one lands."""
+        if node is None and getattr(
+            getattr(provider, "_conn_cfg", None), "mode", None,
+        ) == "cluster":
+            return None
         key = read_pressure_key(node or endpoint_key(provider))
         now = time.monotonic()
         memo = self._read_pressure_memo.get(key)
@@ -580,16 +757,15 @@ class AggregationAdmission:
         waited = False
         while True:
             try:
-                got = await self._redis.eval(
-                    _ACQUIRE_SLOT_LUA, 1, key,
-                    time.time(), _SLOT_STALE_SECS, limit, member,
+                got = await take_slot_once(
+                    self._redis, key, limit, member, stale=_SLOT_STALE_SECS,
                 )
             except Exception as exc:
                 self._warn_fail_open(f"{kind}-slot acquire", exc)
                 _metric("aggregation_slot_fail_open_total", kind=kind, node=node,
                         reason="bus_error")
                 return None, None
-            if int(got or 0) == 1:
+            if got:
                 if waited:
                     _metric("aggregation_slot_waits_total", kind=kind, node=node)
                 return key, member
@@ -612,7 +788,7 @@ class AggregationAdmission:
 
     async def _release_slot(self, key: str, member: str) -> None:
         try:
-            await self._redis.zrem(key, member)
+            await drop_slot(self._redis, key, member)
         except Exception as exc:
             # Score-based pruning reclaims it after _SLOT_STALE_SECS.
             self._warn_fail_open("slot release", exc)

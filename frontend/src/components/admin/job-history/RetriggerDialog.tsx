@@ -63,7 +63,12 @@ export interface RetriggerDialogProps {
      *  failure, the way to the node's own limit (system administrators). */
     presetAction?: 'raise-per-query-limit' | null
     /** Always shown. */
-    onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
+    /** ``opts.purgeFirst`` routes through the purge endpoint, which deletes
+     *  every rollup edge and then chains the rebuild. Off by default. */
+    onConfirmRetrigger: (
+        overrides: AggregationOverridesValue,
+        opts?: { purgeFirst?: boolean },
+    ) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
     onConfirmResume?: (overrides: AggregationOverridesValue) => Promise<void>
 }
@@ -98,6 +103,11 @@ export function RetriggerDialog({
 }: RetriggerDialogProps) {
     const [value, setValue] = useState<AggregationOverridesValue>(initialValue)
     const [loading, setLoading] = useState<'resume' | 'retrigger' | null>(null)
+    // Off by default, deliberately: purging is destructive, it is NOT what
+    // "from scratch" has ever meant here, and on a source that is already
+    // tight for memory it makes the run need MORE room, not less (every
+    // retained cell becomes a fresh write). See the note beside it.
+    const [purgeFirst, setPurgeFirst] = useState(false)
 
     // Reset form to fresh `initialValue` each time the dialog re-opens.
     // We compare on `isOpen` (not `initialValue`) so that prop reference churn
@@ -107,6 +117,7 @@ export function RetriggerDialog({
         if (isOpen && !prevOpenRef.current) {
             setValue(initialValue)
             setLoading(null)
+            setPurgeFirst(false)   // destructive: never sticky across opens
         }
         prevOpenRef.current = isOpen
     }, [isOpen, initialValue])
@@ -142,7 +153,7 @@ export function RetriggerDialog({
             if (kind === 'resume' && onConfirmResume) {
                 await onConfirmResume(value)
             } else {
-                await onConfirmRetrigger(value)
+                await onConfirmRetrigger(value, { purgeFirst })
             }
             onClose()
         } catch {
@@ -214,6 +225,69 @@ export function RetriggerDialog({
                                             defaultFinePairs={defaultFinePairs}
                                         />
                                     )}
+                                    {/* What this button actually does. "From
+                                        scratch" reads as "clear and rebuild"
+                                        and never meant that: it restarts the
+                                        PHASES at zero, it does not empty the
+                                        store. Saying so here is cheaper than
+                                        an operator inferring it from a
+                                        refusal message. */}
+                                    <div
+                                        data-testid="retrigger-explainer"
+                                        className="rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2 text-[11px] text-ink-secondary leading-relaxed space-y-1.5"
+                                    >
+                                        <p>
+                                            <span className="font-semibold text-ink-primary">Re-trigger from scratch</span>{' '}
+                                            re-runs the whole pipeline from the beginning —
+                                            it re-reads the graph and recomputes every rollup.
+                                            It does <span className="font-semibold">not</span> empty
+                                            the store first: existing rollup edges are reused where
+                                            the new result still contains them, ones it no longer
+                                            contains are deleted, and only the difference is written.
+                                        </p>
+                                        <p>
+                                            That is usually what you want. The run needs room for
+                                            the <span className="font-semibold">net</span> change
+                                            rather than for a whole fresh copy, and the source keeps
+                                            serving lineage throughout instead of going blank for
+                                            the length of the rebuild.
+                                        </p>
+                                    </div>
+
+                                    <label
+                                        data-testid="retrigger-purge-first"
+                                        className="flex gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 cursor-pointer"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={purgeFirst}
+                                            onChange={(e) => setPurgeFirst(e.target.checked)}
+                                            disabled={isLoading}
+                                            className="mt-0.5 shrink-0 accent-amber-600"
+                                        />
+                                        <span className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-200 space-y-1.5 block">
+                                            <span className="block font-semibold">
+                                                Clear all rollup edges first (purge, then rebuild)
+                                            </span>
+                                            <span className="block">
+                                                Deletes every stored rollup edge for this source,
+                                                then runs the rebuild above with the settings you
+                                                have chosen here. Use it when you suspect the stored
+                                                rollups are wrong rather than merely stale — after
+                                                an ontology change, or a containment fix that should
+                                                have changed the shape and did not.
+                                            </span>
+                                            <span className="block">
+                                                <span className="font-semibold">It needs more memory, not less.</span>{' '}
+                                                Every edge it deletes has to be written again, so the
+                                                shard must have room for the full result instead of
+                                                just the difference. And container-level lineage for
+                                                this source is empty from the purge until the rebuild
+                                                finishes.
+                                            </span>
+                                        </span>
+                                    </label>
+
                                     <AggregationOverridesForm
                                         value={value}
                                         onChange={setValue}
@@ -274,7 +348,7 @@ export function RetriggerDialog({
                             {loading === 'retrigger'
                                 ? <Loader2 className="w-4 h-4 animate-spin" />
                                 : <Play className="w-4 h-4" />}
-                            Re-trigger from scratch
+                            {purgeFirst ? 'Purge, then re-trigger' : 'Re-trigger from scratch'}
                         </button>
                     </div>
                 </motion.div>

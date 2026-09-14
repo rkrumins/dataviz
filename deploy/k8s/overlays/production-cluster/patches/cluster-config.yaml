@@ -26,6 +26,23 @@ data:
   # guard checks a raised QUERY_MEM_CAPACITY against this number, so it has
   # to be the one these pods actually have. 56 * 1024^3 = 60129542144.
   FALKORDB_CONTAINER_MEMORY_BYTES: "60129542144"
+  # Sockets one process's graph pool holds PER NODE — redis-py applies
+  # max_connections to each node's own pool in cluster mode, so on this
+  # overlay the number is charged six times over, not once.
+  #
+  # Stated rather than inherited because the code derives it
+  # (PROVIDER_MAX_CONCURRENCY 8 x 2 graphs + 4 housekeeping = 20) and what
+  # it derives from is a knob somebody may move: a provider spans the source
+  # graph and its projection, which can hash to the SAME node and are read
+  # together on every canvas open, so one node pool is asked for 16 sockets
+  # at an instant. Under the old flat 10 the 11th caller got redis-py's
+  # MaxConnectionsError — which subclasses redis ConnectionError, so the
+  # circuit breaker read local socket exhaustion as a sick downstream and
+  # opened for every shard in the cluster, against a store that was fine.
+  #
+  # Re-derive with PROVIDER_MAX_CONCURRENCY; a test checks this value
+  # against what the code computes with nothing set.
+  FALKORDB_POOL_SIZE: "20"
   FALKORDB_MODE: "cluster"
   FALKORDB_CLUSTER_NODES: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379"
   FALKORDB_HOST: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local"

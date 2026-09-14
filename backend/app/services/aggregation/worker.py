@@ -35,7 +35,7 @@ import types
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.adapters import (
@@ -61,6 +61,7 @@ from backend.app.jobs.audit import record_terminal
 from backend.app.jobs.metrics import increment as metrics_increment
 
 from .cancel import JobCancelled, get_registry as get_cancel_registry
+from .reap import WORKER_LOST
 from .models import AggregationJobORM
 from .fingerprint import compute_graph_fingerprint
 
@@ -234,6 +235,38 @@ def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     return out
 
 
+#: How long a lesson learned under pressure keeps steering later runs.
+#: Long enough that a source with a genuinely hard graph keeps its narrowing
+#: across a day's rebuilds; short enough that a one-off incident does not
+#: define the source forever. Re-measuring costs one run at the wider setting,
+#: which the pressure ladder narrows again within that run if it has to.
+_LEARNED_TTL_SECS: int = int(
+    os.getenv("AGGREGATION_LEARNED_TUNING_TTL_SECS", "604800")
+)
+
+
+def _learned_is_stale(learned: Any) -> bool:
+    """True when ``observed_tuning`` is too old to act on.
+
+    Unreadable or unstamped is NOT stale: a lesson from before the stamp
+    existed is still the best thing known about the source, and treating a
+    parse failure as expiry would quietly un-narrow every graph at once.
+    """
+    if not isinstance(learned, dict) or _LEARNED_TTL_SECS <= 0:
+        return False
+    stamped = learned.get("observed_at")
+    if not stamped:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(stamped))
+    except (TypeError, ValueError):
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - seen).total_seconds()
+    return age > _LEARNED_TTL_SECS
+
+
 def _merge_live_limits(stall_timeout: int, wall_base: int, fresh: dict) -> tuple:
     """``(stall, wall)`` after a live re-read: the row's ``timeout_secs``
     replaces the stall window when set; the raised wall clock (else the
@@ -392,6 +425,16 @@ class AggregationWorker:
             cancel_event = cancel_registry.register(job_id)
             provider = None
             admission_attached = False
+            # Set only by the eviction path, which settles the row itself.
+            terminal_written = False
+            # Properties the identity stamp wrote onto NODES this run. Carried
+            # on the completion event so the read caches know whether the
+            # hierarchy answers moved or only the rollup layer did.
+            self._identity_stamped = 0
+            # What a write-budget refusal measured about this source, carried
+            # off the exception so the terminal block can store it. See the
+            # refusal handler below and MaterializationBudgetExceeded.
+            self._refused_cell_ratio: Optional[float] = None
 
             # Platform JobEmitter — the only path for live progress
             # updates. Seed its per-job sequence counter from the
@@ -644,18 +687,34 @@ class AggregationWorker:
 
                     try:
                         try:
-                            await provider.stamp_identity_urns(
+                            identity_stamped = await provider.stamp_identity_urns(
                                 on_batch=_stamp_heartbeat,
                             )
                         except TypeError:
                             # A provider that predates the heartbeat. It paces
                             # nothing either, so it needs none.
-                            await provider.stamp_identity_urns()
+                            identity_stamped = await provider.stamp_identity_urns()
+                        # How many properties it wrote decides how much of the
+                        # read cache this run has to invalidate. Stamping puts
+                        # ``urn`` and ``displayName`` on the NODES, which the
+                        # hierarchy endpoints render — so a run that stamped
+                        # anything has changed more than the rollup layer. A
+                        # conforming source stamps nothing and returns 0, which
+                        # is the common case and the one the narrowed
+                        # invalidation is for.
+                        try:
+                            self._identity_stamped = int(identity_stamped or 0)
+                        except (TypeError, ValueError):
+                            # A provider that returns something else has not
+                            # told us it stamped nothing. Assume it did.
+                            self._identity_stamped = 1
                     except Exception as exc:
                         logger.warning(
                             "Aggregation job %s: identity-urn stamp failed "
                             "(continuing): %s", job.id, exc,
                         )
+                        # It may have written some before it failed.
+                        self._identity_stamped = 1
 
 
                 # Compute fingerprint before aggregation
@@ -919,40 +978,57 @@ class AggregationWorker:
                     },
                 )
 
-                # Platform terminal event — closes the SSE stream
-                # cleanly so frontend ``useJob`` unsubscribes and
-                # the row's React-Query cache flips to the durable
-                # API response.
-                await emitter.terminal(
-                    job_id=job_id,
-                    kind="aggregation",
-                    scope=scope,
-                    status="completed",
-                    payload={
-                        "edge_count": job.created_edges,
-                        "fingerprint": job.graph_fingerprint_after,
-                        "completed_at": job.completed_at,
-                    },
-                )
-
-                # Publish event for viz-service to sync its own tables
-                # and invalidate its aggregated-edge graph cache.
-                if self._events:
-                    await self._events.job_completed(
+                # ANNOUNCING the run is not part of DOING it. Everything
+                # below is a side effect on another system — an SSE stream, a
+                # Redis stream, the insights poll — and a failure in any of
+                # them used to land in the generic handler below, which sets
+                # status="failed" and the source to "failed". A perfect
+                # rebuild then read as a failure, and automation queued a full
+                # re-rebuild of a correct cube. The rebuild happened; a
+                # notification about it did not; those are different facts.
+                try:
+                    # Platform terminal event — closes the SSE stream
+                    # cleanly so frontend ``useJob`` unsubscribes and
+                    # the row's React-Query cache flips to the durable
+                    # API response.
+                    await emitter.terminal(
                         job_id=job_id,
-                        data_source_id=job.data_source_id,
-                        edge_count=job.created_edges,
-                        fingerprint=job.graph_fingerprint_after,
-                        completed_at=job.completed_at,
-                        workspace_id=job.workspace_id,
+                        kind="aggregation",
+                        scope=scope,
+                        status="completed",
+                        payload={
+                            "edge_count": job.created_edges,
+                            "fingerprint": job.graph_fingerprint_after,
+                            "completed_at": job.completed_at,
+                        },
                     )
 
-                # Aggregated-edge materialization changed the graph's edge
-                # counts — nudge the insights counts poll (cooldown-
-                # throttled, never raises).
-                if job.workspace_id:
-                    from backend.insights_service.enqueue import mark_stats_changed
-                    await mark_stats_changed(job.data_source_id, job.workspace_id)
+                    # Publish event for viz-service to sync its own tables
+                    # and invalidate its aggregated-edge graph cache.
+                    if self._events:
+                        await self._events.job_completed(
+                            job_id=job_id,
+                            data_source_id=job.data_source_id,
+                            edge_count=job.created_edges,
+                            fingerprint=job.graph_fingerprint_after,
+                            completed_at=job.completed_at,
+                            workspace_id=job.workspace_id,
+                            identity_stamped=self._identity_stamped,
+                        )
+
+                    # Aggregated-edge materialization changed the graph's edge
+                    # counts — nudge the insights counts poll (cooldown-
+                    # throttled, never raises).
+                    if job.workspace_id:
+                        from backend.insights_service.enqueue import mark_stats_changed
+                        await mark_stats_changed(job.data_source_id, job.workspace_id)
+                except Exception as notify_exc:     # noqa: BLE001 — see above
+                    logger.warning(
+                        "Aggregation job %s completed, but announcing it "
+                        "failed (%s). The run's durable state stands; the "
+                        "state-sync consumer reconciles from it.",
+                        job_id, notify_exc, exc_info=True,
+                    )
 
                 # created_edges is the desired-cube total (used for the
                 # readiness edge count). It is NOT how many edges this run
@@ -1002,6 +1078,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1043,6 +1120,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1083,6 +1161,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1143,7 +1222,61 @@ class AggregationWorker:
                     await self._events.job_cancelled(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                     )
+
+            except asyncio.CancelledError:
+                # This worker was EVICTED, not asked to stop: the exec-lock
+                # heartbeat lost its lease (or Redis went away for longer than
+                # the TTL) and cancelled the run so a single executor stays
+                # single. ``CancelledError`` is a ``BaseException``, so it
+                # passes every clause above and, without this, reaches the
+                # ``finally`` with ``job.status`` still ``running`` — which
+                # seals the open step as in-flight forever and, worse, commits
+                # THIS attempt's uncommitted checkpoint columns (cursor,
+                # processed_edges, progress, current_phase, run_stats) onto a
+                # row the successor already owns. A resume then reads a cursor
+                # from a range the successor never scanned.
+                #
+                # So: discard our uncommitted work, and write the terminal
+                # state through a statement PINNED to our own worker id. If
+                # the successor has already claimed the row the UPDATE matches
+                # nothing, which is the correct outcome — the row is no longer
+                # ours to describe.
+                await session.rollback()
+                terminal_written = True
+                try:
+                    await session.execute(
+                        update(AggregationJobORM)
+                        .where(
+                            AggregationJobORM.id == job_id,
+                            AggregationJobORM.worker_id == self._worker_id,
+                            AggregationJobORM.status == "running",
+                        )
+                        .values(
+                            status="failed",
+                            error_message=(
+                                f"{WORKER_LOST} this worker lost its execution lease and "
+                                f"was stopped mid-run. Progress up to the last checkpoint "
+                                f"is preserved; resume re-runs from there."
+                            )[:2000],
+                            completed_at=_now(),
+                            updated_at=_now(),
+                        )
+                    )
+                    await session.commit()
+                except Exception as write_exc:      # noqa: BLE001 — we are unwinding
+                    logger.warning(
+                        "Aggregation job %s: could not record the eviction (%s); "
+                        "the stuck-job reconciler will reap it",
+                        job_id, write_exc,
+                    )
+                    await session.rollback()
+                logger.warning(
+                    "Aggregation job %s stopped: execution lease lost by worker %s",
+                    job_id, self._worker_id,
+                )
+                raise
 
             except Exception as e:
                 job.status = "failed"
@@ -1175,6 +1308,7 @@ class AggregationWorker:
                     await self._events.job_failed(
                         job_id=job_id,
                         data_source_id=job.data_source_id,
+                        workspace_id=job.workspace_id,
                         error_message=job.error_message,
                     )
 
@@ -1184,29 +1318,80 @@ class AggregationWorker:
                 # outage — passes through. A failed run's ledger then NAMES
                 # the step it died in, which is the first question anyone
                 # asks of a failure.
-                ledger.seal(job.status)
-                _record_steps(job, ledger)
-                # What a run that did NOT complete learned under pressure.
-                # The success path writes ``observed_tuning`` unconditionally
-                # (``{}`` clears the previous lesson, because a hinted run
-                # re-grows its width and so proves it no longer needs the
-                # narrowing). A failed run proves no such thing, and it is the
-                # run with the most to teach: an hour spent halving the scan
-                # width down to 500 before dying was thrown away, so the retry
-                # started wide and hit the same wall. Written only when it is
-                # non-empty, so a run that failed for an unrelated reason — an
-                # ontology error, a dead node — cannot erase a valid lesson.
-                if job.status != "completed":
-                    learned = _learned_from(
-                        self._job_run_stats(job), job_id=job.id,
-                    )
-                    if learned:
-                        await self._update_ds_state(
-                            session, job.data_source_id,
-                            observed_tuning=json.dumps(learned),
+                #
+                # An EVICTED worker is the one path that skips all of it. It
+                # has already written its terminal state through a statement
+                # pinned to its own worker id, and rolled back everything else
+                # deliberately, because the row may now belong to a successor.
+                # Re-recording here would put back exactly what that rollback
+                # removed. The cleanup below still runs. (Never ``return``
+                # from this block: that would discard the ``CancelledError``
+                # the eviction path exists to re-raise.)
+                if not terminal_written:
+                    ledger.seal(job.status)
+                    _record_steps(job, ledger)
+                    # What a run that did NOT complete learned under pressure.
+                    # The success path writes ``observed_tuning``
+                    # unconditionally (``{}`` clears the previous lesson,
+                    # because a hinted run re-grows its width and so proves it
+                    # no longer needs the narrowing). A failed run proves no
+                    # such thing, and it is the run with the most to teach: an
+                    # hour spent halving the scan width down to 500 before
+                    # dying was thrown away, so the retry started wide and hit
+                    # the same wall. Written only when it is non-empty, so a
+                    # run that failed for an unrelated reason — an ontology
+                    # error, a dead node — cannot erase a valid lesson.
+                    if job.status != "completed":
+                        learned = _learned_from(
+                            self._job_run_stats(job), job_id=job.id,
                         )
-                job.updated_at = _now()
-                await session.commit()
+                        if learned:
+                            await self._update_ds_state(
+                                session, job.data_source_id,
+                                observed_tuning=json.dumps(learned),
+                            )
+                        # A run refused by the write budget still MEASURED
+                        # this source: the upper bound during EXTRACT and the
+                        # exact cell count at the refusal. run_stats is
+                        # persisted on success only, so the ratio rides the
+                        # exception (see MaterializationBudgetExceeded) and
+                        # is stored here — otherwise the next run arrives
+                        # uncalibrated, pays the same EXTRACT and COMPUTE,
+                        # and refuses again, forever.
+                        if self._refused_cell_ratio is not None:
+                            await self._update_ds_state(
+                                session, job.data_source_id,
+                                observed_cell_ratio=self._refused_cell_ratio,
+                            )
+                    job.updated_at = _now()
+                    try:
+                        await session.commit()
+                    except Exception as commit_exc:  # noqa: BLE001
+                        # The one write that has to land. A session poisoned
+                        # earlier — ``record_terminal`` flushes inside its own
+                        # exception swallow — made this raise out of ``run()``
+                        # entirely, leaving the row ``running`` after the SSE
+                        # stream had already closed with terminal/completed.
+                        # Roll back and write the status on its own.
+                        logger.warning(
+                            "Aggregation job %s: terminal commit failed (%s); "
+                            "retrying with the status alone", job_id, commit_exc,
+                        )
+                        await session.rollback()
+                        try:
+                            await session.execute(
+                                update(AggregationJobORM)
+                                .where(AggregationJobORM.id == job_id)
+                                .values(status=job.status, updated_at=_now())
+                            )
+                            await session.commit()
+                        except Exception as retry_exc:   # noqa: BLE001
+                            logger.error(
+                                "Aggregation job %s: could not record its "
+                                "terminal status (%s) — the stuck-job "
+                                "reconciler will reap it", job_id, retry_exc,
+                            )
+                            await session.rollback()
                 # Always unregister the cancel event, including on
                 # uncaught exceptions, so a future job re-using this
                 # job_id (resume) starts with a fresh event.
@@ -1245,6 +1430,32 @@ class AggregationWorker:
         learned = self._job_tuning(types.SimpleNamespace(
             tuning_json=getattr(state, "observed_tuning", None),
         ))
+        if _learned_is_stale(learned):
+            # A lesson has to be able to expire, or it is a ratchet. Two of
+            # these knobs never re-grow inside a run — nothing resets the
+            # extract-concurrency cap, and nothing switches the reconcile
+            # strategy back to "full" — so a hinted run reports them in
+            # ``adapted`` unchanged and the next ``_learned_from`` writes them
+            # straight back, gated only on ANY single pressure event in the
+            # run. One bad afternoon (a QUERY_MEM_CAPACITY squeeze, a noisy
+            # neighbour on the shard) then pinned a source to serial reads and
+            # keys-only reconcile permanently: escaping needed a run with a
+            # completely empty pressure log, which on a shared cluster with
+            # hundreds of readers effectively never happens, and there is no
+            # control anywhere to clear it by hand.
+            #
+            # So the hints simply stop being applied once they are old. The
+            # next run starts unhinted and finds out for itself: if the
+            # narrowing is still needed it re-learns it within that run, and
+            # if it is not, the source is free of it. What was learned stays
+            # on the row either way — this decides whether to ACT on it, not
+            # whether to remember it.
+            logger.info(
+                "capacity hints for %s are older than %ds — running unhinted "
+                "so the narrowing is re-measured rather than inherited",
+                data_source_id, _LEARNED_TTL_SECS,
+            )
+            return hints
         for key in _LEARNED_KEYS:
             value = learned.get(key) if isinstance(learned, dict) else None
             if value:
@@ -1477,10 +1688,24 @@ class AggregationWorker:
         pacing = doc.get("write_pacing_ratio")
         if isinstance(pacing, (int, float)) and not isinstance(pacing, bool) and pacing >= 0:
             out["write_pacing_ratio"] = float(pacing)
-        for key in ("extract_concurrency", "scan_width", "write_batch_max"):
+        for key in (
+            "extract_concurrency", "scan_width", "write_batch_max",
+            # Replication backpressure. Absent here, these two were in
+            # _LIVE_PIPELINE_KEYS and never in the dict that list is read
+            # against, so the tick's `if key in fresh` never fired: setting
+            # them on a running job was persisted, logged, and ignored.
+            "replica_ack_timeout_ms",
+        ):
             value = _tuning_int(doc, key)
             if value is not None:
                 out[key] = value
+        # replicaAckMin may be 0 — that IS the escape hatch for a run held
+        # behind a lagging replica (see shard_capacity.hold_reason), so a
+        # positive-int guard would discard exactly the value an operator
+        # reaches for. Same reason write_pacing_ratio is read separately.
+        ack_min = doc.get("replica_ack_min")
+        if isinstance(ack_min, int) and not isinstance(ack_min, bool) and ack_min >= 0:
+            out["replica_ack_min"] = int(ack_min)
         target = doc.get("write_batch_target_s")
         if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0:
             out["write_batch_target_s"] = float(target)
@@ -1628,6 +1853,12 @@ class AggregationWorker:
                 MaterializationPreconditionFailed,
                 MaterializationQueryMemoryExceeded,
             ) as e:
+                # The refusal is the only place this source's cell ratio was
+                # ever measured; hand it to the terminal block, which is the
+                # only place that can store it.
+                ratio = getattr(e, "cell_ratio_observed", None)
+                if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+                    self._refused_cell_ratio = float(ratio)
                 # All three are deterministic — every retry recomputes the
                 # same outcome and burns another full EXTRACT+COMPUTE pass.
                 # (The query-memory case additionally used to arrive here as

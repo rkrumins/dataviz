@@ -19,16 +19,21 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const getProjectionHealth = vi.fn()
 const getReadiness = vi.fn()
 const invalidateAggregatedEdges = vi.fn()
 
 vi.mock('@/services/aggregationService', () => ({
-  aggregationService: { getReadiness: (...a: unknown[]) => getReadiness(...a) },
+  aggregationService: {
+    getProjectionHealth: (...a: unknown[]) => getProjectionHealth(...a),
+    getReadiness: (...a: unknown[]) => getReadiness(...a),
+  },
 }))
 vi.mock('@/hooks/useAggregatedLineage', () => ({
   invalidateAggregatedEdges: () => invalidateAggregatedEdges(),
 }))
 
+import { POLLING_INTERVALS } from '@/config/polling'
 import {
   useProjectionCatchUp,
   shouldAskProjector,
@@ -36,20 +41,23 @@ import {
   ROLLUP_INTEGRITY_REASONS,
 } from '@/hooks/useProjectionCatchUp'
 
-/** A readiness answer. Everything the hook does not read is omitted. */
+/** A projection-health answer. Everything the hook does not read is omitted. */
 const ready = (over: Record<string, unknown> = {}) => ({
   dataSourceId: 'ds-1',
-  isReady: true,
-  aggregationStatus: 'ready',
   ...over,
 })
 
 beforeEach(() => {
+  getProjectionHealth.mockReset()
   getReadiness.mockReset()
   invalidateAggregatedEdges.mockReset()
-  getReadiness.mockResolvedValue(ready())
+  Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+  getProjectionHealth.mockResolvedValue(ready())
 })
-afterEach(() => { vi.useRealTimers() })
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('which stale reasons prompt the check', () => {
   it('prompts on every reason that means the answer came back short', () => {
@@ -111,18 +119,18 @@ describe('what the hook asks, and what it is willing to claim', () => {
   it('issues NO request at all on a healthy canvas', async () => {
     const { result } = renderHook(() => useProjectionCatchUp('ds-1', null))
     await act(async () => { await Promise.resolve() })
-    expect(getReadiness).not.toHaveBeenCalled()
+    expect(getProjectionHealth).not.toHaveBeenCalled()
     expect(result.current.catchingUp).toBe(false)
   })
 
   it('issues no request while a rebuild is running', async () => {
     renderHook(() => useProjectionCatchUp('ds-1', 'source_changed'))
     await act(async () => { await Promise.resolve() })
-    expect(getReadiness).not.toHaveBeenCalled()
+    expect(getProjectionHealth).not.toHaveBeenCalled()
   })
 
   it('raises the notice on an affirmative false, carrying the number', async () => {
-    getReadiness.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 902 }))
+    getProjectionHealth.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 902 }))
     const { result } = renderHook(() => useProjectionCatchUp('ds-1', 'derive_hop_bound'))
     await waitFor(() => expect(result.current.catchingUp).toBe(true))
     expect(result.current.commitsBehind).toBe(902)
@@ -139,10 +147,10 @@ describe('what the hook asks, and what it is willing to claim', () => {
    */
   async function raisedThenAnswering(over: Record<string, unknown>) {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    getReadiness.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 3 }))
+    getProjectionHealth.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 3 }))
     const { result } = renderHook(() => useProjectionCatchUp('ds-1', 'degraded', 1000))
     await waitFor(() => expect(result.current.catchingUp).toBe(true))
-    getReadiness.mockResolvedValue(ready(over))
+    getProjectionHealth.mockResolvedValue(ready(over))
     await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
     return result
   }
@@ -166,19 +174,19 @@ describe('what the hook asks, and what it is willing to claim', () => {
   it('asks nothing when there is no data source to ask about', async () => {
     renderHook(() => useProjectionCatchUp(null, 'degraded'))
     await act(async () => { await Promise.resolve() })
-    expect(getReadiness).not.toHaveBeenCalled()
+    expect(getProjectionHealth).not.toHaveBeenCalled()
   })
 
   it('drops the cached short answer once when the source catches up', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    getReadiness.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 5 }))
+    getProjectionHealth.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 5 }))
     const { result } = renderHook(() => useProjectionCatchUp('ds-1', 'degraded', 1000))
     await waitFor(() => expect(result.current.catchingUp).toBe(true))
     // While it is still behind, nothing is invalidated — a poll that dropped
     // the cache every tick would refetch the canvas forever.
     expect(invalidateAggregatedEdges).not.toHaveBeenCalled()
 
-    getReadiness.mockResolvedValue(ready({ projectorCurrent: true, projectionCommitsBehind: 0 }))
+    getProjectionHealth.mockResolvedValue(ready({ projectorCurrent: true, projectionCommitsBehind: 0 }))
     await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
     await waitFor(() => expect(result.current.catchingUp).toBe(false))
     // Exactly once, on the edge: the canvas is holding rollups it cached
@@ -186,16 +194,52 @@ describe('what the hook asks, and what it is willing to claim', () => {
     expect(invalidateAggregatedEdges).toHaveBeenCalledTimes(1)
   })
 
-  it('gives up after three consecutive failures instead of hammering readiness', async () => {
+  it('backs right off after three consecutive failures — and TAKES THE CLAIM DOWN', async () => {
+    // Stopping dead was the worse half: the board kept asserting a specific
+    // number ("about 5 recent changes behind") for the life of the canvas,
+    // including long after the source caught up, because nothing was left
+    // running to take it back down.
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    getReadiness.mockRejectedValue(new Error('403'))
+    getProjectionHealth.mockResolvedValue(ready({ projectorCurrent: false, projectionCommitsBehind: 5 }))
+    const { result } = renderHook(() => useProjectionCatchUp('ds-1', 'degraded', 1000))
+    await waitFor(() => expect(result.current.catchingUp).toBe(true))
+
+    getProjectionHealth.mockRejectedValue(new Error('403'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    await waitFor(() => expect(result.current.catchingUp).toBe(false))
+    expect(result.current.commitsBehind).toBeNull()
+
+    // …and it is not hammering: the next ask is minutes away, not seconds.
+    const settled = getProjectionHealth.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    expect(getProjectionHealth).toHaveBeenCalledTimes(settled)
+  })
+
+  it('asks nothing at all while the tab is hidden', async () => {
+    // This poll arms only on an already-degraded board, so every affected
+    // viewer runs it at once — including the backgrounded tabs nobody is
+    // reading the banner in.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
     renderHook(() => useProjectionCatchUp('ds-1', 'degraded', 1000))
-    await waitFor(() => expect(getReadiness).toHaveBeenCalledTimes(1))
-    await act(async () => { await vi.advanceTimersByTimeAsync(3500) })
-    const settled = getReadiness.mock.calls.length
-    expect(settled).toBeLessThanOrEqual(3)
     await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
-    expect(getReadiness).toHaveBeenCalledTimes(settled)
+    expect(getProjectionHealth).not.toHaveBeenCalled()
+  })
+
+  it('never touches readiness, which probes the graph store this is reporting on', async () => {
+    // /readiness on a READY source resolves the provider, reads the run meta
+    // and computes a graph fingerprint: three sequential 5s waits holding a
+    // GRAPH_READ session and issuing real queries on the shard. This poll
+    // fires precisely when that shard is already hurting.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    renderHook(() => useProjectionCatchUp('ds-1', 'degraded', 1000))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(getProjectionHealth).toHaveBeenCalled()
+    expect(getReadiness).not.toHaveBeenCalled()
+  })
+
+  it('polls at a minute by default, not the 15s it started at', () => {
+    expect(POLLING_INTERVALS.projectionCatchUp).toBeGreaterThanOrEqual(60_000)
   })
 })
 

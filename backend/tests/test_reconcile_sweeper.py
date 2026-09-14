@@ -842,8 +842,12 @@ async def test_action_cap_bounds_one_sweep(session_factory):
 
 @pytest.mark.asyncio
 async def test_first_builds_are_capped_separately(session_factory):
-    """A fresh install with many unbuilt sources drains one per sweep rather
-    than queueing every full build at once."""
+    """A fresh install with many unbuilt sources drains a BOUNDED number per
+    sweep rather than queueing every full build at once.
+
+    The bound is occupancy, not a fixed rate: nothing is in flight here, so
+    the sweep fills up to the target and stops — five sources do not become
+    five concurrent full-cube rebuilds."""
     for i in range(5):
         await _seed(
             session_factory, ds_id=f"ds_{i}",
@@ -854,8 +858,13 @@ async def test_first_builds_are_capped_separately(session_factory):
     svc = _FakeService()
     result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
 
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _FIRST_BUILD_TARGET_IN_FLIGHT,
+    )
+
     assert result.findings == 5
-    assert len(svc.triggers) == 1
+    assert len(svc.triggers) == _FIRST_BUILD_TARGET_IN_FLIGHT
+    assert len(svc.triggers) < 5, "never the whole backlog at once"
 
 
 @pytest.mark.asyncio
@@ -2018,3 +2027,199 @@ async def test_act_off_holds_first_builds_too(session_factory, monkeypatch):
 
     assert result.by_skip.get("fleet_held") == 1
     assert svc.triggers == [] and svc.signals == []
+
+
+# ── The scan window belongs to the sources that are due ─────────────────
+#
+# The SQL cutoff used to be clamped to a 300s floor while _is_due tested the
+# resolved per-source interval (3600s by default). Every source checked
+# between those two numbers matched the query, took a slot in the LIMIT, was
+# dropped by _is_due without its fairness clock moving, and took the same
+# slot again on the next tick. At steady state that is ~92% of the fleet, so
+# past ~218 sources the window held nothing the pass could act on — and a
+# source made due by the counts tripwire, whose last_reconcile_checked_at is
+# by definition RECENT, sorted to the tail and was the row the LIMIT cut.
+
+
+async def _set_interval(factory, ds_id, secs):
+    async with factory() as s:
+        state = await s.get(AggregationDataSourceStateORM, ds_id)
+        state.reconcile_check_interval_secs = secs
+        await s.commit()
+
+
+async def _quiet(factory, ds_id):
+    """Steady state for a source nothing has happened to: the probe has read
+    its counts and the sweep has already seen that digest. Without this the
+    tripwire's own NULL-digest fallback holds the source open, which is a
+    different (and correct) reason to be due."""
+    await _set_digests(factory, ds_id, stats_digest="same", seen_digest="same")
+
+
+@pytest.mark.asyncio
+async def test_a_source_inside_its_interval_is_not_even_read(session_factory):
+    """The bug, at its smallest. 600s is past the old 300s clamp and far
+    inside the 3600s interval the verdict is actually taken against."""
+    for i in range(3):
+        await _seed(session_factory, ds_id=f"ds_{i}", checked_at=_ago(seconds=600))
+        await _quiet(session_factory, f"ds_{i}")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        assert await sweeper._candidates(s, None, 3600) == []
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_not_spent_on_rows_the_pass_would_discard(
+    session_factory, monkeypatch,
+):
+    """The consequence at fleet scale, with the cap shrunk so three sources
+    stand in for three hundred. The tripwire source was checked seconds ago,
+    so oldest-checked-first puts it LAST; it has to be in the window anyway,
+    because the promise on that path is sub-minute detection."""
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    monkeypatch.setattr(rs, "_SCAN_CAP", 2)
+    for i in range(4):
+        await _seed(session_factory, ds_id=f"quiet_{i}", checked_at=_ago(seconds=600))
+        await _quiet(session_factory, f"quiet_{i}")
+    await _seed(session_factory, ds_id="moved", checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "moved", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["moved"]
+
+
+@pytest.mark.asyncio
+async def test_a_tripwire_row_outranks_an_older_but_merely_stale_one(
+    session_factory, monkeypatch,
+):
+    """Both are due; only one has fresh evidence. With the window full, the
+    order decides which gets looked at this tick and which waits."""
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    monkeypatch.setattr(rs, "_SCAN_CAP", 1)
+    await _seed(session_factory, ds_id="ancient", checked_at=_ago(seconds=90_000))
+    await _quiet(session_factory, "ancient")
+    await _seed(session_factory, ds_id="moved", checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "moved", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["moved"]
+
+
+@pytest.mark.asyncio
+async def test_each_source_is_due_on_its_own_cadence(session_factory):
+    """A per-source override is now a SQL predicate rather than a clamp, so a
+    fast source is read on its own schedule and a slow neighbour is not read
+    at all. Under the clamp the fast source's override widened the cutoff for
+    the whole fleet, and — being the most recently checked — sorted last and
+    was the row the LIMIT truncated, so its own override never took effect."""
+    await _seed(session_factory, ds_id="fast", checked_at=_ago(seconds=120))
+    await _set_interval(session_factory, "fast", 60)
+    await _quiet(session_factory, "fast")
+    await _seed(session_factory, ds_id="slow", checked_at=_ago(seconds=120))
+    await _quiet(session_factory, "slow")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["fast"]
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_source_cannot_narrow_the_fleets_window(session_factory):
+    """``probe_scheduler._fastest_override`` filters disabled sources out of
+    its fleet-wide MIN for this reason. There is no fleet-wide number here any
+    more, so the property holds by construction — which is what this pins."""
+    await _seed(session_factory, ds_id="stopped", checked_at=_ago(seconds=120),
+                reconcile_enabled=False)
+    await _set_interval(session_factory, "stopped", 30)
+    await _quiet(session_factory, "stopped")
+    await _seed(session_factory, ds_id="quiet", checked_at=_ago(seconds=120))
+    await _quiet(session_factory, "quiet")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert "quiet" not in [c.data_source_id for c in candidates]
+
+
+@pytest.mark.asyncio
+async def test_the_run_row_says_how_many_rows_the_window_cost(session_factory):
+    """``scanned=5`` while 195 rows were read and thrown away was invisible.
+    The two now track each other, and the gap is on the run row when it does
+    not."""
+    await _seed(session_factory, ds_id="due", checked_at=_ago(seconds=7200))
+    await _quiet(session_factory, "due")
+    await _seed(session_factory, ds_id="inside", checked_at=_ago(seconds=600))
+    await _quiet(session_factory, "inside")
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert result.rows_read == 1 == result.scanned
+    assert json.loads(result.detail_json())["rowsRead"] == 1
+
+
+
+# ── first builds: occupancy, not a fixed rate ───────────────────────────
+#
+# _FIRST_BUILD_CAP = 1 was two problems, not one. Too slow going in: 300
+# never-aggregated sources take ~5h just to be QUEUED at one per tick. And
+# too fast coming out — it is an admission RATE with no feedback from drain,
+# and the only re-queue guard is per source, so queued-but-unstarted first
+# builds accumulate whenever the fleet drains slower than one per tick. The
+# head of that queue reaches AGGREGATION_PENDING_TIMEOUT_SECS and is failed
+# as NEVER_DISPATCHED — "the dispatch message was likely lost", which is not
+# what happened — and three of those suspend the source.
+
+
+def test_a_fleet_that_is_not_draining_admits_nothing():
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _FIRST_BUILD_TARGET_IN_FLIGHT, _first_build_cap,
+    )
+
+    assert _first_build_cap(_FIRST_BUILD_TARGET_IN_FLIGHT, 10) == 0
+    assert _first_build_cap(_FIRST_BUILD_TARGET_IN_FLIGHT + 5, 10) == 0
+    # …and it recovers on its own as they drain, with no operator action.
+    assert _first_build_cap(0, 10) == _FIRST_BUILD_TARGET_IN_FLIGHT
+
+
+def test_first_builds_never_take_more_than_half_the_action_budget():
+    """They draw from the SAME allowance as drift rebuilds, which are the
+    freshness the fleet is judged on. (It is also why a cap above
+    max_actions was always silently ineffective.)"""
+    from backend.app.services.aggregation.reconcile_sweeper import _first_build_cap
+
+    assert _first_build_cap(0, 2) <= 1
+    assert _first_build_cap(0, 100) <= _first_build_cap(0, 100)
+    for budget in (1, 2, 4, 10):
+        assert _first_build_cap(0, budget) <= max(1, budget // 2)
+
+
+def test_the_cap_is_read_from_what_the_sweep_already_loaded():
+    """A job queued or running, for a source that has never completed one.
+    Both facts are on the context rows already; a new query per sweep to
+    police the cold start would be its own cost."""
+    import inspect
+
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    src = inspect.getsource(rs.ReconciliationSweeper._phase_a)
+    assert 'row.get("job_in_flight") and not row.get("has_completed_job")' in src
+    assert "first_build_cap = _first_build_cap(first_builds_in_flight, max_actions)" in src
+    assert "if first_builds >= first_build_cap:" in src

@@ -93,6 +93,19 @@ class NodeLimits(_Base):
     cluster_node_timeout_ms: Optional[int] = Field(None, alias="clusterNodeTimeoutMs")
 
 
+class NodeCommandStat(_Base):
+    """One graph command's service time on one node, from ``INFO commandstats``.
+
+    Cumulative since the node started, so ``usecPerCall`` is the mean over its
+    whole uptime — read beside the rate of ``calls``, not as a current figure.
+    It is here because ``CONCURRENCY_TUNING`` §1 parameterises every
+    supported-user number on mean Cypher service time and the only way to get
+    it used to be a shell into a pod.
+    """
+    calls: Optional[int] = None
+    usec_per_call: Optional[float] = Field(None, alias="usecPerCall")
+
+
 class GraphStoreNode(_Base):
     """One node of one instance. Always present, even when unreachable."""
     endpoint: str
@@ -119,6 +132,10 @@ class GraphStoreNode(_Base):
     replication: NodeReplication = Field(default_factory=NodeReplication)
     server: NodeServer = Field(default_factory=NodeServer)
     limits: NodeLimits = Field(default_factory=NodeLimits)
+    #: ``graph.query`` / ``graph.ro_query`` -> calls and mean service time.
+    #: Empty where the node blocks the section or has served neither.
+    command_stats: Dict[str, NodeCommandStat] = Field(
+        default_factory=dict, alias="commandStats")
     graph_count: Optional[int] = Field(None, alias="graphCount")
     # "measured" | "unsupported" | "skipped" — whether per-graph sizes on
     # this node were measured, refused by the server, or ran out of budget.

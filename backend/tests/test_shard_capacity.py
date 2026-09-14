@@ -85,8 +85,8 @@ def test_what_other_rebuilds_hold_comes_off_the_free_memory_and_is_named():
     v = b.verdict(projected=2_000_000, growth_edges=2_000_000)     # needs ~1 GB
     assert not v.ok and v.blocked_by == "shard"
     msg = sc.format_refusal(b, v, graph="g", composition="x")
-    assert "512.0 MB free of 40.0 GB" in msg
-    assert "30.0 GB used, 1.5 GB held by 1 other rebuild still writing" in msg
+    assert "512.0 MiB free of 40.0 GiB" in msg
+    assert "30.0 GiB used, 1.5 GiB held by 1 other rebuild still writing" in msg
     for word in _FORBIDDEN:
         assert word not in msg, word
     from backend.app.services.aggregation.service import classify_failure
@@ -199,7 +199,7 @@ def test_a_shard_refusal_carries_every_number_a_person_needs():
     _, b, v = next(_refusals())
     msg = sc.format_refusal(b, v, graph="g", composition="d1→d1: 9")
     assert "10,000,000" in msg and "10.0.0.1:6379" in msg
-    assert "2.0 GB free of 40.0 GB" in msg and "20% reserve" in msg
+    assert "2.0 GiB free of 40.0 GiB" in msg and "20% reserve" in msg
     assert "short by" in msg and "512 B/edge (default)" in msg
     assert "shardReservePct" in msg and "bytesPerEdge" in msg
 
@@ -864,3 +864,60 @@ def test_without_a_container_limit_the_budget_is_what_it_was():
     )
     assert b.governed_by == "shard" and b.container_headroom is None
     assert "container_limit" not in b.as_stats()
+
+
+# ── a sentinel pool has a node too, it just does not advertise it ────────
+#
+# This string keys the per-node write slots, the read slots, the reservation
+# ledger and the read-pressure signal. A sentinel pool resolves its master on
+# every connect and carries no host in connection_kwargs, so it returned the
+# literal "unknown" — collapsing every graph in the fleet onto one key, and
+# merging the budgets of two providers pointed at different sentinel services.
+
+
+def _conn(**pool_attrs):
+    import types
+    return types.SimpleNamespace(connection_pool=types.SimpleNamespace(**pool_attrs))
+
+
+def test_a_standalone_pool_names_its_host():
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    assert _endpoint_of(
+        _conn(connection_kwargs={"host": "10.0.0.1", "port": 6379}),
+    ) == "10.0.0.1:6379"
+
+
+def test_a_sentinel_pool_names_the_master_it_actually_reached():
+    import types
+
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    pool = _conn(
+        connection_kwargs={},
+        service_name="mymaster",
+        _available_connections=[types.SimpleNamespace(host="10.0.0.9", port=6379)],
+    )
+    assert _endpoint_of(pool) == "10.0.0.9:6379"
+
+
+def test_a_sentinel_pool_that_has_not_connected_is_named_by_its_service():
+    """Not a node, but stable, distinct per master, and it follows the
+    promotion — which is everything admission needs from a key. Two
+    providers on different sentinel services stop sharing one budget."""
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    assert _endpoint_of(
+        _conn(connection_kwargs={}, service_name="mymaster"),
+    ) == "sentinel:mymaster"
+    assert _endpoint_of(
+        _conn(connection_kwargs={}, service_name="other"),
+    ) == "sentinel:other"
+
+
+def test_nothing_to_go_on_is_still_unknown():
+    import types
+
+    from backend.app.providers.shard_capacity import _endpoint_of
+
+    assert _endpoint_of(types.SimpleNamespace()) == "unknown"

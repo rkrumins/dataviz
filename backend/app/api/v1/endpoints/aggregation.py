@@ -39,6 +39,7 @@ from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import (
     GraphStoreLimitsPatch,
     JobLimitsPatch,
+    PurgeAggregationRequest,
     ResumeOverrides,
     SourceChangedRequest,
     SourceChangedResponse,
@@ -350,7 +351,18 @@ async def get_aggregation_capacity(
 async def get_data_source_capacity(
     ds_id: str,
     session: AsyncSession = Depends(get_graph_read_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ):
+    # The fleet view above is a shard-shaped answer an ingestion reader is
+    # meant to see; THIS one is one tenant's source, named, with its provider,
+    # edge counts and rollup footprint. The gate above is any-workspace, so
+    # the row has to be checked against the caller's visible set — as a 404,
+    # never a 403, or the route becomes an existence oracle over the fleet.
+    from backend.app.services.workspace_visibility import ensure_data_source_visible
+
+    await ensure_data_source_visible(
+        session, claims, ds_id, not_found_detail=f"Data source {ds_id} not found",
+    )
     # In-process in every mode, like the fleet view above.
     from backend.app.services.aggregation.capacity import assemble_source_capacity
     doc = await assemble_source_capacity(session, ds_id)
@@ -725,6 +737,47 @@ async def get_readiness(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+# ── GET /data-sources/{ds_id}/projection-health ─────────────────────
+
+@router.get(
+    "/data-sources/{ds_id}/projection-health",
+    summary="Whether this source's connections are still catching up",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
+)
+async def get_projection_health(ds_id: str) -> dict:
+    """The two fields the canvas's catch-up notice needs, and nothing else.
+
+    The canvas used to ask ``/readiness`` for these on a 15s poll, and that
+    is the one poll guaranteed to be running when the graph store is already
+    hurting — it only arms once a read came back short. On a ``ready`` source
+    readiness resolves the provider, reads ``_aggregation_run_meta`` and
+    computes a graph fingerprint: three sequential 5s waits holding a
+    GRAPH_READ session and issuing real ``GRAPH.QUERY`` on the shard. At a
+    hundred affected viewers that probe consumed a large share of the same
+    bulkhead the canvas reads through — during the degradation it was
+    reporting on.
+
+    This answers from :func:`_projector_health_map`, a TTL-cached read of the
+    control-plane projection tables. No graph store, no provider, and no
+    session out of the graph-read pool: the poll costs a dict lookup.
+
+    Served in-process in every mode — the map is the web tier's own cache,
+    so proxying would only add a hop and a second copy of it.
+    """
+    from backend.app.services.aggregation.service import (
+        _projection_wire_fields, _projector_health_map,
+    )
+
+    fields = _projection_wire_fields((await _projector_health_map()).get(ds_id))
+    return {
+        "dataSourceId": ds_id,
+        # Null is UNKNOWN, never "up to date" — the contract the readiness
+        # fields carry, kept verbatim here.
+        "projectorCurrent": fields["projector_current"],
+        "projectionCommitsBehind": fields["projection_commits_behind"],
+    }
+
+
 # ── GET /data-sources/{ds_id}/aggregation-jobs ──────────────────────
 
 @router.get(
@@ -1044,6 +1097,7 @@ async def purge_aggregation(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
     skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
+    body: Optional[PurgeAggregationRequest] = Body(None),
 ):
     """Queue a purge job. Returns 202 with the job row immediately; the
     actual ``MATCH ... DELETE`` runs as a regular insights-service
@@ -1063,6 +1117,10 @@ async def purge_aggregation(
     try:
         job = await svc.claim_purge_job(
             ds_id, session, skip_reaggregate=skip_reaggregate,
+            reaggregate=(
+                body.reaggregate.model_dump(by_alias=True, exclude_none=True)
+                if body is not None and body.reaggregate is not None else None
+            ),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

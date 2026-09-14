@@ -270,10 +270,22 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     p._hold_max_s = 1800
     p._expected_replicas = None
     p._node_config = None
+    p._server_limits = None
     p._container_env_bytes = None
     p._gov_reading = None
     p._gov_read_at = 0.0
+    # The last reading that ANSWERED and how many since have not: silence
+    # is read as the last measured reading while it is fresh, so the
+    # governor needs somewhere to keep it.
+    p._gov_measured = None
+    p._gov_unmeasured = 0
     p._gov_others = (0, 0)
+    # The graph write lease, which `_paced_write` checks at the batch
+    # boundary — through `_cancel_check`, the one place a lost lease is
+    # read, so the cooperative-cancel hook it also reads has to be here too.
+    # Neither fences a test that holds no lease and was never cancelled.
+    p._lease = None
+    p._should_cancel = None
     p._store_holds = {}
     p._store_hold_s = {}
     p._store_hold_last = None
@@ -461,7 +473,7 @@ def test_the_web_tier_stamps_the_owning_node_on_a_cluster(monkeypatch) -> None:
         _db=object(), _graph_name="g",
         _conn_cfg=SimpleNamespace(mode="cluster", host="seed", port=6379),
     )
-    assert asyncio.run(rp._owning_node(target)) == "10.0.0.3:6379"
+    assert asyncio.run(rp.pressure_key(target)) == "10.0.0.3:6379"
 
 
 def test_a_standalone_node_is_already_named_by_the_endpoint() -> None:
@@ -469,10 +481,17 @@ def test_a_standalone_node_is_already_named_by_the_endpoint() -> None:
         _db=object(), _graph_name="g",
         _conn_cfg=SimpleNamespace(mode="standalone", host="h", port=6379),
     )
-    assert asyncio.run(rp._owning_node(target)) is None
+    assert asyncio.run(rp.pressure_key(target)) == "h:6379"
 
 
-def test_an_owner_the_client_cannot_name_falls_back_to_the_endpoint(monkeypatch) -> None:
+def test_an_owner_the_client_cannot_name_yields_no_key_on_a_cluster(monkeypatch) -> None:
+    """NOT the seed. The seed is shared by every shard, so stamping it tells
+    the writers of all three to slow down for pressure on one — the
+    fleet-wide yield this module exists to have fixed. The stamp and the
+    worker's read fell back independently, so under exactly the load the
+    mechanism is for they addressed different keys and nothing yielded at
+    all. No key is the honest answer: this signal is lost, the next one
+    lands, and nothing idle is throttled."""
     import backend.app.providers.shard_capacity as sc
 
     async def _owner(db, *, mode, graph_key, timeout):
@@ -483,7 +502,23 @@ def test_an_owner_the_client_cannot_name_falls_back_to_the_endpoint(monkeypatch)
         _db=object(), _graph_name="g",
         _conn_cfg=SimpleNamespace(mode="cluster", host="seed", port=6379),
     )
-    assert asyncio.run(rp._owning_node(target)) is None
+    assert asyncio.run(rp.pressure_key(target)) is None
+
+
+def test_a_slow_owner_lookup_never_stamps_the_cluster_seed(monkeypatch) -> None:
+    """The other half of the same rule: the lookup TIMING OUT is the case
+    that fires under load, and it used to fall back to the seed."""
+    import backend.app.providers.shard_capacity as sc
+
+    async def _owner(db, *, mode, graph_key, timeout):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(sc, "owner_endpoint", _owner)
+    target = SimpleNamespace(
+        _db=object(), _graph_name="g",
+        _conn_cfg=SimpleNamespace(mode="cluster", host="seed", port=6379),
+    )
+    assert asyncio.run(rp.pressure_key(target)) is None
 
 
 async def _noop_sleep(seconds: float) -> None:

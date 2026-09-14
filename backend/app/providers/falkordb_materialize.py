@@ -211,6 +211,22 @@ def _store_outage_hold_s() -> int:
     return _env_int("AGGREGATION_STORE_OUTAGE_HOLD_S", 900, 30, 7_200)
 
 
+def _store_loading_hold_s() -> int:
+    """How long one run waits out a node that is REPLAYING its dataset.
+
+    Longer than the plain outage hold, and the distinction is the point. A
+    node that has gone silent might never come back, so the run keeps its
+    checkpoint after a quarter of an hour and lets a person decide. A node
+    answering ``-LOADING`` is telling us it IS coming back — it accepts
+    connections, it reports how far through it is, it just will not serve
+    yet — and a rotated pod replaying a multi-GB AOF incremental takes about
+    an HOUR (docker-compose.yml records exactly that, measured). Failing a
+    run 45 minutes before the node was ready wastes every byte of progress
+    it had, so a replay earns the wait. One number for both cases was too
+    short for a replay and too long for a corpse."""
+    return _env_int("AGGREGATION_STORE_LOADING_HOLD_S", 3_600, 60, 14_400)
+
+
 def _store_hold_max_s() -> int:
     """How long ONE hold may last before the run stops and keeps its
     checkpoint — a hold being the pipeline waiting, before a write batch,
@@ -226,10 +242,77 @@ def _store_hold_max_s() -> int:
     return _env_int("AGGREGATION_HOLD_MAX_SECS", 1800, 60, 21_600)
 
 
+def _hold_max_for(kind: Optional[str], default_s: int) -> int:
+    """The per-hold budget for ONE reason.
+
+    A replica that is absent and a replica that is REPLAYING look identical
+    from the master: a rotated pod is simply missing from ``INFO
+    replication`` until it has loaded its dataset and reattached, and
+    ``hold_reason`` can only see the master. So ``replica_lost`` is the one
+    reason whose honest duration is a node restart — which
+    ``AGGREGATION_STORE_LOADING_HOLD_S`` already documents as up to an hour
+    for a multi-GB AOF replay, and which the default 30-minute bound cut in
+    half. A rebuild against a perfectly healthy master died for a routine
+    pod rotation, at the 30-minute mark, having done nothing wrong.
+
+    Every other reason keeps the shorter bound: a fork that has not finished
+    in half an hour, or RSS that has not come back under the container's
+    line, is a node that is not recovering on its own.
+    """
+    if kind == "replica_lost":
+        return max(default_s, _store_loading_hold_s())
+    return default_s
+
+
+#: How many per-hold budgets one run may spend on the SAME reason before
+#: the bound trips on the TOTAL.
+#:
+#: The per-hold clock starts inside ``_govern_write``, which runs once per
+#: write batch, so a master cycling BGSAVE → clear → AOF rewrite lets one
+#: batch through per cycle and resets it for ever: the run holds for hours
+#: and never trips a bound it is permanently inside. The total cannot be
+#: the same number as the per-hold budget, though — a rebuild running for
+#: hours legitimately meets several AOF rewrites, and one bound covering
+#: both would stop it for the node behaving exactly as expected.
+_HOLD_TOTAL_BUDGETS = 4
+
+
+def _governor_read_timeout_s() -> float:
+    """How long the governor's reading of the node may take before it
+    counts as unanswered.
+
+    Its own knob because it is a READ budget. It used to borrow
+    ``FALKORDB_INIT_TIMEOUT`` (3 s), which is a CONNECT budget — and the
+    reading it bounds is the one that detects a fork, while a ``fork()``
+    over a multi-GB RSS is itself what stalls the node's main thread past
+    three seconds. So the ``INFO`` that would have seen the fork timed out
+    and the rebuild wrote at full speed through exactly the condition the
+    hold exists for. A probe has to outlast the stall it is looking for."""
+    return _env_float("AGGREGATION_GOVERNOR_READ_TIMEOUT_S", 10.0, 1.0, 120.0)
+
+
 #: How long one governor reading of the node serves consecutive write
 #: batches. A sub-batch takes about a second, so this is close to one
 #: ``INFO`` per batch without ever being two for the same batch.
 _GOVERNOR_READ_INTERVAL_S = 1.0
+
+#: How long the last MEASURED reading still answers for a node that has
+#: stopped answering. A fork seen five seconds ago is still a fork; a
+#: reading a minute old says nothing about the node now.
+_GOVERNOR_READING_GRACE_S = 30.0
+
+#: Consecutive unanswered readings, past that grace, before the governor
+#: holds on the silence itself rather than writing into it.
+_GOVERNOR_UNMEASURED_HOLDS_AFTER = 2
+
+#: The node's own limits, read with the run's first full reading and
+#: carried onto every per-batch one — they change about as rarely as the
+#: replica drop limits beside them, and re-reading them per batch spends
+#: the budget the per-batch reading needs to notice a fork.
+_SERVER_LIMIT_FIELDS = (
+    "query_mem_capacity", "timeout_max_ms", "timeout_default_ms",
+    "thread_count", "effects_threshold_us",
+)
 
 
 def _delete_chunk() -> int:
@@ -442,15 +525,19 @@ def _materialize_fine_pairs_mode() -> str:
     cube scales as edges × depth² and OOM'd real instances: 1.17M edges
     → 5.6M pairs). ``false`` forces the diagonal.
 
-    THE COST OF THE DEFAULT, stated plainly: a FORCED cube skips the
-    estimate entirely (see ``_decide_materialization_mode``), so a graph
-    whose cube exceeds ``AGGREGATION_MAX_MATERIALIZED_EDGES`` is not
-    refused up front — it fails terminally mid-apply, leaving a partial
-    cube over the previous generation's cells because the reconcile
-    delete pass never runs. ``auto`` can never pick a cube that exceeds
-    the budget and is the mode that degrades instead of failing. Operators
-    move a fleet back to it from Ingestion → Freshness → Automation
-    (③ Act → Advanced) without a redeploy, or by setting this env var.
+    THE COST OF THE DEFAULT, stated plainly. A forced cube no longer
+    skips the estimate — it pays the same counting scan Auto does, so a
+    cube the owning shard cannot take is refused before compute and
+    before any write (see ``_decide_materialization_mode``). What it does
+    not do is CHOOSE: the clock projection (``_projected_apply_secs``)
+    and the appetite ceiling only advise here, because the operator asked
+    for the full cube. So a cube the shard can hold and the job cannot
+    finish inside its wall clock still runs — it keeps its checkpoint and
+    resumes, which means several runs rather than a failure, and the run
+    says so (``cube_slower_than_wall_clock``). ``auto`` weighs all three
+    and degrades to the depth-diagonal instead. Operators move a fleet
+    back to it from Ingestion → Freshness → Automation (③ Act →
+    Advanced) without a redeploy, or by setting this env var.
     """
     raw = os.getenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -466,6 +553,21 @@ def _materialize_fine_pairs_mode() -> str:
 _MAX_EDGES_BOUND = 500_000_000
 
 
+def _wall_clock_edges() -> int:
+    """The most rows an apply could write inside one job's wall clock, at
+    the shipped rate — the same arithmetic ``_projected_apply_secs`` and
+    ``_apply_wall_budget_s`` decide a cube by.
+
+    The default edge cap derives from this so the pipeline's two answers
+    to "how much may this rebuild write" cannot contradict each other. A
+    cap above it is a count the apply provably cannot reach inside the
+    window it is given, which makes the refusal it promises a refusal that
+    never happens; ``test_aggregation_at_scale`` asserts they stay
+    together. Not a bound on the knob — an operator who has measured a
+    faster apply sets a higher one on purpose."""
+    return int(_APPLY_ROWS_PER_S_DEFAULT * _APPLY_WALL_SHARE * _max_wall_secs())
+
+
 def _max_materialized_edges() -> int:
     """Hard write budget: the pipeline refuses (fails the job loudly with
     guidance) rather than writing more :AGGREGATED edges than this into
@@ -473,18 +575,32 @@ def _max_materialized_edges() -> int:
     FalkorDB's RAM at ~0.5KB/edge — exceeding the instance's memory
     kills it for every graph it hosts.
 
-    Default 25M ≈ 12.5GB at 0.5KB/edge. Sized against ONE SHARD, because a
-    FalkorDB graph key lives entirely on one node — Redis Cluster does not
-    split a graph, so sharding scales the NUMBER of graphs, not the size
-    of any one (see ``falkordb_connection`` module docstring). The
-    reference cluster runs ``maxmemory 40gb`` per shard at ~22GB planned
-    usage, so ~18GB of headroom; this budget claims ~70% of that.
+    The default is :func:`_wall_clock_edges` — the clock, not a memory
+    figure. It used to be a flat 25M (≈ 12.5GB at 0.5KB/edge), chosen
+    against the reference shard's ~18GB of headroom, and that number
+    contradicted the pipeline's own projection: 25M rows only land inside
+    a 24-hour job if a 500-row batch costs ≤ 0.839 s, against the 1.0 s
+    the AIMD sizer steers toward, and ≤ 0.336 s once the read-pressure
+    ratio is in force — which with hundreds of concurrent readers is the
+    steady state, not the exception. A cap the apply can never reach is
+    not a backstop; it is a number that never fires.
 
-    Boundary pairs run ~1.5-2x raw edge count, so 25M covers a graph of
-    roughly 12-16M edges — 6-8x the 1M-node / 2M-edge floor the defaults
-    target, which is the point: that floor is a MINIMUM, not the ceiling.
+    Memory still has the final word wherever it can be measured, and it
+    is the tighter of the two on a small shard: this rule only governs
+    when the shard cannot be measured at all.
 
-    NOTE this is ABOVE the ~8GB "largest single graph" figure in
+    Sized against ONE SHARD, because a FalkorDB graph key lives entirely
+    on one node — Redis Cluster does not split a graph, so sharding scales
+    the NUMBER of graphs, not the size of any one (see
+    ``falkordb_connection`` module docstring).
+
+    Boundary pairs run ~1.5-2x raw edge count, so the default covers a
+    graph of roughly 8-10M edges — 4-5x the 1M-node / 2M-edge floor the
+    defaults target, which is the point: that floor is a MINIMUM, not the
+    ceiling. An operator whose runs measure a faster apply raises the env
+    knob deliberately, and the projection then stops contradicting it.
+
+    NOTE this can sit ABOVE the ~8GB "largest single graph" figure in
     ``docs/INFRASTRUCTURE_LAUNCH_SCALE.md`` §2.2, and that doc's headroom
     covers skew + largest graph + growth together. Because keyslot
     placement is not load-aware, two graphs near this budget landing on
@@ -500,7 +616,8 @@ def _max_materialized_edges() -> int:
     FALLBACK rule: when the owning shard can be measured, the shard's real
     headroom governs (see ``shard_capacity``) and this count applies only
     as an explicit ceiling set in tuning."""
-    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, _MAX_EDGES_BOUND)
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", _wall_clock_edges(),
+                    10_000, _MAX_EDGES_BOUND)
 
 
 def _max_cube_edges() -> int:
@@ -675,7 +792,23 @@ class MaterializationBudgetExceeded(ValueError):
     shard cannot be measured, exceeds ``max_materialized_edges``.
 
     Deterministic: recomputing yields the same count, so the worker must
-    fail the job terminally instead of consuming its retry budget."""
+    fail the job terminally instead of consuming its retry budget.
+
+    ``cell_ratio_observed`` is the one thing a refused run still learned,
+    and it is carried on the exception because nothing else survives this
+    path: ``run_stats`` is persisted on success only. A forced full-detail
+    run counts the upper bound during EXTRACT for the stated purpose of
+    calibrating the source, then computes the exact cell count — and used
+    to throw both away on the refusal, so the next run arrived uncalibrated,
+    paid the same EXTRACT and COMPUTE, and refused again. With the ratio
+    stored, the next run refuses in the cheap pre-compute estimate, and
+    Auto's shard gate (which is deliberately bypassed while the ratio is
+    unknown) starts deciding for this source.
+    """
+
+    def __init__(self, *args: Any, cell_ratio_observed: Optional[float] = None) -> None:
+        super().__init__(*args)
+        self.cell_ratio_observed = cell_ratio_observed
 
 
 class MaterializationPreconditionFailed(ValueError):
@@ -1041,8 +1174,18 @@ class AggregationPipeline:
         # Held from the first passed budget check, shrunk at each recheck,
         # released with the lease.
         self._reservation: Optional[Any] = None
+        # The exclusive per-graph write lease, held for the length of the
+        # run. Kept here so the write path can READ it: the renewer sets
+        # ``lost`` when the key holds somebody else's token, and a lease
+        # nobody checks fences nothing.
+        self._lease: Optional[Any] = None
         self._used_before: Optional[int] = None
         self._edges_before: int = 0
+        # Whether ``_edges_before`` is a READING or still its 0 placeholder —
+        # the two are indistinguishable on an empty graph, and the scheduler's
+        # convergence test compares this number ACROSS runs, where "unknown"
+        # and "nothing stored" must not read the same.
+        self._edges_before_read: bool = False
         self._calibration: Optional[Dict[str, Any]] = None
         #: What the cube would cost in time, and why Auto stepped off it.
         self._cube_projection: Optional[Dict[str, Any]] = None
@@ -1224,6 +1367,7 @@ class AggregationPipeline:
         self._replica_waits = 0
         self._replica_wait_s = 0.0
         self._replica_holds = 0
+        self._replica_hold_s = 0.0           # every replica hold, added up
         self._replica_max_lag_bytes = 0
         self._repl_state: Dict[str, Any] = {}
         self._repl_state_at = 0.0
@@ -1232,6 +1376,7 @@ class AggregationPipeline:
         # Waiting out a node that is not answering, and what the node said
         # about itself when it came back.
         self._outage_hold_s = _store_outage_hold_s()
+        self._loading_hold_s = _store_loading_hold_s()
         self._outage_holds = 0
         self._outage_s = 0.0
         #: When the CURRENT outage began, or None while the store answers.
@@ -1258,9 +1403,20 @@ class AggregationPipeline:
         self._hold_max_s = _store_hold_max_s()
         self._expected_replicas: Optional[int] = None
         self._node_config: Optional[Dict[str, Optional[int]]] = None
+        self._server_limits: Optional[Dict[str, Optional[int]]] = None
         self._container_env_bytes = container_memory_bytes_env()
         self._gov_reading: Optional[ShardMemory] = None
         self._gov_read_at = 0.0
+        # The last reading that ANSWERED, and how many since have not. A
+        # node mid-fork stops answering INFO — the fork stalls the main
+        # thread that would answer — so silence is read as the last
+        # measured reading while that is fresh and as a hold of its own
+        # past it, never as permission to write at full speed. The measured
+        # endpoint is also sticky: a reading that times out does not move
+        # the graph, and re-keying the write slot and the read-pressure
+        # lookup onto the connection seed on a blip loses both.
+        self._gov_measured: Optional[ShardMemory] = None
+        self._gov_unmeasured = 0
         # (bytes, count) other rebuilds hold in the node's reservation
         # ledger, refreshed with the governor's reading. ``(0, 0)`` means
         # this run has the node to itself — or that there is no bus to ask,
@@ -1519,6 +1675,12 @@ class AggregationPipeline:
         state = await self._replication_state()
         attached = int(state.get("connectedReplicas") or 0)
         if attached <= 0:
+            if self._expected_replicas:
+                # The run started with replicas and the node reports none:
+                # they were DROPPED, which is the case the hold exists for,
+                # not a shard that never had any. Same reading as
+                # ``_hold_for_replicas`` makes, and it must not differ.
+                return await self._hold_for_replicas(want)
             if not self._no_replicas_logged:
                 self._no_replicas_logged = True
                 logger.info(
@@ -1577,16 +1739,31 @@ class AggregationPipeline:
                 # to wait for, and nothing this batch could have dropped.
                 break
             held = time.monotonic() - started
-            if held >= self._hold_max_s:
+            # Per episode AND cumulatively, for the same reason the write
+            # governor's bound is: this clock starts inside one write batch,
+            # and replicas that catch up just enough to let one through
+            # reset it for ever.
+            total = self._replica_hold_s + held
+            # A replica that is ABSENT may be a rotated pod replaying its
+            # dataset, which takes up to an hour — the same case, and the
+            # same budget, as the governor's replica_lost hold. A replica
+            # that is merely BEHIND is a live node that is not keeping up,
+            # and half an hour of that is already generous.
+            hold_max = _hold_max_for(
+                "replica_lost" if attached <= 0 else "replica_lag", self._hold_max_s,
+            )
+            if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:
                 what = (
                     f"its replicas gone (the run started with {self._expected_replicas})"
                     if attached <= 0 else
                     f"{attached} replica(s) still behind"
                     + (f" by up to {lag:,} bytes" if lag else "")
                 )
+                self._replica_hold_s = total
                 raise MaterializationStoreUnstable(
                     f"the graph store node {self._store_endpoint()} spent "
-                    f"{held / 60:.0f} minute(s) with {what}. The run keeps its "
+                    f"{held / 60:.0f} minute(s) ({total / 60:.0f} in total this "
+                    f"run) with {what}. The run keeps its "
                     f"checkpoint — check the replicas from Admin → Graph store "
                     f"and Resume the job once they are attached and in sync."
                 )
@@ -1618,6 +1795,7 @@ class AggregationPipeline:
             if acked is None or acked >= waiting_on:
                 break
         held = time.monotonic() - started
+        self._replica_hold_s += held
         if held >= 60.0:
             self._pressure_log.append({
                 "scan": "apply", "kind": "replica_lag",
@@ -1643,6 +1821,19 @@ class AggregationPipeline:
         # the CONFIG round trips and the slot-map refresh.
         self._gov_reading = await self._read_shard(include_config=self._node_config is None)
         self._gov_read_at = time.monotonic()
+        if self._gov_reading.source == "measured":
+            self._gov_measured = self._gov_reading
+            self._gov_unmeasured = 0
+            # The one place this pod's slot envs and the node's real
+            # THREAD_COUNT are both in hand. Logs once per node; never
+            # raises — see check_slot_sizing.
+            from backend.app.services.aggregation.admission import check_slot_sizing
+
+            check_slot_sizing(
+                self._gov_reading.endpoint, self._gov_reading.thread_count,
+            )
+        else:
+            self._gov_unmeasured += 1
         # Who ELSE is writing this node, on the same cadence. The pacing
         # floor below is for a node this run has to itself: N rebuilds each
         # reading the same free memory each conclude they may write at the
@@ -1653,11 +1844,21 @@ class AggregationPipeline:
         return self._gov_reading
 
     def _gov_node(self) -> Optional[str]:
-        """The node the governor's last reading named, for the write-slot
-        key. ``None`` when nothing has been measured — the slot then falls
-        back to the connection's endpoint, exactly as before."""
+        """The node the governor last MEASURED — the key for the write
+        slot, the reservation ledger and the read-pressure lookup.
+
+        Sticky through an unanswered reading on purpose. It used to fall
+        back the moment one ``INFO`` did not come back, and on a cluster
+        that re-keys onto the connection SEED: two rebuilds on one master
+        stop sharing ``agg:writeslots:<master>``, the ledger stops seeing
+        the other's reservation, and read-pressure yielding stops working
+        altogether, because the web tier stamps the OWNER node's key and
+        never the seed. ``None`` only until the first reading answers — the
+        slot then falls back to the connection's endpoint, as before."""
         reading = self._gov_reading
         if reading is None or reading.source != "measured":
+            reading = self._gov_measured
+        if reading is None:
             return None
         return reading.endpoint or None
 
@@ -1665,11 +1866,55 @@ class AggregationPipeline:
         """Why the next batch must wait, if it must. ``replicaAckMin`` 0 —
         the operator's escape hatch, live on the running job — turns the
         replica reasons off; a fork and the memory line are about the
-        master's own survival and no knob waves them through."""
-        return hold_reason(
-            shard, expected_replicas=self._expected_replicas,
-            watch_replicas=self._live_replica_ack_min() > 0,
-        )
+        master's own survival and no knob waves them through.
+
+        What an UNANSWERED reading means is decided here rather than in
+        :func:`hold_reason`, which is pure and has one reading to look at.
+        A node that stops answering ``INFO`` is very often a node mid-fork
+        — the fork stalls the main thread that would have answered — so
+        reading silence as "nothing is wrong" walked the rebuild straight
+        into the case the hold exists for. Instead: while the last measured
+        reading is still fresh it is re-asked, because a fork seen five
+        seconds ago is still a fork; past that, the silence itself holds.
+        That hold is bounded by ``AGGREGATION_HOLD_MAX_SECS`` like every
+        other, so it cannot deadlock the run — it stops for a person with
+        the checkpoint intact."""
+        watch = self._live_replica_ack_min() > 0
+        if shard.source == "measured":
+            return hold_reason(
+                shard, expected_replicas=self._expected_replicas,
+                watch_replicas=watch,
+            )
+        last = self._gov_measured
+        if last is None:
+            # This run has never had a reading of this node, so there is no
+            # change to react to. An instance that does not answer ``INFO``
+            # at all — a managed service, an ACL without it, no maxmemory —
+            # is the documented fallback where the static cap governs, and
+            # a measurement must never fail a job on its own (see the
+            # ``shard_capacity`` module docstring). Holding here would stop
+            # every run on such a deployment waiting for something that was
+            # never going to arrive.
+            return None
+        age = shard.observed_at - last.observed_at
+        if age < _GOVERNOR_READING_GRACE_S:
+            reason = hold_reason(
+                last, expected_replicas=self._expected_replicas,
+                watch_replicas=watch,
+            )
+            if reason is None:
+                return None
+            kind, detail = reason
+            return kind, (
+                f"{detail} — as measured {age:.0f}s ago; the node has not "
+                f"answered INFO since"
+            )
+        if self._gov_unmeasured >= _GOVERNOR_UNMEASURED_HOLDS_AFTER:
+            endpoint = self._gov_node() or shard.endpoint
+            return "unmeasured", (
+                f"{endpoint} did not answer INFO ×{self._gov_unmeasured}"
+            )
+        return None
 
     async def _govern_write(self) -> float:
         """Hold the next write batch while the node is outside the envelope.
@@ -1708,15 +1953,24 @@ class AggregationPipeline:
                     "aggregation pipeline on %s: holding the next write batch — %s. "
                     "Writing through this is how a rebuild takes a node down; the "
                     "run waits (up to %d min per hold) and carries on from where it is.",
-                    self.p._graph_name, detail, self._hold_max_s // 60,
+                    self.p._graph_name, detail, _hold_max_for(kind, self._hold_max_s) // 60,
                 )
             held = time.monotonic() - started
-            if held >= self._hold_max_s:
+            # Per episode AND cumulatively for the same reason. This clock
+            # starts inside one write batch, so a master cycling BGSAVE →
+            # clear → AOF rewrite lets a batch through per cycle and resets
+            # it every time: hours held, the bound never reached.
+            total = self._store_hold_s.get(kind, 0.0) + held
+            # Per REASON, because a missing replica is the one whose honest
+            # duration is a node restart — see _hold_max_for.
+            hold_max = _hold_max_for(kind, self._hold_max_s)
+            if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:
                 self._record_hold(kind, held, detail)
                 raise MaterializationStoreUnstable(
                     f"the graph store node {shard.endpoint} stayed outside the "
                     f"envelope a rebuild may write inside for {held / 60:.0f} "
-                    f"minute(s) — {detail}. The run keeps its checkpoint. Check "
+                    f"minute(s) ({total / 60:.0f} in total this run) — {detail}. "
+                    f"The run keeps its checkpoint. Check "
                     f"the node (a fork that never finished, a replica that never "
                     f"came back, memory past the container's line) and Resume "
                     f"the job once it is steady."
@@ -1809,7 +2063,14 @@ class AggregationPipeline:
 
     def _note_easing(self, shard: ShardMemory) -> None:
         """Halve the batch ceiling and double the pause while the node is
-        nearing a hold line; back to the settings once the reading is."""
+        nearing a hold line; back to the settings once the reading is.
+
+        A reading that did not answer says nothing and must change
+        nothing. It used to CLEAR ``_eased`` (and ``_roomy``), so a node
+        being eased escalated — full batch ceiling, half the pause — the
+        moment it stopped answering."""
+        if shard.source != "measured":
+            return
         roomy = self._is_roomy(shard)
         if roomy != self._roomy:
             self._roomy = roomy
@@ -1826,6 +2087,8 @@ class AggregationPipeline:
             return
         if reason is not None:
             self._eases[reason] = self._eases.get(reason, 0) + 1
+            _metric("aggregation_governor_eases_total", reason=reason,
+                    node=self._gov_node() or "unknown")
             logger.info(
                 "aggregation pipeline on %s: easing off — %s on %s; half the batch "
                 "ceiling and twice the pause until the reading is back.",
@@ -1931,13 +2194,27 @@ class AggregationPipeline:
             )
             self._on_pressure(op, "connection", 0, 0, size=0)
         waited = time.monotonic() - self._outage_since
-        if waited >= self._outage_hold_s:
+        # A node that says it is loading has told us it is coming back, so
+        # it gets the longer budget. Re-checked every hold rather than
+        # latched: a node that starts replaying and then dies drops back to
+        # the shorter one, and one that begins answering -LOADING part way
+        # through an outage earns the longer one from then on.
+        replaying = self._exc_is_replay(exc)
+        budget = self._loading_hold_s if replaying else self._outage_hold_s
+        if waited >= budget:
             raise MaterializationStoreUnreachable(
                 f"the graph store node {endpoint} did not answer for "
                 f"{waited / 60:.0f} minute(s) during {op} ({type(exc).__name__}: "
                 f"{str(exc)[:160]}). The run keeps its checkpoint — Resume it "
                 f"once the node is back, and check whether the container was "
                 f"killed for memory or by its health probe."
+                + (
+                    f" It was still replaying its dataset when the "
+                    f"{budget / 60:.0f}-minute wait ran out; raise "
+                    f"AGGREGATION_STORE_LOADING_HOLD_S if this shard's replay "
+                    f"legitimately takes longer."
+                    if replaying else ""
+                )
             )
         self._outage_holds += 1
         self._outage_holds_now += 1
@@ -1953,6 +2230,18 @@ class AggregationPipeline:
         if reconnect is not None:
             await reconnect()
         await self._note_node_identity(endpoint)
+
+    @staticmethod
+    def _exc_is_replay(exc: BaseException) -> bool:
+        """Whether this failure is a node REPLAYING rather than one gone.
+
+        Both shapes reach here: the raw ``-LOADING`` reply, and the
+        ``ProviderLoading`` the provider converts it into.
+        """
+        from backend.common.adapters import ProviderLoading
+        from backend.app.providers.falkordb_provider import _is_loading_error
+
+        return isinstance(exc, ProviderLoading) or _is_loading_error(exc)
 
     def _store_endpoint(self) -> str:
         shard = self._last_budget.shard if self._last_budget is not None else None
@@ -2069,6 +2358,8 @@ class AggregationPipeline:
             lease = await admission.acquire_graph_lease(
                 self.p, owner=self._job_id,
             )
+        # Kept on the instance so ``_cancel_check`` can see it go.
+        self._lease = lease
         try:
             # Persist a parseable cursor IMMEDIATELY — before any graph
             # work — so an early crash resumes instead of restarting with
@@ -2127,6 +2418,7 @@ class AggregationPipeline:
                 self._reservation = None
             if admission is not None and lease is not None:
                 await admission.release_graph_lease(lease)
+            self._lease = None
 
     # -- shared helpers ------------------------------------------------------
 
@@ -2415,6 +2707,20 @@ class AggregationPipeline:
                 job_id="<aggregation-pipeline>",
                 observed_at=datetime.now(timezone.utc).isoformat(),
             )
+        # A lost per-graph write lease has to reach the RUN. Stopping the
+        # background renewal is not enough: this graph may already be
+        # another rebuild's, and two runs MERGEing the same pairs leave a
+        # stored weight that is neither run's computed weight. Checked here
+        # because every phase and every write path already calls this.
+        lease = getattr(self, "_lease", None)
+        if lease is not None and getattr(lease, "lost", False):
+            raise MaterializationStoreUnstable(
+                f"the per-graph write lease on {self.p._graph_name} was lost "
+                f"({lease.lost_reason}) — another rebuild may now own this "
+                f"graph, so this run stopped rather than write alongside it. "
+                f"The run keeps its checkpoint; Resume it once no other job "
+                f"is running against this data source."
+            )
 
     async def _checkpoint(
         self, phase: str, pos: int, *, phase_label: str,
@@ -2438,6 +2744,15 @@ class AggregationPipeline:
             self._writes, phase_label,
         )
         live_stats: Dict[str, Any] = {"writes": self._writes, "deletes": self._deletes}
+        # What the graph already STORED when this run started. Durable on
+        # every checkpoint, so a run the watchdog kills still leaves it: the
+        # reconcile breaker compares it across consecutive failed runs to tell
+        # a rebuild too large for one wall clock (the stored cube grows every
+        # attempt) from one that writes the same cells and dies (it does not).
+        # ``writes`` cannot answer that — APPLY re-MERGEs cells RECONCILE did
+        # not find, so a stuck run writes every time while storing nothing new.
+        if self._edges_before_read:
+            live_stats["edges_before"] = int(self._edges_before)
         # Which graph store node this run is writing. It is on the run's own
         # record rather than only inside ``write_budget`` because it is the
         # answer to "what else is on this shard right now", which is asked
@@ -2537,6 +2852,13 @@ class AggregationPipeline:
         # envelope, and the wait holds no write slot — another rebuild on
         # the same node decides for itself from its own reading.
         await self._govern_write()
+        # Then the fence, AFTER the hold rather than before it: a hold runs
+        # for up to half an hour, and the run that took this graph over in
+        # the meantime is writing the same :AGGREGATED edges the moment
+        # this batch lands. ``_cancel_check`` is the one place that reads a
+        # lost lease, so the fence is the same signal every phase uses — a
+        # second mechanism here would be one more thing to keep in step.
+        self._cancel_check()
         admission = getattr(self.p, "_admission_controller", None)
         t0 = time.monotonic()
         if admission is not None:
@@ -3682,10 +4004,14 @@ class AggregationPipeline:
         holds NOW and never cached: a failover rebuilds that client, and
         re-reading is what follows it.
 
-        ``include_config`` is the full reading — the node's drop limits and
-        a slot-map refresh — which the budget wants; the governor's
-        per-batch reading passes False and carries the run's once-per-run
-        facts onto it instead."""
+        ``include_config`` is the full reading — the node's own limits, its
+        drop limits and a slot-map refresh — which the budget wants; the
+        governor's per-batch reading passes False and carries the run's
+        once-per-run facts onto it instead.
+
+        Both spend ``AGGREGATION_GOVERNOR_READ_TIMEOUT_S``: a reading that
+        gives up before the node's main thread is free again reports
+        "unavailable" for the very condition it exists to see."""
         p = self.p
         dedicated = getattr(p, "_projection_mode", None) == "dedicated"
         db = (getattr(p, "_proj_db", None) if dedicated else None) or getattr(p, "_db", None)
@@ -3693,16 +4019,16 @@ class AggregationPipeline:
         cfg = getattr(p, "_conn_cfg", None)
         shard = await read_shard_memory(
             db, mode=getattr(cfg, "mode", None), graph_key=key,
-            timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            timeout=_governor_read_timeout_s(),
             include_config=include_config, refresh=include_config,
         )
         return self._complete_reading(shard, include_config=include_config)
 
     def _complete_reading(self, shard: ShardMemory, *, include_config: bool) -> ShardMemory:
         """Carry the run's once-per-run facts onto a reading: the node's
-        drop limits (read with the first full reading, reused after), the
-        container limit the pod is killed at, and how many replicas the
-        run started with."""
+        own limits and its drop limits (read with the first full reading,
+        reused after), the container limit the pod is killed at, and how
+        many replicas the run started with."""
         if shard.source != "measured":
             return shard
         if include_config:
@@ -3710,11 +4036,16 @@ class AggregationPipeline:
                 "repl_backlog_bytes": shard.repl_backlog_bytes,
                 "replica_outbuf_hard_bytes": shard.replica_outbuf_hard_bytes,
             }
-        elif self._node_config:
-            carried = {
-                name: value for name, value in self._node_config.items()
-                if value is not None and getattr(shard, name) is None
+            self._server_limits = {
+                name: getattr(shard, name) for name in _SERVER_LIMIT_FIELDS
             }
+        else:
+            carried = {}
+            for known in (self._node_config, self._server_limits):
+                carried.update({
+                    name: value for name, value in (known or {}).items()
+                    if value is not None and getattr(shard, name) is None
+                })
             if carried:
                 shard = dataclasses.replace(shard, **carried)
         if shard.container_limit_bytes is None:
@@ -3824,6 +4155,7 @@ class AggregationPipeline:
         the calibration on a FRESH run only (a resumed run's start is gone).
         Also the run's first look at how the write node replicates."""
         self._edges_before = await self._count_aggregated()
+        self._edges_before_read = True
         if self._fresh_run:
             shard = await self._read_shard()
             self._used_before = shard.used if shard.measurable else None
@@ -3842,9 +4174,19 @@ class AggregationPipeline:
         """
         state = await self._replication_state()
         attached = int(state.get("connectedReplicas") or 0)
-        if self._expected_replicas is None:
+        if self._expected_replicas is None and state.get("role"):
             # What the run started with: fewer attached later is a replica
             # the rebuild lost, and the governor holds for its return.
+            #
+            # Only from a reading that ANSWERED. ``replication_state``
+            # returns {} on any failure, which is indistinguishable here
+            # from a master with no replicas — and seeding 0 from it
+            # disables the replica-lost hold for the whole run, since
+            # ``hold_reason`` gates that reason on a truthy
+            # ``expected_replicas``. One timeout at run start was enough,
+            # and on a RESUMED run this is the only initialiser. Left None,
+            # the first measured governor reading sets it in
+            # ``_complete_reading`` instead.
             self._expected_replicas = attached
         if attached <= 0:
             return
@@ -4385,9 +4727,16 @@ class AggregationPipeline:
                 composition = f"{composition}; {note}"
             _metric('aggregation_write_budget_refusals_total',
                     node=self._gov_node() or 'unknown')
-            raise MaterializationBudgetExceeded(format_refusal(
-                budget, verdict, graph=self.p._graph_name, composition=composition,
-            ))
+            raise MaterializationBudgetExceeded(
+                format_refusal(
+                    budget, verdict, graph=self.p._graph_name,
+                    composition=composition,
+                ),
+                # ``projected`` IS the exact cell count this run computed, and
+                # the upper bound was counted during EXTRACT. Both are in hand
+                # exactly here, and this is the last place they exist.
+                cell_ratio_observed=self._observed_cell_ratio(projected),
+            )
         # Passed: hold what is still to land in the node's ledger.
         await self._reserve(budget.shard, int(verdict.needed_bytes or 0))
 

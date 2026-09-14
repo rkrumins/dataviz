@@ -26,6 +26,7 @@ spare finishes in twice the wall clock for no one's benefit.
 from __future__ import annotations
 
 import asyncio
+import json
 import types
 
 import pytest
@@ -261,6 +262,32 @@ def test_auto_steps_off_a_cube_the_job_could_not_finish_writing():
     assert proj["rate"] == "last run" and proj["seconds"] > proj["wall_budget_s"]
 
 
+def test_the_edge_cap_cannot_drift_past_what_the_clock_allows(monkeypatch):
+    """The cap and the projection answer the same question, so they may not
+    contradict each other.
+
+    25M was a count the apply provably could not reach: it needs a 500-row
+    batch to cost ≤ 0.839 s at pacing ratio 1.0, against the 1.0 s the AIMD
+    sizer steers toward — and ≤ 0.336 s once the read-pressure ratio is in
+    force, which with hundreds of concurrent readers is the steady state,
+    not the exception. A backstop that cannot fire is not a backstop.
+    """
+    monkeypatch.delenv("AGGREGATION_MAX_MATERIALIZED_EDGES", raising=False)
+
+    def _reachable():
+        return mat._APPLY_ROWS_PER_S_DEFAULT * mat._APPLY_WALL_SHARE * mat._max_wall_secs()
+
+    assert mat._max_materialized_edges() <= _reachable()
+    # And it tracks the clock rather than sitting at a number that happens
+    # to be under it today: halve the wall clock, halve what may be written.
+    monkeypatch.setenv("AGGREGATION_JOB_MAX_WALL_SECS", "43200")
+    assert mat._max_materialized_edges() <= _reachable()
+    # An operator who has measured a faster apply still overrides it — the
+    # derivation is the DEFAULT, not a bound on the knob.
+    monkeypatch.setenv("AGGREGATION_MAX_MATERIALIZED_EDGES", "40000000")
+    assert mat._max_materialized_edges() == 40_000_000
+
+
 def test_the_appetite_ceiling_defaults_to_its_bound_so_it_does_not_decide(monkeypatch):
     monkeypatch.delenv("AGGREGATION_MAX_CUBE_EDGES", raising=False)
     assert mat._max_cube_edges() == 50_000_000
@@ -268,49 +295,90 @@ def test_the_appetite_ceiling_defaults_to_its_bound_so_it_does_not_decide(monkey
     assert mat._max_cube_edges() == 1_000_000     # an operator's ceiling still binds
 
 
-# ── a retry that wrote is converging, not stuck ──────────────────────────
+# ── converging means the STORED cube grew, not that the run wrote ────────
 
 
 class _Rows:
-    def __init__(self, row):
-        self._row = row
+    def __init__(self, rows):
+        self._rows = rows
 
-    def first(self):
-        return self._row
+    def all(self):
+        return list(self._rows)
 
 
 class _Session:
-    """A session that answers one SELECT with a fixed row."""
+    """A session answering one SELECT with the last two terminal runs,
+    newest first — the shape ``_converging`` reads."""
 
-    def __init__(self, row=None, raises=False):
-        self._row, self._raises = row, raises
+    def __init__(self, rows=(), raises=False):
+        self._rows, self._raises = rows, raises
 
     async def execute(self, _stmt):
         if self._raises:
             raise RuntimeError("the jobs table is not answering")
-        return _Rows(self._row)
+        return _Rows(self._rows)
 
 
 def _state(ds="ds_1"):
     return types.SimpleNamespace(data_source_id=ds)
 
 
-def test_a_failed_run_that_wrote_rollup_edges_reads_as_converging():
+def _run_row(status, edges_before=None, **extra):
+    doc = dict(extra)
+    if edges_before is not None:
+        doc["edges_before"] = edges_before
+    return (status, json.dumps(doc))
+
+
+def test_converging_is_the_stored_cube_growing_between_attempts():
     """The distinction the breaker needs. A rebuild of a graph too large for
     one wall clock fails in exactly the same SHAPE every time and is the
-    opposite of stuck: APPLY writes only the cells the reconcile scan did
-    not find, and the writes are durable, so every attempt writes strictly
-    less than the last."""
+    opposite of stuck: every attempt STORES cells the one before it did not,
+    and the writes are durable. Each run reads that stored count at its own
+    start, so run N+1's ``edges_before`` is what run N left behind."""
     from backend.app.services.aggregation.scheduler import _converging
 
-    assert _run(_converging(_Session(("failed", '{"writes": 41000}')), _state())) is True
-    assert _run(_converging(_Session(("cancelled", '{"writes": 7}')), _state())) is True
-    # Wrote nothing: the attempt achieved nothing, and the breaker counts it.
-    assert _run(_converging(_Session(("failed", '{"writes": 0}')), _state())) is False
-    assert _run(_converging(_Session(("failed", "{}")), _state())) is False
-    assert _run(_converging(_Session(("failed", None)), _state())) is False
+    grew = (_run_row("failed", 150), _run_row("failed", 100))
+    assert _run(_converging(_Session(grew), _state())) is True
+    assert _run(_converging(_Session(
+        (_run_row("cancelled", 101), _run_row("failed", 100)),
+    ), _state())) is True
+
+    # Stored nothing new: the attempt achieved nothing durable, and the
+    # breaker counts it.
+    flat = (_run_row("failed", 100), _run_row("failed", 100))
+    assert _run(_converging(_Session(flat), _state())) is False
+    # A rebuild that DELETED more than it wrote is not converging either.
+    assert _run(_converging(_Session(
+        (_run_row("failed", 90), _run_row("failed", 100)),
+    ), _state())) is False
     # A run that SUCCEEDED is not a retry at all.
-    assert _run(_converging(_Session(("completed", '{"writes": 9}')), _state())) is False
+    assert _run(_converging(_Session(
+        (_run_row("completed", 150), _run_row("failed", 100)),
+    ), _state())) is False
+
+
+def test_writes_alone_can_no_longer_clear_the_breaker():
+    """THE REGRESSION. ``run_stats.writes`` was the test, and it is wrong in
+    both directions: APPLY re-MERGEs every cell RECONCILE did not find, so a
+    run that dies in the same place writes a healthy number and stores
+    nothing new — forever, because the clear zeroed the count every cycle.
+    Across a genuinely converging sequence ``writes`` goes DOWN."""
+    from backend.app.services.aggregation.scheduler import _converging
+
+    stuck = (
+        _run_row("failed", 100, writes=41000),
+        _run_row("failed", 100, writes=41000),
+    )
+    assert _run(_converging(_Session(stuck), _state())) is False
+
+    # ... and the converse: falling writes over a growing store is exactly
+    # what a converging rebuild looks like.
+    converging = (
+        _run_row("failed", 900_000, writes=120),
+        _run_row("failed", 400_000, writes=9000),
+    )
+    assert _run(_converging(_Session(converging), _state())) is True
 
 
 def test_the_progress_lookup_never_breaks_the_tick():
@@ -319,9 +387,20 @@ def test_the_progress_lookup_never_breaks_the_tick():
     from backend.app.services.aggregation.scheduler import _converging
 
     assert _run(_converging(_Session(raises=True), _state())) is False
-    assert _run(_converging(_Session(("failed", "not json")), _state())) is False
-    assert _run(_converging(_Session(None), _state())) is False
-    assert _run(_converging(_Session(("failed", '{"writes": 1}')), None)) is False
+    assert _run(_converging(_Session(
+        (("failed", "not json"), ("failed", "not json")),
+    ), _state())) is False
+    assert _run(_converging(_Session(()), _state())) is False
+    # One terminal run is no sequence to judge: the first failure is counted.
+    assert _run(_converging(_Session((_run_row("failed", 100),)), _state())) is False
+    # A run that never got far enough to read the stored count carries no
+    # baseline, and guessing one is how a stuck source is cleared forever.
+    assert _run(_converging(_Session(
+        (_run_row("failed", 150), _run_row("failed")),
+    ), _state())) is False
+    assert _run(_converging(_Session(
+        (_run_row("failed", 150), _run_row("failed", 100)),
+    ), None)) is False
 
 
 def test_the_breaker_asks_whether_the_source_is_converging_first():
@@ -335,3 +414,43 @@ def test_the_breaker_asks_whether_the_source_is_converging_first():
     assert "converging = retrying and await _converging(s2, state)" in src
     assert "and not converging" in src
     assert src.index("converging = retrying") < src.index(">= breaker_cap")
+
+
+def test_converging_is_a_budget_and_not_a_licence():
+    """"Converging" cleared the breaker count on EVERY cycle with no total
+    bound, so a source whose stored cube grows by one cell an attempt is
+    progress by that test and a loop by any other — retried every 900s
+    forever with nothing ever asking a person. The clears are counted and
+    capped, and past the cap the source is suspended like any other."""
+    import inspect
+
+    from backend.app.services.aggregation import scheduler
+
+    src = inspect.getsource(scheduler.AggregationScheduler._reconcile_stale_markers)
+    # The cap is consulted BEFORE the clear, and turns converging off rather
+    # than skipping the clear — so the suspend branch below it applies.
+    assert "clears >= _CONVERGING_CLEAR_CAP" in src
+    assert src.index("clears >= _CONVERGING_CLEAR_CAP") < src.index(
+        "state.reconcile_consecutive_actions = 0"
+    )
+    assert "converging = False" in src
+    # Every clear is recorded, or the cap counts nothing.
+    assert "state.reconcile_converging_clears = clears + 1" in src
+    assert scheduler._CONVERGING_CLEAR_CAP > 0
+
+
+def test_the_clear_budget_resets_wherever_the_breaker_does():
+    """A stale clear count would suspend a source that has since rebuilt
+    cleanly, or survive a person's manual resume — both of which read as the
+    breaker refusing to reset."""
+    import inspect
+
+    from backend.app.services.aggregation import reconcile_sweeper, service
+
+    for src in (
+        inspect.getsource(service.AggregationService.reset_source_breaker),
+        inspect.getsource(reconcile_sweeper.ReconciliationSweeper),
+    ):
+        assert "reconcile_converging_clears = 0" in src
+    # And the fleet-wide "resume everything" statement.
+    assert "reconcile_converging_clears=0" in inspect.getsource(service)

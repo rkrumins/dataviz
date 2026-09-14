@@ -71,7 +71,11 @@ export function FreshnessGroupHeader({
         }
         : {
             total,
-            cached: rows.filter(r => r.cacheAsOf != null).length,
+            // Something warm is actually STORED — not merely "this source
+            // has been invalidated at some point", which is what the
+            // generation stamp answers and which every source that has
+            // ever been rebuilt satisfies forever.
+            cached: rows.filter(r => r.cacheBuiltAt != null).length,
             ready: rows.filter(r => r.aggregationStatus === 'ready').length,
             rebuilding: rows.filter(isRebuilding).length,
             notBuilt: rows.filter(isNeverBuilt).length,

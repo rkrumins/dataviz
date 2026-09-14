@@ -146,3 +146,57 @@ describe('GraphStoreCapacity', () => {
         expect(await screen.findByText(/Capacity could not be measured right now/, {}, { timeout: 5000 })).toBeInTheDocument()
     })
 })
+
+describe('GraphStoreCapacity — collapsing it', () => {
+    beforeEach(() => {
+        try { localStorage.clear() } catch { /* not every environment has one */ }
+    })
+
+    it('opens expanded and collapses to a summary that still names the tightest shard', async () => {
+        const user = userEvent.setup()
+        wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+
+        const toggle = await screen.findByTestId('capacity-toggle')
+        expect(toggle).toHaveAttribute('aria-expanded', 'true')
+        await screen.findByRole('meter', { name: /10\.0\.0\.1:6379/ })
+
+        await user.click(toggle)
+        expect(toggle).toHaveAttribute('aria-expanded', 'false')
+        // The body is hidden, not unmounted — `hidden` keeps it out of the
+        // accessibility tree, which is what a screen reader needs.
+        expect(screen.queryByRole('meter')).not.toBeInTheDocument()
+
+        // Collapsed still has to be worth reading: hiding a shard that is
+        // nearly full behind a chevron is how a rebuild gets refused by a
+        // number nobody saw.
+        const summary = screen.getByTestId('capacity-collapsed-summary')
+        expect(summary).toHaveTextContent(/tightest 10\.0\.0\.1:6379 with 2\.0 GB free/)
+        expect(summary).toHaveTextContent(/not placed/)
+    })
+
+    it('remembers the choice for this viewer, and survives storage being unavailable', async () => {
+        const user = userEvent.setup()
+        const { unmount } = wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+        await user.click(await screen.findByTestId('capacity-toggle'))
+        expect(localStorage.getItem('freshness.capacity.collapsed')).toBe('true')
+        unmount()
+
+        wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+        expect(await screen.findByTestId('capacity-toggle')).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('renders open when storage throws, rather than not at all', async () => {
+        const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+            throw new Error('site data blocked')
+        })
+        try {
+            wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+            // Open is the state that shows the numbers, so it is the one to
+            // fail into.
+            expect(await screen.findByTestId('capacity-toggle'))
+                .toHaveAttribute('aria-expanded', 'true')
+        } finally {
+            getItem.mockRestore()
+        }
+    })
+})

@@ -7,6 +7,41 @@ import { extendStallPatch } from '@/components/admin/job-history/timeLimits';
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
 
+/**
+ * Statuses no amount of polling will change.
+ *
+ * `none` means aggregation was never configured; `skipped` and `cancelled`
+ * mean a person decided; `failed` stays failed until someone acts. The Skip
+ * and Re-aggregate buttons below set their own state and bump `pollEpoch`, so
+ * the poll restarts when something actually starts.
+ */
+const TERMINAL_STATUSES = new Set(['none', 'skipped', 'cancelled', 'failed']);
+
+const IN_PROGRESS_BODY =
+  'We are pre-computing structural hierarchies to optimize deep graph queries. View creation is paused until this completes.';
+
+const HEADINGS: Record<string, string> = {
+  failed: 'Aggregation Failed',
+  running: 'Aggregating Graph Lineage...',
+  pending: 'Preparing Aggregation...',
+  none: 'Aggregation Not Set Up',
+  skipped: 'Aggregation Skipped',
+  cancelled: 'Aggregation Cancelled',
+};
+
+/**
+ * What each settled state actually means. The spinner copy — "we are
+ * pre-computing … view creation is paused until this completes" — used to be
+ * shown for ALL of these, so a source somebody had deliberately skipped
+ * claimed work was in flight and views were blocked. Both halves were false,
+ * and neither would ever have resolved.
+ */
+const BODIES: Record<string, string> = {
+  none: 'Aggregation has not been set up for this source. Views can still be created; rolled-up connections will not appear until it runs.',
+  skipped: 'Aggregation was skipped for this source. Views work as normal — rolled-up connections between items just will not appear. Re-aggregate below to compute them.',
+  cancelled: 'The last aggregation run was cancelled, so rolled-up connections may be missing or out of date. Nothing is running now.',
+};
+
 export function AggregationProgressBanner({
   dataSourceId,
   onStatusChange
@@ -42,10 +77,13 @@ export function AggregationProgressBanner({
             return res;
           });
           onStatusChange(res.isReady);
-          // Terminal states — polling can't change them: ready (drift
-          // included; it's steady-state until the user re-aggregates)
-          // and failed (stays failed until the user acts).
-          if (res.isReady || res.aggregationStatus === 'failed') {
+          // Terminal states — polling can't change them. `isReady` is only
+          // `status === 'ready'`, so it covers exactly one of them: `none`,
+          // `skipped`, `cancelled` and `failed` are every bit as settled, and
+          // without them listed here the 5s poll ran forever — on an end-user
+          // surface, from backgrounded tabs, for a source somebody had just
+          // explicitly skipped.
+          if (res.isReady || TERMINAL_STATUSES.has(res.aggregationStatus)) {
             clearInterval(pollInterval);
           }
         }
@@ -128,23 +166,22 @@ export function AggregationProgressBanner({
               <AlertCircle className="w-5 h-5 text-red-500" />
             ) : readiness.aggregationStatus === 'ready' || readiness.aggregationStatus === 'skipped' ? (
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+            ) : TERMINAL_STATUSES.has(readiness.aggregationStatus) ? (
+              // Settled, not working. A spinner here said something was in
+              // flight for a source where nothing was, and never stopped.
+              <AlertCircle className="w-5 h-5 text-amber-500" />
             ) : (
               <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
             )}
           </div>
           <div>
             <h3 className="text-sm font-semibold text-ink">
-              {readiness.aggregationStatus === 'failed' ? 'Aggregation Failed' : 
-               readiness.aggregationStatus === 'running' ? 'Aggregating Graph Lineage...' : 
-               readiness.aggregationStatus === 'pending' ? 'Preparing Aggregation...' : 
-               'Aggregation Status: ' + readiness.aggregationStatus}
+              {HEADINGS[readiness.aggregationStatus] ?? ('Aggregation Status: ' + readiness.aggregationStatus)}
             </h3>
             <p className="text-xs text-ink-muted mt-0.5 max-w-xl">
-              {readiness.aggregationStatus === 'failed' ? (
-                activeJob?.errorMessage ? friendlyError(activeJob.errorMessage) : 'An unknown error occurred during aggregation.'
-              ) : (
-                'We are pre-computing structural hierarchies to optimize deep graph queries. View creation is paused until this completes.'
-              )}
+              {readiness.aggregationStatus === 'failed'
+                ? (activeJob?.errorMessage ? friendlyError(activeJob.errorMessage) : 'An unknown error occurred during aggregation.')
+                : (BODIES[readiness.aggregationStatus] ?? IN_PROGRESS_BODY)}
             </p>
           </div>
         </div>

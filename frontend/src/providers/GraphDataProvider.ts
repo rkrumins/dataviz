@@ -265,6 +265,34 @@ export interface AggregatedEdgeRequest {
     containmentEdgeTypes?: string[]
 }
 
+/** One canvas open, asked for in one request. See `canvasBootstrap`. */
+export interface CanvasBootstrapRequest {
+    /** The roots leg, as the canvas actually asks it: the nodes it NAMES.
+     *  Omit for the structural "no incoming containment edge" page. */
+    rootQuery?: {
+        urns?: string[]
+        entityTypes?: string[]
+        limit?: number
+        offset?: number
+        includeChildCount?: boolean
+    }
+    /** What is already painted. The edges and aggregated legs cover
+     *  roots ∪ this, which is what getEdgesBetween(new ∪ existing) asks for. */
+    visibleUrns?: string[]
+    includeAggregated?: boolean
+    lineageEdgeTypes?: string[]
+    containmentEdgeTypes?: string[]
+    limit?: number
+    cursor?: string | null
+}
+
+export interface CanvasBootstrapResult {
+    roots: { nodes: GraphNode[]; totalCount?: number | null; hasMore: boolean }
+    edges: GraphEdge[]
+    aggregated?: AggregatedEdgeResult | null
+    providerHealth?: string
+}
+
 export interface AggregatedEdgeInfo {
     id: string
     sourceUrn: string
@@ -1006,6 +1034,20 @@ export interface GraphDataProvider {
      * Enables progressive edge disclosure in the UI
      */
     getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult>
+
+    /**
+     * One request for a canvas open: the root page, the edges among that set,
+     * and the aggregated lineage among it.
+     *
+     * Replaces getNodes + getEdgesBetween (+ getAggregatedEdges) with a
+     * single round trip. The three fire together on every open and queue on
+     * the browser's six HTTP/1.1 connections, so over real RTT the saving is
+     * the queueing, not the query time.
+     *
+     * Optional: a provider that does not implement it leaves the caller on
+     * the three calls, which is also the fallback when it fails.
+     */
+    canvasBootstrap?(request: CanvasBootstrapRequest): Promise<CanvasBootstrapResult>
 
     // ==========================================
     // Node Creation

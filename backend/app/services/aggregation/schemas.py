@@ -398,6 +398,22 @@ class InternalTriggerRequest(BaseModel):
         populate_by_name = True
 
 
+class PurgeAggregationRequest(BaseModel):
+    """Body for a purge that is immediately followed by a rebuild.
+
+    ``reaggregate`` is the trigger the chained rebuild runs with. The purge
+    worker used to post a bare projection mode and batch size, so an operator
+    who purged from the re-trigger dialog had every override they had just
+    set silently dropped — and on a source that only completes at a narrowed
+    scan width, the rebuild the purge promised could not finish. Absent, the
+    chain keeps its previous defaults.
+    """
+    reaggregate: Optional["ResumeOverrides"] = Field(
+        None,
+        description="Trigger settings for the rebuild chained after the purge.",
+    )
+
+
 class ResumeOverrides(BaseModel):
     """Optional parameter overrides applied to a job before resuming it.
 
@@ -857,7 +873,23 @@ class FreshnessRow(BaseModel):
     aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
     last_materialized_at: Optional[str] = Field(None, alias="lastMaterializedAt")
-    cache_as_of: Optional[str] = Field(None, alias="cacheAsOf")
+    cache_as_of: Optional[str] = Field(
+        None, alias="cacheAsOf",
+        description="When this source's cache was last INVALIDATED (the last "
+                    "generation bump). Not when it was last filled.",
+    )
+    cache_built_at: Optional[str] = Field(
+        None, alias="cacheBuiltAt",
+        description="When a compute was last STORED for this source. Carries "
+                    "the entries' own TTL, so its absence means there is "
+                    "nothing warm left to serve.",
+    )
+    cache_built_generation: Optional[str] = Field(
+        None, alias="cacheBuiltGeneration",
+        description="The cache version that stored answer was built at. "
+                    "Behind `generation` means the newest readers are "
+                    "recomputing.",
+    )
     generation: Optional[int] = None
     stale_reason: Optional[str] = Field(None, alias="staleReason")
     # The marker carries no reliable "since": its TTL is a 7-day backstop
@@ -1049,7 +1081,10 @@ class FreshnessSummary(BaseModel):
     not_built: int = Field(0, alias="notBuilt")  # status in ("none","skipped") or no state row
     recomputing: int = Field(0)  # stale marker present
     needs_attention: int = Field(0, alias="needsAttention")  # marker, failed, drifting, or suspended
-    cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
+    #: Sources with something WARM stored (cacheBuiltAt non-null) — not
+    #: sources that have been invalidated at some point, which is every
+    #: source that has ever been rebuilt.
+    cache_stamped: int = Field(0, alias="cacheStamped")
     # driftState is a drifting/overlayMissing verdict from the last sweep.
     drifting: int = Field(0)
     # Circuit breaker tripped — automation stopped; a person has to look.
@@ -1995,3 +2030,7 @@ class BatchStatus(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# ``reaggregate`` forward-references ResumeOverrides, defined below it.
+PurgeAggregationRequest.model_rebuild()

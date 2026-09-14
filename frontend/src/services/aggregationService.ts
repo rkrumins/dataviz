@@ -487,7 +487,7 @@ export interface JobHistoryFilters {
 export interface DataSourceReadinessResponse {
   dataSourceId: string;
   isReady: boolean;
-  aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped';
+  aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped' | 'cancelled';
   canCreateViews: boolean;
   activeJob?: AggregationJobResponse;
   driftDetected: boolean;
@@ -520,6 +520,17 @@ export interface DataSourceReadinessResponse {
    *  under the same three unknown cases as `projectorCurrent`. */
   projectionCommitsBehind?: number | null;
   message: string;
+}
+
+/**
+ * The two catch-up fields on their own, from a route that reads nothing but
+ * the TTL-cached projection map. Same contract as the identically-named
+ * fields on readiness: null is UNKNOWN, never healthy.
+ */
+export interface ProjectionHealthResponse {
+  dataSourceId: string;
+  projectorCurrent?: boolean | null;
+  projectionCommitsBehind?: number | null;
 }
 
 export interface DriftCheckResponse {
@@ -838,6 +849,23 @@ class AggregationService {
     );
   }
 
+  /**
+   * Just "is this source's projection behind, and by how much".
+   *
+   * The canvas's catch-up notice used to read these two fields off
+   * `/readiness`, which on a READY source resolves the provider, reads the
+   * run meta and computes a graph fingerprint — three sequential 5s waits
+   * holding a graph-read session and issuing real queries on the shard. That
+   * poll only arms once a read came back short, so it was guaranteed to be
+   * running during exactly the degradation it was reporting on. This one
+   * answers from a TTL-cached control-plane read and touches no graph store.
+   */
+  async getProjectionHealth(dataSourceId: string): Promise<ProjectionHealthResponse> {
+    return authFetch<ProjectionHealthResponse>(
+      `/api/v1/admin/data-sources/${dataSourceId}/projection-health`
+    );
+  }
+
   async listJobs(dataSourceId: string, status?: string): Promise<AggregationJobResponse[]> {
     const query = status ? `?status=${status}` : '';
     return authFetch<AggregationJobResponse[]>(
@@ -920,7 +948,14 @@ class AggregationService {
    */
   async purgeAggregation(
     dataSourceId: string,
-    opts?: { skipReaggregate?: boolean },
+    opts?: {
+      skipReaggregate?: boolean
+      /** Settings for the rebuild chained after the purge. Without this the
+       *  chain posts a bare body and every override the operator chose is
+       *  dropped — so a source that only completes at a narrowed scan width
+       *  gets the purge it asked for and a rebuild that cannot finish. */
+      reaggregate?: AggregationTriggerRequest
+    },
   ): Promise<{
     deletedEdges: number
     dataSourceId: string
@@ -930,7 +965,12 @@ class AggregationService {
     const qs = opts?.skipReaggregate ? '?skipReaggregate=true' : '';
     return authFetch(
       `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation${qs}`,
-      { method: 'POST' }
+      {
+        method: 'POST',
+        ...(opts?.reaggregate
+          ? { body: JSON.stringify({ reaggregate: opts.reaggregate }) }
+          : {}),
+      }
     );
   }
 

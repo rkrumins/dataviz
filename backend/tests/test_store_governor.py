@@ -177,6 +177,44 @@ def test_the_replicas_the_run_started_with_must_be_back_before_the_next_batch(sl
     assert "full resync" in pipe._store_hold_last["detail"]
 
 
+def test_a_replication_read_that_failed_does_not_seed_zero_replicas(sleeps):
+    """``replication_state`` returns {} on ANY failure, and {} is
+    indistinguishable here from "a master with no replicas". Seeding 0 from
+    it turned the replica-lost hold off for the whole run — the hold is
+    gated on a truthy expected count — and on a RESUMED run this is the
+    only initialiser, so one timeout at run start was enough."""
+    pipe = _pipeline(_Conn(_picture()))
+
+    async def _no_answer(*a, **kw):
+        return {}
+
+    pipe.p.replication_state = _no_answer
+    _run(pipe._check_replication_shape())
+    assert pipe._expected_replicas is None
+    # The first reading that DID answer supplies it instead.
+    reading = _run(pipe._governor_reading())
+    assert reading.source == "measured" and pipe._expected_replicas == 2
+
+
+def test_the_gate_holds_for_replicas_that_vanished_rather_than_writing_on(sleeps, monkeypatch):
+    """``attached <= 0`` read as "no replication backpressure here" whatever
+    the run started with — which is the incident's second move: the replica
+    the rebuild had just dropped looked like a topology that never had one."""
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._hold_max_s = 1000
+    pipe._expected_replicas = 2
+
+    async def _gone(*a, **kw):
+        return {"role": "master", "connectedReplicas": 0, "replicas": []}
+
+    pipe.p.replication_state = _gone
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        _run(pipe._replica_gate())
+    assert "replicas gone" in str(info.value)
+    assert "in total this run" in str(info.value)
+
+
 def test_a_run_that_started_without_replicas_never_holds_for_them(sleeps):
     pic = _picture(connected_slaves="0")
     del pic["slave0"], pic["slave1"]
@@ -196,7 +234,7 @@ def test_a_replica_too_far_behind_is_a_hold(sleeps):
     _run(pipe._paced_write(_write))
     assert pipe._store_holds == {"replica_lag": 1}
     assert "behind" in pipe._store_hold_last["detail"]
-    assert "512.0 MB" in pipe._store_hold_last["detail"]        # the threshold, from CONFIG
+    assert "512.0 MiB" in pipe._store_hold_last["detail"]       # the threshold, from CONFIG
 
 
 def test_replica_ack_min_zero_waves_the_replica_reasons_through_but_not_a_fork(sleeps):
@@ -223,7 +261,7 @@ def test_rss_past_the_fork_line_holds_until_it_drains(sleeps, monkeypatch):
     _run(pipe._paced_write(_write))
     assert pipe._store_holds == {"memory": 1}
     detail = pipe._store_hold_last["detail"]
-    assert "33.0 GB RSS" in detail and "40.0 GB container" in detail
+    assert "33.0 GiB RSS" in detail and "40.0 GiB container" in detail
 
 
 # ── the bound ────────────────────────────────────────────────────────────
@@ -263,6 +301,27 @@ def test_the_bound_is_per_hold_not_per_run(sleeps, monkeypatch):
     assert pipe._store_hold_s["fork"] >= pipe._hold_max_s
 
 
+def test_a_node_cycling_its_forks_still_trips_the_bound_on_the_total(sleeps, monkeypatch):
+    """The other half of "per hold, not per run". The per-hold clock starts
+    inside ``_govern_write``, which runs once per WRITE BATCH — so a master
+    cycling BGSAVE → clear → AOF rewrite lets one batch through per cycle
+    and resets it every time. The run then holds for hours and never reaches
+    a bound it has been permanently inside. The total is what catches that,
+    and it is a multiple of the per-hold budget so the rebuild that meets
+    several honest AOF rewrites still finishes."""
+    monkeypatch.setattr(mat, "time", _Clock(step=100.0))
+    cycling = [p for _ in range(20)
+               for p in (_picture(rdb_bgsave_in_progress="1"), _picture())]
+    pipe = _pipeline(_Conn(*cycling))
+    pipe._hold_max_s = 500
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        for _ in range(20):
+            _run(pipe._paced_write(_write))
+    assert "in total this run" in str(info.value)
+    assert pipe._store_hold_s["fork"] >= pipe._hold_max_s * mat._HOLD_TOTAL_BUDGETS
+    assert pipe._store_holds["fork"] > 1          # no single hold did this
+
+
 # ── the record, the cost, the failure modes ──────────────────────────────
 
 
@@ -300,17 +359,130 @@ def test_sub_batches_inside_one_second_share_a_reading(monkeypatch):
     assert conn.infos == 1
 
 
-def test_an_unmeasured_node_never_holds_the_write(sleeps):
-    """The store not answering is the outage path's business — the governor
-    fails open, and the write goes out to meet whatever is there."""
+# ── the node that stops answering ────────────────────────────────────────
+#
+# A ``fork()`` over a multi-GB RSS stalls the node's main thread for longer
+# than a probe's budget — and that thread is the one that answers ``INFO``.
+# So the reading that detects a fork is precisely the reading a fork breaks,
+# and treating "unmeasured" as "nothing is wrong" drove the rebuild at full
+# speed through the one condition the hold exists for. The silence is
+# evidence; it is just not evidence of health.
+
+
+class _GoesQuiet(_Conn):
+    """A node that answers ``after`` readings and then stops answering INFO
+    at all — what a fork over a large dataset looks like from outside."""
+
+    def __init__(self, *pictures, after=1):
+        super().__init__(*pictures)
+        self.after = after
+
+    async def info(self, *sections):
+        if sections != ("replication",) and self.infos >= self.after:
+            self.infos += 1
+            raise TimeoutError("INFO did not come back")
+        return await super().info(*sections)
+
+
+def test_the_governor_reading_has_its_own_budget_not_the_connect_one(monkeypatch):
+    """``FALKORDB_INIT_TIMEOUT`` is a CONNECT budget (3 s). A probe has to
+    outlast the stall it is looking for, not the handshake."""
+    monkeypatch.delenv("AGGREGATION_GOVERNOR_READ_TIMEOUT_S", raising=False)
+    monkeypatch.setenv("FALKORDB_INIT_TIMEOUT", "3")
+    assert mat._governor_read_timeout_s() == 10.0
+    budgets: list = []
+
+    async def _read(db, **kw):
+        budgets.append(kw["timeout"])
+        return cap.sc.ShardMemory("10.0.0.1:6379", None, None, None, 0.0, "unavailable")
+
+    monkeypatch.setattr(mat, "read_shard_memory", _read)
+    pipe = _pipeline(_Conn(_picture()))
+    _run(pipe._read_shard())
+    assert budgets == [10.0]
+    monkeypatch.setenv("AGGREGATION_GOVERNOR_READ_TIMEOUT_S", "45")
+    _run(pipe._read_shard())
+    assert budgets[-1] == 45.0
+
+
+def test_a_reading_that_did_not_come_back_keeps_the_fork_it_last_saw(sleeps, monkeypatch):
+    """A fork seen five seconds ago is still a fork. The last MEASURED
+    reading answers for the node while it is fresh, so the hold survives the
+    node going quiet instead of being released by it."""
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    pipe = _pipeline(_GoesQuiet(_picture(rdb_bgsave_in_progress="1"), after=1))
+    pipe._hold_max_s = 1000
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        _run(pipe._paced_write(_write))
+    assert pipe._store_holds == {"fork": 1}
+    text = str(info.value)
+    assert "background save" in text and "has not answered INFO since" in text
+    assert "keeps its checkpoint" in text
+
+
+def test_silence_past_the_readings_shelf_life_holds_on_its_own_account(sleeps, monkeypatch):
+    """A reading a minute old says nothing about the node now, so past its
+    shelf life there is nothing left to re-ask and the silence itself
+    holds — bounded like every other hold, so it stops for a person with
+    the checkpoint intact rather than deadlocking."""
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    pipe = _pipeline(_GoesQuiet(_picture(), after=1))
+    pipe._hold_max_s = 1000
+    _run(pipe._paced_write(_write))              # the node answers once …
+    pipe._gov_measured = dataclasses.replace(
+        pipe._gov_measured, observed_at=pipe._gov_measured.observed_at - 120.0,
+    )                                            # … and that reading ages out
+    _run(pipe._paced_write(_write))              # one unanswered reading is not a verdict
+    assert pipe._store_holds == {}
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        _run(pipe._paced_write(_write))
+    assert pipe._store_holds == {"unmeasured": 1}
+    assert "did not answer INFO" in str(info.value)
+
+
+def test_a_node_this_run_never_measured_is_not_a_reason_to_wait(sleeps):
+    """An instance that does not answer ``INFO`` at all — a managed service,
+    an ACL without it — has no governor: the static cap governs and a
+    measurement never fails a job on its own. Holding on silence a run has
+    never seen through would stop every rebuild on such a deployment."""
     class _Mute(_Conn):
         async def info(self, *sections):
             raise ConnectionError("Error 111 connecting to 10.0.0.1:6379. Connection refused.")
 
     pipe = _pipeline(_Mute(_picture()))
-    _, result = _run(pipe._paced_write(_write))
+    for _ in range(4):
+        _, result = _run(pipe._paced_write(_write))
     assert result == "ok" and pipe._store_holds == {}
     assert "store_holds" not in pipe._adapted_snapshot()
+
+
+def test_a_reading_that_did_not_come_back_never_clears_the_easing(sleeps, monkeypatch):
+    """The compounding half of the same bug: a node being EASED escalated
+    the moment it went quiet — the ceiling un-halved and the doubled pause
+    was dropped, on a reading that said nothing at all."""
+    monkeypatch.setattr(mat, "time", _Clock(step=0.5))
+    behind = _picture(slave1={"ip": "10.0.0.5", "port": "6379", "state": "online",
+                              "offset": str(1000 - 300 * 1024 ** 2), "lag": "1"})
+    pipe = _pipeline(_GoesQuiet(behind, after=1))
+    pipe.p._aggregation_sub_batch_size = 500
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._eased == "replica_lag" and pipe._sub_batch_size() == 250
+    _run(pipe._paced_write(_write, rows=250))              # the node goes quiet
+    assert pipe._eased == "replica_lag" and pipe._sub_batch_size() == 250
+
+
+def test_the_node_key_survives_a_reading_that_did_not_answer(sleeps):
+    """The write slot, the reservation ledger and the read-pressure lookup
+    are all keyed by the OWNER node. Falling back to the connection seed on
+    one timeout stops two rebuilds on one master sharing a slot — and stops
+    read pressure being seen at all, because the web tier stamps the owner's
+    key and never the seed."""
+    admission = _SharedNode()
+    pipe = _pipeline(_GoesQuiet(_picture(), after=1))
+    pipe.p._admission_controller = admission
+    _run(pipe._paced_write(_write, rows=500))
+    _run(pipe._paced_write(_write, rows=500))
+    assert admission.slot_nodes == ["10.0.0.1:6379", "10.0.0.1:6379"]
 
 
 def test_the_governor_holds_before_the_slot_and_the_gate_runs_after(sleeps):
@@ -773,3 +945,51 @@ def test_no_controller_at_all_still_scans():
     pipe = _pipeline(_Conn(_picture()))
     pipe.p._admission_controller = None
     assert _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS")) == [(0, 10)]
+
+
+# ── a rotated replica takes an hour, and the master is fine throughout ───
+#
+# A replica that is ABSENT and one that is REPLAYING look identical from the
+# master: a rotated pod is simply missing from INFO replication until it has
+# loaded its dataset and reattached, and hold_reason can only see the master.
+# The 30-minute default therefore cut a routine pod rotation in half and
+# killed a rebuild that had done nothing wrong, against a healthy master.
+
+
+def test_a_missing_replica_gets_the_time_a_restart_actually_takes():
+    from backend.app.providers.falkordb_materialize import (
+        _hold_max_for, _store_hold_max_s, _store_loading_hold_s,
+    )
+
+    default = _store_hold_max_s()
+    # The same hour the pipeline already documents for a node replaying its
+    # dataset — one number, one reason, not two that can drift.
+    assert _hold_max_for("replica_lost", default) == max(default, _store_loading_hold_s())
+    assert _hold_max_for("replica_lost", default) >= 3600
+
+
+def test_every_other_reason_keeps_the_shorter_bound():
+    """A fork that has not finished in half an hour, or RSS still past the
+    container's line, is a node that is not recovering on its own."""
+    from backend.app.providers.falkordb_materialize import _hold_max_for, _store_hold_max_s
+
+    default = _store_hold_max_s()
+    for kind in ("fork", "replica_lag", "memory", "unmeasured", None):
+        assert _hold_max_for(kind, default) == default, kind
+
+
+def test_both_gates_use_the_per_reason_budget():
+    """The governor's hold and the replica-acknowledgement gate are separate
+    loops with the same 30-minute constant; fixing one and not the other
+    leaves the run dying at the same mark for the same reason."""
+    import inspect
+
+    from backend.app.providers.falkordb_materialize import AggregationPipeline
+
+    gov = inspect.getsource(AggregationPipeline._govern_write)
+    assert "hold_max = _hold_max_for(kind, self._hold_max_s)" in gov
+    assert "if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:" in gov
+
+    gate = inspect.getsource(AggregationPipeline._hold_for_replicas)
+    assert '"replica_lost" if attached <= 0 else "replica_lag"' in gate
+    assert "if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:" in gate

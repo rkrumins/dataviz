@@ -370,12 +370,52 @@ async def test_crash_recovery_never_resumes_a_cancelled_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_falls_open_when_redis_is_down(monkeypatch):
+async def test_crash_recovery_defers_to_the_reconciler_when_redis_is_down(monkeypatch):
+    """Recovery runs on EVERY control-plane boot, including every rolling
+    deploy, and the worker fleet does not restart with it. Without an
+    execution lock to read it cannot tell a crashed run from a live one — so
+    it must leave the row alone rather than flip a running job to ``pending``,
+    which would tell users it "is queued and will start shortly" while it is
+    mid-write, hide it from the stuck-job reconciler (which matches
+    ``running`` only), and spend one of its five auto-resumes.
+
+    Deferring costs nothing: a genuinely dead run is still reaped by the
+    reconciler's staleness fallback, which is the path that needs no Redis."""
     def _boom():
         raise RuntimeError("redis down")
 
     monkeypatch.setattr(
         "backend.app.services.aggregation.redis_client.get_redis", _boom,
+    )
+    d = _Dispatcher()
+    job = _job()
+    await _service([job], d).recover_interrupted_jobs()
+    assert d.dispatched == [] and job.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_leaves_a_job_whose_worker_still_holds_the_lock(monkeypatch):
+    """The reconciler treats ``agg:exec:{id}`` as the liveness oracle. Recovery
+    has to read the SAME one, or the two disagree about which jobs are alive
+    and every rolling deploy mislabels the fleet's live rows."""
+    redis = FakeRedis()
+    redis.store["agg:exec:J"] = "worker-1-token"
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
+    )
+    d = _Dispatcher()
+    job = _job()
+    await _service([job], d).recover_interrupted_jobs()
+    assert d.dispatched == [] and job.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_still_resumes_a_job_whose_lock_has_gone(monkeypatch):
+    """The other half of the oracle: no lock means no executor, so the run is
+    genuinely interrupted and resumes from its checkpoint."""
+    redis = FakeRedis()
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
     )
     d = _Dispatcher()
     job = _job()
