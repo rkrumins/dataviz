@@ -63,6 +63,7 @@ tests/test_nav_catalogue.py
 tests/test_process_memory.py
 tests/test_projection_stalled_reconcile.py
 tests/test_provider_failover_pause.py
+tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
 tests/test_purge_then_rebuild.py
 tests/test_read_pressure_yield.py
@@ -75,4 +76,3 @@ tests/test_source_changed_signal.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_top_level_provider_kwargs.py
-tests/test_provider_fleet_admission.py
