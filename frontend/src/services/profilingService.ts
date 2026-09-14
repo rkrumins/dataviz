@@ -20,6 +20,7 @@ import type {
     ProfilingPolicy,
     ProfilingScope,
     SeriesPayload,
+    SeriesMetric,
 } from '@/types/profiling'
 
 const BASE = '/api/v1/profiling'
@@ -33,7 +34,7 @@ export interface SeriesQuery {
     from?: string
     to?: string
     grain?: ProfilingGrain
-    metric?: ProfilingMetric
+    metric?: SeriesMetric
     breakdown?: ProfilingBreakdown
     top?: number
     compare?: boolean

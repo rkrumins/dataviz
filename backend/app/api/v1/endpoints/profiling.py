@@ -161,7 +161,15 @@ async def get_series(
     frm: Optional[str] = Query(None, alias="from"),
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None, description="raw | hour | day | auto"),
-    metric: str = Query("total", description="total | nodes | edges"),
+    metric: str = Query(
+        "total",
+        description=(
+            "total | nodes | edges | aggregated. ``aggregated`` is the "
+            "platform's own materialised rollup, reported alongside the "
+            "relationship types rather than among them; it has no meaning "
+            "under a breakdown, which implies its own measure."
+        ),
+    ),
     breakdown: str = Query("none", description="none | entity_type | edge_type"),
     top: int = Query(profiling_series.DEFAULT_TOP, ge=1, le=20),
     compare: bool = Query(False, description="Also return the preceding window"),
@@ -197,7 +205,11 @@ async def get_series(
         "to": to_iso,
         "window": label,
         "grain": resolved_grain,
-        "requested_metric": metric,
+        # The measure actually DRAWN, not the string handed in. ``build_series``
+        # falls back to "total" for anything it does not know, so echoing the
+        # raw param told a client running ahead of its backend that it had got
+        # the series it asked for over one it did not.
+        "requested_metric": payload.get("metric", metric),
         "breakdown": breakdown,
         "platform_wide": platform_wide,
         "truncated": truncated,
@@ -352,11 +364,19 @@ async def export_csv(
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None),
     breakdown: str = Query("none"),
+    metric: str = Query("total", description="total | nodes | edges | aggregated"),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> Response:
     """One row per bucket, one column per series. Always the drawn values, so
-    an export and the chart it came from can never disagree."""
+    an export and the chart it came from can never disagree.
+
+    ``metric`` defaults to ``total``, which is what this endpoint hardcoded
+    before — so an export with no metric is byte-identical to yesterday's and
+    nobody's saved parser breaks. Passing it is what makes the docstring above
+    true: the chart's own measure now reaches the file, where "Show:
+    Relationships" used to silently export both series.
+    """
     scope, scope_id, visible, _wide = await _scope_for(
         session, claims, scope=scope, scope_id=id,
     )
@@ -371,7 +391,7 @@ async def export_csv(
         frm=frm_iso, to=to_iso, grain=resolved_grain,
     )
     built = profiling_series.build_series(
-        observations, metric="total", breakdown=breakdown,
+        observations, metric=metric, breakdown=breakdown,
         top=profiling_series.DEFAULT_TOP,
     )
 

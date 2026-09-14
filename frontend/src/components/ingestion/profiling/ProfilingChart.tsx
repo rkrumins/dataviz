@@ -22,15 +22,21 @@ import { TypeTrellis } from './TypeTrellis'
 import { TimeSeriesChart } from '@/components/analytics/charts/TimeSeriesChart'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
 import type {
-    Finding, ProfilingBreakdown, ProfilingMetric, SeriesPayload,
+    Finding, ProfilingBreakdown, SeriesMetric, SeriesPayload,
 } from '@/types/profiling'
 import { ControlGroup } from './BoardFilters'
 import { TIME_ZONE_NOTE, axisLabels, formatBucketUtc } from './shared'
 
-const METRICS: { key: ProfilingMetric; label: string }[] = [
+const METRICS: { key: SeriesMetric; label: string }[] = [
     { key: 'total', label: 'Everything' },
     { key: 'nodes', label: 'Entities' },
     { key: 'edges', label: 'Relationships' },
+    // The platform's own materialised rollup, drawn ALONGSIDE the customer's
+    // relationships rather than among them. A rebuild wipes and rewrites it,
+    // so this is the line that says whether a drop was ours and whether it
+    // has come back — the question the Relationships total cannot answer
+    // because the overlay is inside it.
+    { key: 'aggregated', label: 'Aggregated' },
 ]
 
 /**
@@ -62,10 +68,10 @@ interface Props {
      * screens and a mental join on timestamps.
      */
     findings?: Finding[]
-    metric: ProfilingMetric
+    metric: SeriesMetric
     breakdown: ProfilingBreakdown
     view: BreakdownView
-    onMetric: (next: ProfilingMetric) => void
+    onMetric: (next: SeriesMetric) => void
     onBreakdown: (next: ProfilingBreakdown) => void
     onView: (next: BreakdownView) => void
     /** When set, one type is drawn alone at full size. */
@@ -205,10 +211,18 @@ export function ProfilingChart({
                         label="Show" options={METRICS}
                         value={metric} onChange={onMetric}
                     />
-                    <ControlGroup
-                        label="Split by" options={BREAKDOWNS}
-                        value={breakdown} onChange={onBreakdown}
-                    />
+                    {/* The overlay IS one relationship type, so decomposing
+                        it by relationship type is a tautology — and the
+                        backend's breakdown implies its own measure, so the
+                        control would visibly do nothing. Same rule as "As"
+                        below: a control that does nothing teaches people to
+                        ignore controls. */}
+                    {metric !== 'aggregated' && (
+                        <ControlGroup
+                            label="Split by" options={BREAKDOWNS}
+                            value={breakdown} onChange={onBreakdown}
+                        />
+                    )}
                     {/* Only once there IS a split. A view control that does
                         nothing until another control is set teaches people to
                         ignore controls. */}

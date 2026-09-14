@@ -24,7 +24,10 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from backend.common.derived_artifacts import strip_derived_counts
+from backend.common.derived_artifacts import (
+    derived_edge_total,
+    strip_derived_counts,
+)
 
 #: Series drawn before the tail is folded away. Above this a categorical
 #: palette runs out of distinguishable slots — a seventh hue is not a new
@@ -35,7 +38,11 @@ DEFAULT_TOP = 8
 
 OTHER_KEY = "__other__"
 
-METRICS = ("total", "nodes", "edges")
+#: ``aggregated`` is the materialised rollup — the platform's own overlay,
+#: reported ALONGSIDE the relationship types rather than among them. It is a
+#: ``breakdown="none"`` measure only: the overlay IS one edge type, so
+#: decomposing it by edge type is a tautology (see ``_BREAKDOWN_METRIC``).
+METRICS = ("total", "nodes", "edges", "aggregated")
 BREAKDOWNS = ("none", "entity_type", "edge_type")
 
 _BREAKDOWN_FIELD = {
@@ -46,6 +53,13 @@ _BREAKDOWN_FIELD = {
 #: relationship type" is not a question with an answer, so the breakdown
 #: implies the metric rather than multiplying with it.
 _BREAKDOWN_METRIC = {"entity_type": "nodes", "edge_type": "edges"}
+
+#: What each measure is called on screen.
+_METRIC_LABEL = {
+    "nodes": "Entities",
+    "edges": "Relationships",
+    "aggregated": "Aggregated",
+}
 
 
 def _loads(raw: Any) -> Dict[str, int]:
@@ -83,11 +97,29 @@ def _counts(obs: Any, field: str) -> Dict[str, int]:
     )
 
 
+def _overlay_value(obs) -> int:
+    """How many of this snapshot's relationships are the platform's OWN
+    materialised rollup.
+
+    The exact complement of :func:`_counts` on the edge field: that one
+    removes the derived types, this one IS them. Same list, opposite halves.
+
+    Stripping was only ever half an answer. The overlay must not rank among a
+    customer's relationship types, and it must not read as a data-quality
+    anomaly when a rebuild wipes and rewrites it — but its VOLUME is a real
+    operational number, and "did the overlay drop, and has it come back" is
+    the question people open this page to ask.
+    """
+    return derived_edge_total(_loads(getattr(obs, "edge_type_counts", None)))
+
+
 def _metric_value(obs, metric: str) -> int:
     if metric == "nodes":
         return int(obs.node_count or 0)
     if metric == "edges":
         return int(obs.edge_count or 0)
+    if metric == "aggregated":
+        return _overlay_value(obs)
     return int(obs.node_count or 0) + int(obs.edge_count or 0)
 
 
@@ -96,6 +128,12 @@ def _metric_extremes(obs, metric: str) -> Tuple[Optional[int], Optional[int]]:
         return obs.node_min, obs.node_max
     if metric == "edges":
         return obs.edge_min, obs.edge_max
+    if metric == "aggregated":
+        # The rollup tiers keep ``edge_min``/``edge_max`` for the TOTAL only —
+        # there are no per-type extremes anywhere. Returning the total's would
+        # draw a band that does not contain its own line. Unknown extremes are
+        # already handled: the caller drops min/max from the point.
+        return None, None
     if obs.node_min is None or obs.edge_min is None:
         return None, None
     return obs.node_min + obs.edge_min, (obs.node_max or 0) + (obs.edge_max or 0)
@@ -171,7 +209,19 @@ def build_series(
     # chart still needs its own total to be readable, and the summary below
     # is derived from it rather than from a sum of the drawn bands (which
     # would silently exclude whatever landed in "Other").
-    totals: Dict[str, List[int]] = {"nodes": [], "edges": [], "total": []}
+    # Parsed ONCE per observation, not once per (bucket, source): carry-forward
+    # repeats the same object across every bucket a source was silent for, so
+    # the naive version turns the breakdown="none" path — which parses no JSON
+    # at all today — into buckets x sources parses. The key is the one
+    # ``_carry_forward`` itself assumes to be unique.
+    overlay = {
+        (getattr(o, "data_source_id", None), o.bucket): _overlay_value(o)
+        for o in observations
+    }
+
+    totals: Dict[str, List[int]] = {
+        "nodes": [], "edges": [], "total": [], "aggregated": [],
+    }
     for bucket in buckets:
         observed = filled[bucket].values()
         nodes = sum(_metric_value(o, "nodes") for o in observed)
@@ -179,6 +229,13 @@ def build_series(
         totals["nodes"].append(nodes)
         totals["edges"].append(edges)
         totals["total"].append(nodes + edges)
+        # Always, breakdown or not — this is what lets the Relationships tile
+        # say "of which N aggregated" and the type ledger carry an overlay row
+        # without a second request.
+        totals["aggregated"].append(sum(
+            overlay.get((getattr(o, "data_source_id", None), o.bucket), 0)
+            for o in observed
+        ))
 
     series: List[Dict[str, Any]] = []
 
@@ -203,11 +260,16 @@ def build_series(
                 points.append(point)
             series.append({
                 "key": name,
-                "label": "Entities" if name == "nodes" else "Relationships",
+                "label": _METRIC_LABEL.get(name, name),
                 "kind": "metric",
                 "points": points,
             })
-        return {"buckets": buckets, "series": series, "totals": totals}
+        return {
+            "buckets": buckets, "series": series, "totals": totals,
+            # The RESOLVED measure, so the endpoint can echo what it actually
+            # drew rather than the string it was handed.
+            "metric": metric,
+        }
 
     field = _BREAKDOWN_FIELD[breakdown]
     drawn = _rank_types(filled, buckets, field, top)

@@ -11,7 +11,11 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 from weakref import WeakKeyDictionary
 
-from backend.common.derived_artifacts import strip_derived_counts
+from backend.common.derived_artifacts import (
+    DERIVED_EDGE_TYPES,
+    derived_edge_total,
+    strip_derived_counts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +27,12 @@ logger = logging.getLogger(__name__)
 _BUDGET_SUPPORT: "WeakKeyDictionary[Any, bool]" = WeakKeyDictionary()
 
 
-# The materialized overlay's edge type. Excluded from the RAW fingerprint
-# below so that a rebuild — which changes only this type's count — cannot
-# move the baseline it is compared against.
-AGGREGATED_EDGE_TYPE = "AGGREGATED"
+#: The materialized overlay's edge type, kept ONLY as a re-export for callers
+#: that already import it from here. The definition lives in
+#: ``common.derived_artifacts.DERIVED_EDGE_TYPES`` — a second copy of the list
+#: is how the derived-artifact exclusions went wrong twice before, so this
+#: name must never be spelled literally again.
+AGGREGATED_EDGE_TYPE = DERIVED_EDGE_TYPES[0]
 
 
 def raw_fingerprint_from_counts(
@@ -66,14 +72,18 @@ def raw_fingerprint_from_counts(
         str(k): _as_int(v)
         for k, v in strip_derived_counts(entity_type_counts or {}).items()
     }
-    raw_edges: Dict[str, int] = {}
-    observed_aggregated = 0
-    for key, value in (edge_type_counts or {}).items():
-        count = _as_int(value)
-        if str(key).upper() == AGGREGATED_EDGE_TYPE:
-            observed_aggregated += count
-        else:
-            raw_edges[str(key)] = count
+    # The two halves of one split, from the one definition — see
+    # ``common.derived_artifacts``. This loop used to do it by hand against a
+    # second copy of the type name declared in this module, which is exactly
+    # the duplication that module's docstring exists to stop ("Both were one
+    # missing copy of one list").
+    raw_edges: Dict[str, int] = {
+        str(k): _as_int(v)
+        for k, v in strip_derived_counts(edge_type_counts or {}, edges=True).items()
+    }
+    observed_aggregated = derived_edge_total(
+        {str(k): _as_int(v) for k, v in (edge_type_counts or {}).items()}
+    )
 
     structure = {
         # Namespace tag. Without it this digest is byte-identical to

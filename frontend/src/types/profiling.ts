@@ -10,6 +10,11 @@
 
 export type ProfilingScope = 'source' | 'workspace' | 'provider' | 'all'
 export type ProfilingMetric = 'total' | 'nodes' | 'edges'
+/** The chart's measures. Deliberately NOT `ProfilingMetric`: that one is also
+ *  the board's measure and the key of `MEASURE_LABEL` / `METRIC_NOUN`, and
+ *  `movement_board` cannot serve `aggregated` — widening it there would offer
+ *  a board measure whose `else` branch quietly resolves to *total*. */
+export type SeriesMetric = ProfilingMetric | 'aggregated'
 export type ProfilingBreakdown = 'none' | 'entity_type' | 'edge_type'
 export type ProfilingGrain = 'auto' | 'raw' | 'hour' | 'day'
 export type ProfilingWindow = '24h' | '7d' | '30d' | '90d' | 'custom'
@@ -40,11 +45,24 @@ export interface SeriesPayload {
     to: string
     window: ProfilingWindow
     grain: Exclude<ProfilingGrain, 'auto'>
-    requested_metric: ProfilingMetric
+    /** The measure actually DRAWN — the backend falls back to `total` for
+     *  anything it does not know, so this is not necessarily what was asked
+     *  for. A client running ahead of its backend reads the truth here. */
+    requested_metric: SeriesMetric
     breakdown: ProfilingBreakdown
     buckets: string[]
     series: ProfilingSeries[]
-    totals: { nodes: number[]; edges: number[]; total: number[] }
+    /** `aggregated` is the platform's own materialised rollup, present on
+     *  every payload so the Relationships tile and the type ledger can show
+     *  it without a second request. Optional: a backend that predates it
+     *  simply omits the key, and every read site degrades to "no overlay to
+     *  show" rather than to zero. */
+    totals: {
+        nodes: number[]
+        edges: number[]
+        total: number[]
+        aggregated?: number[]
+    }
     /** Which altitude this is. "Nothing moved" means very different things
      *  across a deployment and across one workspace's sources. */
     platform_wide: boolean
