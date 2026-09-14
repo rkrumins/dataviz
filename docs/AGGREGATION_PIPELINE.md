@@ -649,12 +649,33 @@ seeing it as an outage when a node is replaced anyway.
   replication state, retrying — bounded only by the job's stall window, and
   releasable live by setting `replicaAckMin` to 0, and bounded like every
   hold by `AGGREGATION_HOLD_MAX_SECS`. A run that starts against a master
-  with no replicas never waits; one that LOSES a replica mid-run holds for
-  its return rather than writing into its resync. The run records `replica_waits`, `replica_wait_s`,
-  `replica_holds` and `replica_max_lag_bytes`, and warns at the start when a
+  with no replicas never waits. One that LOSES a replica mid-run holds for
+  five minutes (`_REPLICA_ABSENCE_GRACE_S`) in case it is coming straight
+  back, and then **writes on without it** rather than failing — see
+  "A replica that is gone" below. The run records `replica_waits`, `replica_wait_s`,
+  `replica_holds`, `replicas_forgone` and `replica_max_lag_bytes`, and warns at the start when a
   master has replicas and an `EFFECTS_THRESHOLD` above 0 (see
   `FALKORDB_DEPLOYMENT.md` §5aa — that is the setting that decides whether a
   replica applies a change log or re-runs your whole batch).
+- **A replica that is gone.** Behind and gone are different problems, and the
+  governor answers them differently. A replica that is ATTACHED and falling
+  behind is one this rebuild is outrunning: it holds, for the full
+  `AGGREGATION_HOLD_MAX_SECS`, and a rebuild that has not let it catch up in
+  half an hour stops for a person. A replica that is ABSENT is one the rebuild
+  can neither reach nor harm: it gets a five-minute grace and then the run
+  carries on without it, recording `replicas_forgone`. Holding longer bought
+  nothing — a partial resync needs the master's backlog to still hold every
+  byte written while the replica was away, which is megabytes, and a rebuild
+  writes past that in seconds; every absence longer than a blip ends in a full
+  resync whatever the run did meanwhile. What it cost was real: with one
+  replica per shard, every node drain and rolling upgrade took out the only
+  replica a shard had, and every rebuild on it held for an hour and then died.
+  Two things are never forgiven. The resync itself, when the replica comes
+  back, is a `fork` — no knob waves a fork through. And an absence that
+  follows this run pushing a replica half way to the drop limit is the
+  rebuild's own doing (the master dropped it for an overflowing output
+  buffer), so it keeps the full bound and stops the run. Replicas fully back
+  re-arm the grace, so the next absence gets its own.
 - **The outage hold.** A refused connection is not pressure: narrowing a query
   does not help a node that is not there. Any connection fault inside the
   ladder becomes a wait — heartbeat, backoff, re-resolve the owner (which finds
@@ -785,7 +806,7 @@ pipeline).
 | `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
 | `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |
 | `AGGREGATION_STORE_LOADING_HOLD_S` | 3600 | How long one run waits out a node **replaying its dataset** (`-LOADING`) before giving up and keeping its checkpoint (60-14400). Longer than the plain outage hold on purpose: a silent node might never come back, while one answering `-LOADING` has said it is coming back and roughly when. A rotated pod replaying a multi-GB AOF incremental takes about an hour |
-| `AGGREGATION_HOLD_MAX_SECS` | 1800 | The write governor: how long ONE hold may last — the run waiting, before a write batch, for the node to come back inside the envelope (a fork to finish, the replicas it started with to reattach and catch up, RSS to drop under the container's line) — before it stops for a person with its checkpoint intact (60-21600). Per hold, not per run |
+| `AGGREGATION_HOLD_MAX_SECS` | 1800 | The write governor: how long ONE hold may last — the run waiting, before a write batch, for the node to come back inside the envelope (a fork to finish, a replica to catch up, RSS to drop under the container's line) — before it stops for a person with its checkpoint intact (60-21600). Per hold, not per run. A replica that is simply GONE is not measured against this: it gets a fixed five-minute grace and then the run writes on without it |
 | `AGGREGATION_FORK_COW_PCT` | 125 | Copy-on-write allowance over RSS that a fork is budgeted at, for the container-aware write budget and the memory hold line (100-200). 125 is the deployment guide's figure, and is valid only because the pipeline holds its writes through a fork |
 | `AGGREGATION_REPLICA_LAG_HOLD_BYTES` | derived | How far behind a replica may fall before the governor holds. Unset: a quarter of the replica output-buffer hard limit or half the backlog, whichever is smaller — both read from the node — so the master never drops a replica because of a rebuild |
 | `FALKORDB_READ_FROM_REPLICAS` | auto | Whether read-only Cypher may be served by a shard's in-sync replicas. `never` pins every read to the master; per provider as `readFromReplicas` in the connection settings |

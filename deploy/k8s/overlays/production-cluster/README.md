@@ -25,6 +25,28 @@ make apply OVERLAY=production-cluster                      # deploy (same envsub
    (2 per zone × 3 zones = 6 nodes; n4 requires Hyperdisk — the PVCs use
    `hyperdisk-balanced`.)
 
+   **The node count is not a recommendation, it is the pod count.** The
+   anti-affinity is `requiredDuringScheduling` and spans every shard
+   (`app.kubernetes.io/part-of: falkordb-cluster`, `topologyKey:
+   kubernetes.io/hostname`), and the pods request ≈ their limits, so one pod
+   owns one node and there is no sharing to fall back on. `--num-nodes` is
+   per zone: **`--num-nodes N` gives 3N nodes, and the cluster needs one per
+   pod.** Short by one and that pod sits `Pending` for ever — no eviction, no
+   warning, just a shard permanently short of a replica.
+
+   To run 3 shards × (1 master + 2 replicas) = 9 pods, provision 9 nodes
+   (`--num-nodes 3`) BEFORE raising `replicas:` to 3 in
+   `resources/falkordb-cluster-statefulsets.yaml`, and extend
+   `resources/falkordb-cluster-init-job.yaml` — its `$PODS` list and its
+   `add-node --cluster-slave` loop both name `falkordb-shard-$i-1`
+   explicitly, so the `-2` pods have to be added to each. Note
+   what the third pod actually buys: a shard survives losing a master AND a
+   replica. It does not make writes safer — one in-sync replica is already
+   enough for that (see `FALKORDB_DEPLOYMENT.md` §5a, "If you do set it, set
+   it to 1") — and it does not make rebuilds safer, since the aggregation
+   pipeline waits for one acknowledgement by default and carries on without a
+   replica that is merely absent.
+
 2. **Managed cache** — `CACHE_REDIS_URL` must point at Memorystore (the
    production `managed-data-tier` patch). Cluster mode cannot host the provider
    cache (ADR-020, doc §7.3).

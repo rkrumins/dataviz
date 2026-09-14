@@ -424,6 +424,15 @@ export function gentlePreset(): ConfigPreset {
     return CONFIG_PRESETS.find(p => p.id === 'gentle')!
 }
 
+/** The profile a manually triggered run starts from. Its knobs are the
+ *  server's own environment defaults (scan 200,000, pacing 1.0, extract 1,
+ *  50M pending pairs), so seeding it changes nothing about what runs — it
+ *  makes the dialog SAY what runs, instead of reading "Custom" over settings
+ *  that are exactly this profile. */
+export function balancedPreset(): ConfigPreset {
+    return CONFIG_PRESETS.find(p => p.id === 'balanced')!
+}
+
 /**
  * Which profile a set of overrides IS, or null for a custom mix. Strict on
  * purpose: a form that differs from a preset in any knob the preset sets is

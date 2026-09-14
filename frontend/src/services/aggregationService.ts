@@ -302,6 +302,7 @@ export interface AdaptedRunState {
   replica_wait_s?: number;
   replica_holds?: number;
   replica_max_lag_bytes?: number;
+  replicas_forgone?: number;
   /** A graph store node stopped answering mid-run: how many times the run
    *  waited it out, for how long in total, and any node that came back with a
    *  new run id (proof it restarted rather than being slow). */

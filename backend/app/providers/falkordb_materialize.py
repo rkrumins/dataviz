@@ -242,26 +242,17 @@ def _store_hold_max_s() -> int:
     return _env_int("AGGREGATION_HOLD_MAX_SECS", 1800, 60, 21_600)
 
 
-def _hold_max_for(kind: Optional[str], default_s: int) -> int:
-    """The per-hold budget for ONE reason.
-
-    A replica that is absent and a replica that is REPLAYING look identical
-    from the master: a rotated pod is simply missing from ``INFO
-    replication`` until it has loaded its dataset and reattached, and
-    ``hold_reason`` can only see the master. So ``replica_lost`` is the one
-    reason whose honest duration is a node restart — which
-    ``AGGREGATION_STORE_LOADING_HOLD_S`` already documents as up to an hour
-    for a multi-GB AOF replay, and which the default 30-minute bound cut in
-    half. A rebuild against a perfectly healthy master died for a routine
-    pod rotation, at the 30-minute mark, having done nothing wrong.
-
-    Every other reason keeps the shorter bound: a fork that has not finished
-    in half an hour, or RSS that has not come back under the container's
-    line, is a node that is not recovering on its own.
-    """
-    if kind == "replica_lost":
-        return max(default_s, _store_loading_hold_s())
-    return default_s
+#: How long the write node may report fewer replicas than the run started
+#: with before the run carries on without them — see
+#: :meth:`AggregationPipeline._forgo_replicas`.
+#:
+#: Its own number rather than a share of ``AGGREGATION_HOLD_MAX_SECS``,
+#: because that bound means "how long I tolerate a node that is
+#: misbehaving" and an operator raises it to sit through long AOF rewrites.
+#: This is the opposite question — how long a MISSING replica might just be
+#: coming straight back — and the honest answer is a pod restart's worth of
+#: debounce, not a share of someone else's patience.
+_REPLICA_ABSENCE_GRACE_S = 300
 
 
 #: How many per-hold budgets one run may spend on the SAME reason before
@@ -1402,6 +1393,16 @@ class AggregationPipeline:
 
         self._hold_max_s = _store_hold_max_s()
         self._expected_replicas: Optional[int] = None
+        #: When the write node first reported fewer replicas than the run
+        #: started with, and whether the run has since carried on without
+        #: them — see ``_forgo_replicas`` and ``_replicas_short_for``.
+        self._short_replicas_since: Optional[float] = None
+        self._replicas_forgone = False
+        self._replicas_forgone_n = 0
+        #: Whether this run has recently pushed a replica far enough behind
+        #: to be in danger of being dropped for it. An absence that follows
+        #: that is the rebuild's own doing, and is not forgiven.
+        self._replica_lag_seen = False
         self._node_config: Optional[Dict[str, Optional[int]]] = None
         self._server_limits: Optional[Dict[str, Optional[int]]] = None
         self._container_env_bytes = container_memory_bytes_env()
@@ -1674,10 +1675,15 @@ class AggregationPipeline:
             return 0.0
         state = await self._replication_state()
         attached = int(state.get("connectedReplicas") or 0)
+        # Deliberately NOT feeding ``_replicas_short_for`` here: this reading
+        # is up to a minute old (``_replication_state``'s cache), and a stale
+        # one re-started the shortfall clock against a node whose replicas
+        # the governor had already seen come back. The clock is fed from the
+        # governor's per-batch reading and from the hold's own fresh ones.
         if attached <= 0:
-            if self._expected_replicas:
+            if self._expected_replicas and not self._replicas_forgone:
                 # The run started with replicas and the node reports none:
-                # they were DROPPED, which is the case the hold exists for,
+                # they were DROPPED, which is the case the grace exists for,
                 # not a shard that never had any. Same reading as
                 # ``_hold_for_replicas`` makes, and it must not differ.
                 return await self._hold_for_replicas(want)
@@ -1709,16 +1715,15 @@ class AggregationPipeline:
 
     async def _hold_for_replicas(self, target: int) -> float:
         """Wait out replicas that are behind — or gone — saying why, until
-        they catch up, the operator lowers the bar, or the hold budget is
-        spent.
+        they catch up, the operator lowers the bar, or the budget is spent.
 
-        Gone is the case that matters. A replica that vanishes during a
-        rebuild almost always vanished BECAUSE of it (dropped for an
-        overflowing output buffer), and its return is a full resync: the
-        master forks under the very write load that lost it. Writing on
-        was how one shard's rebuild became that fork. So a run that started
-        with replicas holds for them; only a run that started with none has
-        nothing to wait for."""
+        The two ends differ in what spending the budget means. BEHIND is a
+        live replica this run is outrunning, and a rebuild that has not let
+        it catch up in half an hour stops for a person. GONE is a replica
+        this run cannot reach or harm: it gets a grace, in case it is a
+        blip the master's backlog can still cover, and past that the run
+        writes on without it — see ``_forgo_replicas``. A run that started
+        with no replicas has nothing to wait for at either end."""
         self._replica_holds += 1
         started = time.monotonic()
         attempt = 0
@@ -1744,15 +1749,21 @@ class AggregationPipeline:
             # and replicas that catch up just enough to let one through
             # reset it for ever.
             total = self._replica_hold_s + held
-            # A replica that is ABSENT may be a rotated pod replaying its
-            # dataset, which takes up to an hour — the same case, and the
-            # same budget, as the governor's replica_lost hold. A replica
-            # that is merely BEHIND is a live node that is not keeping up,
-            # and half an hour of that is already generous.
-            hold_max = _hold_max_for(
-                "replica_lost" if attached <= 0 else "replica_lag", self._hold_max_s,
-            )
+            hold_max = self._hold_max_s
+            if attached <= 0 and self._may_forgo_replicas(attached):
+                # A grace, not a deadline — see ``_forgo_replicas``. Judged
+                # on how long the replicas have been GONE, never on ``held``:
+                # a hold that began as lag would arrive here already past it.
+                self._forgo_replicas(
+                    f"the graph store node {self._store_endpoint()} has had no "
+                    f"replicas attached for "
+                    f"{self._replicas_short_for(attached) / 60:.0f} minute(s) — "
+                    f"the run started with {self._expected_replicas}"
+                )
+                break
             if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:
+                # Still reachable with none attached: an absence inside its
+                # grace, or one this rebuild caused and so cannot forgive.
                 what = (
                     f"its replicas gone (the run started with {self._expected_replicas})"
                     if attached <= 0 else
@@ -1771,8 +1782,8 @@ class AggregationPipeline:
                 if attached <= 0:
                     logger.warning(
                         "aggregation pipeline on %s: the write node's replicas are "
-                        "gone (the run started with %d) — holding until they are "
-                        "back and in sync rather than writing into their resync.",
+                        "gone (the run started with %d) — holding for a few minutes "
+                        "in case they are coming straight back.",
                         self.p._graph_name, self._expected_replicas,
                     )
                 else:
@@ -1798,13 +1809,87 @@ class AggregationPipeline:
         self._replica_hold_s += held
         if held >= 60.0:
             self._pressure_log.append({
-                "scan": "apply", "kind": "replica_lag",
+                "scan": "apply",
+                "kind": "replica_lag" if attached > 0 else "replica_lost",
                 "held_s": round(held, 1),
                 "lag_bytes": self._replica_max_lag_bytes or None,
             })
             if len(self._pressure_log) > 8:
                 del self._pressure_log[0]
         return held
+
+    def _replicas_short_for(self, attached: Optional[int]) -> float:
+        """How long the write node has reported fewer replicas than the run
+        started with — 0.0 when it has them all, or has not said.
+
+        The ONE clock the absence grace is judged on, fed by both hold
+        loops. Their own clocks time the whole EPISODE, which may have
+        started for something else entirely: a run already holding on
+        ``replica_lag`` when the master drops that replica arrives at the
+        grace with twenty minutes on the clock and forgives an absence it
+        has watched for a single turn — which is the incident, not a drain.
+
+        Replicas fully back re-arm the run. Forgiving one node drain at
+        minute ten must not leave the next four hours unprotected, and the
+        absence that matters most is the SECOND one — the replica this
+        rebuild pushed over the line itself.
+        """
+        expected = self._expected_replicas
+        if not expected or attached is None:
+            return 0.0
+        if attached >= expected:
+            self._short_replicas_since = None
+            self._replicas_forgone = False
+            return 0.0
+        now = time.monotonic()
+        if self._short_replicas_since is None:
+            self._short_replicas_since = now
+        return now - self._short_replicas_since
+
+    def _may_forgo_replicas(self, attached: Optional[int]) -> bool:
+        """Whether an absence this long may be written through.
+
+        Not while this run has recently had a replica half way to the limit
+        the master drops it at (``_ease_reason``, ``replica_lag``). A
+        replica that disappears from under a rebuild that was already
+        outrunning it did not wander off: the rebuild overflowed its output
+        buffer, and writing on at full speed is step three of the incident
+        this governor exists for. That absence keeps the full bound and
+        stops the run for a person, exactly as it did before.
+        """
+        if self._replica_lag_seen:
+            return False
+        return self._replicas_short_for(attached) >= _REPLICA_ABSENCE_GRACE_S
+
+    def _forgo_replicas(self, detail: str) -> None:
+        """Carry on without the replicas the run started with and no longer
+        has. Called once, when the absence grace is spent.
+
+        A rebuild harms replication in two ways, and neither needs a replica
+        that is away: it outruns one that is attached (``replica_lag``), or
+        it writes through the fork that streams one back (``fork``, which
+        ``INFO`` reports as ``replica_sync``). Both of those still hold, for
+        their full budget. What absence used to do instead was stop the
+        rebuild for a node drain — and the rollups are a derived projection,
+        rebuilt from Postgres on demand, so holding a run for an hour to
+        protect their durability was the expensive side of that trade.
+
+        It forgives the replica COUNT — a partial loss as much as a total
+        one — and only until the run sees them all attached again, which
+        re-arms it (``_replicas_short_for``). Lag and forks are never
+        forgiven, and neither is an absence this rebuild caused
+        (``_may_forgo_replicas``).
+        """
+        if self._replicas_forgone:
+            return
+        self._replicas_forgone = True
+        self._replicas_forgone_n += 1
+        logger.warning(
+            "aggregation pipeline on %s: %s — writing on without it. The run "
+            "still holds for a replica that is attached and behind, and for "
+            "the resync fork when this one returns.",
+            self.p._graph_name, detail,
+        )
 
     # -- the write governor ---------------------------------------------------
 
@@ -1824,6 +1909,7 @@ class AggregationPipeline:
         if self._gov_reading.source == "measured":
             self._gov_measured = self._gov_reading
             self._gov_unmeasured = 0
+            self._replicas_short_for(self._gov_reading.connected_replicas)
             # The one place this pod's slot envs and the node's real
             # THREAD_COUNT are both in hand. Logs once per node; never
             # raises — see check_slot_sizing.
@@ -1880,9 +1966,14 @@ class AggregationPipeline:
         other, so it cannot deadlock the run — it stops for a person with
         the checkpoint intact."""
         watch = self._live_replica_ack_min() > 0
+        # ``expected_replicas`` is what ``replica_lost`` is judged against and
+        # the only thing it feeds, so a run that has forgiven the absence
+        # simply stops declaring one — ``replica_lag``, the forks and the
+        # memory line are all still asked.
+        expected = None if self._replicas_forgone else self._expected_replicas
         if shard.source == "measured":
             return hold_reason(
-                shard, expected_replicas=self._expected_replicas,
+                shard, expected_replicas=expected,
                 watch_replicas=watch,
             )
         last = self._gov_measured
@@ -1899,7 +1990,7 @@ class AggregationPipeline:
         age = shard.observed_at - last.observed_at
         if age < _GOVERNOR_READING_GRACE_S:
             reason = hold_reason(
-                last, expected_replicas=self._expected_replicas,
+                last, expected_replicas=expected,
                 watch_replicas=watch,
             )
             if reason is None:
@@ -1943,6 +2034,15 @@ class AggregationPipeline:
                 self._note_easing(shard)
                 break
             new_kind, detail = reason
+            if new_kind == "replica_lost" and self._may_forgo_replicas(
+                shard.connected_replicas
+            ):
+                # A grace, not a deadline — see ``_forgo_replicas``.
+                self._forgo_replicas(detail)
+                self._holding = None
+                break
+            if new_kind == "replica_lag":
+                self._replica_lag_seen = True
             if started is None:
                 started = time.monotonic()
             if new_kind != kind:
@@ -1953,7 +2053,7 @@ class AggregationPipeline:
                     "aggregation pipeline on %s: holding the next write batch — %s. "
                     "Writing through this is how a rebuild takes a node down; the "
                     "run waits (up to %d min per hold) and carries on from where it is.",
-                    self.p._graph_name, detail, _hold_max_for(kind, self._hold_max_s) // 60,
+                    self.p._graph_name, detail, self._hold_max_s // 60,
                 )
             held = time.monotonic() - started
             # Per episode AND cumulatively for the same reason. This clock
@@ -1961,9 +2061,7 @@ class AggregationPipeline:
             # clear → AOF rewrite lets a batch through per cycle and resets
             # it every time: hours held, the bound never reached.
             total = self._store_hold_s.get(kind, 0.0) + held
-            # Per REASON, because a missing replica is the one whose honest
-            # duration is a node restart — see _hold_max_for.
-            hold_max = _hold_max_for(kind, self._hold_max_s)
+            hold_max = self._hold_max_s
             if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:
                 self._record_hold(kind, held, detail)
                 raise MaterializationStoreUnstable(
@@ -2072,6 +2170,11 @@ class AggregationPipeline:
         if shard.source != "measured":
             return
         roomy = self._is_roomy(shard)
+        if roomy:
+            # Every replica the run started with attached and barely behind:
+            # whatever this rebuild did to one earlier, it is not doing it
+            # now, so a later absence is a drain again and not the incident.
+            self._replica_lag_seen = False
         if roomy != self._roomy:
             self._roomy = roomy
             logger.info(
@@ -2086,6 +2189,8 @@ class AggregationPipeline:
         if reason == self._eased:
             return
         if reason is not None:
+            if reason == "replica_lag":
+                self._replica_lag_seen = True
             self._eases[reason] = self._eases.get(reason, 0) + 1
             _metric("aggregation_governor_eases_total", reason=reason,
                     node=self._gov_node() or "unknown")
@@ -3332,6 +3437,11 @@ class AggregationPipeline:
                 out["replica_holds"] = self._replica_holds
             if self._replica_max_lag_bytes:
                 out["replica_max_lag_bytes"] = self._replica_max_lag_bytes
+        if self._replicas_forgone_n:
+            # How often the run wrote on without a replica it started with.
+            # Its own line because the governor can reach this with no wait
+            # recorded, and a count because they fully coming back re-arms it.
+            out["replicas_forgone"] = self._replicas_forgone_n
         if self._eases:
             # How often the run eased off short of a hold, by reason.
             out["eases"] = dict(self._eases)

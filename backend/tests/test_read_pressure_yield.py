@@ -269,6 +269,10 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     # governor's reading and record touch on that path.
     p._hold_max_s = 1800
     p._expected_replicas = None
+    p._short_replicas_since = None
+    p._replicas_forgone = False
+    p._replicas_forgone_n = 0
+    p._replica_lag_seen = False
     p._node_config = None
     p._server_limits = None
     p._container_env_bytes = None

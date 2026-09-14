@@ -196,23 +196,84 @@ def test_a_replication_read_that_failed_does_not_seed_zero_replicas(sleeps):
     assert reading.source == "measured" and pipe._expected_replicas == 2
 
 
+def _states(*scripted):
+    """``replication_state`` answering a script, the last answer repeating."""
+    left = list(scripted)
+
+    async def _read(*a, **kw):
+        return left.pop(0) if len(left) > 1 else left[0]
+
+    return _read
+
+
+def _gone(attached=0):
+    return {"role": "master", "connectedReplicas": attached, "replicas": []}
+
+
 def test_the_gate_holds_for_replicas_that_vanished_rather_than_writing_on(sleeps, monkeypatch):
     """``attached <= 0`` read as "no replication backpressure here" whatever
     the run started with — which is the incident's second move: the replica
-    the rebuild had just dropped looked like a topology that never had one."""
+    the rebuild had just dropped looked like a topology that never had one.
+
+    A blip is what the hold is for, and the master's backlog can still cover
+    one: the gate waits, and the moment they are back it writes."""
+    monkeypatch.setattr(mat, "time", _Clock(step=1.0))
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._hold_max_s = 1000                      # → a 166s grace for an absence
+    pipe._expected_replicas = 2
+    pipe.p.replication_state = _states(_gone(), _gone(), _gone(2))
+
+    assert _run(pipe._replica_gate()) > 0
+    assert pipe._replica_holds == 1
+    assert not pipe._replicas_forgone            # they came back inside the grace
+
+
+def test_an_absence_that_outlasts_the_grace_is_forgiven_not_fatal(sleeps, monkeypatch):
+    """The other end of the same hold. A replica that is AWAY is one this
+    run cannot reach and cannot harm — and a rebuild writes past the
+    backlog a partial resync would need in seconds, so waiting an hour for
+    the pod never saved the resync it claimed to. It used to fail the run
+    for a node drain."""
+    monkeypatch.setattr(mat, "time", _Clock(step=1.0))
+    monkeypatch.setattr(mat, "_REPLICA_ABSENCE_GRACE_S", 20)
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._expected_replicas = 2
+    pipe.p.replication_state = _states(_gone())
+
+    assert _run(pipe._replica_gate()) >= 20      # it held out the grace first
+    assert pipe._replicas_forgone
+    assert pipe._adapted_snapshot()["replicas_forgone"] == 1
+
+    # And it is forgiven until the replicas are all back: the next batch does not
+    # pay the grace again, which is what turns one drain into an hour of
+    # them at four batches a minute.
+    pipe._replica_holds = 0
+    assert _run(pipe._replica_gate()) == 0.0
+    assert pipe._replica_holds == 0
+
+
+def test_a_replica_that_is_merely_behind_still_stops_the_run(sleeps, monkeypatch):
+    """Forgiveness is for ABSENCE. A replica that is attached and falling
+    further behind is one this rebuild is actively outrunning, and half an
+    hour of that is already generous."""
     monkeypatch.setattr(mat, "time", _Clock(step=400.0))
     pipe = _pipeline(_Conn(_picture()))
     pipe._hold_max_s = 1000
     pipe._expected_replicas = 2
+    pipe.p.replication_state = _states({
+        "role": "master", "connectedReplicas": 2,
+        "replicas": [{"endpoint": "10.0.0.5:6379", "lagBytes": 700 * 1024 ** 2}],
+    })
 
-    async def _gone(*a, **kw):
-        return {"role": "master", "connectedReplicas": 0, "replicas": []}
+    async def _never(**kw):
+        return 0
 
-    pipe.p.replication_state = _gone
+    pipe.p.wait_for_replicas = _never
     with pytest.raises(mat.MaterializationStoreUnstable) as info:
         _run(pipe._replica_gate())
-    assert "replicas gone" in str(info.value)
+    assert "still behind" in str(info.value)
     assert "in total this run" in str(info.value)
+    assert not pipe._replicas_forgone
 
 
 def test_a_run_that_started_without_replicas_never_holds_for_them(sleeps):
@@ -247,6 +308,139 @@ def test_replica_ack_min_zero_waves_the_replica_reasons_through_but_not_a_fork(s
     forked = _pipeline(_Conn(_picture(rdb_bgsave_in_progress="1"), _picture()), replica_ack_min=0)
     _run(forked._paced_write(_write))
     assert forked._store_holds == {"fork": 1}
+
+
+def test_the_governor_forgives_a_lost_replica_rather_than_failing_the_run(sleeps, monkeypatch):
+    """The governor's side of the same decision. With one master and one
+    replica per shard — the shipped cluster overlay — every node drain,
+    rolling upgrade and OOM kill took out the only replica a shard had, and
+    every rebuild on it held and then died. Routine maintenance is not an
+    aggregation outage."""
+    monkeypatch.setattr(mat, "time", _Clock(step=1.0))
+    monkeypatch.setattr(mat, "_REPLICA_ABSENCE_GRACE_S", 20)
+    pipe = _pipeline(_Conn(_picture(), _lost_one()))
+
+    _run(pipe._paced_write(_write))              # the run's first look: two replicas
+    assert pipe._expected_replicas == 2
+
+    _run(pipe._paced_write(_write))              # one gone — held, then wrote on
+    assert pipe._store_holds == {"replica_lost": 1}
+    assert pipe._replicas_forgone
+    assert pipe._adapted_snapshot()["replicas_forgone"] == 1
+
+    _run(pipe._paced_write(_write))              # and does not pay it again
+    assert pipe._store_holds == {"replica_lost": 1}
+
+
+def test_forgiving_the_count_forgives_nothing_else(sleeps, monkeypatch):
+    """``expected_replicas`` is what ``replica_lost`` is judged against and
+    the only thing it feeds, so dropping it must leave every other reason
+    asked — including the resync fork the returning replica causes, which is
+    the incident's real cost and the reason the count could be forgiven."""
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    pipe = _pipeline(_Conn(_picture(), _lost_one()))
+    pipe._hold_max_s = 1000
+    _run(pipe._paced_write(_write))
+    _run(pipe._paced_write(_write))
+    assert pipe._replicas_forgone
+
+    shard = _run(pipe._governor_reading(fresh=True))
+    assert pipe._write_hold_reason(shard) is None            # the count, forgiven
+
+    syncing = dataclasses.replace(shard, replicas_syncing=1)
+    assert pipe._write_hold_reason(syncing)[0] == "fork"     # the resync, not
+    behind = dataclasses.replace(
+        shard, replica_max_lag_bytes=700 * 1024 ** 2)
+    assert pipe._write_hold_reason(behind)[0] == "replica_lag"
+
+
+def test_an_absence_this_rebuild_caused_is_not_forgiven(sleeps, monkeypatch):
+    """Step three of the incident, and the one case forgiveness must not
+    cover. A replica that disappears from under a rebuild that was already
+    outrunning it did not wander off — the rebuild overflowed its output
+    buffer and the master dropped it. Writing on at full speed is what turns
+    that into the resync fork that killed the node."""
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    monkeypatch.setattr(mat, "_REPLICA_ABSENCE_GRACE_S", 1)
+    behind = _picture(slave1={"ip": "10.0.0.5", "port": "6379", "state": "online",
+                              "offset": str(1000 - 600 * 1024 ** 2), "lag": "3"})
+    pipe = _pipeline(_Conn(_picture(), behind, _lost_one()))
+    pipe._hold_max_s = 1000
+    _run(pipe._paced_write(_write))              # the run's first look: two replicas
+
+    # The second batch reads the replica far behind, holds for it — and then
+    # sees it gone, which is what a dropped replica looks like from here.
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        _run(pipe._paced_write(_write))
+    assert "replica(s) attached" in str(info.value)
+    assert not pipe._replicas_forgone
+    assert pipe._store_holds == {"replica_lag": 1, "replica_lost": 1}
+
+
+def test_the_grace_is_judged_on_the_absence_not_on_the_hold(sleeps, monkeypatch):
+    """The ack gate's own clock times the whole episode, and an episode can
+    begin as lag: a run holding twenty minutes for a replica that is behind
+    would arrive at the grace already past it and forgive an absence it had
+    watched for one turn."""
+    monkeypatch.setattr(mat, "time", _Clock(step=400.0))
+    monkeypatch.setattr(mat, "_REPLICA_ABSENCE_GRACE_S", 5_000)
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._hold_max_s = 1000
+    pipe._expected_replicas = 2
+    pipe.p.replication_state = _states(
+        {"role": "master", "connectedReplicas": 2,
+         "replicas": [{"endpoint": "10.0.0.5:6379", "lagBytes": 700 * 1024 ** 2}]},
+        _gone(),
+    )
+
+    async def _never(**kw):
+        return 0
+
+    pipe.p.wait_for_replicas = _never
+    with pytest.raises(mat.MaterializationStoreUnstable) as info:
+        _run(pipe._replica_gate())
+    assert "replicas gone" in str(info.value)      # not forgiven: barely absent
+    assert not pipe._replicas_forgone
+
+
+def test_replicas_fully_back_re_arm_the_run(sleeps, monkeypatch):
+    """Forgiving one node drain at minute ten must not leave the next four
+    hours unprotected — and the absence that matters most is the SECOND
+    one, the replica this rebuild pushed over the line itself."""
+    monkeypatch.setattr(mat, "time", _Clock(step=1.0))
+    monkeypatch.setattr(mat, "_REPLICA_ABSENCE_GRACE_S", 20)
+    pipe = _pipeline(_Conn(_picture(), _lost_one()))
+
+    _run(pipe._paced_write(_write))
+    _run(pipe._paced_write(_write))
+    assert pipe._replicas_forgone and pipe._replicas_forgone_n == 1
+
+    pipe.p._db.connection.pictures = [_picture()]          # both back, in sync
+    _run(pipe._paced_write(_write))
+    assert not pipe._replicas_forgone                      # re-armed
+    assert pipe._short_replicas_since is None
+
+    pipe.p._db.connection.pictures = [_lost_one()]         # and gone again
+    _run(pipe._paced_write(_write))
+    assert pipe._replicas_forgone_n == 2                   # its own grace, its own record
+
+
+def test_a_forgone_run_still_holds_for_the_resync_it_caused(sleeps, monkeypatch):
+    """The load-bearing assumption. Forgiving the COUNT is only safe because
+    a replica coming back shows up in ``INFO replication`` with a non-online
+    state, which is a ``fork`` — and no knob waves a fork through."""
+    monkeypatch.setattr(mat, "time", _Clock(step=1.0))
+    monkeypatch.setattr(mat, "_REPLICA_ABSENCE_GRACE_S", 20)
+    pipe = _pipeline(_Conn(_picture(), _lost_one()))
+
+    _run(pipe._paced_write(_write))
+    _run(pipe._paced_write(_write))
+    assert pipe._replicas_forgone
+
+    pipe.p._db.connection.pictures = [_one_resyncing(), _picture()]
+    _run(pipe._paced_write(_write))
+    assert pipe._store_holds["fork"] == 1
+    assert "receiving a full resync" in pipe._store_hold_last["detail"]
 
 
 # ── memory ───────────────────────────────────────────────────────────────
@@ -947,35 +1141,46 @@ def test_no_controller_at_all_still_scans():
     assert _run(pipe._fetch_range(_rows, 0, 10, label="extract:FLOWS")) == [(0, 10)]
 
 
-# ── a rotated replica takes an hour, and the master is fine throughout ───
+# ── a rotated replica must not stop the rebuild ──────────────────────────
 #
 # A replica that is ABSENT and one that is REPLAYING look identical from the
 # master: a rotated pod is simply missing from INFO replication until it has
 # loaded its dataset and reattached, and hold_reason can only see the master.
-# The 30-minute default therefore cut a routine pod rotation in half and
-# killed a rebuild that had done nothing wrong, against a healthy master.
+# So the 30-minute default cut a routine pod rotation in half and killed a
+# rebuild that had done nothing wrong, against a healthy master. Stretching
+# the budget to the hour a restart takes stopped that, at the cost of an
+# hour of not writing — and it was never buying what it looked like it was
+# buying: a partial resync needs the master's backlog to still hold every
+# byte written while the replica was away, and a rebuild writes past that in
+# seconds. So absence is now a GRACE, for the blip the backlog can cover,
+# and spending it carries on rather than stopping.
 
 
-def test_a_missing_replica_gets_the_time_a_restart_actually_takes():
+def test_a_missing_replica_gets_a_grace_not_a_deadline():
+    """And the grace is its OWN number. ``AGGREGATION_HOLD_MAX_SECS`` means
+    "how long I tolerate a node that is misbehaving", and an operator raises
+    it to sit through long AOF rewrites; a share of it would silently hand
+    them back the hour this change exists to remove."""
     from backend.app.providers.falkordb_materialize import (
-        _hold_max_for, _store_hold_max_s, _store_loading_hold_s,
+        _REPLICA_ABSENCE_GRACE_S, _store_hold_max_s,
     )
 
-    default = _store_hold_max_s()
-    # The same hour the pipeline already documents for a node replaying its
-    # dataset — one number, one reason, not two that can drift.
-    assert _hold_max_for("replica_lost", default) == max(default, _store_loading_hold_s())
-    assert _hold_max_for("replica_lost", default) >= 3600
+    assert 60 <= _REPLICA_ABSENCE_GRACE_S < _store_hold_max_s()
 
 
-def test_every_other_reason_keeps_the_shorter_bound():
-    """A fork that has not finished in half an hour, or RSS still past the
-    container's line, is a node that is not recovering on its own."""
-    from backend.app.providers.falkordb_materialize import _hold_max_for, _store_hold_max_s
+def test_every_reason_now_shares_one_bound():
+    """``replica_lost`` was the one exception — the hour a rotated pod takes
+    to come back — and it existed only so a routine rotation would not kill
+    the run at the 30-minute mark. Forgiving the absence does that properly,
+    so the exception is gone and a hold that is NOT forgiven (one this
+    rebuild caused) stops the run on the same bound as every other."""
+    import backend.app.providers.falkordb_materialize as m
 
-    default = _store_hold_max_s()
-    for kind in ("fork", "replica_lag", "memory", "unmeasured", None):
-        assert _hold_max_for(kind, default) == default, kind
+    assert not hasattr(m, "_hold_max_for")
+    gate = inspect.getsource(mat.AggregationPipeline._hold_for_replicas)
+    gov = inspect.getsource(mat.AggregationPipeline._govern_write)
+    assert gate.count("hold_max = self._hold_max_s") == 1
+    assert gov.count("hold_max = self._hold_max_s") == 1
 
 
 def test_both_gates_use_the_per_reason_budget():
@@ -987,9 +1192,7 @@ def test_both_gates_use_the_per_reason_budget():
     from backend.app.providers.falkordb_materialize import AggregationPipeline
 
     gov = inspect.getsource(AggregationPipeline._govern_write)
-    assert "hold_max = _hold_max_for(kind, self._hold_max_s)" in gov
     assert "if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:" in gov
 
     gate = inspect.getsource(AggregationPipeline._hold_for_replicas)
-    assert '"replica_lost" if attached <= 0 else "replica_lag"' in gate
     assert "if held >= hold_max or total >= hold_max * _HOLD_TOTAL_BUDGETS:" in gate

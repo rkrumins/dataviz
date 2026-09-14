@@ -213,6 +213,25 @@ If an hour is not enough for your node sizes, raise
 `FALKORDB_NOREPLICAS_RETRY_AFTER_S` rather than the park count — the parks are
 also spent on genuine write-latency quiesce, and they are per job.
 
+#### If you do set it, set it to 1
+
+On a shard of one master and N replicas, `min-replicas-to-write 1` buys the
+durability that actually matters — a write cannot be lost to a master failure
+without at least one replica already holding it — and `2` buys only survival of
+a simultaneous master + replica loss. That second failure is rarer, in this
+topology, than the maintenance the setting breaks: with 2 replicas per shard,
+requiring 2 in-sync acknowledgements means **any single replica rotation stops
+every write on that shard** for as long as the replacement takes to load its
+dataset, which §2's node sizes put at up to an hour. A node drain becomes a
+shard-wide write outage; a rolling upgrade becomes three of them.
+
+The same reasoning is why the application's own replica gate waits for
+`AGGREGATION_REPLICA_ACK_MIN` = **1** by default and degrades to however many
+replicas are actually attached (`min(want, attached)`) rather than holding for
+a replica that is not there — see `AGGREGATION_PIPELINE.md`, "A replica that is
+gone". Raising the two together is the configuration that turns one drained
+node into a stalled fleet.
+
 ---
 
 ## 5a. Memory Sizing Rule (read this before raising maxmemory)
