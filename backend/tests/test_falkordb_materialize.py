@@ -3308,3 +3308,244 @@ def test_a_user_cancel_still_wins_over_a_lost_lease():
     pipe._should_cancel = lambda: True
     with pytest.raises(JobCancelled):
         pipe._cancel_check()
+
+
+# ---------------------------------------------------------------------------
+# The aggKey index gate in front of RECONCILE, and the attribute-name ceiling
+#
+# Live (2026-09): a graph holding 7.8M rollup edges sat in Reconcile until the
+# master was demoted. The aggKey index was still building — FalkorDB populates
+# indexes in the background, and the old wait gave up after sixty seconds and
+# proceeded — so every keyed delete was a full pass over the cube under the
+# write lock, which the cluster's failure detector read as a dead node.
+# ---------------------------------------------------------------------------
+
+_ATTR_REFUSAL = (
+    "Max number of attributes exceeded, graph does not support more than "
+    "65534 unique attribute names"
+)
+
+
+def test_agg_index_state_reads_only_the_aggkey_row():
+    state = mat._agg_index_state
+    assert state(None) == "absent"
+    assert state([]) == "absent"
+    assert state([["Column", ["urn"], "OPERATIONAL"]]) == "absent"
+    # An AGGREGATED index that does not cover aggKey is not the one the
+    # keyed delete enters through.
+    assert state([["AGGREGATED", ["sourceLevel", "targetLevel"], "OPERATIONAL"]]) == "absent"
+    assert state([["AGGREGATED", ["aggKey"], "OPERATIONAL"]]) == "operational"
+    assert state([["AGGREGATED", ["aggKey"], {"aggKey": "UNDER CONSTRUCTION"}]]) == "building"
+    # Column order varies between builds: a cell scan, not a column read.
+    assert state([[None, "UNDER CONSTRUCTION", ["aggKey"], "AGGREGATED"]]) == "building"
+    # One row per property on some builds — only aggKey's row decides.
+    assert state([
+        ["AGGREGATED", ["sourceDepth", "targetDepth"], "UNDER CONSTRUCTION"],
+        ["AGGREGATED", ["aggKey"], "OPERATIONAL"],
+    ]) == "operational"
+
+
+def _gate_pipeline(fake, *, index_rows):
+    """A pipeline whose db.indexes() answers ``index_rows`` (a list, or a
+    callable returning one per probe) and whose every other read goes to
+    the fake."""
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    probes = {"n": 0}
+
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.indexes" in cypher:
+            probes["n"] += 1
+            rows = index_rows() if callable(index_rows) else index_rows
+            return _Result(rows)
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+    pipeline = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    return pipeline, probes
+
+
+def test_await_agg_index_ready_reports_what_it_last_saw():
+    fake = _FakeFalkor()
+    seen = {"n": 0}
+
+    def rows():
+        seen["n"] += 1
+        status = "UNDER CONSTRUCTION" if seen["n"] < 3 else "OPERATIONAL"
+        return [["AGGREGATED", ["aggKey"], status]]
+
+    pipe, _ = _gate_pipeline(fake, index_rows=rows)
+    assert _run(pipe._await_agg_index_ready(budget_s=10, interval_s=0)) == "operational"
+
+    pipe, _ = _gate_pipeline(
+        fake, index_rows=[["AGGREGATED", ["aggKey"], "UNDER CONSTRUCTION"]],
+    )
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "building"
+
+    pipe, _ = _gate_pipeline(fake, index_rows=[["Column", ["urn"], "OPERATIONAL"]])
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "absent"
+
+    pipe, _ = _gate_pipeline(fake, index_rows=[])
+
+    async def broken(cypher, params=None, **kw):
+        raise RuntimeError("no such procedure")
+
+    pipe.p._proj_ro_query = broken
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "unknown"
+
+
+def _patched_wait(monkeypatch, state):
+    """Replace the readiness wait with one that answers ``state`` at once,
+    recording the budget it was asked to wait — the gate decides the budget
+    by cube size, and that decision is what these tests pin."""
+    asked = {}
+
+    async def wait(self, *, budget_s=60.0, interval_s=2.0):
+        asked["budget_s"] = budget_s
+        return state
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_await_agg_index_ready", wait)
+    return asked
+
+
+def test_a_small_cube_reconciles_while_the_index_builds(monkeypatch):
+    """Below the gate a scan per keyed delete costs nothing worth stopping
+    for: the run proceeds, as it always did, after the sixty-second wait."""
+    asked = _patched_wait(monkeypatch, "building")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    assert asked["budget_s"] == 60.0
+
+
+def test_a_large_cube_waits_a_hold_for_the_index_and_then_stops(monkeypatch):
+    """Above the gate the wait is one hold long, and a run that is still
+    waiting at the end of it stops for a person — checkpoint kept, through
+    the worker's ordinary resume path — instead of writing unindexed into a
+    master the cluster is about to demote."""
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    asked = _patched_wait(monkeypatch, "building")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "still building" in msg and "db.indexes()" in msg and "1 rollup edge" in msg
+    assert asked["budget_s"] == float(mat._store_hold_max_s())
+    assert fake.write_queries == 0
+
+
+def test_a_large_cube_stops_when_the_index_is_not_there(monkeypatch):
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    _patched_wait(monkeypatch, "absent")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    with pytest.raises(mat.MaterializationStoreUnstable, match="not on the graph"):
+        _run(_materialize(p))
+    assert fake.write_queries == 0
+
+
+def test_an_unanswered_index_probe_stops_nothing(monkeypatch):
+    """The probe is an optimisation's evidence, not a correctness gate: a
+    build without db.indexes() runs as it always has."""
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    _patched_wait(monkeypatch, "unknown")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+
+
+def _answer_property_keys(p, fake, count):
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.propertyKeys" in cypher:
+            return _Result([[count]])
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+
+
+def test_a_graph_at_the_attribute_ceiling_is_refused_before_any_write():
+    """Ids are never freed, so no retry and no smaller batch changes the
+    outcome: terminal, with the count and the way out in the message."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, 65_100)
+    with pytest.raises(mat.MaterializationPreconditionFailed) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "65,100" in msg and "65,533" in msg and "recreate" in msg
+    assert fake.write_queries == 0
+
+
+def test_a_graph_under_the_ceiling_records_its_count():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, 12_000)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert result["run_stats"]["attribute_names"] == 12_000
+
+
+def test_the_attribute_count_is_best_effort():
+    """The fake has no db.propertyKeys(): the probe answers None, nothing is
+    recorded, and the run is the run it always was."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert "attribute_names" not in result["run_stats"]
+
+
+def test_the_store_refusing_a_rollup_name_is_terminal_not_pressure():
+    """A write the store refuses for want of an attribute id must not enter
+    the pressure ladder — halving a batch and re-issuing it forever is how a
+    deterministic refusal turns into an hour of retries."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.proj_query
+    attempts = {"n": 0}
+
+    async def refusing(cypher, params=None, **kw):
+        if "MERGE (s)-[r:AGGREGATED" in cypher:
+            attempts["n"] += 1
+            raise Exception(_ATTR_REFUSAL)
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refusing
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="never freed"):
+        _run(_materialize(p))
+    assert attempts["n"] == 1
+
+
+def test_the_store_refusing_the_index_name_is_terminal():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.proj_query
+
+    async def refusing(cypher, params=None, **kw):
+        if "CREATE INDEX" in cypher and "aggKey" in cypher:
+            raise Exception(_ATTR_REFUSAL)
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refusing
+    with pytest.raises(mat.MaterializationPreconditionFailed):
+        _run(_materialize(p))
+    assert fake.write_queries == 0
+
+
+def test_is_attribute_limit_error_walks_the_cause_chain():
+    inner = Exception(_ATTR_REFUSAL)
+    outer = RuntimeError("Provider 'x' unavailable")
+    outer.__cause__ = inner
+    assert mat._is_attribute_limit_error(outer)
+    assert not mat._is_attribute_limit_error(RuntimeError("Query timed out"))

@@ -31,6 +31,10 @@ export type FailureCategory =
     // that was never the problem.
     | 'worker_lost'
     | 'never_dispatched'
+    // The graph store has no property-name ids left for this graph, so the
+    // rollups can be neither written nor indexed. Only recreating the graph
+    // gets past it — resuming cannot.
+    | 'attribute_limit'
     | 'unknown'
 
 /** A reconciliation verdict, stamped by the sweep and read off the state row.

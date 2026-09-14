@@ -255,6 +255,30 @@ def _store_hold_max_s() -> int:
 _REPLICA_ABSENCE_GRACE_S = 300
 
 
+#: FalkorDB's hard ceiling on DISTINCT attribute names per graph. Attribute
+#: ids are ``uint16_t`` with the top two values reserved as sentinels
+#: (``ATTRIBUTE_ID_NONE``, ``ATTRIBUTE_ID_ALL``), and
+#: ``GraphContext_FindOrAddAttribute`` refuses the next name with "Max number
+#: of attributes exceeded, graph does not support more than N unique
+#: attribute names". Ids are never freed: a graph that reaches this can only
+#: be recreated. Every distinct user property name written natively
+#: (``SET n += $props``) is one of these, which is how a source with
+#: thousands of per-node metadata keys gets here.
+_ATTRIBUTE_NAME_LIMIT = 65_533
+#: How close to the ceiling a run refuses to start. The rollup write needs a
+#: handful of names of its own (aggKey, weight, the depth stamps), and an
+#: index on a name that cannot be registered leaves every keyed delete a
+#: full scan of the cube — the failure this pre-flight exists to name before
+#: it costs an hour.
+_ATTRIBUTE_NAME_MARGIN = 500
+
+#: Below this many existing rollup edges, reconciling without the aggKey
+#: index is a scan small enough not to matter; above it, it is the master
+#: held under the write lock for the length of TIMEOUT_MAX per statement —
+#: ten thousand keys per UNWIND, each a full pass over the cube — which is
+#: what the cluster's failure detector reads as a dead node.
+_INDEX_GATE_EDGES = 100_000
+
 #: How many per-hold budgets one run may spend on the SAME reason before
 #: the bound trips on the TOTAL.
 #:
@@ -802,6 +826,61 @@ class MaterializationBudgetExceeded(ValueError):
         self.cell_ratio_observed = cell_ratio_observed
 
 
+def _is_attribute_limit_error(exc: BaseException) -> bool:
+    """The graph has no attribute ids left — see ``_ATTRIBUTE_NAME_LIMIT``.
+    Matched by message, walking the cause chain like the provider's own
+    classifiers: FalkorDB raises it as a generic ``ResponseError``."""
+    seen: Optional[BaseException] = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        msg = str(seen).lower()
+        if "max number of attributes exceeded" in msg or "unique attribute names" in msg:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _attribute_limit_message(graph_name: str, names: Optional[int]) -> str:
+    """The one message for a graph with no attribute ids left, wherever the
+    run finds out — the pre-flight count, the aggKey index DDL, or a rollup
+    write. Says what it is and what the way out is, because a retry changes
+    nothing: ids are never freed."""
+    seen = (
+        f"has registered {names:,} distinct property names against"
+        if names is not None else "has no attribute ids left under"
+    )
+    return (
+        f"the graph {graph_name} {seen} FalkorDB's limit of "
+        f"{_ATTRIBUTE_NAME_LIMIT:,} — almost every distinct metadata key its "
+        f"source carries has become an attribute name, and the rollup write "
+        f"and its aggKey index need names of their own. Attribute ids are "
+        f"never freed, so this graph cannot be rebuilt in place: recreate it "
+        f"(drop and re-ingest the source) with the metadata long tail stored "
+        f"as values rather than as property names, then rebuild the rollups."
+    )
+
+
+def _agg_index_state(rows: Optional[List[Any]]) -> str:
+    """What ``CALL db.indexes()`` says about AGGREGATED(aggKey):
+    ``"operational"``, ``"building"`` or ``"absent"``. Version-tolerant — a
+    cell scan for the markers, since column order varies between builds and
+    an index on a relationship type lists every property it covers on one
+    row with one status. Only the row that names ``aggKey`` counts: the
+    keyed delete enters through that property and no other."""
+    found = False
+    for row in (rows or []):
+        cells = [str(c) for c in (row or []) if c is not None]
+        if not any("AGGREGATED" in c for c in cells):
+            continue
+        if not any("aggKey" in c for c in cells):
+            continue
+        found = True
+        if any("UNDER CONSTRUCTION" in c.upper() for c in cells):
+            return "building"
+    return "operational" if found else "absent"
+
+
 class MaterializationPreconditionFailed(ValueError):
     """Graph/ontology state makes materialization impossible in a way a
     retry cannot fix (e.g. the graph has content but no node matches any
@@ -1177,6 +1256,13 @@ class AggregationPipeline:
         # convergence test compares this number ACROSS runs, where "unknown"
         # and "nothing stored" must not read the same.
         self._edges_before_read: bool = False
+        #: Distinct attribute names the graph has registered, when the
+        #: probe answered — see ``_ATTRIBUTE_NAME_LIMIT``.
+        self._attribute_names: Optional[int] = None
+        #: Seconds this run spent waiting for the aggKey index to build
+        #: before reconciling — the evidence, when a run sat in Reconcile
+        #: writing nothing, of what it was waiting for.
+        self._index_wait_s: float = 0.0
         self._calibration: Optional[Dict[str, Any]] = None
         #: What the cube would cost in time, and why Auto stepped off it.
         self._cube_projection: Optional[Dict[str, Any]] = None
@@ -2795,6 +2881,14 @@ class AggregationPipeline:
                 # The per-query ceiling the ladder narrows against, when the
                 # shard could say — always present, None when unknown.
                 "query_mem_capacity": self._query_mem_capacity,
+                # How far the source's metadata long tail has eaten into the
+                # graph's attribute ids, and what this run waited for the
+                # aggKey index — see ``_ATTRIBUTE_NAME_LIMIT`` and
+                # ``_INDEX_GATE_EDGES``. Present only when there is a reading.
+                **({"attribute_names": int(self._attribute_names)}
+                   if self._attribute_names is not None else {}),
+                **({"index_wait_s": round(self._index_wait_s, 1)}
+                   if self._index_wait_s > 0 else {}),
                 # What the run ran with and where each value came from.
                 "effective_tuning": {**self._effective, "sources": dict(self._effective_sources)},
                 # Conformance advisories (identity / casing gaps) — present
@@ -2858,6 +2952,13 @@ class AggregationPipeline:
         # not find, so a stuck run writes every time while storing nothing new.
         if self._edges_before_read:
             live_stats["edges_before"] = int(self._edges_before)
+        if self._attribute_names is not None:
+            # Distinct property names the graph has registered, against a
+            # hard FalkorDB ceiling of 65,533. The one number that says how
+            # far a source's metadata long tail has eaten into the graph.
+            live_stats["attribute_names"] = int(self._attribute_names)
+        if self._index_wait_s > 0:
+            live_stats["index_wait_s"] = round(self._index_wait_s, 1)
         # Which graph store node this run is writing. It is on the run's own
         # record rather than only inside ``write_budget`` because it is the
         # answer to "what else is on this shard right now", which is asked
@@ -4270,12 +4371,43 @@ class AggregationPipeline:
             )
             return 0
 
+    async def _count_attribute_names(self) -> Optional[int]:
+        """How many distinct attribute names the graph has registered —
+        ``CALL db.propertyKeys()`` enumerates the attribute map, so its count
+        is the number of ids spent. Best-effort: None when the procedure is
+        unavailable, and the run proceeds as it always did."""
+        try:
+            res = await self.p._proj_ro_query(
+                "CALL db.propertyKeys() YIELD propertyKey RETURN count(*)",
+                timeout=self._scan_timeout(),
+            )
+            rows = res.result_set or []
+            return int(rows[0][0] or 0) if rows and rows[0] else None
+        except Exception as exc:                  # noqa: BLE001 — best-effort
+            logger.info(
+                "aggregation pipeline on %s: attribute-name count unavailable "
+                "(%s).", self.p._graph_name, exc,
+            )
+            return None
+
     async def _capacity_baseline(self) -> None:
         """E0 for the growth budget on every run; the shard's ``used`` for
         the calibration on a FRESH run only (a resumed run's start is gone).
-        Also the run's first look at how the write node replicates."""
+        Also the run's first look at how the write node replicates — and at
+        whether the graph has any attribute ids left to write with."""
         self._edges_before = await self._count_aggregated()
         self._edges_before_read = True
+        self._attribute_names = await self._count_attribute_names()
+        if (
+            self._attribute_names is not None
+            and self._attribute_names >= _ATTRIBUTE_NAME_LIMIT - _ATTRIBUTE_NAME_MARGIN
+        ):
+            # Deterministic, and nothing a retry changes: ids are never
+            # freed. Say what it is and what the way out is, once, instead of
+            # a rebuild that writes unindexed for an hour and is demoted.
+            raise MaterializationPreconditionFailed(
+                _attribute_limit_message(self.p._graph_name, self._attribute_names)
+            )
         if self._fresh_run:
             shard = await self._read_shard()
             self._used_before = shard.used if shard.measurable else None
@@ -5170,6 +5302,13 @@ class AggregationPipeline:
         try:
             elapsed, _ = await self._through_outage(lambda: _issue(rows), op=label)
         except Exception as exc:
+            if _is_attribute_limit_error(exc):
+                # Not pressure: the graph has no attribute ids left for the
+                # rollup's own properties. Halving the batch cannot change
+                # that, and neither can a retry — see ``_ATTRIBUTE_NAME_LIMIT``.
+                raise MaterializationPreconditionFailed(
+                    _attribute_limit_message(p._graph_name, self._attribute_names)
+                ) from exc
             kind = _pressure_kind(exc)
             if kind is None:
                 raise
@@ -5340,7 +5479,38 @@ class AggregationPipeline:
         exist. Returns the keys observed existing so APPLY can skip them."""
         dedicated = getattr(self.p, "_projection_mode", "in_source") == "dedicated"
         await self._ensure_agg_index()
-        await self._await_agg_index_ready()
+        # Below the gate the keyed deletes can afford to scan the cube while
+        # the index builds; above it they cannot (see ``_INDEX_GATE_EDGES``),
+        # so a large cube waits for the index as long as one hold may last
+        # and then stops for a person, checkpoint kept, rather than write
+        # unindexed into a master the cluster is about to demote.
+        large = self._edges_before >= _INDEX_GATE_EDGES
+        waited_from = time.monotonic()
+        state = await self._await_agg_index_ready(
+            budget_s=float(self._hold_max_s) if large else 60.0,
+        )
+        self._index_wait_s += time.monotonic() - waited_from
+        if state in ("building", "absent"):
+            what = (
+                f"still building after {self._index_wait_s:.0f}s"
+                if state == "building" else "not on the graph"
+            )
+            if large:
+                raise MaterializationStoreUnstable(
+                    f"the AGGREGATED(aggKey) index on {self.p._graph_name} is "
+                    f"{what} and the graph holds {self._edges_before:,} rollup "
+                    f"edges: reconciling without it scans the whole cube once "
+                    f"per key, under the write lock, for the length of every "
+                    f"statement — which is what the cluster's failure detector "
+                    f"reads as a dead master. The run keeps its checkpoint. "
+                    f"Check CALL db.indexes() and Resume once the index reads "
+                    f"OPERATIONAL."
+                )
+            logger.warning(
+                "aggregation pipeline on %s: AGGREGATED(aggKey) index %s — "
+                "proceeding; keyed deletes may scan until it is there.",
+                self.p._graph_name, what,
+            )
 
         if start_lo == 0:
             # Heal generations that predate the aggKey contract: edges
@@ -5710,15 +5880,21 @@ class AggregationPipeline:
 
     async def _await_agg_index_ready(
         self, *, budget_s: float = 60.0, interval_s: float = 2.0,
-    ) -> None:
+    ) -> str:
         """Bounded wait for the AGGREGATED(aggKey) edge index to finish
-        building. FalkorDB constructs indexes in the BACKGROUND: on a
-        first run against a large existing :AGGREGATED set, the keyed
-        deletes below would run as full relation scans until it is ready.
-        Version-tolerant (cell-scan for the status marker; column order
-        varies) and never a correctness gate — probe failure, unknown
-        shapes and budget exhaustion all WARN + proceed."""
+        building. FalkorDB constructs indexes in the BACKGROUND — CREATE
+        INDEX returns before a single edge is indexed, and a graph read back
+        off disk rebuilds every index the same way — so on a run against a
+        large existing :AGGREGATED set the keyed deletes below would run as
+        full relation scans until it is ready.
+
+        Returns what the probe last saw: ``"operational"``, ``"building"``
+        (the budget ran out first), ``"absent"`` (no index names aggKey) or
+        ``"unknown"`` (the probe is unavailable). Never raises: whether the
+        state is a reason to stop is ``_reconcile``'s call, by cube size."""
         deadline = time.monotonic() + budget_s
+        started = time.monotonic()
+        polls = 0
         while True:
             try:
                 res = await self.p._proj_ro_query(
@@ -5730,26 +5906,22 @@ class AggregationPipeline:
                     "unavailable (%s) — skipping the readiness wait.",
                     self.p._graph_name, exc,
                 )
-                return
-            building = False
-            for row in (res.result_set or []):
-                cells = [str(c) for c in (row or []) if c is not None]
-                if not any("AGGREGATED" in c for c in cells):
-                    continue
-                if any("UNDER CONSTRUCTION" in c.upper() for c in cells):
-                    building = True
-                    break
-            if not building:
-                return
+                return "unknown"
+            state = _agg_index_state(res.result_set)
+            if state != "building":
+                return state
             if time.monotonic() >= deadline:
+                return "building"
+            polls += 1
+            if polls % 30 == 0:
                 logger.warning(
-                    "aggregation pipeline on %s: AGGREGATED(aggKey) index "
-                    "still building after %.0fs — proceeding; keyed deletes "
-                    "may scan until it completes.",
-                    self.p._graph_name, budget_s,
+                    "aggregation pipeline on %s: waiting for the "
+                    "AGGREGATED(aggKey) index to build — %.0fs so far, up to "
+                    "%.0fs.", self.p._graph_name,
+                    time.monotonic() - started, budget_s,
                 )
-                return
             self._cancel_check()
+            await self._ladder_heartbeat()
             await asyncio.sleep(interval_s)
 
     async def _ensure_agg_index(self) -> None:
@@ -5771,6 +5943,14 @@ class AggregationPipeline:
                     timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
                 )
             except Exception as exc:
+                if _is_attribute_limit_error(exc):
+                    # The index is the first thing this run asks the graph
+                    # to NAME. Deterministic — see ``_ATTRIBUTE_NAME_LIMIT``.
+                    raise MaterializationPreconditionFailed(
+                        _attribute_limit_message(
+                            self.p._graph_name, self._attribute_names,
+                        )
+                    ) from exc
                 msg = str(exc).lower()
                 if "already" not in msg and "exist" not in msg:
                     logger.warning(

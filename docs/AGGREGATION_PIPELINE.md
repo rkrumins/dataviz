@@ -1388,6 +1388,98 @@ account rather than trusted: `cube_estimate_upper` (what was counted),
 `cell_ratio_observed` (what actually happened). If the first and last diverge,
 the ratio is drifting and the graph's shape has changed.
 
+## The attribute-name ceiling, and the index gate in front of Reconcile
+
+FalkorDB numbers property names with a 16-bit id per graph. Two values are
+reserved, so a graph can register **65,533 distinct attribute names**; the
+next `SET n.newName = …` is refused with `Max number of attributes exceeded,
+graph does not support more than 65534 unique attribute names`. **Ids are
+never freed** — deleting every node that carried a name does not give the id
+back — so a graph that reaches the ceiling can only be recreated.
+
+The rollup itself never gets near it: the pipeline writes a fixed handful of
+edge properties. The **source** does. User properties are written as native
+node properties (`SET n += $props`, `_split_user_properties` in the provider)
+so that search predicates can see them, and every distinct key is one id — a
+source whose nodes carry thousands of per-node metadata keys spends the ids on
+the long tail of keys that appear once. `CALL db.propertyKeys() YIELD
+propertyKey RETURN count(*)` is the count; `run_stats.attribute_names` records
+it on every run.
+
+What the ceiling does to a rebuild is not a refusal on the first write. The
+rollup's own names (`aggKey`, `weight`, the level and depth stamps) were
+registered by the first run that ever wrote a rollup, so on a graph that
+already holds rollups the writes go through. What fails is the thing that
+makes Reconcile affordable: `CREATE INDEX FOR ()-[r:AGGREGATED]-() ON
+(r.aggKey)` on a graph that never registered `aggKey`, or — the case that
+actually happens — an index that exists but is **still building**. FalkorDB
+populates indexes in the background: `CREATE INDEX` returns before one edge
+is indexed, and a graph read back off disk (a restart; a failover to a replica
+that reloaded) rebuilds every index the same way. On 7.8 million rollup edges
+that is not a sixty-second wait, and sixty seconds was all the old wait gave
+before proceeding.
+
+Without the index, Reconcile's keyed delete — `UNWIND $keys AS k MATCH
+()-[r:AGGREGATED {aggKey: k}]->() … DELETE r`, ten thousand keys per statement
+— is a full pass over the cube **per key**, under the write lock, for as long
+as `TIMEOUT_MAX` lets one statement run. Apply's `MERGE (s)-[r:AGGREGATED
+{aggKey: item.k}]->(t)` is anchored on both nodes by the URN index and is not
+that scan on an ordinary node, but on a top-level container whose out-degree
+is most of the cube it is the same thing. A master that does not answer for
+the length of that is what Redis Cluster's failure detector
+(`cluster-node-timeout`, 15 s) reads as a dead node: a replica is promoted,
+the client's blocked call comes back as `UNBLOCKED force unblock from blocking
+operation, instance state changed (master -> replica?)`, and the run has spent
+its time making the cluster fail over. Two things that look like fixes are
+not: halving the batch (the cost is per key, not per batch) and a shorter
+write timeout (it decides how often the statement is cut off and re-issued,
+not how long a key takes). Write timeouts are server-enforced here — the
+manifests set `TIMEOUT_MAX` — so a short one is safe, just not a remedy.
+
+So two gates, both before the phase's first write:
+
+* **Pre-flight, every run.** `_capacity_baseline` counts the graph's attribute
+  names; within 500 of the ceiling the run refuses with
+  `MaterializationPreconditionFailed` — terminal, since a retry recomputes the
+  same count — and the message names the count and the way out. The store
+  refusing a name mid-run (the index DDL, or a rollup write) is classified the
+  same way instead of being fed to the pressure ladder, which would halve and
+  re-issue a deterministic refusal for an hour. The job lands in the
+  `attribute_limit` failure category, which offers no Resume.
+* **The index gate, above 100,000 existing rollup edges.** Reconcile asks
+  `CALL db.indexes()` for the `aggKey` index. Operational → proceed. Still
+  `UNDER CONSTRUCTION` → wait for it, heartbeating, for as long as one hold
+  may last (`AGGREGATION_HOLD_MAX_SECS`, 30 min by default), and if it is
+  still building then stop with `MaterializationStoreUnstable` — checkpoint
+  kept, the worker's ordinary resume path — rather than scan. Absent → the
+  same stop. Below the gate a cube is small enough that scanning while the
+  index builds does not matter, and the run proceeds after the sixty-second
+  wait it always had. `run_stats.index_wait_s` records what a run waited. A
+  probe the build cannot answer stops nothing: the gate needs evidence to
+  act on, and without it the run is the run it always was.
+
+The operator's two checks, on the shard that owns the graph:
+
+```
+GRAPH.RO_QUERY <graph> "CALL db.propertyKeys() YIELD propertyKey RETURN count(*)"
+GRAPH.RO_QUERY <graph> "CALL db.indexes()"
+```
+
+The first, against 65,533, says whether the graph can be rebuilt at all. The
+second's `status` for the `AGGREGATED` row says whether Reconcile is waiting on
+a build (`UNDER CONSTRUCTION`) or ready (`OPERATIONAL`). A run that stopped at
+the gate resumes cleanly once that reads `OPERATIONAL`; nothing it wrote is
+lost, because it wrote nothing.
+
+**Recreating a graph at the ceiling** means purging the data source's graph
+and ingesting the source again — and that helps only if the second ingest
+does not spend the ids the same way. The long tail has to stop becoming
+property names: a key that appears on a handful of nodes belongs in the
+node's `propertiesRaw` blob, where the Properties panel still shows it and
+only search predicates cannot reach it, and the ids stay for the keys that
+carry the graph. Until ingest draws that line, re-ingesting the same source
+rebuilds the same 65,000 names.
+
 ## Index policy, and cleaning up the retired ones
 
 `backend/app/providers/index_policy.py` is the single declaration of every index

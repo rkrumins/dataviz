@@ -584,8 +584,10 @@ async def _prior_ledgers(
 #: same way; the source needs a fresh trigger against the new ontology.
 #: ``never_dispatched`` means no executor ever saw the row, so there is no
 #: checkpoint to resume FROM and re-dispatching it is what the operator
-#: actually wants.
-_UNRESUMABLE_CATEGORIES = frozenset({"ontology", "never_dispatched"})
+#: actually wants. ``attribute_limit`` means the graph has no attribute ids
+#: left (FalkorDB never frees one) — nothing short of recreating the graph
+#: gets a rebuild past it.
+_UNRESUMABLE_CATEGORIES = frozenset({"ontology", "never_dispatched", "attribute_limit"})
 
 
 def _is_resumable(job) -> bool:
@@ -3771,6 +3773,19 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
         return "worker_lost"
     if stripped.startswith(_NEVER_DISPATCHED):
         return "never_dispatched"
+    # The graph has no attribute ids left: FalkorDB's own refusal ("Max
+    # number of attributes exceeded, graph does not support more than N
+    # unique attribute names"), or the pipeline's pre-flight, which names
+    # the count and says the graph has to be recreated. Before the memory
+    # and availability buckets because the raw refusal arrives wrapped in
+    # the provider's "unavailable" wording like everything else does.
+    lowered = error_message.lower()
+    if (
+        "unique attribute names" in lowered
+        or "max number of attributes" in lowered
+        or "attribute ids are never freed" in lowered
+    ):
+        return "attribute_limit"
     if (
         "OutOfMemoryError" in error_message
         or "used memory > 'maxmemory'" in error_message
@@ -3785,7 +3800,6 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     # which matches none of the buckets below on its own — it only ever
     # landed in provider_unavailable because the breaker happened to
     # prefix it with the word "unavailable".
-    lowered = error_message.lower()
     if (
         "connection refused" in lowered
         or "error 111" in lowered

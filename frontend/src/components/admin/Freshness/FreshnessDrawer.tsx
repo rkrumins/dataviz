@@ -1048,6 +1048,17 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         note: 'Re-triggering before a worker is registered just queues another row that nothing will claim.',
         showClear: false, showRetry: true, primary: 'retry',
     },
+    attribute_limit: {
+        // A hard ceiling in the graph store, reached by the SOURCE: every
+        // distinct metadata key it carries became a property name, and a
+        // graph never gives one back. The rebuild refused before writing
+        // (or the store refused the first name it needed), and no retry
+        // changes the count — so no Retry, and the way out is a recreate.
+        why: 'The graph has used almost every one of the 65,533 distinct property names the graph store allows a graph. The source’s per-node metadata keys became property names, and the rollups need a few names of their own that the graph can no longer register — nor can it index them.',
+        how: 'Property names are never freed, so this graph has to be recreated: purge it, re-ingest the source so its metadata long tail is stored as values rather than as separate property names, then rebuild the rollups. The technical details below give the count the rebuild measured.',
+        note: 'Retrying or resuming reaches the same ceiling — nothing changes until the graph is recreated.',
+        showClear: true, showRetry: false, primary: 'clear',
+    },
     unknown: {
         why: "The rebuild didn't complete.",
         how: 'Retry the rebuild. If it keeps failing, check the technical details below.',
