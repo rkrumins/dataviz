@@ -15,6 +15,16 @@ statement, on a graph other people are reading, once per job per source.
 These tests pin: the set is applied once per graph; a changed ontology
 re-applies it; a partial failure is retried rather than remembered; and `force`
 overrides the marker for a caller that knows the graph was rebuilt.
+
+And the other direction — the storm that DOES happen, because the marker is
+written only on a clean sweep. When the NODE refuses (`-NOREPLICAS` from
+`min-replicas-to-write`, `-LOADING`, a socket that is not there), every one of
+the 131 statements fails, no marker is written, and the next ontology-cache
+miss runs the whole set again. On the interactive read path
+(`context_engine._resolve_ontology`) that is 131 doomed round trips per
+reader, for as long as the condition lasts — an hour-long node restart, say.
+So a refusal that is about the node stops the set at the first statement and
+silences it for everyone for a short while.
 """
 import asyncio
 
@@ -41,6 +51,9 @@ class _FakeRedis:
 
     async def setex(self, key, ttl, value):
         self.kv[key] = value
+
+    async def delete(self, key):
+        self.kv.pop(key, None)
 
 
 def _provider(*, fail_on=None):
@@ -172,6 +185,177 @@ def test_a_marker_store_that_is_down_does_not_skip_the_work():
     assert len(p.issued) == _expected_count(TYPES)
     _run(p.ensure_indices(TYPES))
     assert len(p.issued) == 2 * _expected_count(TYPES)
+
+
+# ── the node refusing, rather than the statement failing ────────────────
+
+
+class _Refusing:
+    """A node that answers every DDL the same way, because the refusal is
+    about the node and not about the statement."""
+
+    def __init__(self, error):
+        self.error = error
+        self.issued = []
+
+    async def query(self, cypher, **kw):
+        self.issued.append(cypher)
+        raise self.error
+
+
+def _refusing_provider(error):
+    p = FalkorDBProvider(host="x", graph_name="g")
+    graph = _Refusing(error)
+    p._graph = graph
+    p._redis = _FakeRedis()
+    p.issued = graph.issued
+
+    async def _connected():
+        return None
+
+    p._ensure_connected = _connected
+    return p
+
+
+class ReadOnlyError(Exception):
+    """The sentinel spelling of a failover: this node was the master when the
+    pool connected and has been demoted. Matched by class name, like the
+    cluster errors, because it is a ResponseError and not a ConnectionError."""
+
+
+class ClusterDownError(Exception):
+    """Named to match: the cluster classifier keys on the exception CLASS
+    NAME, not the message, so a fake raising a bare RuntimeError would test
+    the wrong thing — redis-py raises this class for ``-CLUSTERDOWN``."""
+
+
+NODE_REFUSALS = [
+    RuntimeError("NOREPLICAS Not enough good replicas to write."),
+    RuntimeError("LOADING FalkorDB is loading the dataset in memory"),
+    ConnectionRefusedError("Connection refused"),
+    ClusterDownError("CLUSTERDOWN The cluster is down"),
+    ReadOnlyError("READONLY You can't write against a read only replica"),
+    asyncio.TimeoutError(),
+]
+
+
+@pytest.mark.parametrize("error", NODE_REFUSALS)
+def test_a_node_that_refuses_stops_the_set_at_the_first_statement(error):
+    """Every remaining statement would be refused for the same reason, so
+    they buy nothing and cost an interactive reader a round trip each."""
+    p = _refusing_provider(error)
+    _run(p.ensure_indices(TYPES))
+    assert len(p.issued) == 1, p.issued
+
+
+@pytest.mark.parametrize("error", NODE_REFUSALS)
+def test_the_refusal_silences_the_set_for_everyone(error):
+    """The marker is where every pod looks. Without it the fail-fast only
+    shortens one storm and the herd behind it starts the next."""
+    p = _refusing_provider(error)
+    _run(p.ensure_indices(TYPES))
+    _run(p.ensure_indices(TYPES))
+    _run(p.ensure_indices(TYPES))
+    assert len(p.issued) == 1, "the set was re-entered while the node was refusing"
+
+
+def test_a_refusal_does_not_record_the_set_as_applied():
+    """It says nothing about whether the indices exist — so a graph that was
+    genuinely missing them must still get them once the node recovers."""
+    p = _refusing_provider(RuntimeError("NOREPLICAS Not enough good replicas to write."))
+    _run(p.ensure_indices(TYPES))
+    assert not any(k.endswith(":indices_ensured") for k in p._redis.kv)
+
+    # The condition lifts (here: the backoff expires and the node answers).
+    p._redis.kv.clear()
+    healthy = _provider()
+    healthy._redis = p._redis
+    _run(healthy.ensure_indices(TYPES))
+    assert len(healthy.issued) == _expected_count(TYPES)
+
+
+def test_force_still_reaches_a_refusing_node():
+    """An operator asking for it explicitly is not the herd the backoff is
+    for, and the answer they need is the node's, not the marker's."""
+    p = _refusing_provider(RuntimeError("NOREPLICAS Not enough good replicas to write."))
+    _run(p.ensure_indices(TYPES))
+    _run(p.ensure_indices(TYPES, force=True))
+    assert len(p.issued) == 2
+
+
+def test_a_clean_sweep_clears_the_backoff():
+    """Whatever the node was refusing for is over, and leaving the key to
+    expire would keep a forced run's success from unblocking everyone else."""
+    shared = _FakeRedis()
+    refused = _refusing_provider(RuntimeError("NOREPLICAS Not enough good replicas to write."))
+    refused._redis = shared
+    _run(refused.ensure_indices(TYPES))
+    assert any(k.endswith(":indices_deferred") for k in shared.kv)
+
+    healthy = _provider()
+    healthy._redis = shared
+    _run(healthy.ensure_indices(TYPES, force=True))
+    assert not any(k.endswith(":indices_deferred") for k in shared.kv)
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("Query's mem consumption exceeded maximum allowed size"),
+    RuntimeError("Query timed out"),
+])
+def test_a_statement_too_big_for_the_node_does_not_stop_the_others(error):
+    """The line ``_replica_at_fault`` already draws, and it matters more here.
+    A per-query memory ceiling and a SERVER-aborted deadline are
+    deterministic for that statement, so deferring on one would abandon every
+    statement after it, re-issue the same prefix on every attempt, and never
+    lift — the largest label's index would permanently cost every smaller
+    label its own."""
+    p = _refusing_provider(error)
+    _run(p.ensure_indices(TYPES))
+    assert len(p.issued) == _expected_count(TYPES)
+
+
+def test_one_sweep_per_pod_and_the_rest_skip():
+    """The provider instance is process-cached per graph and every concurrent
+    reader shares it, but nothing else serialises them: the ontology resolve
+    lock is per-REQUEST and the shared cache has no in-flight registry. So a
+    cold window used to admit one full sweep per admitted reader."""
+    p = _provider()
+    entered = []
+
+    async def _slow(cypher, **kw):
+        entered.append(cypher)
+        await asyncio.sleep(0)              # yield, so the herd gets its turn
+        return None
+
+    p._graph.query = _slow
+
+    async def _herd():
+        await asyncio.gather(*[p.ensure_indices(TYPES) for _ in range(8)])
+
+    _run(_herd())
+    # One sweep ran; the other seven found it in flight and went away. They
+    # SKIP rather than queue: the work is idempotent and someone else is
+    # doing it, so waiting would trade a storm for a stall on a request a
+    # person is holding open.
+    assert len(entered) == _expected_count(TYPES)
+
+
+def test_the_flag_is_released_even_when_the_node_refuses():
+    """A sweep that stops early must not leave the graph looking permanently
+    busy — nothing would ever index it again in this process."""
+    p = _refusing_provider(RuntimeError("NOREPLICAS Not enough good replicas to write."))
+    _run(p.ensure_indices(TYPES))
+    assert p._index_sweeping is False
+
+
+def test_a_statement_the_server_rejects_still_lets_the_rest_run():
+    """The other direction, and the one that must not change: a refusal about
+    THE STATEMENT (a syntax an older server does not support) says nothing
+    about the next statement, so the set carries on and the failure is
+    reported."""
+    p = _provider(fail_on="targetDepth")
+    _run(p.ensure_indices(TYPES))
+    assert len(p.issued) == _expected_count(TYPES)
 
 
 def test_the_edge_index_set_is_declared_once():

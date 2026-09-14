@@ -968,6 +968,51 @@ def _replica_at_fault(exc: BaseException) -> bool:
     )
 
 
+def _index_ddl_deferred_reason(exc: BaseException) -> Optional[str]:
+    """Why a failed ``CREATE INDEX`` says nothing about that index — and why
+    every other statement in the set would fail the same way.
+
+    ``ensure_indices`` issues one statement per (label, property) pair, which
+    for a twenty-type ontology is over a hundred. When the refusal is about
+    the NODE — no in-sync replica to accept a write, a dataset still loading,
+    a socket that is not there, a shard mid-failover, a demoted master — it
+    is true of all of them, so issuing the other hundred cannot succeed and
+    cannot inform anyone. It just spends an interactive reader's request on
+    a hundred doomed round trips.
+
+    ``None`` means the failure was about the STATEMENT, and the rest of the
+    set still runs because the rest of the set may well work. The line is
+    the one :func:`_replica_at_fault` already draws, for the same reason and
+    with more force here: a query the store refused at its per-query memory
+    ceiling, or one the SERVER aborted at its time limit, is DETERMINISTIC
+    for that statement (see ``_is_query_memory_error``). Deferring on one
+    would abandon every statement after it, re-issue the same prefix on
+    every attempt, and never lift — so the largest label's index would
+    permanently cost every smaller label its own.
+
+    The CLIENT deadline is different and does defer. ``_clamp_db_timeout_ms``
+    puts the server's limit below it deliberately, so that the server
+    cancels first: a statement that blows the client budget is one the node
+    did not answer at all.
+    """
+    if _is_no_replicas_error(exc):
+        return "it has too few in-sync replicas to accept writes"
+    if _is_loading_error(exc):
+        return "it is still loading its dataset"
+    if _is_connection_refused_error(exc) or _is_transient_connection_error(exc):
+        return "it is not answering"
+    if _is_cluster_routing_error(exc):
+        return "the shard moved"
+    # The sentinel spelling of the same thing: this node was the master when
+    # the pool connected and has been demoted since. A ``ResponseError``, so
+    # the transient ladder above does not see it.
+    if _is_role_changed_error(exc):
+        return "it is a replica now, not the master"
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "it did not answer inside the index budget"
+    return None
+
+
 def _pressure_kind(exc: BaseException) -> Optional[str]:
     """What KIND of pressure an exception is, or None.
 
@@ -1574,6 +1619,16 @@ _IDENTITY_STAMP_PAUSE_MAX_S = 2.0
 
 _INDEX_MARKER_TTL_S = int(os.getenv("FALKORDB_INDEX_MARKER_TTL_S", str(24 * 3600)))
 
+#: How long ONE node-level refusal silences the whole index set — for every
+#: reader, on every pod, because it is written where they all look.
+#:
+#: Short on purpose. The conditions it covers (too few in-sync replicas, a
+#: dataset loading, a node not answering) are live and lift on their own, and
+#: the cost of guessing the lift too early is a single statement, not a
+#: hundred. The cost of guessing it too late is a graph that reads unindexed
+#: for longer than it had to.
+_INDEX_BACKOFF_TTL_S = int(os.getenv("FALKORDB_INDEX_BACKOFF_S", "120"))
+
 
 class FalkorDBProvider(GraphDataProvider):
     """
@@ -1640,6 +1695,8 @@ class FalkorDBProvider(GraphDataProvider):
         # coalesce into a single rebuild instead of a thundering herd.
         self._conn_generation = 0
         self._failover_lock = asyncio.Lock()
+        #: One index sweep per pod at a time — see ``ensure_indices``.
+        self._index_sweeping = False
         self._proj_db = None   # separate client for {graph}_proj on cluster
         self._proj_pool = None
         # P1.6 — credentials previously dropped silently in
@@ -4260,108 +4317,190 @@ class FalkorDBProvider(GraphDataProvider):
         alignment-analysis endpoint so its performance predictions can never
         drift from what is actually indexed here.
         """
-        from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
-
-        labels = indexed_labels(entity_type_ids)
-        # Remember the ontology vocabulary the indices were built for, so
-        # label-union readers (get_nodes_by_layer) can anchor on the same
-        # label set the label-scoped indexes actually cover.
-        self._indexed_entity_type_ids = list(entity_type_ids or [])
-        # Idempotent CREATE INDEX is fine if the index already exists.
-        properties = list(INDEXED_NODE_PROPS)
-        # Index the source's URN-equivalent too, so the identity-urn stamp's
-        # NULL-urn lookup and any direct property access are index-backed rather
-        # than full label scans. No-op when the source uses the default `urn`
-        # (already in INDEXED_NODE_PROPS).
-        _ident = getattr(self, "_node_identity_property", None)
-        if _ident and _ident != "urn" and _ident not in properties:
-            properties.append(_ident)
-
-        _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
-        # Failure accounting: "already indexed" is success (idempotent DDL);
-        # everything else is collected and reported in ONE warning at the end
-        # so a persistently failing CREATE INDEX (unsupported server version,
-        # timeouts) is visible instead of silently swallowed. Still
-        # best-effort — this method never raises; queries work unindexed.
-        failures: list[str] = []
-
-        async def _create_index(cypher: str) -> None:
-            try:
-                # Server-side timeout too — an abandoned DDL statement
-                # must not keep burning FalkorDB CPU after the client
-                # deadline fires.
-                await asyncio.wait_for(
-                    self._graph.query(
-                        cypher, timeout=self._db_timeout_ms(_init_timeout),
-                    ),
-                    timeout=_init_timeout,
-                )
-            except Exception as exc:
-                if "already indexed" in str(exc).lower():
-                    return
-                failures.append(f"{cypher}: {type(exc).__name__}: {exc}")
-
-        statements = [
-            f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"
-            for label in labels for prop in properties
-        ] + list(_AGGREGATED_EDGE_INDEXES)
-        total = len(statements)
-
-        # Already applied to THIS graph, for THIS exact statement set? Then
-        # nothing here has anything to do. The set is a pure function of the
-        # ontology's entity types and the indexed property list, so a digest of
-        # it is the whole cache key — a changed ontology yields a different
-        # digest and re-runs on its own.
+        # ONE sweep per pod at a time, and later arrivals SKIP rather than
+        # queue. The provider instance is process-cached per (provider_id,
+        # graph_name), so every concurrent reader of this graph shares it —
+        # and nothing else serialises them: the ontology resolve lock is
+        # per-REQUEST and the shared-ontology cache has no in-flight
+        # registry, so a cold window admits as many sweeps as there are
+        # readers admitted to the graph (sixteen, at the default ceiling).
         #
-        # This ran unconditionally on every aggregation job, every skip, every
-        # ontology-cache miss and every provider connect: (5 + N_types) × 5 + 6
-        # statements, serially, which for a twenty-type ontology is 131 round
-        # trips of write-path DDL per job — issued before the write lease is
-        # taken and before the admission controller is even attached, so none of
-        # the pipeline's pacing applied to any of it. Nothing ever drops a graph
-        # index, so re-issuing the set can only ever be a no-op that costs a
-        # parse and a lock on a graph other people are reading.
-        # Building the key can itself fail on a half-built provider — this
-        # method runs during onboarding, before the graph name is settled —
-        # and its contract is that it never raises. No key means no memo:
-        # do the work, which is the safe side of the trade.
-        digest = hashlib.sha256("\n".join(statements).encode()).hexdigest()[:16]
-        try:
-            marker_key = f"{self._cache_ns}:indices_ensured"
-        except Exception:                 # noqa: BLE001 — by contract
-            marker_key = None
-        if marker_key and not force:
-            try:
-                if await self._redis.get(marker_key) == digest:
-                    logger.debug(
-                        "ensure_indices on %s: %d statements already applied "
-                        "(digest %s) — skipping",
-                        getattr(self, "_graph_name", "?"), total, digest,
-                    )
-                    return
-            except Exception:
-                pass                      # no marker ⇒ do the work
-
-        for cypher in statements:
-            await _create_index(cypher)
-
-        if failures:
-            logger.warning(
-                "ensure_indices: %d/%d index statements failed (queries still "
-                "work, unindexed). First failures: %s",
-                len(failures), total, "; ".join(failures[:3]),
+        # Skipping is the point. The work is idempotent and someone else is
+        # already doing it, so a reader that QUEUED would trade a storm for a
+        # stall — on a request a person is holding open — and gain nothing.
+        # A plain flag, not a lock: there is no await between the check and
+        # the set, so nothing can interleave, and a lock would bind itself
+        # to the first event loop that touched it.
+        if self._index_sweeping:
+            logger.debug(
+                "ensure_indices on %s: another sweep is already running here",
+                getattr(self, "_graph_name", "?"),
             )
-        else:
-            logger.debug("ensure_indices: %d index statements ensured", total)
-            # Marked only on a clean sweep: a partial application must be
-            # retried, not remembered. The TTL is a floor under a graph that
-            # was dropped and rebuilt behind our back — the indices would be
-            # gone and no code path anywhere issues DROP INDEX to tell us.
-            if marker_key:
+            return
+        self._index_sweeping = True
+        try:
+            from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
+
+            labels = indexed_labels(entity_type_ids)
+            # Remember the ontology vocabulary the indices were built for, so
+            # label-union readers (get_nodes_by_layer) can anchor on the same
+            # label set the label-scoped indexes actually cover.
+            self._indexed_entity_type_ids = list(entity_type_ids or [])
+            # Idempotent CREATE INDEX is fine if the index already exists.
+            properties = list(INDEXED_NODE_PROPS)
+            # Index the source's URN-equivalent too, so the identity-urn stamp's
+            # NULL-urn lookup and any direct property access are index-backed rather
+            # than full label scans. No-op when the source uses the default `urn`
+            # (already in INDEXED_NODE_PROPS).
+            _ident = getattr(self, "_node_identity_property", None)
+            if _ident and _ident != "urn" and _ident not in properties:
+                properties.append(_ident)
+
+            _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+            # Failure accounting: "already indexed" is success (idempotent DDL);
+            # everything else is collected and reported in ONE warning at the end
+            # so a persistently failing CREATE INDEX (unsupported server version,
+            # timeouts) is visible instead of silently swallowed. Still
+            # best-effort — this method never raises; queries work unindexed.
+            failures: list[str] = []
+            #: Set when the NODE refused, not the statement — see
+            #: ``_index_ddl_deferred_reason``. The set stops there.
+            deferred: Optional[str] = None
+
+            async def _create_index(cypher: str) -> bool:
+                """False when there is no point issuing the rest of the set."""
+                nonlocal deferred
                 try:
-                    await self._redis.setex(marker_key, _INDEX_MARKER_TTL_S, digest)
+                    # Server-side timeout too — an abandoned DDL statement
+                    # must not keep burning FalkorDB CPU after the client
+                    # deadline fires.
+                    await asyncio.wait_for(
+                        self._graph.query(
+                            cypher, timeout=self._db_timeout_ms(_init_timeout),
+                        ),
+                        timeout=_init_timeout,
+                    )
+                except Exception as exc:
+                    if "already indexed" in str(exc).lower():
+                        return True
+                    reason = _index_ddl_deferred_reason(exc)
+                    if reason:
+                        deferred = reason
+                        return False
+                    failures.append(f"{cypher}: {type(exc).__name__}: {exc}")
+                return True
+
+            statements = [
+                f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"
+                for label in labels for prop in properties
+            ] + list(_AGGREGATED_EDGE_INDEXES)
+            total = len(statements)
+
+            # Already applied to THIS graph, for THIS exact statement set? Then
+            # nothing here has anything to do. The set is a pure function of the
+            # ontology's entity types and the indexed property list, so a digest of
+            # it is the whole cache key — a changed ontology yields a different
+            # digest and re-runs on its own.
+            #
+            # This ran unconditionally on every aggregation job, every skip, every
+            # ontology-cache miss and every provider connect: (5 + N_types) × 5 + 6
+            # statements, serially, which for a twenty-type ontology is 131 round
+            # trips of write-path DDL per job — issued before the write lease is
+            # taken and before the admission controller is even attached, so none of
+            # the pipeline's pacing applied to any of it. Nothing ever drops a graph
+            # index, so re-issuing the set can only ever be a no-op that costs a
+            # parse and a lock on a graph other people are reading.
+            # Building the key can itself fail on a half-built provider — this
+            # method runs during onboarding, before the graph name is settled —
+            # and its contract is that it never raises. No key means no memo:
+            # do the work, which is the safe side of the trade.
+            digest = hashlib.sha256("\n".join(statements).encode()).hexdigest()[:16]
+            try:
+                marker_key = f"{self._cache_ns}:indices_ensured"
+                backoff_key = f"{self._cache_ns}:indices_deferred"
+            except Exception:                 # noqa: BLE001 — by contract
+                marker_key = backoff_key = None
+            if marker_key and not force:
+                try:
+                    if await self._redis.get(marker_key) == digest:
+                        logger.debug(
+                            "ensure_indices on %s: %d statements already applied "
+                            "(digest %s) — skipping",
+                            getattr(self, "_graph_name", "?"), total, digest,
+                        )
+                        return
                 except Exception:
-                    pass
+                    pass                      # no marker ⇒ do the work
+            if backoff_key and not force:
+                # A refusal that was about the NODE is still about the node a
+                # moment later, and this key is where every pod looks — so the
+                # next reader in the window pays NOTHING, not one statement each.
+                # Without it the deferral below only shortens one storm; the herd
+                # behind it starts the next one.
+                try:
+                    if await self._redis.get(backoff_key):
+                        logger.debug(
+                            "ensure_indices on %s: deferred — the node refused the "
+                            "set recently; not re-issuing it yet",
+                            getattr(self, "_graph_name", "?"),
+                        )
+                        return
+                except Exception:
+                    pass                      # no marker ⇒ do the work
+
+            issued = 0
+            for cypher in statements:
+                issued += 1
+                if not await _create_index(cypher):
+                    break
+
+            if deferred:
+                # NOT a failure of these statements, so it is not collected with
+                # them and it does not clear the success memo: the indices may
+                # well be there already. It is the node saying "not now", and the
+                # honest response is to stop asking for a while.
+                logger.warning(
+                    "ensure_indices on %s: stopped after %d/%d statements — the node "
+                    "refused: %s.%s Reads work unindexed meanwhile; not re-issuing "
+                    "the set for %ds.",
+                    getattr(self, "_graph_name", "?"), issued, total, deferred,
+                    f" {len(failures)} earlier statement(s) also failed." if failures else "",
+                    _INDEX_BACKOFF_TTL_S,
+                )
+                if backoff_key:
+                    try:
+                        await self._redis.setex(backoff_key, _INDEX_BACKOFF_TTL_S, deferred)
+                    except Exception:
+                        pass
+                return
+
+            if failures:
+                logger.warning(
+                    "ensure_indices: %d/%d index statements failed (queries still "
+                    "work, unindexed). First failures: %s",
+                    len(failures), total, "; ".join(failures[:3]),
+                )
+            else:
+                logger.debug("ensure_indices: %d index statements ensured", total)
+                # Marked only on a clean sweep: a partial application must be
+                # retried, not remembered. The TTL is a floor under a graph that
+                # was dropped and rebuilt behind our back — the indices would be
+                # gone and no code path anywhere issues DROP INDEX to tell us.
+                if marker_key:
+                    try:
+                        await self._redis.setex(marker_key, _INDEX_MARKER_TTL_S, digest)
+                    except Exception:
+                        pass
+                if backoff_key:
+                    # The node took the whole set, so whatever it was refusing for
+                    # is over. Leaving the key to expire would keep a ``force``
+                    # run's success from unblocking everyone else.
+                    try:
+                        await self._redis.delete(backoff_key)
+                    except Exception:
+                        pass
+        finally:
+            self._index_sweeping = False
 
     @property
     def name(self) -> str:
