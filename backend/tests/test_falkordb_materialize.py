@@ -3477,35 +3477,119 @@ def test_an_unanswered_index_probe_stops_nothing(monkeypatch):
     assert set(fake.agg.keys()) == _EXPECTED_PAIRS
 
 
-def _answer_property_keys(p, fake, count):
+def _answer_property_keys(p, fake, names):
+    """db.propertyKeys() answers ``names`` — a count of synthetic names, or
+    an explicit iterable of them."""
+    rows = (
+        [[f"k{i}"] for i in range(names)] if isinstance(names, int)
+        else [[n] for n in names]
+    )
+
     async def proj_ro(cypher, params=None, **kw):
         if "db.propertyKeys" in cypher:
-            return _Result([[count]])
+            return _Result(rows)
         return await fake.ro_query(cypher, params, **kw)
 
     p._proj_ro_query = proj_ro
 
 
-def test_a_graph_at_the_attribute_ceiling_is_refused_before_any_write():
-    """Ids are never freed, so no retry and no smaller batch changes the
-    outcome: terminal, with the count and the way out in the message."""
+def _at_the_ceiling(*, with_rollup_names, with_meta_names=False, minus=0):
+    """A graph with no free ids: the ceiling's worth of names, of which the
+    rollup names are (or are not) some."""
+    own = set()
+    if with_rollup_names:
+        own |= mat._ROLLUP_ATTRIBUTE_NAMES
+    if with_meta_names:
+        own |= mat._META_ATTRIBUTE_NAMES
+    filler = mat._ATTRIBUTE_NAME_LIMIT - len(own) - minus
+    return [*own, *(f"k{i}" for i in range(filler))]
+
+
+def test_a_graph_that_cannot_register_the_rollup_names_is_refused():
+    """Ids are never freed, so no retry, no smaller batch and no purge of
+    the rollups changes the outcome: terminal, naming the names it needs
+    and the room it has."""
     fake = _FakeFalkor()
     p = _make_provider(fake, _seed_two_chain_graph(fake))
-    _answer_property_keys(p, fake, 65_100)
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=False))
     with pytest.raises(mat.MaterializationPreconditionFailed) as exc:
         _run(_materialize(p))
     msg = str(exc.value)
-    assert "65,100" in msg and "65,533" in msg and "recreate" in msg
+    assert "65,534" in msg and "aggKey" in msg and "room for 0" in msg
+    assert "recreate" in msg and "never freed" in msg
     assert fake.write_queries == 0
 
 
-def test_a_graph_under_the_ceiling_records_its_count():
+def test_a_graph_at_the_ceiling_that_holds_its_rollup_names_rebuilds_in_place():
+    """The operator's graph: every id spent, but the rollups it holds were
+    written by this pipeline, so every name the run writes is registered.
+    A margin would refuse it and send them to a recreate they do not need;
+    the exact check admits it and says, on the record, how little room is
+    left and that the _AggMeta stamp cannot land."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=True))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    stats = result["run_stats"]
+    assert stats["attribute_names"] == mat._ATTRIBUTE_NAME_LIMIT
+    assert stats["attribute_names_room"] == 0
+    (adv,) = [a for a in stats["advisories"] if a["kind"] == "attribute_names_exhausted"]
+    assert adv["room"] == 0
+    assert "regime" in adv["meta_names_missing"]
+    assert "_AggMeta" in adv["message"] and "rebuilt in place" in adv["message"]
+
+
+def test_a_graph_with_a_little_room_but_missing_more_names_than_it_has_is_refused():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    # Room for 3, needs 9.
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=False, minus=3))
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="room for 3"):
+        _run(_materialize(p))
+
+
+def test_dedicated_mode_also_needs_urn():
+    """The dedicated statement MERGEs the projection nodes by urn in the
+    same query as the rollup MERGE, so the refusal reaches that name."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    p._projection_mode = "dedicated"
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=True))
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="urn"):
+        _run(_materialize(p))
+
+
+def test_a_graph_under_the_ceiling_records_its_count_and_room():
     fake = _FakeFalkor()
     p = _make_provider(fake, _seed_two_chain_graph(fake))
     _answer_property_keys(p, fake, 12_000)
     result = _run(_materialize(p))
     assert result["errors"] == 0
     assert result["run_stats"]["attribute_names"] == 12_000
+    assert result["run_stats"]["attribute_names_room"] == mat._ATTRIBUTE_NAME_LIMIT - 12_000
+    assert not [a for a in result["run_stats"].get("advisories", [])
+                if a["kind"] == "attribute_names_exhausted"]
+
+
+def test_the_names_the_run_writes_are_the_names_the_pre_flight_checks():
+    """The required and advisory sets are hand-kept; this pins them to the
+    Cypher the pipeline actually issues (the SET tail, the MERGE pattern
+    key, the _AggMeta stamp) and to the declared edge indexes, so neither
+    can drift from the other."""
+    import inspect
+    from backend.app.providers.index_policy import declared_edge_indexes
+
+    src = inspect.getsource(mat)
+    set_tail = set(re.findall(r"\br\.(\w+)\s*=(?!=)", src))
+    merge_keys = set(re.findall(r"\[r:AGGREGATED \{(\w+):", src))
+    assert set_tail | merge_keys == set(mat._ROLLUP_ATTRIBUTE_NAMES)
+    meta_set = set(re.findall(r"\bm\.(\w+)\s*=(?!=)", src))
+    meta_keys = set(re.findall(r"\(m:_AggMeta \{(\w+):", src))
+    assert meta_set | meta_keys == set(mat._META_ATTRIBUTE_NAMES)
+    for ix in declared_edge_indexes():
+        assert set(ix.props) <= set(mat._ROLLUP_ATTRIBUTE_NAMES), ix
 
 
 def test_the_attribute_count_is_best_effort():

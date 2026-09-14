@@ -384,7 +384,7 @@ export interface AggregationRunStats {
   /** The store's per-query ceiling the ladder narrowed against; null when unknown. */
   query_mem_capacity?: number | null;
   /** Distinct property names the graph has registered, against the store's
-   *  ceiling of 65,533 per graph — how far the source's metadata long tail
+   *  ceiling of 65,534 per graph — how far the source's metadata long tail
    *  has eaten into it. Absent when the probe could not answer. */
   attribute_names?: number;
   /** Seconds the run waited for the aggKey index to finish building before
@@ -679,7 +679,7 @@ export interface CapacitySource {
   lastRegime?: string | null;
   lastFailureCategory?: string | null;
   /** Distinct property names the graph had registered at its last completed
-   *  rebuild, against the graph store's ceiling of 65,533 per graph. */
+   *  rebuild, against the graph store's ceiling of 65,534 per graph. */
   attributeNames?: number | null;
 }
 

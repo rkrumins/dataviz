@@ -1391,7 +1391,7 @@ the ratio is drifting and the graph's shape has changed.
 ## The attribute-name ceiling, and the index gate in front of Reconcile
 
 FalkorDB numbers property names with a 16-bit id per graph. Two values are
-reserved, so a graph can register **65,533 distinct attribute names**; the
+reserved, so a graph can register **65,534 distinct attribute names**; the
 next `SET n.newName = …` is refused with `Max number of attributes exceeded,
 graph does not support more than 65534 unique attribute names`. **Ids are
 never freed** — deleting every node that carried a name does not give the id
@@ -1438,14 +1438,26 @@ manifests set `TIMEOUT_MAX` — so a short one is safe, just not a remedy.
 
 So two gates, both before the phase's first write:
 
-* **Pre-flight, every run.** `_capacity_baseline` counts the graph's attribute
-  names; within 500 of the ceiling the run refuses with
+* **Pre-flight, every run, exact.** `_capacity_baseline` reads the graph's
+  registered names and asks the only question that matters: can the graph
+  register the names this run writes? The run must write nine rollup-edge
+  names (`aggKey`, `weight`, `sourceEdgeTypes`, `sourceLevel`, `targetLevel`,
+  `sourceDepth`, `targetDepth`, `levelDigest`, `latestUpdate`; plus `urn` in
+  dedicated mode), and the room is the ceiling less the count. Only when the
+  missing names outnumber the room does it refuse, with
   `MaterializationPreconditionFailed` — terminal, since a retry recomputes the
-  same count — and the message names the count and the way out. The store
-  refusing a name mid-run (the index DDL, or a rollup write) is classified the
-  same way instead of being fed to the pressure ladder, which would halve and
-  re-issue a deterministic refusal for an hour. The job lands in the
+  same answer — naming the missing names and the room. A graph that already
+  holds rollups has every one of those names whatever its count, so it
+  rebuilds in place; a purge of the rollups frees no name and is not needed.
+  A graph at the ceiling that can be rebuilt carries an
+  `attribute_names_exhausted` advisory on its record instead, saying how much
+  room is left and, when the `_AggMeta` stamp's names are not registered,
+  that readers fall back to the Redis marker. The store refusing a name
+  mid-run (the index DDL, or a rollup write) is classified the same way as
+  the refusal instead of being fed to the pressure ladder, which would halve
+  and re-issue a deterministic refusal for an hour. The job lands in the
   `attribute_limit` failure category, which offers no Resume.
+  `run_stats.attribute_names` and `attribute_names_room` carry the reading.
 * **The index gate, above 100,000 existing rollup edges.** Reconcile asks
   `CALL db.indexes()` for the `aggKey` index. Operational → proceed. Still
   `UNDER CONSTRUCTION` → wait for it, heartbeating, for what is left of the
@@ -1467,7 +1479,7 @@ GRAPH.RO_QUERY <graph> "CALL db.propertyKeys() YIELD propertyKey RETURN count(*)
 GRAPH.RO_QUERY <graph> "CALL db.indexes()"
 ```
 
-The first, against 65,533, says whether the graph can be rebuilt at all. The
+The first, against 65,534, says whether the graph can be rebuilt at all. The
 second's `status` for the `AGGREGATED` row says whether Reconcile is waiting on
 a build (`UNDER CONSTRUCTION`) or ready (`OPERATIONAL`). A run that stopped at
 the gate resumes cleanly once that reads `OPERATIONAL`; nothing it wrote is

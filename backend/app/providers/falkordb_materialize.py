@@ -86,7 +86,7 @@ import logging
 import os
 import random
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from backend.app.providers.process_memory import MemoryGauge
 from backend.app.providers.shard_capacity import (
@@ -257,20 +257,41 @@ _REPLICA_ABSENCE_GRACE_S = 300
 
 #: FalkorDB's hard ceiling on DISTINCT attribute names per graph. Attribute
 #: ids are ``uint16_t`` with the top two values reserved as sentinels
-#: (``ATTRIBUTE_ID_NONE``, ``ATTRIBUTE_ID_ALL``), and
-#: ``GraphContext_FindOrAddAttribute`` refuses the next name with "Max number
-#: of attributes exceeded, graph does not support more than N unique
-#: attribute names". Ids are never freed: a graph that reaches this can only
-#: be recreated. Every distinct user property name written natively
-#: (``SET n += $props``) is one of these, which is how a source with
-#: thousands of per-node metadata keys gets here.
-_ATTRIBUTE_NAME_LIMIT = 65_533
-#: How close to the ceiling a run refuses to start. The rollup write needs a
-#: handful of names of its own (aggKey, weight, the depth stamps), and an
-#: index on a name that cannot be registered leaves every keyed delete a
-#: full scan of the cube — the failure this pre-flight exists to name before
-#: it costs an hour.
-_ATTRIBUTE_NAME_MARGIN = 500
+#: (``ATTRIBUTE_ID_NONE``, ``ATTRIBUTE_ID_ALL``), so ids 0..65,533 are
+#: usable and ``GraphContext_FindOrAddAttribute`` refuses the 65,535th name
+#: with "Max number of attributes exceeded, graph does not support more
+#: than N unique attribute names". Ids are never freed — deleting every
+#: entity that carried a name, or every rollup edge, gives nothing back;
+#: only GRAPH.DELETE discards the map. Every distinct user property name
+#: written natively (``SET n += $props``) is one of these, which is how a
+#: source with thousands of per-node metadata keys gets here.
+_ATTRIBUTE_NAME_LIMIT = 65_534
+
+#: The names a run MUST be able to write: the rollup edge's own properties —
+#: the MERGE pattern key and the SET tail in ``_write_items`` — which the
+#: three edge indexes are declared on a subset of. The store refusing one of
+#: these fails the run, so a graph that cannot register a missing one cannot
+#: be rebuilt. A graph that already holds rollups has them all, whatever its
+#: count, and the pre-flight asks exactly that instead of guessing from a
+#: margin: purging the rollups frees no name, and needs none.
+_ROLLUP_ATTRIBUTE_NAMES = frozenset({
+    "aggKey", "weight", "sourceEdgeTypes", "sourceLevel", "targetLevel",
+    "sourceDepth", "targetDepth", "levelDigest", "latestUpdate",
+})
+#: In dedicated projection mode the same statement MERGEs the projection
+#: nodes by urn, so the refusal reaches that name too.
+_PROJECTION_NODE_ATTRIBUTE_NAMES = frozenset({"urn"})
+#: Names the run writes best-effort: the ``_AggMeta`` stamp, whose failure
+#: is logged and the run still completes (readers fall back to the Redis
+#: marker). A graph without room for these is a graph to recreate on the
+#: operator's schedule — an advisory, never a refusal.
+_META_ATTRIBUTE_NAMES = frozenset({
+    "id", "regime", "stampVersion", "pairRuleVersion", "levelDigest",
+    "maxDepth", "edgeCount", "runStartMs", "lastMaterializedAt",
+})
+#: Below this much room the run says so on its record, so a graph at the
+#: ceiling is known before the next name it cannot register turns up.
+_ATTRIBUTE_ROOM_ADVISORY = 100
 
 #: Below this many existing rollup edges, reconciling without the aggKey
 #: index is a scan small enough not to matter; above it, it is the master
@@ -841,23 +862,40 @@ def _is_attribute_limit_error(exc: BaseException) -> bool:
     return False
 
 
-def _attribute_limit_message(graph_name: str, names: Optional[int]) -> str:
+def _attribute_limit_message(
+    graph_name: str, names: Optional[int], *,
+    missing: Sequence[str] = (), room: Optional[int] = None,
+) -> str:
     """The one message for a graph with no attribute ids left, wherever the
-    run finds out — the pre-flight count, the aggKey index DDL, or a rollup
+    run finds out — the pre-flight, the aggKey index DDL, or a rollup
     write. Says what it is and what the way out is, because a retry changes
-    nothing: ids are never freed."""
+    nothing: ids are never freed. The phrase "Attribute ids are never
+    freed" is what ``classify_failure`` keys the ``attribute_limit`` bucket
+    on — keep it."""
     seen = (
-        f"has registered {names:,} distinct property names against"
-        if names is not None else "has no attribute ids left under"
+        f"has registered {names:,} of the {_ATTRIBUTE_NAME_LIMIT:,} distinct "
+        f"property names FalkorDB allows a graph"
+        if names is not None
+        else f"has no attribute ids left under FalkorDB's limit of "
+             f"{_ATTRIBUTE_NAME_LIMIT:,}"
     )
+    if missing:
+        need = (
+            f", and this rebuild needs {len(missing)} it cannot register "
+            f"({', '.join(missing)}; room for {room:,})"
+        )
+    else:
+        need = (
+            ", and the store has just refused a name the rollup write or "
+            "its aggKey index needs"
+        )
     return (
-        f"the graph {graph_name} {seen} FalkorDB's limit of "
-        f"{_ATTRIBUTE_NAME_LIMIT:,} — almost every distinct metadata key its "
-        f"source carries has become an attribute name, and the rollup write "
-        f"and its aggKey index need names of their own. Attribute ids are "
-        f"never freed, so this graph cannot be rebuilt in place: recreate it "
-        f"(drop and re-ingest the source) with the metadata long tail stored "
-        f"as values rather than as property names, then rebuild the rollups."
+        f"the graph {graph_name} {seen}{need} — almost every distinct "
+        f"metadata key its source carries has become an attribute name. "
+        f"Attribute ids are never freed, so no retry and no purge of the "
+        f"rollups changes this: recreate the graph (drop and re-ingest the "
+        f"source) with the metadata long tail stored as values rather than "
+        f"as property names, then rebuild the rollups."
     )
 
 
@@ -1257,8 +1295,13 @@ class AggregationPipeline:
         # and "nothing stored" must not read the same.
         self._edges_before_read: bool = False
         #: Distinct attribute names the graph has registered, when the
-        #: probe answered — see ``_ATTRIBUTE_NAME_LIMIT``.
+        #: probe answered — see ``_ATTRIBUTE_NAME_LIMIT`` — and how many more
+        #: it can take; the rollup names it could not register (a refusal),
+        #: and the advisory a graph at the ceiling carries on its record.
         self._attribute_names: Optional[int] = None
+        self._attribute_names_room: Optional[int] = None
+        self._attribute_names_missing: List[str] = []
+        self._attribute_advisory: Optional[Dict[str, Any]] = None
         #: Seconds this run spent waiting for the aggKey index to build
         #: before reconciling — the evidence, when a run sat in Reconcile
         #: writing nothing, of what it was waiting for.
@@ -2766,6 +2809,8 @@ class AggregationPipeline:
             advisories = [*advisories, self._replication_advisory]
         if self._slow_cube_advisory is not None:
             advisories = [*advisories, self._slow_cube_advisory]
+        if self._attribute_advisory is not None:
+            advisories = [*advisories, self._attribute_advisory]
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -2885,7 +2930,8 @@ class AggregationPipeline:
                 # graph's attribute ids, and what this run waited for the
                 # aggKey index — see ``_ATTRIBUTE_NAME_LIMIT`` and
                 # ``_INDEX_GATE_EDGES``. Present only when there is a reading.
-                **({"attribute_names": int(self._attribute_names)}
+                **({"attribute_names": int(self._attribute_names),
+                    "attribute_names_room": int(self._attribute_names_room or 0)}
                    if self._attribute_names is not None else {}),
                 **({"index_wait_s": round(self._index_wait_s, 1)}
                    if self._index_wait_s > 0 else {}),
@@ -2954,9 +3000,11 @@ class AggregationPipeline:
             live_stats["edges_before"] = int(self._edges_before)
         if self._attribute_names is not None:
             # Distinct property names the graph has registered, against a
-            # hard FalkorDB ceiling of 65,533. The one number that says how
-            # far a source's metadata long tail has eaten into the graph.
+            # hard FalkorDB ceiling of 65,534, and the room left. The
+            # numbers that say how far a source's metadata long tail has
+            # eaten into the graph.
             live_stats["attribute_names"] = int(self._attribute_names)
+            live_stats["attribute_names_room"] = int(self._attribute_names_room or 0)
         if self._index_wait_s > 0:
             live_stats["index_wait_s"] = round(self._index_wait_s, 1)
         # Which graph store node this run is writing. It is on the run's own
@@ -4371,24 +4419,90 @@ class AggregationPipeline:
             )
             return 0
 
-    async def _count_attribute_names(self) -> Optional[int]:
-        """How many distinct attribute names the graph has registered —
-        ``CALL db.propertyKeys()`` enumerates the attribute map, so its count
-        is the number of ids spent. Best-effort: None when the procedure is
-        unavailable, and the run proceeds as it always did."""
+    async def _registered_attribute_names(self) -> Optional[Set[str]]:
+        """Every attribute name the graph the rollups are written to has
+        registered — ``CALL db.propertyKeys()`` enumerates the attribute
+        map, so its size is the number of ids spent and its contents say
+        which of the run's own names are already there. Best-effort: None
+        when the procedure is unavailable, and the run proceeds as it
+        always did."""
         try:
             res = await self.p._proj_ro_query(
-                "CALL db.propertyKeys() YIELD propertyKey RETURN count(*)",
+                "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey",
                 timeout=self._scan_timeout(),
             )
-            rows = res.result_set or []
-            return int(rows[0][0] or 0) if rows and rows[0] else None
+            return {
+                str(row[0]) for row in (res.result_set or [])
+                if row and row[0] is not None
+            }
         except Exception as exc:                  # noqa: BLE001 — best-effort
             logger.info(
-                "aggregation pipeline on %s: attribute-name count unavailable "
+                "aggregation pipeline on %s: attribute names unavailable "
                 "(%s).", self.p._graph_name, exc,
             )
             return None
+
+    def _check_attribute_room(self, names: Set[str]) -> None:
+        """Refuse only when the run needs a name the graph cannot register.
+
+        The names the run must write are known (``_ROLLUP_ATTRIBUTE_NAMES``,
+        plus ``urn`` in dedicated mode); the names the graph holds are what
+        the probe returned; the room is the ceiling less the count. A graph
+        that already holds rollups has every required name whatever its
+        count, so it rebuilds in place — and a purge, which frees no name,
+        would not have been needed. A graph at the ceiling that CAN be
+        rebuilt says so on its record instead: the next name it cannot
+        register (a new indexed property, a new stamp) is the one that
+        turns up later, and the operator should plan the recreate before
+        it does."""
+        required = set(_ROLLUP_ATTRIBUTE_NAMES)
+        if getattr(self.p, "_projection_mode", "in_source") == "dedicated":
+            required |= _PROJECTION_NODE_ATTRIBUTE_NAMES
+        missing = sorted(required - names)
+        room = _ATTRIBUTE_NAME_LIMIT - len(names)
+        self._attribute_names = len(names)
+        self._attribute_names_room = room
+        self._attribute_names_missing = missing
+        if len(missing) > room:
+            # Deterministic, and nothing a retry changes: ids are never
+            # freed. Say what it is and what the way out is, once, instead
+            # of a rebuild that fails at its first rollup write.
+            raise MaterializationPreconditionFailed(
+                _attribute_limit_message(
+                    self.p._graph_name, len(names), missing=missing, room=room,
+                )
+            )
+        left = room - len(missing)
+        meta_missing = sorted(_META_ATTRIBUTE_NAMES - names)
+        stamp_short = len(meta_missing) > left
+        if left >= _ATTRIBUTE_ROOM_ADVISORY and not stamp_short:
+            return
+        detail = (
+            f"every name this rebuild writes is registered, so the graph can "
+            f"be rebuilt in place, but it has room for only {left:,} more "
+            f"property name(s) of FalkorDB's {_ATTRIBUTE_NAME_LIMIT:,}. Ingest "
+            f"registers nothing new on it (a registered name stays native; "
+            f"new keys are stored as values), but a property this platform "
+            f"has not written here before — a new indexed property, a new "
+            f"stamp — will be refused, and attribute ids are never freed. "
+            f"Plan the recreate on your schedule, not as a prerequisite for "
+            f"this rebuild."
+        )
+        if stamp_short:
+            detail += (
+                f" The in-graph _AggMeta stamp cannot land ({len(meta_missing)} "
+                f"of its names unregistered: {', '.join(meta_missing)}); readers "
+                f"use the Redis marker instead."
+            )
+        self._attribute_advisory = {
+            "kind": "attribute_names_exhausted",
+            "severity": "warning",
+            "attribute_names": len(names),
+            "room": left,
+            "meta_names_missing": meta_missing,
+            "message": detail,
+        }
+        logger.warning("aggregation pipeline on %s: %s", self.p._graph_name, detail)
 
     async def _capacity_baseline(self) -> None:
         """E0 for the growth budget on every run; the shard's ``used`` for
@@ -4397,17 +4511,9 @@ class AggregationPipeline:
         whether the graph has any attribute ids left to write with."""
         self._edges_before = await self._count_aggregated()
         self._edges_before_read = True
-        self._attribute_names = await self._count_attribute_names()
-        if (
-            self._attribute_names is not None
-            and self._attribute_names >= _ATTRIBUTE_NAME_LIMIT - _ATTRIBUTE_NAME_MARGIN
-        ):
-            # Deterministic, and nothing a retry changes: ids are never
-            # freed. Say what it is and what the way out is, once, instead of
-            # a rebuild that writes unindexed for an hour and is demoted.
-            raise MaterializationPreconditionFailed(
-                _attribute_limit_message(self.p._graph_name, self._attribute_names)
-            )
+        names = await self._registered_attribute_names()
+        if names is not None:
+            self._check_attribute_room(names)
         if self._fresh_run:
             shard = await self._read_shard()
             self._used_before = shard.used if shard.measurable else None

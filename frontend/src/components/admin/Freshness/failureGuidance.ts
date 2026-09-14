@@ -38,7 +38,7 @@ export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
     never_dispatched:
         'The rebuild was queued but no worker ever picked it up — either none is registered on the job bus, or the dispatch message was lost. Check that the aggregation worker is deployed and can reach Redis.',
     attribute_limit:
-        'The graph has used almost every one of the 65,533 distinct property names the graph store allows a graph — the source’s per-node metadata keys became property names — so the rollups can be neither written nor indexed. Names are never freed; the graph has to be recreated.',
+        'The graph store refused a property name the rollups need: the source’s per-node metadata keys used up the 65,534 distinct names a graph may hold, and a name the rebuild writes is not among them. Names are never freed; the graph has to be recreated.',
     unknown: "The rebuild didn't complete. Open this source for details.",
 }
 
