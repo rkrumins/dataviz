@@ -3208,6 +3208,49 @@ def test_the_worker_passes_the_stamp_a_heartbeat():
 # every pair BOTH runs touch is neither run's computed weight — a silently
 # wrong rollup that survives until a full fresh rebuild.
 #
+def test_cancel_is_noticed_during_compute(monkeypatch):
+    """COMPUTE is the one stage that issues no graph I/O, so it reaches none
+    of the other ``_cancel_check`` sites — every one of them sits on a query.
+    Without a check of its own, Cancel was not noticed until the stage ENDED:
+    on a large cube that is fifteen minutes of the UI showing a job the
+    operator already stopped, with the clock still running."""
+    pipe = _make_pipeline()
+    pipe._nonleaf_levels = None                    # the cube path
+    pipe._parents = {}
+
+    flushes = {"n": 0}
+
+    async def _no_flush():
+        flushes["n"] += 1
+
+    monkeypatch.setattr(pipe, "_maybe_overflow_flush", _no_flush)
+    pipe._should_cancel = lambda: True
+
+    # Two thousand pairs: enough to cross the 1024-key yield boundary once.
+    base = {mat._pack(i, i + 1): 1 for i in range(2000)}
+    with pytest.raises(JobCancelled):
+        _run(pipe._rollup_base(base))
+
+    # And it stopped THERE — not after grinding through the whole map.
+    assert flushes["n"] == 1
+
+
+def test_compute_without_a_cancel_runs_to_the_end(monkeypatch):
+    """The check must not be a new way for compute to fail."""
+    pipe = _make_pipeline()
+    pipe._nonleaf_levels = None
+    pipe._parents = {}
+
+    async def _no_flush():
+        return None
+
+    monkeypatch.setattr(pipe, "_maybe_overflow_flush", _no_flush)
+    pipe._should_cancel = lambda: False
+
+    base = {mat._pack(i, i + 1): 1 for i in range(2000)}
+    _run(pipe._rollup_base(base))
+
+
 # The check rides ``_cancel_check``, which every phase and every write path
 # already calls, and raises ``MaterializationStoreUnstable`` — "the run keeps
 # its checkpoint and stops for a person", which is exactly right here: the

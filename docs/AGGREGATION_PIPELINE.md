@@ -1195,6 +1195,16 @@ storing all of it.
 Two separate defects turned that quiet stage into a failure loop. Both are
 fixed; the history is here because the symptoms are not obviously related.
 
+**0. The client did not know how long a failover takes.** Everything a client
+does about one is derived from `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` — how long a
+write waits out a demotion, and the `Retry-After` a caller is handed. Nothing
+reads it off the server, and it was set **nowhere**, so the client assumed the
+3s fallback while the shards run `--cluster-node-timeout 15000`. Every
+compliant client went away and came back before the cluster had begun to
+promote anything, and a rebuild spent all ten of its failover parks inside the
+window in which there was never going to be an answer. The cluster overlay now
+declares it, and a test compares it against the StatefulSets' own argument.
+
 **1. A demotion read as a job failure.** FalkorDB runs `GRAPH.*` on a module
 thread pool and blocks the client for the query's duration, so a long query is
 a blocked client in Redis's own sense — and Redis force-unblocks a blocked
@@ -1207,7 +1217,20 @@ error escaped to the worker's retry mill instead, and **a retry re-runs EXTRACT
 and COMPUTE from zero**: the attempt budget only resets when `processed_edges`
 advances past its high-water mark, which a from-zero re-run never does. One
 routine shard rotation became three hours of repeated work and then a failed
-job. `-UNBLOCKED` is now matched by message, like `-LOADING` and `-NOREPLICAS`.
+job. `-UNBLOCKED` is now matched by message, like `-LOADING` and `-NOREPLICAS`. And
+the branch it reaches was itself too short: it retried three times **with no
+wait at all** and then raised the raw error, so all three landed on the same
+demoted node. A write now waits on the same ladder a refused connection gets
+(17.5s in cluster mode, which is what `_retry_wall_clock` already budgets a
+write for) and, when that is spent, raises `ProviderFailingOver` — the job
+parks with its checkpoint instead of spending a retry. A READ keeps the short
+path deliberately: the wall clock budgets a read for the transient window
+only, so an escalated ladder there would be cut short by the deadline and
+surface as a timeout, which nothing reads as a failover.
+
+**No aggregation job setting prevents any of this.** A shard demotion is a
+cluster event; the job settings decide how hard the rebuild leans on the node,
+not whether the node keeps its role.
 
 **2. The idle reaper closing a provider mid-job.** `PROVIDER_CACHE_IDLE_TTL_SECS`
 defaults to 900 — the source of the `>900s` line, and the same 15 minutes.

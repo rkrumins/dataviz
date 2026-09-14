@@ -353,7 +353,123 @@ async def test_a_node_that_stays_readonly_eventually_gives_up(monkeypatch):
         calls["n"] += 1
         raise _ReadOnlyError()
 
-    with pytest.raises(Exception):
+    # And it gives up AS a failover, not as the raw error. A caller that gets
+    # the raw one cannot tell a promotion in progress from a query that is
+    # simply wrong — and for a rebuild that difference is the whole job:
+    # ProviderFailingOver parks it with its checkpoint, an unclassified error
+    # spends a retry, and a retry re-runs extract and compute from zero.
+    from backend.common.adapters import ProviderFailingOver
+
+    with pytest.raises(ProviderFailingOver):
         await p._run_guarded(call)
     assert calls["n"] > 1, "never retried at all"
     assert calls["n"] <= 5, f"retried {calls['n']} times — unbounded"
+
+
+@pytest.mark.asyncio
+async def test_a_demotion_waits_as_long_as_a_refused_connection_does(monkeypatch):
+    """The budget has to outlast the event. A cluster does not DECLARE a
+    failover until ``cluster-node-timeout`` — 15s on the shipped overlay —
+    and then holds an election, while the transient ladder is 1.75s spent
+    back to back with no wait at all. All three retries landed on the same
+    demoted node before the promotion any of them was waiting for."""
+    import backend.app.providers.falkordb_provider as prov
+    from backend.common.adapters import ProviderFailingOver
+
+    p = _provider()
+
+    class _Cfg:
+        mode = "cluster"
+
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    async def fake_rebuild(gen):
+        return None
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    slept: list = []
+
+    async def _record(delay):
+        slept.append(delay)
+
+    monkeypatch.setattr(prov.asyncio, "sleep", _record)
+
+    async def call():
+        raise _Unblocked()
+
+    with pytest.raises(ProviderFailingOver):
+        await p._run_guarded(call)
+
+    assert slept == list(prov._REFUSED_RETRY_BACKOFFS)
+    assert sum(slept) > 15.0, "shorter than cluster-node-timeout"
+
+
+@pytest.mark.asyncio
+async def test_a_read_leaves_after_one_re_resolve(monkeypatch):
+    """A read does not get the long wait. ``_retry_wall_clock`` budgets a
+    read for the TRANSIENT window only, so an escalated ladder would be cut
+    short by the deadline and surface as asyncio.TimeoutError — which nothing
+    reads as a failover. One re-resolve, then say what it is."""
+    import backend.app.providers.falkordb_provider as prov
+    from backend.common.adapters import ProviderFailingOver
+
+    p = _provider()
+
+    class _Cfg:
+        mode = "cluster"
+
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    async def fake_rebuild(gen):
+        return None
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    slept: list = []
+
+    async def _record(delay):
+        slept.append(delay)
+
+    monkeypatch.setattr(prov.asyncio, "sleep", _record)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        raise _Unblocked()
+
+    with pytest.raises(ProviderFailingOver):
+        await p._run_guarded(call, read_only=True)
+
+    assert calls["n"] == prov._READ_REFUSED_RETRIES + 1
+    assert sum(slept) < 2.0, "a read waited out a failover"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_read_does_not_wait_out_a_failover(monkeypatch):
+    """A pinned read was addressed to a replica the router chose, and its
+    caller holds a master to fall back on. Spending 17.5s here would make a
+    logged-in user wait out a promotion to reach a node that could have
+    answered at once — so it keeps the fast schedule and raises the
+    underlying error, which is what benches the replica."""
+    import backend.app.providers.falkordb_provider as prov
+    from backend.common.adapters import ProviderFailingOver
+
+    p = _provider()
+
+    class _Cfg:
+        mode = "cluster"
+
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+    monkeypatch.setattr(prov.asyncio, "sleep", AsyncMock())
+
+    async def call():
+        raise _Unblocked()
+
+    with pytest.raises(Exception) as info:
+        await p._run_guarded(call, read_only=True, pinned=True)
+    assert not isinstance(info.value, ProviderFailingOver)

@@ -3555,17 +3555,54 @@ class FalkorDBProvider(GraphDataProvider):
                     # for a cluster, and it is bounded by the same schedule so
                     # a node that is never coming back cannot hold the
                     # caller's whole budget.
-                    if _is_role_changed_error(exc):
+                    if _is_role_changed_error(exc) and not pinned:
+                        # A demotion is a node being REPLACED, so it gets the
+                        # same schedule a refused connection does rather than
+                        # the transient one. The transient ladder is 1.75s and
+                        # spent it back to back with no wait at all — against
+                        # a cluster that does not DECLARE a failover until
+                        # ``cluster-node-timeout`` (15s on the shipped overlay)
+                        # and then has to hold an election, all three retries
+                        # landed on the same demoted node before the promotion
+                        # any of them was waiting for had happened.
+                        escalated_role = (
+                            _REFUSED_RETRY_BACKOFFS if cluster
+                            else _SENTINEL_RETRY_BACKOFFS
+                        )
+                        if not read_only and schedule is not escalated_role:
+                            schedule = escalated_role
+                            max_retries = len(schedule)
+                        if read_only:
+                            # A READ does not get the long wait, for the same
+                            # reason it does not on a refusal — and here the
+                            # wall clock settles it either way:
+                            # ``_retry_wall_clock`` budgets a read for the
+                            # TRANSIENT window only, so an escalated ladder
+                            # would be cut short by the deadline and surface
+                            # as ``asyncio.TimeoutError``, which nothing reads
+                            # as a failover. One re-resolve, then say what it
+                            # is and let the caller decide.
+                            max_retries = min(max_retries, _READ_REFUSED_RETRIES)
                         if attempt >= max_retries:
-                            raise
+                            # Not the raw error. A caller that gets that has no
+                            # way to tell a promotion in progress from a query
+                            # that is simply wrong, and for a rebuild the
+                            # difference is everything: ``ProviderFailingOver``
+                            # parks the job and keeps its checkpoint, while an
+                            # unclassified error spends a retry — and a retry
+                            # re-runs extract and compute from zero.
+                            raise self._failing_over(exc) from exc
+                        backoff = schedule[attempt]
                         gen = self._conn_generation
                         attempt += 1
                         logger.warning(
-                            "FalkorDB %s: the node answered READONLY — it has "
-                            "been demoted; re-resolving the master and "
-                            "retrying (%d/%d).",
-                            self._graph_name, attempt, max_retries,
+                            "FalkorDB %s: the node says it is a replica now "
+                            "(%s) — re-resolving the master and retrying "
+                            "(%d/%d after %.2fs).",
+                            self._graph_name, type(exc).__name__,
+                            attempt, max_retries, backoff,
                         )
+                        await asyncio.sleep(backoff)
                         await self._rebuild_graph_client_for_failover(gen)
                         continue
                     # Transient connection drop (any mode) OR a graph handle that

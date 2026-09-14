@@ -44,5 +44,15 @@ data:
   # against what the code computes with nothing set.
   FALKORDB_POOL_SIZE: "20"
   FALKORDB_MODE: "cluster"
+  # The cluster's OWN promotion clock, told to the client. It must match the
+  # `--cluster-node-timeout 15000` the shard StatefulSets in this overlay set:
+  # nothing reads it off the server, and left unset the client falls back to
+  # 3s. Everything a client does about a failover is derived from this — how
+  # long it waits out a demotion before giving up, and the Retry-After it
+  # hands a caller — so a 3s answer against a 15s cluster sends every
+  # compliant client back before the cluster has begun to promote anything,
+  # and a rebuild exhausts its whole park budget inside the window in which
+  # there was never going to be an answer. Raise both together or neither.
+  FALKORDB_CLUSTER_NODE_TIMEOUT_MS: "15000"
   FALKORDB_CLUSTER_NODES: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379"
   FALKORDB_HOST: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local"

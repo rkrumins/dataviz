@@ -3891,6 +3891,15 @@ class AggregationPipeline:
                 # every later merge lands in the orphaned snapshot and is
                 # silently discarded (missing edges, undercounted weights).
                 acc = self._acc
+                # COMPUTE is the one stage that issues no graph I/O, so it
+                # reaches none of the other ``_cancel_check`` sites — every
+                # one of them sits on a query. Without this a Cancel pressed
+                # during it is not noticed until the stage ENDS, which on a
+                # large cube is fifteen minutes of the UI showing a job the
+                # operator already stopped, with the clock running. It reads
+                # a flag; it is free at this cadence. It is also where a lost
+                # write lease reaches the run.
+                self._cancel_check()
                 await asyncio.sleep(0)  # yield during long CPU stretches
         await self._maybe_overflow_flush()
 
@@ -4019,6 +4028,7 @@ class AggregationPipeline:
                 # every later merge lands in the orphaned snapshot and is
                 # silently discarded (missing edges, undercounted weights).
                 acc = self._acc
+                self._cancel_check()          # see the note in _rollup_base
                 await asyncio.sleep(0)
         self._fine_merges_skipped += skipped
         await self._maybe_overflow_flush()

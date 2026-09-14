@@ -120,6 +120,42 @@ def test_server_timeout_max_matches_the_deployed_args(config, manifest, label):
     )
 
 
+# ── the cluster's promotion clock, told to the client ────────────────────
+
+
+def test_the_cluster_overlay_tells_the_client_its_node_timeout():
+    """Everything a client does about a failover is derived from
+    ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` — how long a write waits out a
+    demotion before giving up, and the Retry-After a caller is handed. Nothing
+    reads it off the server, and unset it falls back to 3s.
+
+    Against a cluster that does not even DECLARE a failover for 15s, a 3s
+    answer sends every compliant client back before there is anything to
+    answer it, and a rebuild spends its whole park budget inside the window in
+    which no promotion had yet happened — then fails, throwing away the
+    extract and compute it had done. Raise both together or neither."""
+    declared = _cm_value(
+        _read("deploy/k8s/overlays/production-cluster/patches/cluster-config.yaml"),
+        "FALKORDB_CLUSTER_NODE_TIMEOUT_MS",
+    )
+    assert declared, (
+        "FALKORDB_CLUSTER_NODE_TIMEOUT_MS is unset, so the client assumes 3s "
+        "against a cluster configured for far longer"
+    )
+    shipped = {int(m) for m in re.findall(
+        r"--cluster-node-timeout (\d+)",
+        _read("deploy/k8s/overlays/production-cluster/resources/"
+              "falkordb-cluster-statefulsets.yaml"),
+    )}
+    assert shipped, "no --cluster-node-timeout found in the shard StatefulSets"
+    assert len(shipped) == 1, f"shards disagree on --cluster-node-timeout: {shipped}"
+    assert int(declared) == shipped.pop(), (
+        f"the client is told the cluster promotes in {declared}ms, but the "
+        f"shards are configured otherwise — every failover wait is derived "
+        f"from the wrong number"
+    )
+
+
 # ── aggregation's share of a node's query threads ────────────────────────
 #
 # FALKORDB_ENDPOINT_WRITE_SLOTS and FALKORDB_ENDPOINT_READ_SLOTS are the
