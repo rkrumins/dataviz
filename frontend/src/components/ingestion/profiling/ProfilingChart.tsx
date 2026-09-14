@@ -19,7 +19,9 @@ import { ChartFrame } from '@/components/analytics/charts/ChartFrame'
 import { ChartTable } from '@/components/analytics/charts/ChartTable'
 import { StackedAreaChart } from '@/components/analytics/charts/StackedAreaChart'
 import { TypeTrellis } from './TypeTrellis'
-import { TimeSeriesChart } from '@/components/analytics/charts/TimeSeriesChart'
+import {
+    TimeSeriesChart, type AnnotationTone,
+} from '@/components/analytics/charts/TimeSeriesChart'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
 import type {
     Finding, ProfilingBreakdown, SeriesMetric, SeriesPayload,
@@ -186,6 +188,13 @@ export function ProfilingChart({
                     : f.finding === 'silent'
                         ? `Stopped reporting · ${f.severity}`
                         : `${f.delta < 0 ? '−' : '+'}${compact(Math.abs(f.delta))} ${noun} · ${f.severity}`,
+                // The severity word is in the sentence, but a reader scanning
+                // a dozen marks for the one that matters is reading colour,
+                // not prose. Only the key below is tinted — the rule on the
+                // plot stays chrome.
+                tone: (f.severity === 'critical'
+                    ? 'danger'
+                    : f.severity === 'severe' ? 'warn' : 'neutral') as AnnotationTone,
             }]
         })
     }, [findings, payload.buckets])
