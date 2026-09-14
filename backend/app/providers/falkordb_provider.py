@@ -559,6 +559,21 @@ _CLUSTER_NODE_TIMEOUT_S = (
 #: anything, so the retry is spent before there is anything to answer it.
 _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 
+#: What a client meeting ``-NOREPLICAS`` is told to wait.
+#:
+#: A master configured with ``min-replicas-to-write`` refuses EVERY write
+#: while it has too few in-sync replicas, and answers reads normally
+#: throughout. On a big node that is an RDB/AOF reload away from serving —
+#: an hour on the shapes this deployment targets — so the honest wait is
+#: minutes, not seconds: a client told to come back in 3 s spends its whole
+#: budget long before a replica could possibly have loaded.
+#:
+#: Paired with ``AGGREGATION_MAX_QUIESCE_EVENTS`` (20): 20 parks x 180 s is
+#: an hour, which is what a rebuild has to sit through to survive one. Raise
+#: one and the pair no longer covers the reload it was sized for —
+#: ``test_falkordb_no_replicas.py`` pins the product.
+_NOREPLICAS_RETRY_AFTER_S = int(os.getenv("FALKORDB_NOREPLICAS_RETRY_AFTER_S", "180"))
+
 # ...and for the next few seconds every other read of this graph gets the
 # same answer without dialling the dead address at all. Without this, a
 # hundred concurrent readers each open a socket to a node that is not there.
@@ -794,6 +809,43 @@ def _is_loading_error(exc: BaseException) -> bool:
         if _LOADING_REDIS_EXC and isinstance(seen, _LOADING_REDIS_EXC):
             return True
         if "loading the dataset in memory" in str(seen).lower():
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+#: How Redis words a write refused for want of in-sync replicas. The error
+#: code is stable; the prose after it is not, so both are matched.
+_NOREPLICAS_TEXT = ("noreplicas", "not enough good replicas")
+
+
+def _is_no_replicas_error(exc: BaseException) -> bool:
+    """True when the node REFUSED a write because too few replicas are in
+    sync — ``-NOREPLICAS Not enough good replicas to write``.
+
+    Not an outage, and not this graph's fault. A master with
+    ``min-replicas-to-write`` set (a common hardening, and the default on
+    several managed FalkorDB offerings — the manifests in ``deploy/`` do NOT
+    set it) stops accepting writes the moment a replica falls behind
+    ``min-replicas-max-lag`` or goes away, while continuing to serve reads
+    perfectly. A replica reloading an RDB is exactly that state, for as long
+    as the reload takes.
+
+    It is deterministic for as long as the condition holds, so retrying
+    inside one operation's budget is wasted work: the only useful reaction
+    is to come back later, which is why the caller raises the logical
+    ``ProviderBusy`` (breaker-ignored, park-and-resume) rather than
+    retrying in place.
+
+    Matched by message like its siblings, walking the
+    ``__cause__``/``__context__`` chain because the signal arrives wrapped.
+    """
+    seen = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        text = str(seen).lower()
+        if any(marker in text for marker in _NOREPLICAS_TEXT):
             return True
         seen = seen.__cause__ or seen.__context__
     return False
@@ -3319,6 +3371,43 @@ class FalkorDBProvider(GraphDataProvider):
                             provider_name=self._graph_name,
                             reason="graph is starting up (loading dataset into memory)",
                             retry_after_seconds=5,
+                        ) from exc
+                    # The node is up and answering reads, and REFUSING writes
+                    # until enough replicas are back in sync. Its sibling
+                    # above is the replica saying "I am loading"; this is the
+                    # master saying "one of mine is". Same shape — transient,
+                    # self-resolving, nothing about this graph is wrong — so
+                    # the same treatment: a LOGICAL signal the breaker
+                    # ignores, and a wait long enough to be worth taking.
+                    #
+                    # Without this it is an unclassified ResponseError: the
+                    # breaker counts it, three writes open it, and a node
+                    # reload that only ever blocked WRITES starts refusing
+                    # every read of that graph too. Operators saw the raw
+                    # "NOREPLICAS: Not enough good replicas to write".
+                    if _is_no_replicas_error(exc):
+                        from backend.common.adapters import ProviderBusy
+                        node = self._endpoint_label()
+                        # getattr, like ``_known_server_limits``: the bare
+                        # fakes in tests never run __init__.
+                        if not getattr(self, "_no_replicas_write_logged", False):
+                            self._no_replicas_write_logged = True
+                            logger.warning(
+                                "FalkorDB %s: %s is refusing writes until enough "
+                                "replicas are back in sync (min-replicas-to-write). "
+                                "Reads are unaffected; writes wait. This is the "
+                                "store's own guard, not a fault in this graph — "
+                                "check the replicas of that shard.",
+                                self._graph_name, node,
+                            )
+                        raise ProviderBusy(
+                            provider_name=self._graph_name,
+                            reason=(
+                                f"{node} has too few in-sync replicas to accept "
+                                f"writes (min-replicas-to-write); reads are "
+                                f"unaffected"
+                            ),
+                            retry_after_seconds=_NOREPLICAS_RETRY_AFTER_S,
                         ) from exc
                     cluster = (
                         self._conn_cfg is not None

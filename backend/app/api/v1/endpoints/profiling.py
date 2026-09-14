@@ -27,7 +27,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from fastapi import (
+    APIRouter, Body, Depends, HTTPException, Path, Query, Response,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,10 +163,29 @@ async def get_series(
     frm: Optional[str] = Query(None, alias="from"),
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None, description="raw | hour | day | auto"),
-    metric: str = Query("total", description="total | nodes | edges"),
+    metric: str = Query(
+        "total",
+        description=(
+            "total | nodes | edges | aggregated. ``aggregated`` is the "
+            "platform's own materialised rollup, reported alongside the "
+            "relationship types rather than among them; it has no meaning "
+            "under a breakdown, which implies its own measure."
+        ),
+    ),
     breakdown: str = Query("none", description="none | entity_type | edge_type"),
     top: int = Query(profiling_series.DEFAULT_TOP, ge=1, le=20),
     compare: bool = Query(False, description="Also return the preceding window"),
+    includeDerivedEdges: Optional[bool] = Query(
+        None,
+        description=(
+            "Show the platform's own rolled-up relationship types in a "
+            "breakdown. Omitted takes the deployment's profiling policy, "
+            "which shows them: the rollup is the lineage every view draws, "
+            "and a breakdown without it does not add up to the store. Node "
+            "labels are unaffected — the platform's bookkeeping nodes are "
+            "never shown."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> dict:
@@ -187,8 +208,14 @@ async def get_series(
         session, scope=scope, scope_id=scope_id, visible=visible,
         frm=frm_iso, to=to_iso, grain=resolved_grain,
     )
+    include_derived = (
+        includeDerivedEdges
+        if includeDerivedEdges is not None
+        else await profiling_repo.resolve_include_derived_edges(session)
+    )
     payload = profiling_series.build_series(
         observations, metric=metric, breakdown=breakdown, top=top,
+        include_derived_edges=include_derived,
     )
     payload.update({
         "scope": scope,
@@ -197,8 +224,16 @@ async def get_series(
         "to": to_iso,
         "window": label,
         "grain": resolved_grain,
-        "requested_metric": metric,
+        # The measure actually DRAWN, not the string handed in. ``build_series``
+        # falls back to "total" for anything it does not know, so echoing the
+        # raw param told a client running ahead of its backend that it had got
+        # the series it asked for over one it did not.
+        "requested_metric": payload.get("metric", metric),
         "breakdown": breakdown,
+        # Echoed so the chart can label the rollup band without guessing, and
+        # so a reader can tell "this source has no rollup" from "rollups are
+        # switched off for this deployment".
+        "include_derived_edges": include_derived,
         "platform_wide": platform_wide,
         "truncated": truncated,
         "vanished_types": profiling_series.types_that_vanished(
@@ -352,11 +387,19 @@ async def export_csv(
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None),
     breakdown: str = Query("none"),
+    metric: str = Query("total", description="total | nodes | edges | aggregated"),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> Response:
     """One row per bucket, one column per series. Always the drawn values, so
-    an export and the chart it came from can never disagree."""
+    an export and the chart it came from can never disagree.
+
+    ``metric`` defaults to ``total``, which is what this endpoint hardcoded
+    before — so an export with no metric is byte-identical to yesterday's and
+    nobody's saved parser breaks. Passing it is what makes the docstring above
+    true: the chart's own measure now reaches the file, where "Show:
+    Relationships" used to silently export both series.
+    """
     scope, scope_id, visible, _wide = await _scope_for(
         session, claims, scope=scope, scope_id=id,
     )
@@ -371,7 +414,7 @@ async def export_csv(
         frm=frm_iso, to=to_iso, grain=resolved_grain,
     )
     built = profiling_series.build_series(
-        observations, metric="total", breakdown=breakdown,
+        observations, metric=metric, breakdown=breakdown,
         top=profiling_series.DEFAULT_TOP,
     )
 
@@ -443,6 +486,68 @@ async def acknowledge_alert(
     return {"data": profiling_repo.finding_model(updated or alert)}
 
 
+class BulkAcknowledgeRequest(BaseModel):
+    """Mark a whole set of findings seen.
+
+    ``ids`` omitted means every OPEN finding in scope — the contract
+    ``POST /me/notifications/read`` already uses, where an absent list is
+    "all" and an explicit empty one is nothing. ``dataSourceId`` narrows to
+    one source; without it the scope is every source the caller can see.
+
+    The listing fields are echoed back rather than defaulted, because the
+    response IS the caller's next cache entry: the findings query is keyed on
+    ``(id, openOnly, limit, offset)``, and a payload built with different
+    params seeded into that key writes a wrong answer into a live cache.
+    """
+    ids: Optional[List[str]] = None
+    dataSourceId: Optional[str] = None
+    openOnly: bool = True
+    limit: int = Field(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT)
+    offset: int = Field(0, ge=0)
+
+
+# NOTE: two path segments after ``/alerts``, where the single-finding verb
+# above has three, so neither can shadow the other whatever the declaration
+# order. That stops being true the moment someone adds ``POST /alerts/{id}``.
+@router.post("/alerts/acknowledge", summary="Mark a set of findings seen")
+async def acknowledge_alerts(
+    body: BulkAcknowledgeRequest = Body(default_factory=BulkAcknowledgeRequest),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> dict:
+    """Acknowledging is GLOBAL and it is what makes a finding purgeable —
+    retention only ever deletes acknowledged rows. So this returns the
+    post-mutation listing alongside the count, and the caller shows a person
+    both facts before it is pressed."""
+    data_source_id = body.dataSourceId
+    if data_source_id:
+        data_source_id = await profiling_repo.resolve_source_id(
+            session, data_source_id,
+        )
+        await ensure_data_source_visible(
+            session, claims, data_source_id,
+            not_found_detail="Finding not found",
+        )
+    visible = await _visible(session, claims)
+    actor = getattr(claims, "user_id", None) or "unknown"
+    acknowledged = await count_alerts_repo.acknowledge_many(
+        session, actor_id=actor, visible=visible,
+        ids=body.ids, data_source_id=data_source_id,
+    )
+    await session.commit()
+
+    rows, total, open_count = await profiling_repo.list_findings(
+        session, data_source_id=data_source_id, visible=visible,
+        open_only=body.openOnly, limit=body.limit, offset=body.offset,
+    )
+    return {"data": {
+        "alerts": rows, "total": total, "openCount": open_count,
+        "offset": body.offset, "limit": body.limit,
+        "platform_wide": visible is None,
+        "acknowledged": acknowledged,
+    }}
+
+
 # ── policy ───────────────────────────────────────────────────────────
 
 
@@ -463,6 +568,11 @@ class PolicyRequest(BaseModel):
     alertsEnabled: Optional[bool] = None
     alertMinSeverity: Optional[str] = None
     alertCooldownSecs: Optional[int] = Field(None, ge=-1)
+    #: Show the platform's own rolled-up relationship types in breakdowns.
+    #: A display decision, not a retention one — it changes what a chart
+    #: draws, never what is captured or kept, so turning it off loses no
+    #: history and turning it back on needs no backfill.
+    includeDerivedEdges: Optional[bool] = None
 
 
 @router.get("/policy", summary="Retention and alerting policy")
@@ -499,6 +609,9 @@ async def get_policy(
         "alertsEnabled": alerts.enabled,
         "alertMinSeverity": alerts.min_severity,
         "alertCooldownSecs": alerts.cooldown_secs,
+        "includeDerivedEdges": await profiling_repo.resolve_include_derived_edges(
+            session,
+        ),
         # What the deployment would use with nothing persisted, so the editor
         # can show it as the placeholder and a blank field can mean "inherit"
         # rather than pinning today's default forever.
@@ -514,6 +627,7 @@ async def get_policy(
             "silentAfterSecs": resilience.PROFILING_SILENT_AFTER_SECS,
             "alertMinSeverity": count_alerts_repo.env_alert_policy().min_severity,
             "alertCooldownSecs": count_alerts_repo.env_alert_policy().cooldown_secs,
+            "includeDerivedEdges": profiling_repo._INCLUDE_DERIVED_EDGES_DEFAULT,
         },
         "overridden": sorted(overrides),
         "editable": _can_edit_policy(claims),

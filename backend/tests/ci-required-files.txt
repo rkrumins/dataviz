@@ -26,6 +26,7 @@ tests/test_aggregation_overrides.py
 tests/test_aggregation_run_record.py
 tests/test_aggregation_scan_shrink.py
 tests/test_aggregation_settings.py
+tests/test_alembic_revision_lengths.py
 tests/test_api_graph.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
@@ -35,10 +36,12 @@ tests/test_ci_required_list.py
 tests/test_cleanup_graph_indices.py
 tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
+tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
 tests/test_drift_probe_cost.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
+tests/test_falkordb_no_replicas.py
 tests/test_falkordb_ondemand_pairs.py
 tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
@@ -61,6 +64,8 @@ tests/test_loadtest_retry_model.py
 tests/test_metrics_backend.py
 tests/test_nav_catalogue.py
 tests/test_process_memory.py
+tests/test_profiling_endpoints.py
+tests/test_profiling_series.py
 tests/test_projection_stalled_reconcile.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py

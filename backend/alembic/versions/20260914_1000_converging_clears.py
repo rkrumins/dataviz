@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260914_1000_converging_clears"
-down_revision: Union[str, None] = "20260913_1100_invalidated_fingerprint"
+down_revision: Union[str, None] = "20260913_1100_invalidated_fp"
 branch_labels = None
 depends_on = None
 

@@ -68,7 +68,7 @@ interface Props {
      * chrome, never as data: an annotation is context ABOUT the series, and
      * giving it a mark's weight would put it in competition with the values.
      */
-    annotations?: { bucket: string; title: string }[]
+    annotations?: { bucket: string; title: string; tone?: AnnotationTone }[]
     /**
      * Anchor the y-axis here instead of at zero.
      *
@@ -85,6 +85,29 @@ interface Props {
 // paint outside the plot and get clipped by the card.
 const PAD = { top: 12, right: 16, bottom: 22, left: 44 }
 const LABEL_GUTTER = 52
+
+/** How much a reader should care. The PLOT stays recessive whatever this
+ *  says — an annotation is context about the series and must not compete with
+ *  the values — so it only tints the key below, which is HTML and where the
+ *  rest of this product already spends rose and amber on severity. */
+export type AnnotationTone = 'neutral' | 'warn' | 'danger'
+
+const TONE_RANK: Record<AnnotationTone, number> = {
+    neutral: 0, warn: 1, danger: 2,
+}
+
+const TONE_CLASS: Record<AnnotationTone, string> = {
+    neutral: 'bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted',
+    warn: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
+    danger: 'bg-rose-500/10 text-rose-700 dark:text-rose-300',
+}
+
+function worstTone(a?: AnnotationTone, b?: AnnotationTone): AnnotationTone {
+    const left = a ?? 'neutral'
+    const right = b ?? 'neutral'
+    return TONE_RANK[right] > TONE_RANK[left] ? right : left
+}
+
 
 export function TimeSeriesChart({
     buckets, axisLabels, series, height = 220, labelEnds = true,
@@ -201,10 +224,41 @@ export function TimeSeriesChart({
 
     // Only the annotations that land on a bucket in this window — the plot and
     // the key below it must name exactly the same set.
-    const marked = useMemo(
-        () => (annotations ?? []).filter((a) => buckets.includes(a.bucket)),
-        [annotations, buckets],
-    )
+    //
+    // GROUPED, and that is not a nicety. Several findings routinely share one
+    // bucket: a source that stops reporting raises one per metric, and a
+    // reload moves entities, relationships and a type at the same instant.
+    // Ungrouped that drew eleven overlapping vertical rules on one tick and
+    // printed eleven list items below, seven of them the identical sentence
+    // with the identical timestamp — a wall that reads as a rendering fault
+    // and buries the four lines that differ.
+    //
+    // Identical titles in one bucket collapse to a count. Different ones stay
+    // separate, in the order they arrived, because which of them came first
+    // is the only ordering the data supports.
+    const marked = useMemo(() => {
+        const byBucket = new Map<string, Map<string, { count: number; tone: AnnotationTone }>>()
+        for (const a of annotations ?? []) {
+            if (!buckets.includes(a.bucket)) continue
+            const titles = byBucket.get(a.bucket)
+                ?? new Map<string, { count: number; tone: AnnotationTone }>()
+            const hit = titles.get(a.title)
+            titles.set(a.title, {
+                count: (hit?.count ?? 0) + 1,
+                // The worst wins where the same sentence arrives at two
+                // weights: a list that averaged them would under-report the
+                // one occurrence that mattered.
+                tone: worstTone(hit?.tone, a.tone),
+            })
+            byBucket.set(a.bucket, titles)
+        }
+        return [...byBucket.entries()]
+            .map(([bucket, titles]) => ({
+                bucket,
+                items: [...titles.entries()].map(([title, v]) => ({ title, ...v })),
+            }))
+            .sort((a, b) => buckets.indexOf(a.bucket) - buckets.indexOf(b.bucket))
+    }, [annotations, buckets])
 
     const staticMarks = useMemo(() => (
         <>
@@ -213,7 +267,12 @@ export function TimeSeriesChart({
                 {marked.map((a) => {
                     const i = buckets.indexOf(a.bucket)
                     return (
-                        <g key={`${a.bucket}-${a.title}`}>
+                        <g key={a.bucket}>
+                            {/* ONE rule per bucket. Eleven findings at one
+                                instant are one moment in time, and stacking
+                                eleven identical lines on the same x only made
+                                it darker than its neighbours for no reason a
+                                reader could name. */}
                             <line
                                 x1={x(i)} y1={PAD.top} x2={x(i)} y2={PAD.top + plotH}
                                 stroke={theme.muted} strokeWidth={1}
@@ -225,7 +284,11 @@ export function TimeSeriesChart({
                                 fill={theme.neutralMark}
                                 stroke={theme.surface} strokeWidth={MARK.surfaceGap}
                             >
-                                <title>{a.title}</title>
+                                <title>
+                                    {a.items
+                                        .map((t) => (t.count > 1 ? `${t.title} (${t.count})` : t.title))
+                                        .join(' · ')}
+                                </title>
                             </circle>
                         </g>
                     )
@@ -415,21 +478,51 @@ export function TimeSeriesChart({
                 rendering artefact. Naming each mark once, below the plot,
                 costs a line and cannot collide with anything. */}
             {marked.length > 0 && (
-                <ul className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                /* One ROW per moment, not one per finding. The instant is
+                   printed once and the things that happened in it sit beside
+                   it, so the eye scans a short column of times rather than
+                   re-reading the same timestamp eleven times to find the four
+                   lines that differ. */
+                <ul className="mt-2 space-y-1">
                     {marked.map((a) => (
-                        <li key={`${a.bucket}-${a.title}`} className="flex items-center gap-1.5 text-[11px]">
-                            <span
-                                aria-hidden
-                                className="h-1.5 w-1.5 shrink-0 rounded-full"
-                                style={{ backgroundColor: theme.neutralMark }}
-                            />
-                            {/* No year: the key must read as the same date the
-                                axis prints, and "Jun 8, 26" also scans as a
-                                range rather than as one day. */}
-                            <span className="font-semibold text-ink-secondary tabular-nums">
-                                {shortDate(a.bucket)}
+                        <li
+                            key={a.bucket}
+                            className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[11px]"
+                        >
+                            <span className="flex items-center gap-1.5 shrink-0">
+                                <span
+                                    aria-hidden
+                                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                                    style={{ backgroundColor: theme.neutralMark }}
+                                />
+                                {/* No year: the key must read as the same date
+                                    the axis prints, and "Jun 8, 26" also scans
+                                    as a range rather than as one day. */}
+                                <span className="font-semibold text-ink-secondary tabular-nums">
+                                    {shortDate(a.bucket)}
+                                </span>
                             </span>
-                            <span className="text-ink-muted">{a.title}</span>
+                            {a.items.map((t) => (
+                                <span
+                                    key={t.title}
+                                    className={cn(
+                                        'inline-flex items-baseline gap-1 rounded px-1.5 py-0.5',
+                                        TONE_CLASS[t.tone],
+                                    )}
+                                >
+                                    {t.title}
+                                    {/* The count is the difference between "a
+                                        source stopped reporting" and "seven
+                                        did". Printing the sentence seven times
+                                        said the same thing less clearly and
+                                        cost seven lines. */}
+                                    {t.count > 1 && (
+                                        <span className="font-semibold text-ink-secondary tabular-nums">
+                                            ×{t.count}
+                                        </span>
+                                    )}
+                                </span>
+                            ))}
                         </li>
                     ))}
                 </ul>
