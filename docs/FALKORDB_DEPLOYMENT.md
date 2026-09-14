@@ -180,6 +180,39 @@ the master how many replicas have acknowledged its writes (`WAIT`) and holds
 when they fall behind, so it can never write faster than its replicas absorb.
 See `AGGREGATION_PIPELINE.md`.
 
+### `NOREPLICAS`: when the master refuses writes on its own
+
+`min-replicas-to-write` (with `min-replicas-max-lag`) makes a master refuse
+**every write** — `-NOREPLICAS Not enough good replicas to write` — while it
+has too few replicas in sync. Reads are unaffected throughout; the guard is
+only ever about writes.
+
+**The manifests in `deploy/` do not set it.** If you are seeing `NOREPLICAS`,
+something else did: a managed FalkorDB offering that sets it by default, a
+Helm values override, or a hand-edited conf. It is a reasonable hardening —
+just know what it costs, because a replica replaying an RDB *is* a replica
+that is out of sync, for as long as the replay takes. On the node sizes in §2
+that is up to an hour, and for that hour the shard's master takes no writes.
+
+What the application does about it (`_is_no_replicas_error`,
+`falkordb_provider.py`):
+
+| | |
+|---|---|
+| Circuit breaker | **Ignores it.** It is a logical `ProviderBusy`, like `ProviderLoading`. Before this it was an unclassified `ResponseError`: three refused writes opened the breaker, and a condition that blocked only writes started refusing every **read** of that graph too. |
+| Rebuilds | Park and resume — `AGGREGATION_MAX_QUIESCE_EVENTS` (20) waits of `FALKORDB_NOREPLICAS_RETRY_AFTER_S` (180 s) = **one hour**, none of them spending a retry. Raise either and the pair must still cover your reload time; `test_falkordb_no_replicas.py` fails if the product drops below an hour. |
+| Interactive writes | HTTP **429 + Retry-After**, naming the node and saying reads are unaffected — not a 500, and not "the store is down". |
+
+The rebuild does **not** treat it as the store being unreachable, deliberately:
+the node is answering, and holding the graph lease for an hour under a
+diagnosis of "not answering" would be both wrong and blocking. Parking
+releases the lease and the write slot for the window in which nothing can
+write anyway.
+
+If an hour is not enough for your node sizes, raise
+`FALKORDB_NOREPLICAS_RETRY_AFTER_S` rather than the park count — the parks are
+also spent on genuine write-latency quiesce, and they are per job.
+
 ---
 
 ## 5a. Memory Sizing Rule (read this before raising maxmemory)

@@ -39,6 +39,7 @@ tests/test_cube_estimate_calibration.py
 tests/test_drift_probe_cost.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
+tests/test_falkordb_no_replicas.py
 tests/test_falkordb_ondemand_pairs.py
 tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
