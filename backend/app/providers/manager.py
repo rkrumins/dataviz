@@ -23,11 +23,15 @@ import inspect
 import json
 import logging
 import os
+import random
 from enum import Enum
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.services.aggregation.admission import drop_slot, take_slot_once
 
 from backend.common.adapters import (
     AsyncCircuitBreaker,
@@ -115,6 +119,62 @@ _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "2.
 # slot count absorbs a canvas open's burst; beyond it, shedding at once is
 # cheaper for the client than waiting 2s to be shed anyway.
 _SLOT_MAX_WAITERS = int(os.getenv("PROVIDER_SLOT_MAX_WAITERS", "16"))
+
+# ── The same budget, counted once for the whole fleet ────────────────────
+#
+# Everything above is per PROCESS. The deployed shape runs 3 replicas x 4
+# gunicorn workers, so "cap 8 concurrent calls per (provider, graph)" was
+# really 96 against a shard running THREAD_COUNT 6 — the shed that exists to
+# protect the store admitted sixteen times what it promised, and the store
+# then queued the surplus behind MAX_QUEUED_QUERIES where it does nobody any
+# good. This is the same counter the aggregation workers already share for
+# their write and scan slots (``admission.take_slot_once``), under its own
+# key prefix and with the web tier's policy: SHED where the worker WAITS.
+#
+# Sized from the node's own THREAD_COUNT where one has been read, because a
+# node cannot execute more queries at once than it has query threads and
+# admitting past that only lengthens everybody's queue. Set
+# ``PROVIDER_FLEET_MAX_CONCURRENCY`` to override — a workload of short
+# queries tolerates some queueing, and 0 turns the fleet counter off
+# entirely (back to per-process caps only).
+_FLEET_MAX_CONCURRENCY = int(os.getenv("PROVIDER_FLEET_MAX_CONCURRENCY", "0"))
+# Never let a misread or tiny THREAD_COUNT shed a store down to a trickle.
+_FLEET_MIN_CONCURRENCY = 4
+# How long a slot survives a holder that never released it. A provider call
+# is bounded by the request tier above it (60s graph / 120s versioning), so a
+# holder still counted past this is a process that died mid-call, and its
+# slot must come back without one. NOT the aggregation 660s: that bounds a
+# write batch, and 660s of a phantom holder against a cap of 6 would be an
+# outage.
+_FLEET_SLOT_STALE_S = 150.0
+_FLEET_SLOT_PREFIX = "provider:slots:v1"
+
+
+class _FleetSlot:
+    """One fleet-wide compute slot, held for the body of an ``async with``.
+
+    Entering can raise ``ProviderBusy`` (→ 429 + Retry-After); every other
+    failure leaves the body unbounded, exactly as it is today without a bus.
+    """
+
+    __slots__ = ("_manager", "_cache_key", "_key", "_member")
+
+    def __init__(self, manager: "ProviderManager", cache_key: Tuple[str, str]) -> None:
+        self._manager = manager
+        self._cache_key = cache_key
+        self._key: Optional[str] = None
+        self._member: Optional[str] = None
+
+    async def __aenter__(self) -> "_FleetSlot":
+        self._key, self._member = await self._manager._acquire_fleet_slot(
+            self._cache_key,
+        )
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        if self._key and self._member:
+            key, member, self._key, self._member = self._key, self._member, None, None
+            await self._manager._release_fleet_slot(key, member)
 
 
 # ── Per-data-source admission, ahead of the GRAPH_READ DB session ─────
@@ -328,6 +388,8 @@ class ProviderManager:
         # Requests currently waiting for a slot, per cache_key — bounded by
         # _SLOT_MAX_WAITERS so a burst cannot pin the DB pool while queueing.
         self._slot_waiters: Dict[Tuple[str, str], int] = {}
+        # Rate limit on the fleet-admission fail-open log line.
+        self._fleet_warned_at = 0.0
 
         # Process-wide counters (monotonic since boot) for the request-path
         # decisions that used to be invisible: surfaced on /health/deps so a
@@ -340,6 +402,8 @@ class ProviderManager:
             "preflight_gated": 0,
             "slots_shed_queue_full": 0,
             "slots_shed_wait_timeout": 0,
+            "fleet_slots_shed": 0,
+            "fleet_slots_fail_open": 0,
             "graph_shed_process_full": 0,
             "graph_shed_over_share": 0,
             "graph_inflight_peak": 0,
@@ -1170,6 +1234,126 @@ class ProviderManager:
         finally:
             self._slot_waiters[cache_key] = max(0, self._slot_waiters.get(cache_key, 1) - 1)
         return sem
+
+    # ------------------------------------------------------------------ #
+    # Fleet-wide compute admission                                         #
+    # ------------------------------------------------------------------ #
+
+    def fleet_slot(self, provider_id: str, graph_name: str = "") -> "_FleetSlot":
+        """Async context manager holding ONE of the fleet's slots on
+        ``(provider_id, graph_name)`` — see ``_FLEET_MAX_CONCURRENCY``.
+
+        Wraps the per-process semaphore rather than replacing it: that one
+        still bounds this process's own fan-out and its waiter queue (which
+        is what keeps a burst off the GRAPH_READ pool), and it answers
+        without a round trip. This adds the number that was missing — the
+        one every process shares.
+
+        Keyed by ``(provider_id, graph_name)`` and not by the node the graph
+        lives on: the request path has the cache key in hand and resolving
+        the node would cost a round trip on every miss. One graph lives on
+        one node, so the count is right per graph; several graphs on one
+        node still each get their own cap.
+
+        Fails OPEN on every Redis failure. The bus is not a hard dependency
+        of the read path, which is the rule ``graph_cache`` states and this
+        rests on: no Redis means today's per-process bound, not an outage.
+        """
+        return _FleetSlot(self, (provider_id, graph_name or ""))
+
+    def _fleet_slot_limit(self, cache_key: Tuple[str, str]) -> int:
+        """How many calls the whole fleet may have in flight on one graph."""
+        if _FLEET_MAX_CONCURRENCY > 0:
+            return _FLEET_MAX_CONCURRENCY
+        threads = None
+        provider = self._providers.get(cache_key)
+        if provider is not None:
+            reader = getattr(provider, "server_thread_count", None)
+            if callable(reader):
+                try:
+                    threads = reader()
+                except Exception:  # noqa: BLE001 — a sizing hint, never a failure
+                    threads = None
+        if threads:
+            return max(_FLEET_MIN_CONCURRENCY, int(threads))
+        return max(_FLEET_MIN_CONCURRENCY, _MAX_PROVIDER_CONCURRENCY)
+
+    def _fleet_redis(self):
+        """The shared bus client, or None when there isn't one."""
+        try:
+            from backend.app.services.aggregation.redis_client import get_redis
+
+            return get_redis()
+        except Exception as exc:  # noqa: BLE001 — no bus, no bound
+            self._warn_fleet_fail_open("client", exc)
+            return None
+
+    def _warn_fleet_fail_open(self, what: str, exc: Exception) -> None:
+        """Say it, but no more than once a minute: the fail-open path is
+        reached per request, and a wedged bus would otherwise write the log
+        that hides the incident."""
+        now = time.monotonic()
+        if now - self._fleet_warned_at > 60:
+            self._fleet_warned_at = now
+            logger.warning(
+                "provider fleet admission: %s failed (%s: %s) — proceeding "
+                "with per-process limits only.",
+                what, type(exc).__name__, exc,
+            )
+
+    async def _acquire_fleet_slot(
+        self, cache_key: Tuple[str, str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Take a fleet slot, or raise ``ProviderBusy``.
+
+        Retries inside ``_SEMAPHORE_ACQUIRE_BUDGET_S`` for the same reason
+        that budget exists at all: a canvas open fans out short queries, and
+        shedding the tail of one burst that would have cleared in 100ms costs
+        the client a whole 429 + backoff round trip. A store that is genuinely
+        saturated still sheds — its slots do not free inside the budget.
+        """
+        if _FLEET_MAX_CONCURRENCY < 0:
+            return None, None
+        redis_client = self._fleet_redis()
+        if redis_client is None:
+            self.stats["fleet_slots_fail_open"] += 1
+            return None, None
+        key = f"{_FLEET_SLOT_PREFIX}:{cache_key[0]}:{cache_key[1]}"
+        limit = self._fleet_slot_limit(cache_key)
+        member = uuid.uuid4().hex
+        deadline = time.monotonic() + _SEMAPHORE_ACQUIRE_BUDGET_S
+        while True:
+            try:
+                took = await take_slot_once(
+                    redis_client, key, limit, member, stale=_FLEET_SLOT_STALE_S,
+                )
+            except Exception as exc:  # noqa: BLE001 — never a hard dependency
+                self.stats["fleet_slots_fail_open"] += 1
+                self._warn_fleet_fail_open("slot acquire", exc)
+                return None, None
+            if took:
+                return key, member
+            if time.monotonic() >= deadline:
+                self.stats["fleet_slots_shed"] += 1
+                raise ProviderBusy(
+                    provider_name=f"{cache_key[0]}:{cache_key[1]}",
+                    reason=(
+                        f"graph store at its fleet-wide concurrency ({limit}); "
+                        f"shed load"
+                    ),
+                    retry_after_seconds=1,
+                )
+            await asyncio.sleep(0.05 + random.uniform(0, 0.1))
+
+    async def _release_fleet_slot(self, key: str, member: str) -> None:
+        redis_client = self._fleet_redis()
+        if redis_client is None:
+            return
+        try:
+            await drop_slot(redis_client, key, member)
+        except Exception as exc:  # noqa: BLE001
+            # The score-based prune reclaims it after _FLEET_SLOT_STALE_S.
+            self._warn_fleet_fail_open("slot release", exc)
 
     # ------------------------------------------------------------------ #
     # Eviction                                                             #

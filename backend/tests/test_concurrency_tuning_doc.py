@@ -48,6 +48,11 @@ def test_the_ladder_table_matches_the_code(doc):
         (r"Provider semaphore \|[^|]*?\*\*(\d+)\*\*", M._MAX_PROVIDER_CONCURRENCY),
         (r"Provider semaphore \|[^|]*?\+(\d+) waiters", M._SLOT_MAX_WAITERS),
         (r"Provider semaphore \|[^|]*?(\d+)s wait", M._SEMAPHORE_ACQUIRE_BUDGET_S),
+        # Row 4b: the only ceiling in the table that is NOT multiplied by the
+        # worker count. A drift here is the one that reads as "we are bounded"
+        # when the fleet is not.
+        (r"Provider fleet count \|[^|]*?= \*\*(\d+)\*\*", M._FLEET_MAX_CONCURRENCY),
+        (r"Provider fleet count \|[^|]*?floor (\d+)", M._FLEET_MIN_CONCURRENCY),
     ]
     drifted = []
     for pattern, actual in documented:
@@ -183,8 +188,15 @@ def test_the_fleet_arithmetic_is_self_consistent(doc):
         f"{total} workers × {hard} admitted (deployed pool {pool})"
     )
     assert re.search(rf"{total} ×\s+{M._MAX_PROVIDER_CONCURRENCY}\s+=\s+{total * M._MAX_PROVIDER_CONCURRENCY} per provider", doc), (
-        "the concurrent-FalkorDB-calls line in §1 no longer matches "
+        "the provider-semaphore line in §1 no longer matches "
         f"{total} workers × {M._MAX_PROVIDER_CONCURRENCY} slots"
+    )
+    # And the point of that line: it is what the processes HOLD, not what the
+    # store is asked to execute. §1 has to say what actually bounds the store,
+    # or the arithmetic above reads as the conclusion.
+    assert re.search(r"fleet-wide[^\n]*\n", doc) and "PROVIDER_FLEET_MAX_CONCURRENCY" in doc, (
+        "§1 multiplies the per-process cap by the worker count without naming "
+        "the fleet-wide count that is the real ceiling"
     )
 
 
@@ -201,6 +213,7 @@ def test_the_changed_values_table_matches_the_code(doc):
         ("`FALKORDB_NODES_QUERY_TIMEOUT`", int(R.FALKORDB_NODES_QUERY_TIMEOUT_SECS)),
         ("`HTTP_TIMEOUT_GRAPH_SECS`", int(R.HTTP_TIMEOUT_GRAPH_SECS)),
         ("`PROVIDER_SLOT_MAX_WAITERS`", M._SLOT_MAX_WAITERS),
+        ("`PROVIDER_FLEET_MAX_CONCURRENCY`", M._FLEET_MAX_CONCURRENCY),
     ]:
         row = re.search(rf"^\| {re.escape(label)} \|.*?\| \*\*([\d.]+)\*\* \|", doc, re.M)
         assert row, f"§3 has no row for {label}"

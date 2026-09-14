@@ -2406,6 +2406,19 @@ class FalkorDBProvider(GraphDataProvider):
         ]
         return min(known) if known else None
 
+    def server_thread_count(self) -> Optional[int]:
+        """The FEWEST query threads (``THREAD_COUNT``) read from any node this
+        provider's graphs live on; None until a node has been read.
+
+        The lowest, like the timeout and memory caps above: a fleet-wide
+        admission number sized from a wide node would over-admit the narrow
+        one, and a graph can move between them on a failover."""
+        known = [
+            int(v["thread_count"]) for v in self._known_server_limits().values()
+            if v.get("thread_count")
+        ]
+        return min(known) if known else None
+
     def server_limits_for(self, endpoint: str) -> Dict[str, Optional[int]]:
         """What has been read for one node — ``{}`` when nothing has."""
         return dict(self._known_server_limits().get(endpoint, {}))

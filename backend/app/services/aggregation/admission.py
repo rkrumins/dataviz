@@ -159,6 +159,29 @@ return -1
 """
 
 
+async def take_slot_once(
+    redis_client: Any, key: str, limit: int, member: str, *, stale: float,
+) -> bool:
+    """One attempt at a counted slot on ``key``. True when ``member`` took it.
+
+    The counter is a sorted set scored by wall clock, so a holder that dies
+    without releasing is pruned after ``stale`` instead of leaking the slot
+    for good — which is the whole reason this is not an INCR. Raises whatever
+    the bus raises: every caller has its own fail-open policy (the worker
+    waits, the web tier sheds) and neither belongs here.
+    """
+    got = await redis_client.eval(
+        _ACQUIRE_SLOT_LUA, 1, key, time.time(), stale, limit, member,
+    )
+    return int(got or 0) == 1
+
+
+async def drop_slot(redis_client: Any, key: str, member: str) -> None:
+    """Give back a slot taken by :func:`take_slot_once`. Raises on a bus
+    error; score-based pruning reclaims the entry either way."""
+    await redis_client.zrem(key, member)
+
+
 def reservation_key(endpoint: str) -> str:
     """The ledger of one graph-store node — keyed by the node the shard
     reading names, never by ``endpoint_key`` (see the module docstring)."""
@@ -734,16 +757,15 @@ class AggregationAdmission:
         waited = False
         while True:
             try:
-                got = await self._redis.eval(
-                    _ACQUIRE_SLOT_LUA, 1, key,
-                    time.time(), _SLOT_STALE_SECS, limit, member,
+                got = await take_slot_once(
+                    self._redis, key, limit, member, stale=_SLOT_STALE_SECS,
                 )
             except Exception as exc:
                 self._warn_fail_open(f"{kind}-slot acquire", exc)
                 _metric("aggregation_slot_fail_open_total", kind=kind, node=node,
                         reason="bus_error")
                 return None, None
-            if int(got or 0) == 1:
+            if got:
                 if waited:
                     _metric("aggregation_slot_waits_total", kind=kind, node=node)
                 return key, member
@@ -766,7 +788,7 @@ class AggregationAdmission:
 
     async def _release_slot(self, key: str, member: str) -> None:
         try:
-            await self._redis.zrem(key, member)
+            await drop_slot(self._redis, key, member)
         except Exception as exc:
             # Score-based pruning reclaims it after _SLOT_STALE_SECS.
             self._warn_fail_open("slot release", exc)

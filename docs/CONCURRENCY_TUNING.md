@@ -22,7 +22,7 @@ Two companions, both still authoritative for what they cover:
 
 ## 1. The ladder, and the one rule that governs it
 
-A graph request passes through eight ceilings. Each is a separate queue.
+A graph request passes through nine ceilings. Each is a separate queue.
 
 | # | Ceiling | Code default | **As deployed** | Scope |
 |---|---|---|---|---|
@@ -30,6 +30,7 @@ A graph request passes through eight ceilings. Each is a separate queue.
 | 2 | Per-source admission gate | `hard = GRAPH_READ pool − 4` = 16 | **12** | per **process**, per data source |
 | 3 | `GRAPH_READ` DB session | `pool_size 10 + overflow 10` = 20 | **8 + 8 = 16** | per **process** |
 | 4 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` = **8** (+16 waiters, 2s wait) | same | per **process**, per (provider, graph) |
+| 4b | Provider fleet count | `PROVIDER_FLEET_MAX_CONCURRENCY` = **0** → the node's own `THREAD_COUNT`, floor 4 | same | **fleet-wide**, per (provider, graph) |
 | 5 | Provider query semaphore | `FALKORDB_QUERY_CONCURRENCY` = **20** | same (unset) | per **process** |
 | 6 | Outbound socket pool | read path `FALKORDB_GRAPH_POOL_SIZE` = **24**; every other client `FALKORDB_POOL_SIZE` = **`PROVIDER_MAX_CONCURRENCY` × 2 + 4** | **20** stated in `common-config` | per **process**, **per node** |
 | 7 | FalkorDB query threads | `THREAD_COUNT` **6** per node (cluster overlay) | same | per node |
@@ -108,8 +109,32 @@ per gunicorn worker, not per pod and not per cluster**:
 ```
 3 viz-service replicas × GUNICORN_WORKERS 4          = 12 worker processes
 admitted graph requests   12 × 12                    = 144 in flight
-concurrent FalkorDB calls 12 ×  8                    =  96 per provider
+provider semaphore slots  12 ×  8                    =  96 per provider
 ```
+
+**Row 4b is the only one of those that is not multiplied.** Row 4 is a per-process
+semaphore, so twelve processes hold twelve of them and its "cap 8" was really 96
+concurrent Cypher calls against a shard running `THREAD_COUNT 6` — the shed that exists
+to protect the store admitted sixteen times what it promised, and the store queued the
+surplus behind `MAX_QUEUED_QUERIES` where it helps nobody. Row 4b counts the same
+admission **once for the whole fleet**, in the job-bus Redis, sized from the node's own
+`THREAD_COUNT`:
+
+```
+cache misses actually admitted  = THREAD_COUNT 6 per (provider, graph), fleet-wide
+```
+
+Row 4 still runs first: it answers without a round trip, and its waiter queue is what
+keeps a burst off the `GRAPH_READ` pool. Row 4b is the number that protects the store.
+
+Both shed with `ProviderBusy` → **429 + Retry-After**, not 503 — a saturated store is a
+healthy store under load, and the client is expected to retry in place. Neither is a hard
+dependency on Redis: if the bus is unreachable, row 4b **fails open** to per-process
+limits only and counts it in `/health/deps` → `resilience.provider_manager.fleet_slots_fail_open`.
+
+Set `PROVIDER_FLEET_MAX_CONCURRENCY` to a positive number to override the sizing (a
+workload of short queries tolerates some queueing), or to `-1` to turn the fleet count
+off entirely and go back to per-process caps.
 
 Against that, the store executes **far less than the whole cluster suggests**, and this
 is the most important number on the page:
@@ -146,10 +171,13 @@ shard — six of them on the shape shipped today.
 > 9-pod shape at `2 replicas × 2gb hard`, so the 6-pod deployment shipped today has ~2 GiB
 > more headroom per shard than that table shows.)
 
-Against 6–12 threads the fleet can present 96 provider slots, and each HTTP request
-issues one Cypher per label bucket. Once `slots_in_use × buckets ≥ 150` the store starts
-answering `Max pending queries exceeded` — which the app now surfaces as a retryable 429
-rather than a 500. With two label buckets that threshold is 75 slots; with three, 50.
+Each HTTP request issues one Cypher per label bucket, so what reaches the store is
+`slots_in_use × buckets`, and once that is ≥ 150 the store answers `Max pending queries
+exceeded` — which the app surfaces as a retryable 429 rather than a 500. With two label
+buckets that threshold is 75 slots; with three, 50. Before row 4b that was reachable on
+one burst (96 slots × 2 buckets = 192); with the fleet count sized from `THREAD_COUNT` it
+is not reachable at all from cache misses, and the queue depth that remains comes from
+the paths row 4b does not gate.
 
 How many users that supports depends entirely on **mean query service time**, which is a
 property of your data, not of this configuration:
@@ -374,6 +402,7 @@ bulk-load at ~74 MB/s (13 GB ≈ 3 min) against incremental replay at minutes pe
 | `PROVIDER_SEMAPHORE_BUDGET_S` | 0.25 | **2.0** | Absorb a canvas open's burst instead of shedding its tail. |
 | `PROVIDER_PREFLIGHT_DEADLINE_S` | 1.5 | **2.5** | A loaded provider must not fail its own probe. |
 | `PROVIDER_SLOT_MAX_WAITERS` | — | **16** | Bounds the queue so waiting cannot drain the DB pool. |
+| `PROVIDER_FLEET_MAX_CONCURRENCY` | — | **0** | 0 = size the fleet-wide count from the node's `THREAD_COUNT`. The per-process cap alone was 12 × 8. |
 | `FALKORDB_AGGREGATED_READ_BUDGET_SECS` | — | **0.8 × tier** | One wall clock for the whole read ladder, not one per rung. |
 | `EFFECTS_THRESHOLD` | — | **0** | Replicate writes as effects; required for the replication behaviour in §5aa. |
 
@@ -400,10 +429,12 @@ This section is the playbook for "we need more throughput". It is ordered, and t
 matters — most performance work fails because someone pulls lever 6 while lever 1 is
 still the constraint.
 
-**The governing fact, from §1:** the application tier can present ~96 concurrent queries
-per provider against **6 query threads** on the one shard replica serving that data
-source. **The store is the constraint, and adding web capacity does not change that.** Every step below is either "make the store do less",
-"make the store do it faster", or "make the app ask for less". In that order.
+**The governing fact, from §1:** one data source is served by **6 query threads** on the
+one shard replica that holds it, and the application tier can queue far more than that —
+row 4b now holds cache misses to the thread count, but nothing widens the threads
+themselves. **The store is the constraint, and adding web capacity does not change
+that.** Every step below is either "make the store do less", "make the store do it
+faster", or "make the app ask for less". In that order.
 
 ### Step 0 — Measure, or everything below is guesswork
 
@@ -424,8 +455,10 @@ curl -s localhost:8080/health/deps | jq '.resilience'
 ```
 
 Record: `usec_per_call`, the p99 from SLOWLOG, `breaker.deadline_timeouts_not_counted`,
-`provider_manager.slots_shed_wait_timeout`, `provider_manager.graph_shed_over_share`.
-Those five tell you which of the eight ceilings is actually binding.
+`provider_manager.slots_shed_wait_timeout`, `provider_manager.fleet_slots_shed`,
+`provider_manager.graph_shed_over_share`. Those six tell you which of the nine ceilings
+is actually binding. Read `fleet_slots_shed` beside `fleet_slots_fail_open`: a zero shed
+count means nothing if the bus is unreachable and every request is failing open.
 
 ### Step 1 — Stop doing avoidable work (free, biggest wins)
 

@@ -855,17 +855,27 @@ async def _invalidate_cache(engine: ContextEngine) -> None:
 
 
 def _bounded_compute(engine: ContextEngine, compute):
-    """Wrap a GraphCache ``compute`` callable in the per-(provider, graph)
-    concurrency slot (``ProviderManager.acquire_provider_slot``, cap
-    ``PROVIDER_MAX_CONCURRENCY``, default 8). Saturation raises
+    """Wrap a GraphCache ``compute`` callable in TWO per-(provider, graph)
+    concurrency bounds: this process's semaphore
+    (``ProviderManager.acquire_provider_slot``, cap
+    ``PROVIDER_MAX_CONCURRENCY``, default 8) and then the fleet's shared
+    count (``ProviderManager.fleet_slot``). Saturation of either raises
     ``ProviderBusy`` → 429 + Retry-After via the handler in main.py, so
     a burst of cache misses sheds load instead of pegging FalkorDB's
-    single Cypher thread.
+    query threads.
 
-    Cache hits never touch the semaphore — only singleflight-leader
-    misses do actual provider work. Engines whose provider doesn't
-    expose ``manager_cache_key`` (draft/versioned wrappers that don't
-    delegate attributes) degrade to unbounded — those paths are
+    Both, because only the second one is a real ceiling: the semaphore is
+    per process and the deployed shape runs twelve of them, so its "cap 8"
+    was 96 concurrent calls against a shard with THREAD_COUNT 6. The
+    semaphore still earns its place ahead of the fleet count — it answers
+    without a round trip and its waiter queue is what keeps a burst off the
+    GRAPH_READ pool — but the number that protects the store is the shared
+    one.
+
+    Cache hits never touch either — only singleflight-leader misses do
+    actual provider work. Engines whose provider doesn't expose
+    ``manager_cache_key`` (draft/versioned wrappers that don't delegate
+    attributes) degrade to unbounded — those paths are
     Postgres-overlay-heavy, not FalkorDB fan-out.
     """
     key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
@@ -875,7 +885,8 @@ def _bounded_compute(engine: ContextEngine, compute):
     async def _run():
         sem = await provider_manager.acquire_provider_slot(*key)
         try:
-            return await compute()
+            async with provider_manager.fleet_slot(*key):
+                return await compute()
         finally:
             sem.release()
 
