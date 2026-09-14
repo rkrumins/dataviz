@@ -14,7 +14,9 @@ from unittest.mock import AsyncMock
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.app.providers.falkordb_provider import (
+    FalkorDBProvider, _is_role_changed_error,
+)
 
 
 def _provider():
@@ -187,3 +189,171 @@ async def test_inflight_counter_tracks_guarded_ops():
     await p._run_guarded(call)
     assert seen["during"] == 1
     assert p.inflight_ops() == 0
+
+
+# ── a demoted master is a redirect, not a failure ───────────────────────
+#
+# Redis answers a write on a replica with `-READONLY`, and in sentinel and
+# standalone that IS what a failover looks like from the client's side: the
+# pool is still pointed at the node that was the master when it connected,
+# and that node has been demoted. Cluster mode never sees it — it gets
+# MOVED first, which the branch above already handles — so the case was
+# invisible in the only mode the tests exercised.
+#
+# `ReadOnlyError` is a `ResponseError`, not a `ConnectionError`, so nothing
+# in the transient ladder caught it: the write failed hard, at the one
+# moment re-resolving would have fixed it. redis-py re-runs
+# `discover_master` on reconnect, so a rebuild lands on the node that was
+# just promoted.
+
+
+class _ReadOnlyError(Exception):
+    """Stands in for redis.exceptions.ReadOnlyError (matched by name, as the
+    cluster routing errors are, so the classifier needs no redis import)."""
+
+    def __init__(self, msg="READONLY You can't write against a read only replica."):
+        super().__init__(msg)
+
+
+_ReadOnlyError.__name__ = "ReadOnlyError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sentinel", "standalone", "cluster"])
+async def test_a_readonly_reply_re_resolves_the_master_and_retries(monkeypatch, mode):
+    """In EVERY mode: the node says it is a replica, so stop talking to it
+    and find the one that is not."""
+    p = _provider()
+
+    class _Cfg:
+        pass
+
+    _Cfg.mode = mode
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    rebuilds = {"n": 0}
+
+    async def fake_rebuild(gen):
+        rebuilds["n"] += 1
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _ReadOnlyError()
+        return "ok"
+
+    assert await p._run_guarded(call) == "ok"
+    assert calls["n"] == 2
+    assert rebuilds["n"] == 1
+
+
+# The SAME demotion, reaching a client that was mid-QUERY rather than
+# mid-write — and the spelling a rebuild actually meets.
+#
+# FalkorDB runs GRAPH.* on a module thread pool and BLOCKS the client for the
+# duration, so a long query is a blocked client in Redis's own sense. Redis
+# force-unblocks a blocked client when the instance changes role, and the
+# reply is `-UNBLOCKED force unblock from blocking operation, instance state
+# changed (master -> replica?)`. There is no redis-py class for it: it
+# arrives as a bare ResponseError, so the name match could not see it and the
+# branch above — the one that fixes this in under a second — was skipped for
+# exactly the case it exists for.
+#
+# What it cost: the error escaped to the worker's generic handler, which
+# spends a job retry. A retry re-runs EXTRACT and COMPUTE from zero
+# (`falkordb_materialize`: "EXTRACT + COMPUTE always re-run"), and the attempt
+# budget only resets when processed_edges advances past its high-water mark —
+# which a from-zero re-run never does. So a routine shard rotation turned an
+# hour of work into three of them and then a failed job.
+
+
+class _Unblocked(Exception):
+    """A bare ResponseError, as redis-py delivers -UNBLOCKED."""
+
+    def __init__(self):
+        super().__init__(
+            "UNBLOCKED force unblock from blocking operation, "
+            "instance state changed (master -> replica?)"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sentinel", "standalone", "cluster"])
+async def test_an_unblocked_reply_is_a_demotion_and_is_retried(monkeypatch, mode):
+    p = _provider()
+
+    class _Cfg:
+        pass
+
+    _Cfg.mode = mode
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    rebuilds = {"n": 0}
+
+    async def _rebuild(gen):
+        rebuilds["n"] += 1
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", _rebuild)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Unblocked()
+        return "ok"
+
+    assert await p._run_guarded(call) == "ok"
+    assert calls["n"] == 2
+    assert rebuilds["n"] == 1
+
+
+def test_the_unblocked_match_stays_narrow():
+    """Matched on the verb, not on "instance state changed", so it cannot
+    swallow an unrelated error. Nothing in this repo issues CLIENT UNBLOCK,
+    so there is no legitimate -UNBLOCKED for this to absorb."""
+    assert _is_role_changed_error(_Unblocked())
+    assert _is_role_changed_error(
+        RuntimeError("unblocked force unblock from blocking operation"))
+    for other in [
+        RuntimeError("instance state changed"),
+        RuntimeError("blocked client"),
+        RuntimeError("NOREPLICAS Not enough good replicas to write."),
+        RuntimeError("LOADING FalkorDB is loading the dataset in memory"),
+    ]:
+        assert not _is_role_changed_error(other), other
+
+
+@pytest.mark.asyncio
+async def test_a_node_that_stays_readonly_eventually_gives_up(monkeypatch):
+    """Retrying forever would hold the caller's whole budget against a node
+    that is never going to be the master again."""
+    p = _provider()
+
+    class _Cfg:
+        mode = "sentinel"
+
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    async def fake_rebuild(gen):
+        return None
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        raise _ReadOnlyError()
+
+    with pytest.raises(Exception):
+        await p._run_guarded(call)
+    assert calls["n"] > 1, "never retried at all"
+    assert calls["n"] <= 5, f"retried {calls['n']} times — unbounded"

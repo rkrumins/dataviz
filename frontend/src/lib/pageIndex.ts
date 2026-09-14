@@ -295,6 +295,15 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'admin', key: 'redis' },
     },
     {
+        id: 'admin-graph-store',
+        category: 'Setting',
+        title: 'Graph store',
+        description: 'Shards, replicas, memory and where every graph lives',
+        keywords: ['admin', 'graph store', 'shard', 'replica', 'cluster', 'slots', 'falkordb', 'topology', 'lag', 'memory'],
+        path: '/admin/graph-store',
+        gate: { kind: 'admin', key: 'graph-store' },
+    },
+    {
         id: 'admin-branding',
         category: 'Setting',
         title: 'Branding',

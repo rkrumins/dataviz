@@ -24,17 +24,25 @@ from backend.app.models.graph import (
 )
 from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
 from backend.common.interfaces.provider import ProviderConfigurationError
-from backend.app.providers.falkordb_provider import CursorMismatchError
+from backend.app.providers.falkordb_provider import (
+    _FAILOVER_RETRY_AFTER_S,
+    CursorMismatchError,
+)
 from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
+from backend.common.adapters import ProviderFailingOver
 from backend.app.services.fair_share import get_fair_share
+from backend.app.config import resilience
 from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
+    ENDPOINT_CANVAS_BOOTSTRAP,
+    ENDPOINT_CANVAS_EXPAND,
     ENDPOINT_CHILDREN,
     ENDPOINT_EDGES_BETWEEN,
+    ENDPOINT_NODES_DEGREE,
     ENDPOINT_NODES_QUERY,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
@@ -43,6 +51,7 @@ from backend.app.services.graph_cache import (
     get_graph_cache,
     get_source_stale_reason,
     graph_ns_hash,
+    invalidate_aggregated_reads,
 )
 from backend.app.services.stats_cache import (
     CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
@@ -694,6 +703,15 @@ async def confirm_vocab_variant(
     # process-wide resolution cache so every pod re-derives on next read.
     from backend.app.services.resolved_ontology_cache import bump_ontology_generation
     await bump_ontology_generation(ws_id, dataSourceId)
+    # Those same alias maps decide the containment/lineage split every cached
+    # read embeds in its answer, so re-deriving the ontology is only half the
+    # invalidation: without this the reads keep serving the pre-decision split
+    # from Redis for a full TTL. Content counter — the split is in every
+    # endpoint's answer, not just the rollup's.
+    if ws_id:
+        await get_graph_cache().bump_generation(
+            CacheScope(workspace_id=ws_id, data_source_id=dataSourceId)
+        )
     return {"declared": declared, "keepMerged": keepMerged, "hasDrift": bool(row.has_drift)}
 
 
@@ -762,6 +780,43 @@ def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
     return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch, graph_ns=graph_ns)
 
 
+def _compute_budget(endpoint: str) -> float:
+    """The wall clock a cold compute on ``endpoint`` is budgeted for.
+
+    Passed to ``get_or_compute`` as ``expected_compute_s``, where it sizes how
+    long a follower in another pod watches the elected leader before giving up
+    and computing its own. The flat 10s it replaced was shorter than every
+    compute it guarded, which made the election a pure latency tax: eleven of
+    twelve pod-leaders waited, gave up, and issued the same query 10s late —
+    onto a shard still running the leader's.
+
+    Read live off the resilience module (not copied at import) so an operator
+    override of a query budget moves the wait that derives from it.
+    """
+    if endpoint in (
+        ENDPOINT_AGGREGATED, ENDPOINT_CANVAS_BOOTSTRAP, ENDPOINT_CANVAS_EXPAND,
+    ):
+        # The whole aggregated read, ladder and all — canvas bootstrap/expand
+        # compose one into their answer, so they cost at least as much.
+        return resilience.FALKORDB_AGGREGATED_READ_BUDGET_SECS
+    if endpoint in (ENDPOINT_TRACE, ENDPOINT_TRACE_EXPAND, ENDPOINT_TRACE_CLOSURE):
+        # The engine's own outer budget, which is what a trace is allowed to
+        # spend before it truncates.
+        return max(
+            5.0,
+            resilience.TRACE_TIMEOUT_SECS - resilience.TRACE_ENGINE_HEADROOM_SECS,
+        )
+    if endpoint == ENDPOINT_CHILDREN:
+        return resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+    if endpoint == ENDPOINT_TOP_LEVEL:
+        return resilience.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+    if endpoint == ENDPOINT_EDGES_BETWEEN:
+        return resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
+    if endpoint == ENDPOINT_NODES_QUERY:
+        return resilience.FALKORDB_NODES_QUERY_TIMEOUT_SECS
+    return resilience.FALKORDB_QUERY_TIMEOUT_SECS
+
+
 def _provider_health_header(engine: ContextEngine) -> str:
     """Map the engine's CircuitBreakerProxy state to the same string set
     used by the stats_cache envelope's ``provider_health`` field.
@@ -800,17 +855,27 @@ async def _invalidate_cache(engine: ContextEngine) -> None:
 
 
 def _bounded_compute(engine: ContextEngine, compute):
-    """Wrap a GraphCache ``compute`` callable in the per-(provider, graph)
-    concurrency slot (``ProviderManager.acquire_provider_slot``, cap
-    ``PROVIDER_MAX_CONCURRENCY``, default 8). Saturation raises
+    """Wrap a GraphCache ``compute`` callable in TWO per-(provider, graph)
+    concurrency bounds: this process's semaphore
+    (``ProviderManager.acquire_provider_slot``, cap
+    ``PROVIDER_MAX_CONCURRENCY``, default 8) and then the fleet's shared
+    count (``ProviderManager.fleet_slot``). Saturation of either raises
     ``ProviderBusy`` → 429 + Retry-After via the handler in main.py, so
     a burst of cache misses sheds load instead of pegging FalkorDB's
-    single Cypher thread.
+    query threads.
 
-    Cache hits never touch the semaphore — only singleflight-leader
-    misses do actual provider work. Engines whose provider doesn't
-    expose ``manager_cache_key`` (draft/versioned wrappers that don't
-    delegate attributes) degrade to unbounded — those paths are
+    Both, because only the second one is a real ceiling: the semaphore is
+    per process and the deployed shape runs twelve of them, so its "cap 8"
+    was 96 concurrent calls against a shard with THREAD_COUNT 6. The
+    semaphore still earns its place ahead of the fleet count — it answers
+    without a round trip and its waiter queue is what keeps a burst off the
+    GRAPH_READ pool — but the number that protects the store is the shared
+    one.
+
+    Cache hits never touch either — only singleflight-leader misses do
+    actual provider work. Engines whose provider doesn't expose
+    ``manager_cache_key`` (draft/versioned wrappers that don't delegate
+    attributes) degrade to unbounded — those paths are
     Postgres-overlay-heavy, not FalkorDB fan-out.
     """
     key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
@@ -820,11 +885,53 @@ def _bounded_compute(engine: ContextEngine, compute):
     async def _run():
         sem = await provider_manager.acquire_provider_slot(*key)
         try:
-            return await compute()
+            async with provider_manager.fleet_slot(*key):
+                return await compute()
         finally:
             sem.release()
 
     return _run
+
+
+def watch_for_failover(compute, seen: dict):
+    """Wrap a compute so a node being replaced is remembered, not just raised.
+
+    ``get_or_compute`` already serves the last good answer when the provider
+    cannot answer — the caller just never learned WHY, so a canvas that went
+    quietly stale during a failover looked no different from one that was
+    merely old. The route reads ``seen`` afterwards and labels the response.
+    """
+    async def _run():
+        try:
+            return await compute()
+        except ProviderFailingOver as exc:
+            seen["endpoint"] = exc.endpoint or ""
+            raise
+
+    return _run
+
+
+def label_failover(response: Response, target, seen: dict) -> None:
+    """Say that this answer is the last good one and the node is coming back.
+
+    ``target`` is anything carrying ``stale``/``stale_reason`` (the aggregated
+    result, a canvas freshness block). Only fires when the cache actually
+    stood in for the provider: a failover the retries absorbed changed
+    nothing the user can see, and does not deserve a banner.
+    """
+    if not seen or response.headers.get("X-Cache-Status") != "stale-fallback":
+        return
+    target.stale = True
+    if not getattr(target, "stale_reason", None):
+        target.stale_reason = "failing_over"
+    # The same figure the provider puts on a 429 during a failover, derived
+    # from the cluster's own node timeout. A flat 3 s here sent the client
+    # back before the cluster had begun to promote anything, so the retry
+    # was spent on a node still not there — and then the two halves of the
+    # same outage told the client two different numbers.
+    response.headers["Retry-After"] = str(_FAILOVER_RETRY_AFTER_S)
+    if seen.get("endpoint"):
+        response.headers["X-Provider-Failing-Over"] = seen["endpoint"]
 
 
 async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
@@ -962,6 +1069,7 @@ async def trace_v2(
         compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_TRACE),
     )
 
 
@@ -1069,6 +1177,7 @@ async def trace_closure(
             compute=_bounded_compute(engine, compute),
             model_cls=TraceClosureResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_TRACE_CLOSURE),
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail={"code": "trace_closure_unsupported", "message": str(exc)})
@@ -1103,6 +1212,7 @@ async def trace_expand(
         compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_TRACE_EXPAND),
     )
 
 
@@ -1197,6 +1307,7 @@ async def trace_expand_batch(
         compute=_bounded_compute(engine, compute_batch),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_TRACE_EXPAND),
     )
 
 
@@ -1385,6 +1496,7 @@ async def get_top_level_nodes(
             compute=_bounded_compute(engine, compute),
             model_cls=TopLevelNodesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_TOP_LEVEL),
         )
     except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug).
@@ -1503,6 +1615,7 @@ async def get_children_with_edges(
             compute=_bounded_compute(engine, compute),
             model_cls=ChildrenWithEdgesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_CHILDREN),
         )
     except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug) — 400, not 500.
@@ -2032,6 +2145,7 @@ async def get_edges_between(
         compute=_bounded_compute(engine, compute),
         model_cls=_EdgeListResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_EDGES_BETWEEN),
     )
     return result.root
 
@@ -2054,6 +2168,11 @@ async def get_node_degrees(
     omits URNs whose bucket query failed. Response-cached (gen-bump
     invalidated) and slot-bounded like /edges/between; degree totals
     tolerate cache staleness because they are advisory cues.
+
+    The endpoint key is the REGISTERED ``nodes-degree``. It read
+    ``nodes_degree``, which is not a registered key, so ``is_enabled``
+    answered False and every call bypassed the cache the docstring above
+    promised — silently, since a bypass is a legal outcome.
     """
     async def compute() -> _DegreesResult:
         return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
@@ -2063,7 +2182,7 @@ async def get_node_degrees(
         return (await _bounded_compute(engine, compute)()).root
     result = await get_graph_cache().get_or_compute(
         scope=scope,
-        endpoint="nodes_degree",
+        endpoint=ENDPOINT_NODES_DEGREE,
         params={
             "urns": sorted(query.urns),
             "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
@@ -2071,6 +2190,7 @@ async def get_node_degrees(
         compute=_bounded_compute(engine, compute),
         model_cls=_DegreesResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
     )
     return result.root
 
@@ -2097,17 +2217,39 @@ async def query_nodes(
         return _NodeListResult(await engine.get_nodes_query(query))
 
     scope = _cache_scope(engine)
+    # (params built below — see _node_query_cache_params)
     if scope is None:
         return (await _bounded_compute(engine, compute)()).root
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_NODES_QUERY,
-        params=query.model_dump(mode="json", by_alias=True, exclude_none=True),
+        params=_node_query_cache_params(query),
         compute=_bounded_compute(engine, compute),
         model_cls=_NodeListResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
     )
     return result.root
+
+
+def _node_query_cache_params(query) -> dict:
+    """Cache params for /nodes/query, with the list filters normalised.
+
+    The query is a SET of URNs, entity types and tags — the answer does not
+    depend on the order they arrived in, and the canvas builds them by
+    expansion order. Hashing the raw dump therefore gave two users who
+    reached the identical view by different routes two different entries for
+    one compute. Every neighbouring endpoint already sorts; this one did not.
+
+    Only the cache key is normalised — the query handed to the engine is
+    untouched, in case any filter is ever order-sensitive.
+    """
+    dumped = query.model_dump(mode="json", by_alias=True, exclude_none=True)
+    for field in ("urns", "entityTypes", "tags"):
+        value = dumped.get(field)
+        if isinstance(value, list):
+            dumped[field] = sorted(value)
+    return dumped
 
 
 @router.get("/metadata/entity-types", response_model=List[str])
@@ -2504,6 +2646,7 @@ async def get_aggregated_edges(
     # Sort URN lists so two semantically identical requests with differing
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
+    failing_over: dict = {}
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
@@ -2515,10 +2658,12 @@ async def get_aggregated_edges(
             "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
         },
-        compute=_bounded_compute(engine, compute),
+        compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_AGGREGATED),
     )
+    label_failover(response, result, failing_over)
 
     # Post-cache staleness overlay (Task 6): the source-changed marker is
     # set/cleared independently of the cache entry, so a cache hit (or a
@@ -2554,6 +2699,14 @@ async def materialize_aggregated_edges(
         )
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
+    # This rewrites the entire :AGGREGATED layer, which is precisely what the
+    # aggregation worker's terminal events invalidate through — and it was the
+    # one writer of that layer that invalidated nothing at all. Every cached
+    # aggregated/canvas/trace read kept serving pre-materialization answers
+    # until its TTL, which is now an hour.
+    scope = _cache_scope(engine)
+    if scope is not None and scope.data_source_id:
+        await invalidate_aggregated_reads(scope.workspace_id, scope.data_source_id)
     return JSONResponse(content=stats)
 
 

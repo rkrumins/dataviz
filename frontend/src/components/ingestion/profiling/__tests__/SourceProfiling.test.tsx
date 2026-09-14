@@ -89,6 +89,44 @@ describe('SourceProfiling', () => {
         expect(screen.getAllByText('Customers').length).toBeGreaterThan(0)
     })
 
+    it('accounts for the overlay without changing what Relationships means', async () => {
+        // The tile keeps the total it has always shown — raw + rollup — and
+        // the sub-line accounts for the gap against the relationship-type
+        // table below, which strips the rollup because it is not the
+        // customer's data. A number that changed meaning silently would be
+        // worse than one that was missing.
+        getSeries.mockResolvedValue(series({
+            totals: { nodes: [100, 140], edges: [50, 60], total: [150, 200], aggregated: [20, 25] },
+        }))
+        renderIt()
+        expect((await screen.findAllByText('60')).length).toBeGreaterThan(0)
+        expect(screen.getByText('of which 25 aggregated')).toBeInTheDocument()
+    })
+
+    it('says nothing about an overlay a source does not have', async () => {
+        // Most sources legitimately have no rollups. "of which 0 aggregated"
+        // on every one of them reads as a fault.
+        getSeries.mockResolvedValue(series({
+            totals: { nodes: [100, 140], edges: [50, 60], total: [150, 200], aggregated: [0, 0] },
+        }))
+        renderIt()
+        expect((await screen.findAllByText('60')).length).toBeGreaterThan(0)
+        // Scoped to the sub-line: "Aggregated" is also the chart's Show
+        // toggle, which is present on every source whether it has an overlay
+        // or not.
+        expect(screen.queryByText(/of which/i)).not.toBeInTheDocument()
+    })
+
+    it('degrades to today when the backend has no overlay measure', async () => {
+        // Rolling deploy: a new frontend against an old backend gets a payload
+        // with no `aggregated` key at all. It must read as "nothing to show",
+        // never as zero.
+        getSeries.mockResolvedValue(series())
+        renderIt()
+        expect((await screen.findAllByText('60')).length).toBeGreaterThan(0)
+        expect(screen.queryByText(/of which/i)).not.toBeInTheDocument()
+    })
+
     it('shows both measures and what each did', async () => {
         getSeries.mockResolvedValue(series())
         renderIt()

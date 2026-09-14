@@ -50,6 +50,76 @@ jobs:
           -k "falkordb or preflight or warmup or circuit or redis or bus
           or provider or probes or manager or aggregation or insights"
 
+      # The step above selects by KEYWORD, which is a denylist by omission: a
+      # file whose name and test names miss every keyword is ungated, and
+      # nothing goes red to say so. Measured on the graph-store branch, 681 of
+      # its 1174 tests gated nothing while this job stayed green. Until
+      # `full-suite` can be promoted to required, the read path is gated by
+      # naming its files. `tests/test_ci_required_list.py` fails if an entry
+      # stops existing, or if this step stops reading the list.
+      - name: Run the graph store, view cache and capacity suites
+        working-directory: backend
+        run: |
+          python -m pytest -q -m "not integration" \
+            $(grep -vE '^\s*(#|$)' tests/ci-required-files.txt)
+
+  live-engine:
+    # THE ONLY JOB THAT RUNS AGAINST A REAL FALKORDB.
+    #
+    # Every other job here runs `-m "not integration"` and no workflow starts
+    # an engine, so until this existed the entire rebuild pipeline was proven
+    # against in-memory fakes only: our control logic, never FalkorDB's actual
+    # behaviour. The live suite pins what the fakes cannot — case-fold
+    # vocabulary matching against real per-label URN indexes, an unchanged
+    # re-run writing NOTHING rather than wiping good edges, a resume past
+    # every computed key still creating every missing pair, and the
+    # `db.indexes()` shape the readiness probe reads.
+    #
+    # Informational to begin with, like `full-suite`: a job that gates before
+    # it has a track record turns an engine hiccup into a blocked merge. Watch
+    # it, then promote it to required.
+    #
+    # Scoped deliberately to the provider-level suite. The rest of
+    # `tests/integration/` wants dev Postgres and a live viz-service
+    # (`GRAPHVER_E2E`), and a broad red job teaches nobody anything.
+    name: Live FalkorDB pipeline (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    services:
+      falkordb:
+        # Pinned to the version docker-compose.yml ships, so CI and the dev
+        # container cannot disagree about engine behaviour.
+        image: falkordb/falkordb:v4.18.11
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-test.txt
+      - name: The rebuild pipeline, against the real engine
+        working-directory: backend
+        env:
+          RUN_FALKOR_LIVE: "1"
+          FALKORDB_HOST: localhost
+          FALKORDB_PORT: "6379"
+        run: |
+          python -m pytest tests/integration/test_aggregation_pipeline_live.py -q
+
   full-suite:
     name: Full backend suite (informational)
     runs-on: ubuntu-latest

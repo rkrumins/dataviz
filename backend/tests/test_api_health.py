@@ -164,6 +164,7 @@ async def test_deps_reports_resilience_counters(test_client: AsyncClient, monkey
     for key in (
         "preflight_skipped_recent_ok", "preflight_slow_misses", "preflight_gated",
         "slots_shed_queue_full", "slots_shed_wait_timeout",
+        "fleet_slots_shed", "fleet_slots_fail_open",
     ):
         assert isinstance(resilience["provider_manager"][key], int)
 

@@ -179,7 +179,7 @@ async def test_the_scan_shrinks_for_an_oversized_query(monkeypatch):
     r = _runner()
     seen = []
 
-    async def q(client, cypher, params=None, *, timeout_ms=0):
+    async def q(client, cypher, params=None, *, timeout_ms=0, read_only=False):
         seen.append(params["hi"] - params["lo"])
         if seen[-1] > 25_000:
             raise _Boom("Query timed out")
@@ -199,7 +199,7 @@ async def test_the_scan_does_not_shrink_for_a_broken_pipe(monkeypatch):
     r = _runner()
     seen = []
 
-    async def q(client, cypher, params=None, *, timeout_ms=0):
+    async def q(client, cypher, params=None, *, timeout_ms=0, read_only=False):
         seen.append(params["hi"] - params["lo"])
         raise ConnectionResetError("reset by peer")
 
@@ -222,7 +222,7 @@ async def test_the_scan_DOES_shrink_for_a_socket_timeout(monkeypatch):
     r = _runner()
     seen = []
 
-    async def q(client, cypher, params=None, *, timeout_ms=0):
+    async def q(client, cypher, params=None, *, timeout_ms=0, read_only=False):
         seen.append(params["hi"] - params["lo"])
         if seen[-1] > 25_000:
             raise TimeoutError("Timeout reading from falkordb:6379")   # a SOCKET timeout
@@ -240,7 +240,7 @@ async def test_a_timeout_at_the_floor_is_finally_waited_out(monkeypatch):
     r = _runner()
     seen = []
 
-    async def q(client, cypher, params=None, *, timeout_ms=0):
+    async def q(client, cypher, params=None, *, timeout_ms=0, read_only=False):
         seen.append(params["hi"] - params["lo"])
         raise TimeoutError("Timeout reading from falkordb:6379")
 

@@ -10,6 +10,7 @@ import { providerService, friendlyError, type ConnectionTestResult, type Provide
 import { usePermission } from '@/store/auth'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
+import { ProviderTopologyBlock, ProviderTopologyLine } from './AdminGraphStore/ProviderTopologyBlock'
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
 import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
@@ -124,9 +125,17 @@ function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedA
                     detail — only managers see it. Readers see name, type,
                     and status only. */}
                 {canManage && (
-                    <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
-                        {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
-                        {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
+                    <div className="mb-4 space-y-1">
+                        <div className="flex items-center gap-4 text-xs text-ink-muted">
+                            {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
+                            {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
+                        </div>
+                        {/* The line above is what was CONFIGURED. This one is
+                            what the connection actually reaches — the count a
+                            provider card never had. */}
+                        {provider.providerType === 'falkordb' && (
+                            <ProviderTopologyLine providerId={provider.id} />
+                        )}
                     </div>
                 )}
                 {health.status === 'unhealthy' && health.error && (
@@ -176,6 +185,9 @@ function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedA
                     {/* Admission control hits a system:admin-only endpoint —
                         only render it for managers (also avoids a 403 per
                         expanded card for readers). */}
+                    {canManage && provider.providerType === 'falkordb' && (
+                        <ProviderTopologyBlock providerId={provider.id} />
+                    )}
                     {canManage && <ProviderAdmissionEditor providerId={provider.id} />}
                 </div>
             )}

@@ -34,7 +34,7 @@ Key decisions:
 
 - **Stale-while-revalidate, not cold-cache.** Users keep fast responses during a rebuild; the aggregated LKG deliberately *survives* the signal (it still matches the live overlay) and is purged only at completion. Staleness is overlaid **post-cache** so cached hits are flagged without baking `stale` into cached payloads.
 - **Change-gated + throttled.** The gate compares a counts-based graph fingerprint server-side; unchanged syncs do nothing. Confirmed changes always invalidate (cheap), but the rebuild itself fires at most once per `AGGREGATION_REBUILD_MIN_INTERVAL_SECS` (default 900) per source; within the window the signal returns `deferred: true`.
-- **Eventual consistency with a reconciler.** The scheduler tick (60s) acts on fingerprint drift for scheduled sources and sweeps the stale markers (≤50/tick) for *all* sources: deferred rebuilds fire when the cooldown elapses, failed rebuilds are retried, false markers are cleared, in-flight rebuilds (`pending` state) are left alone. Strictly schedule/event-driven — **read paths never trigger work** (the `110cd431` constraint stands).
+- **Eventual consistency with a reconciler.** The scheduler tick (60s) acts on fingerprint drift for scheduled sources and sweeps the stale markers (≤50/tick) for *all* sources: deferred rebuilds fire when the cooldown elapses, failed or cancelled rebuilds are retried up to the reconciliation breaker cap (then the source waits for a person), false markers are cleared, in-flight rebuilds (`pending` state) are left alone. Strictly schedule/event-driven — **read paths never trigger work** (the `110cd431` constraint stands).
 - **Manual resolution always available**: `--force` on the signal (bypasses gate + cooldown; needed for count-neutral changes like re-parenting, since the fingerprint is counts-only), and the pre-existing manual re-aggregation endpoint.
 
 ## What changed (by component)
@@ -45,7 +45,7 @@ Key decisions:
 | Provider | Failed aggregated batches flag the result `stale/degraded/truncated` instead of silently shrinking it; `clear_content_caches()` bulk-clears ancestor-chain/urn-label caches + run-meta memo | `backend/app/providers/falkordb_provider.py` |
 | Signal | `AggregationService.signal_source_changed` (gate → mark → clear → invalidate → nudge → throttled trigger; never raises after invalidation; not-applicable sources are never marked) | `backend/app/services/aggregation/service.py`, `schemas.py` |
 | Entry points | Control-plane route `POST /aggregation/data-sources/{id}/source-changed`; admin route `POST /api/v1/admin/data-sources/{id}/source-changed` (`workspace:datasource:manage`, proxy-aware); loader script `python -m backend.scripts.signal_data_changed --graph <name> [--force]` | `controlplane.py`, `api/v1/endpoints/aggregation.py`, `backend/scripts/signal_data_changed.py`, `backend/scripts/README.md` |
-| Scheduler | Acts on drift + reconciles stale markers (both gated by `AGGREGATION_DRIFT_AUTO_REBUILD`, default on; skips in-flight/in-cooldown sources) | `backend/app/services/aggregation/scheduler.py` |
+| Scheduler | Acts on drift + reconciles stale markers (both gated by `AGGREGATION_DRIFT_AUTO_REBUILD`, default on, and by the operator holds; skips in-flight/in-cooldown sources; retries after a failed or cancelled job are bounded by the reconciliation breaker) | `backend/app/services/aggregation/scheduler.py` |
 | Event listener | Clears the stale marker on `job.completed` only (failures keep it → reconciler retries) | `backend/app/services/aggregation/event_listener.py` |
 | Read overlay | While the marker is set, `/edges/aggregated` + canvas bootstrap/expand responses carry `stale: true, staleReason: "source_changed"` (post-cache; never overwrites structural reasons) | `api/v1/endpoints/graph.py`, `canvas.py`, `common/models/graph.py` |
 | Frontend | Blue "Source data changed — lineage is being recomputed" banner (self-clears); truncation banner now includes the unplaceable-connection count; truncated merges are no longer cached client-side (stale merges are — required for SWR) | `useAggregatedLineage.ts`, `useEdgeProjection.ts`, `ContextViewCanvas.tsx`, `GraphDataProvider.ts` |
@@ -55,14 +55,14 @@ Key decisions:
 | Env var | Default | Meaning |
 |---|---|---|
 | `AGGREGATION_REBUILD_MIN_INTERVAL_SECS` | `900` | Min interval between signal-triggered rebuilds per source; `0` disables throttling. Invalidation/marking is never throttled. **Env is the fallback only**: a persisted global (`PUT /aggregation/settings`, or the Freshness tab's Cadence settings) and a per-source override (`PATCH /admin/data-sources/{id}/freshness-settings`, or the source drawer) take precedence — resolution is override → global → env, shared by the cooldown gate, the reconciler, and the UI badge. |
-| `AGGREGATION_DRIFT_AUTO_REBUILD` | `true` | Scheduler acts on drift + reconciles markers. `false` restores notify-only. Same persisted-global override applies. |
+| `AGGREGATION_DRIFT_AUTO_REBUILD` | `true` | ③ Act. `false` is a fleet-wide stop: notify-only drift, no marker retries, no sweeper rebuilds, batch refreshes skip every source; a single-source Rebuild a person clicks still runs. Same persisted-global override applies. |
 | `GRAPH_CACHE_MAX_PAYLOAD_BYTES` | `1048576` | Cache-entry cap. Raise (e.g. 8388608) for large-model aggregated payloads; oversized results now *delete* the stale entry rather than stranding it. |
 
 ## Operating it
 
 - **After any direct load**: `python -m backend.scripts.signal_data_changed --graph <name>` (or `--data-source-id <id>`). External connectors call the admin API instead.
 - **Re-parenting / property-only changes**: the fingerprint is counts-based and won't see them — use `--force`.
-- **A source shows the stale banner "forever"**: check the aggregation job pipeline (a failing rebuild keeps the marker on purpose; the reconciler retries each window). The marker also has a 7-day TTL backstop.
+- **A source shows the stale banner "forever"**: check the aggregation job pipeline (a failing rebuild keeps the marker on purpose; the reconciler retries each window up to the breaker cap, then the source shows "Needs a person" until **Resume automation**). The marker also has a 7-day TTL backstop.
 - **Immediate resolution**: `--force` signal or the manual re-aggregation endpoint (both bypass the cooldown).
 
 ## OPS API

@@ -23,14 +23,18 @@ import { workspaceService } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
 import type { FreshnessRow as FreshnessRowData, ProviderFreshnessSummary, RefreshScope } from '@/services/freshnessService'
 import { FreshnessRow } from './FreshnessRow'
+import { overrideWarning, rowHold } from './holds'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
+import { ProviderHoldDialog } from './ProviderHoldDialog'
 import { FleetRefreshDialog } from './FleetRefreshDialog'
 import { FreshnessStatBand } from './FreshnessStatBand'
 import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { AutomationModal } from './AutomationModal'
 import { OverlayIntegrity } from './OverlayIntegrity'
+import { GraphStoreCapacity } from './GraphStoreCapacity'
+import { DefaultsDialog } from '../shared/DefaultsDialog'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
@@ -53,9 +57,9 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
 
 const COLS = 7
 
-const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended', 'projectionStalled']
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended', 'projectionStalled', 'held']
 const FAILURE_FACETS: readonly FailureFacet[] = [
-    'out_of_memory', 'query_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
+    'write_budget', 'out_of_memory', 'query_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
 ]
 
 function parseStatus(raw: string | null): StatusFacet {
@@ -73,6 +77,9 @@ function parseList(raw: string | null): string[] {
 export function Freshness() {
     useDocumentTitle('Freshness')
     const isSystemAdmin = usePermission('system:admin')
+    // The fleet Defaults, reachable from the capacity card: the limits the
+    // card measures against live one dialog away, not on another page.
+    const [defaultsOpen, setDefaultsOpen] = useState(false)
     const { notify } = useAppNotifications()
 
     const [searchParams, setSearchParams] = useSearchParams()
@@ -144,6 +151,7 @@ export function Freshness() {
     // ── Local (non-URL) UI state ──────────────────────────────────────
     const [confirm, setConfirm] = useState<{ dsId: string; scope: RefreshScope; firstBuild?: boolean } | null>(null)
     const [providerDialog, setProviderDialog] = useState<{ id: string; name: string } | null>(null)
+    const [providerHold, setProviderHold] = useState<{ id: string; name: string } | null>(null)
     const [fleetDialogOpen, setFleetDialogOpen] = useState(false)
     const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
     const [expandedRow, setExpandedRow] = useState<string | null>(null)
@@ -169,7 +177,7 @@ export function Freshness() {
     const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
         try {
             await aggregationService.cancelJob(dsId, jobId)
-            notify('success', 'Rebuild cancelled.')
+            notify('success', 'Rebuild cancelled. If automation requested it, it may retry a few more times, then it waits for a person.')
         } catch (e) {
             notify('error', (e as Error).message || 'Could not cancel the rebuild.')
         }
@@ -310,6 +318,10 @@ export function Freshness() {
     }
 
     const busyDsId = refreshSource.isPending ? refreshSource.variables?.dsId : undefined
+    // A person may rebuild past a hold; the confirm says so, and that the
+    // hold stays — one sentence, so "Rebuild" is never read as "and resume".
+    const confirmRow = confirm ? rows.find(r => r.dataSourceId === confirm.dsId) : undefined
+    const confirmHold = confirmRow ? rowHold(confirmRow) : null
     const truncated = (fleet.data?.total ?? 0) > rows.length
     const hasFilters = fprov.length > 0 || fws.length > 0 || fstatus !== '' || ffail !== '' || q !== ''
     const clearAll = () => patchParams({ fprov: null, fws: null, fstatus: null, ffail: null, fq: null })
@@ -363,6 +375,12 @@ export function Freshness() {
                 onOpenSource={setDrawerDsId}
                 window={fwin}
                 onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
+            />
+
+            <GraphStoreCapacity
+                onOpenSource={setDrawerDsId}
+                onFacetWouldNotFit={() => patchParams({ fstatus: 'needsAttention', ffail: 'write_budget' })}
+                onAdjustLimits={isSystemAdmin ? () => setDefaultsOpen(true) : undefined}
             />
 
             <StartHereStrip
@@ -470,6 +488,7 @@ export function Freshness() {
                                             onToggle={() => toggleGroup(pid, expanded)}
                                             isSystemAdmin={isSystemAdmin}
                                             onRefreshProvider={(id, name) => setProviderDialog({ id, name })}
+                                            onHoldProvider={(id, name) => setProviderHold({ id, name })}
                                             colSpan={COLS}
                                         />
                                         {expanded && g.rows.map(row => (
@@ -530,11 +549,12 @@ export function Freshness() {
                 open={confirm != null}
                 title={buildMode ? 'Build lineage' : (confirm ? SCOPE_LABEL[confirm.scope] : '')}
                 message={
-                    buildMode
+                    (buildMode
                         ? 'Builds lineage rollups for this source for the first time. This may take a while on large sources.'
                         : confirm?.scope === 'full'
                             ? 'This refreshes caches and rebuilds aggregated lineage for this source. It can take a while.'
-                            : 'This rebuilds aggregated lineage for this source. It can take a while.'
+                            : 'This rebuilds aggregated lineage for this source. It can take a while.')
+                    + (confirmHold ? ` ${overrideWarning(confirmHold)}` : '')
                 }
                 confirmLabel={buildMode ? 'Build lineage' : (confirm ? SCOPE_LABEL[confirm.scope] : '')}
                 confirmColor="bg-indigo-600 hover:bg-indigo-700 shadow-md"
@@ -554,6 +574,15 @@ export function Freshness() {
                 onClose={() => setProviderDialog(null)}
             />
 
+            <ProviderHoldDialog
+                key={providerHold?.id ?? 'closed'}
+                providerId={providerHold?.id ?? null}
+                providerName={providerHold?.name ?? ''}
+                current={providerHold ? providerSummaryById.get(providerHold.id) ?? null : null}
+                isOpen={providerHold != null}
+                onClose={() => setProviderHold(null)}
+            />
+
             <FleetRefreshDialog
                 key={fleetDialogOpen ? 'open' : 'closed'}
                 fleetTotal={summary?.total ?? null}
@@ -561,11 +590,14 @@ export function Freshness() {
                 onClose={() => setFleetDialogOpen(false)}
             />
 
+            <DefaultsDialog open={defaultsOpen} onClose={() => setDefaultsOpen(false)} />
+
             <AutomationModal
                 open={automationOpen}
                 onClose={closeAutomation}
                 isAdmin={isSystemAdmin}
                 summary={summary}
+                onShowSuspended={() => patchParams({ fstatus: 'suspended', ffail: null, automation: null })}
             />
         </div>
     )

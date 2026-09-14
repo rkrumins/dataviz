@@ -36,6 +36,7 @@ const AdminPage = lazyWithRetry(() => import('@/pages/AdminPage').then(m => ({ d
 const AdminOverview = lazyWithRetry(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminInfrastructure = lazyWithRetry(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
 const AdminRedis = lazyWithRetry(() => import('@/components/admin/AdminRedis').then(m => ({ default: m.AdminRedis })))
+const AdminGraphStore = lazyWithRetry(() => import('@/components/admin/AdminGraphStore').then(m => ({ default: m.AdminGraphStore })))
 const AdminBranding = lazyWithRetry(() => import('@/components/admin/AdminBranding').then(m => ({ default: m.AdminBranding })))
 const AdminFeatures = lazyWithRetry(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminUsers = lazyWithRetry(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
@@ -272,6 +273,14 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="redis">
                 <Lazy><AdminRedis /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'graph-store',
+            element: (
+              <RequireNav group="admin" sectionKey="graph-store">
+                <Lazy><AdminGraphStore /></Lazy>
               </RequireNav>
             ),
           },

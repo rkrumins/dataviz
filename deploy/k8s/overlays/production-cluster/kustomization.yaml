@@ -28,6 +28,8 @@ patches:
   - path: patches/remove-single-falkordb.yaml
   # FALKORDB_MODE=cluster + seed nodes for the topology-aware client.
   - path: patches/cluster-config.yaml
+  # Aggregation's slot budget re-derived for THREAD_COUNT 6 (base is 8).
+  - path: patches/worker-slots.yaml
   # DR: one backup pod per shard, snapshotting the shard's REPLICA.
   - path: patches/dr-backup-cluster.yaml
 

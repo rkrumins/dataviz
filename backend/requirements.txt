@@ -5,8 +5,18 @@ gunicorn>=23.0.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via 
 pydantic>=2.13.5          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
 # FalkorDB graph provider (persistent graph backend)
-FalkorDB>=1.7.1
-redis>=8.1.0
+FalkorDB>=1.7.1,<2
+# Ceilinged deliberately. Replica read routing reaches past the public API
+# on both libraries: it reads redis-py's ``nodes_manager.slots_cache`` to
+# find a shard's replicas, gets the READONLY handshake as a side effect of
+# ``load_balancing_strategy``, and pins a read by rebinding the FalkorDB
+# graph object's ``execute_command`` — which works because the async graph
+# calls its OWN attribute rather than its client's. A major bump that
+# renames any of those turns the whole feature into a silent no-op: every
+# read back on the master, no error and no log. The provider's topology
+# line reports the replica share, which is what would show it, but a
+# ceiling is what stops it happening unattended.
+redis>=8.1.0,<9
 # C parser for every FalkorDB/Redis reply. Without it redis-py parses in pure
 # Python: a 2,000-node trace-closure page spent ~1.2 s parsing ~300k reply
 # lines on the event loop (the event_loop_lag warnings). redis-py picks it up

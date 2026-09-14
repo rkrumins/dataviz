@@ -24,6 +24,9 @@ import {
     AutoReconcileOffBadge, DriftStateBadge,
 } from '@/components/admin/Freshness/DriftStateBadge'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
+import { useNavPermission } from '@/store/auth'
+import { useSidebarSpec } from '@/store/navCatalogue'
+import { GraphStorePlacementCard } from '@/components/admin/AdminGraphStore/GraphStorePlacementCard'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { aggregationService } from '@/services/aggregationService'
@@ -293,6 +296,10 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
 }) {
     const [tab, setTab] = useState<'overview' | 'profiling'>('overview')
     const { item, provider, stats, meta, consumers, statsLoading, consumersLoading, notFound } = useDataSourceProfile(catalogId)
+    // Placement reads the graph store topology, which is ingestion-read like
+    // the capacity figures it sits beside — the same question the guard on
+    // the Ingestion page asks.
+    const canReadIngestion = useNavPermission(useSidebarSpec('ingestion'))
 
     const health = useProviderHealth(item?.providerId)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
@@ -444,6 +451,11 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
                 <PhysicalAlignmentSection wsId={context.wsId} dataSourceId={context.dataSourceId} />
             )}
             {context && <AggregationStatusCard dataSourceId={context.dataSourceId} wsId={context.wsId} />}
+            {/* Which node this source's lineage is actually on. Ingestion-read
+                gated, like the capacity figures it sits beside. */}
+            {context && canReadIngestion && (
+                <GraphStorePlacementCard dataSourceId={context.dataSourceId} />
+            )}
             {/* Vocab warning: the workspace drawer already shows it in its
                 header, so only render it in the standalone (non-embedded) view. */}
             {context && !embedded && <VocabAlignmentWarning wsId={context.wsId} dataSourceId={context.dataSourceId} />}

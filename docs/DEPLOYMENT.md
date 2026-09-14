@@ -247,6 +247,7 @@ cd .. && rm -rf synodic
 
 ## Related
 
+- [Concurrency, timeouts, and what to change when users complain](CONCURRENCY_TUNING.md) — the eight ceilings a graph request passes through, the rule that orders their deadlines, and a troubleshooting guide keyed by what the user reports rather than by variable name.
 - [Running several environments side by side](MULTI_ENVIRONMENT_SESSIONS.md) — required reading before standing up a second instance: cookie scoping, signing-key rotation, and the `/auth/diagnostics` endpoint.
 - [FalkorDB Deployment](/docs/falkordb-deployment) — the graph read layer's topology, memory sizing, AOF durability, and engine-upgrade procedure.
 - [FalkorDB DR Runbook](/docs/falkordb-dr) — backup/restore and region-loss recovery for the graph layer.

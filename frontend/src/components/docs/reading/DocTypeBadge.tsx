@@ -24,6 +24,8 @@ export const DOC_TYPES: Record<string, DocType> = {
   decisions: 'explanation',
   'scaling-architecture': 'explanation',
   'aggregation-pipeline': 'explanation',
+  'feature-aggregation-reconciliation': 'how-to',
+  'feature-external-change-notification': 'how-to',
   'technical-debt': 'explanation',
   'versioning-overview': 'explanation',
   'services-overview': 'explanation',

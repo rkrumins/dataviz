@@ -201,6 +201,33 @@ def validate_policy(values: Dict[str, Any], current: "RetentionPolicy") -> None:
         )
 
 
+#: Shown unless an operator turns it off. The rolled-up lineage is what every
+#: view draws and a large share of the graph, so a breakdown without it does
+#: not add up to the store it describes — which is a chart lying quietly
+#: rather than a chart being tidy.
+_INCLUDE_DERIVED_EDGES_DEFAULT = True
+
+
+async def resolve_include_derived_edges(session: AsyncSession) -> bool:
+    """Whether profiling breakdowns SHOW the platform's own rollup types.
+
+    EDGE types only. Derived node labels are never shown and have no switch —
+    see ``_counts``.
+
+    Never raises: an unreadable settings row degrades to the default, because
+    a policy lookup must not be able to fail a chart.
+    """
+    from backend.app.db.models import PlatformSettingsORM
+
+    try:
+        row = await session.get(PlatformSettingsORM, 1)
+    except Exception:  # noqa: BLE001 — policy must never break a read
+        logger.warning("profiling: platform settings unreadable; showing rollups")
+        return _INCLUDE_DERIVED_EDGES_DEFAULT
+    value = getattr(row, "profiling_include_derived_edges", None) if row else None
+    return _INCLUDE_DERIVED_EDGES_DEFAULT if value is None else bool(value)
+
+
 async def resolve_retention_policy(
     session: AsyncSession,
 ) -> Tuple[RetentionPolicy, Dict[str, Any]]:
@@ -1518,6 +1545,7 @@ _POLICY_COLUMNS = {
     "alertsEnabled": "history_alerts_enabled",
     "alertMinSeverity": "history_alert_min_severity",
     "alertCooldownSecs": "history_alert_cooldown_secs",
+    "includeDerivedEdges": "profiling_include_derived_edges",
 }
 
 #: Sentinel meaning "clear this override and inherit the environment default".

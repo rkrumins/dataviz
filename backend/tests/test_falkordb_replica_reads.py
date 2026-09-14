@@ -1,0 +1,1016 @@
+"""Read-only queries served by a shard's in-sync replicas.
+
+On a cluster with two replicas per shard, the master took every write AND
+answered every read — two thirds of the hardware idle while the master's
+query threads were the bottleneck for a hundred people opening canvases at
+once. A read-only Cypher can be answered by a replica that is in step.
+
+The danger is a stale answer, so the router is deliberately timid: the
+provider must allow it, the replica must be online and inside the lag
+threshold, this process must not have written to that graph recently, and a
+replica that just failed is skipped. Anything the router is unsure of goes
+to the master. These tests pin each of those, because a read routed wrongly
+is a correctness bug that looks like a caching bug.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+import types
+
+import pytest
+
+from backend.app.providers import falkordb_provider as fp
+from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _stale_sample() -> float:
+    """Long enough ago that the router will take a fresh reading."""
+    return fp._REPLICA_SAMPLE_S + 1
+
+
+class _Node:
+    def __init__(self, host, port=6379):
+        self.host, self.port = host, port
+
+    def __repr__(self):
+        return f"{self.host}:{self.port}"
+
+
+MASTER = _Node("10.0.0.1")
+R1 = _Node("10.0.1.1")
+R2 = _Node("10.0.2.1")
+
+
+class _Conn:
+    """A cluster connection whose slot map has one master and two replicas."""
+
+    def __init__(self, *, replicas=(R1, R2), info=None):
+        self.nodes_manager = types.SimpleNamespace(
+            slots_cache={7: [MASTER, *replicas]},
+            get_node_from_slot=lambda slot: MASTER,
+        )
+        self._info = info if info is not None else {
+            "role": "master", "connected_slaves": 2, "master_repl_offset": 100,
+            "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
+            "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
+        }
+        self.calls = []
+
+    def keyslot(self, key):
+        return 7
+
+    async def initialize(self):
+        return None
+
+    def _self_report(self, node):
+        """What one replica says about ITSELF, derived from what the master
+        observes about it — which is how a healthy pair actually agrees.
+
+        The router asks every candidate directly now (see
+        ``_vouched_replicas``), so a fake that answered the master's INFO
+        whatever was addressed would have every replica claim to be the
+        master. The translation is the honest one: ``state: online`` means
+        the link is up, ``wait_bgsave`` means a full resync is in flight,
+        and the offsets carry across so ``lagBytes`` comes out identical.
+        """
+        entry = None
+        for key, value in self._info.items():
+            if not (isinstance(key, str) and key.startswith("slave") and key[5:].isdigit()):
+                continue
+            if isinstance(value, dict) and (
+                f"{value.get('ip')}:{value.get('port')}" == f"{node.host}:{node.port}"
+            ):
+                entry = value
+                break
+        if entry is None:
+            # The master does not list it: it is not replicating from here.
+            return {"role": "master"}
+        state = entry.get("state")
+        report = {
+            "role": "slave",
+            "master_link_status": "up" if state == "online" else "down",
+            "master_sync_in_progress": 1 if state == "wait_bgsave" else 0,
+        }
+        if self._info.get("master_repl_offset") is not None:
+            report["master_repl_offset"] = self._info["master_repl_offset"]
+        if entry.get("offset") is not None:
+            report["slave_repl_offset"] = entry["offset"]
+        return report
+
+    async def execute_command(self, command, *args, target_nodes=None):
+        self.calls.append((command, args, target_nodes))
+        if command == "INFO":
+            if target_nodes is not None and target_nodes is not MASTER:
+                return self._self_report(target_nodes)
+            return self._info
+        return "OK"
+
+
+class _Graph:
+    """A FalkorDB graph object, in the shape the router copies: it binds its
+    client's ``execute_command`` at construction."""
+
+    def __init__(self, client, name="g1"):
+        self.name = name
+        self.client = client
+        self.execute_command = client.execute_command
+
+    async def query(self, cypher, params=None, timeout=None):
+        await self.execute_command("GRAPH.QUERY", self.name, cypher)
+        return types.SimpleNamespace(result_set=[])
+
+    async def ro_query(self, cypher, params=None, timeout=None):
+        # Where a read LANDED is what these tests are about, and the client
+        # records the node its sender addressed — so the query goes through
+        # execute_command exactly as the real one does.
+        await self.execute_command("GRAPH.RO_QUERY", self.name, cypher)
+        return types.SimpleNamespace(result_set=[])
+
+
+def _provider(conn, *, mode="cluster", read_from_replicas="auto"):
+    p = object.__new__(FalkorDBProvider)
+    p._graph_name = "g1"
+    p._conn_cfg = types.SimpleNamespace(mode=mode, read_from_replicas=read_from_replicas)
+    p._db = types.SimpleNamespace(connection=conn)
+    p._proj_db = types.SimpleNamespace(connection=conn)
+    p._graph = _Graph(conn)
+    p._proj_graph = _Graph(conn, name="g1_proj")
+    p._projection_mode = "in_source"
+    p._replica_reads = p._master_reads = p._replica_fallbacks = 0
+    return p
+
+
+# ── the gates ────────────────────────────────────────────────────────────
+
+
+def test_a_read_goes_to_a_replica_when_every_gate_is_open():
+    p = _provider(_Conn())
+    node = _run(p._replica_for("g1"))
+    assert node in (R1, R2)
+
+
+def test_the_two_replicas_take_turns():
+    """One replica taking every read of a shard is the master problem again,
+    one node over."""
+    p = _provider(_Conn())
+    seen = {str(_run(p._replica_for("g1"))) for _ in range(4)}
+    assert seen == {"10.0.1.1:6379", "10.0.2.1:6379"}
+
+
+def test_a_provider_pinned_to_its_master_never_routes():
+    p = _provider(_Conn(), read_from_replicas="never")
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_a_deployment_with_no_replicas_reads_from_its_master(monkeypatch):
+    """Whatever the mode. In cluster there is nothing beside the master in
+    the slot map; in sentinel/standalone the master names no replicas."""
+    for mode in ("standalone", "sentinel"):
+        p = _provider(_SentinelConn(replicas=[]), mode=mode)
+        assert _run(p._replica_for("g1")) is None
+    assert _run(_provider(_Conn(replicas=()))._replica_for("g1")) is None
+
+
+def test_a_replica_that_is_behind_does_not_answer():
+    """Behind is measured in BYTES OWED, not in the `lag` seconds INFO
+    reports. A replica acknowledges the stream about once a second whatever
+    it has actually applied, so `lag` reads 0 for one that is a gigabyte
+    behind — under a rebuild, exactly when a stale answer would be served."""
+    behind = 200 * 1024 * 1024
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 2,
+        "master_repl_offset": behind,
+        # Promptly acknowledged (lag 0) and hopelessly behind, both at once.
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+    })
+    p = _provider(conn)
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_one_replica_keeping_up_does_not_speak_for_its_sibling():
+    """A verdict for the whole shard would hand the lagging replica the
+    reads the healthy one qualified for."""
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 2,
+        "master_repl_offset": 100 * 1024 * 1024,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online",
+                   "offset": 100 * 1024 * 1024, "lag": 0},
+        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+    })
+    p = _provider(conn)
+    for _ in range(6):
+        assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"
+
+
+def test_a_replica_whose_offset_is_unknown_does_not_answer():
+    """Nothing to measure means nothing to trust; the master answers."""
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 1,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "lag": 0},
+    })
+    assert _run(_provider(conn)._replica_for("g1")) is None
+
+
+def test_a_replica_that_is_not_online_does_not_answer():
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 1, "master_repl_offset": 0,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "wait_bgsave", "offset": 0, "lag": 0},
+    })
+    p = _provider(conn)
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_a_shard_with_no_replicas_reads_from_its_master():
+    p = _provider(_Conn(replicas=()))
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_this_processs_own_writes_pin_the_graph_to_its_master():
+    """A caller must always see what it just wrote. Reading a replica a
+    second behind would show it the graph as it was before."""
+    p = _provider(_Conn())
+    assert _run(p._replica_for("g1")) is not None
+    p._note_local_write()
+    assert _run(p._replica_for("g1")) is None
+    # …and the window ends on its own.
+    p._wrote_at["g1"] = time.monotonic() - fp._REPLICA_READ_SETTLE_S - 1
+    assert _run(p._replica_for("g1")) is not None
+    assert fp._REPLICA_READ_SETTLE_S >= 10
+
+
+def test_a_replica_that_failed_a_read_is_skipped_for_a_while():
+    p = _provider(_Conn())
+    p._penalise_replica(R1, ConnectionError("refused"))
+    for _ in range(4):
+        assert str(_run(p._replica_for("g1"))) == "10.0.2.1:6379"
+    # Both penalised: back to the master.
+    p._penalise_replica(R2, ConnectionError("refused"))
+    assert _run(p._replica_for("g1")) is None
+    assert fp._REPLICA_PENALTY_S >= 10
+
+
+# ── the master going away is when replicas matter most ───────────────────
+
+
+def _deaf_master(conn):
+    """A shard whose master answers nothing — the pods are rotating.
+
+    Only the MASTER goes quiet. Its replicas are the copies still standing,
+    which is the whole point of the case, so they keep answering — and what
+    they say about themselves is that their link is down, because it is.
+    They still carry the offsets from their last snapshot, so how far behind
+    each one was remains readable.
+    """
+    async def _refuse(command, *args, target_nodes=None):
+        conn.calls.append((command, args, target_nodes))
+        if command != "INFO":
+            return "OK"
+        if target_nodes is not None and target_nodes is not MASTER:
+            report = conn._self_report(target_nodes)
+            if report.get("role") == "slave":
+                report["master_link_status"] = "down"
+            return report
+        raise ConnectionError(
+            "Error 111 connecting to 10.0.0.1:6379. Connection refused.")
+
+    conn.execute_command = _refuse
+    return conn
+
+
+def test_reads_keep_coming_from_replicas_when_the_master_is_gone():
+    """The lag gate asks the MASTER how far behind its replicas are. A
+    master that cannot answer therefore closed the gate — and sent every
+    read to the node that was already down, at the one moment its replicas
+    were the only copies of the graph still standing."""
+    p = _provider(_deaf_master(_Conn()))
+    assert _run(p._replica_for("g1")) in (R1, R2)
+
+
+def test_a_master_that_answered_recently_hands_over_the_replicas_it_vouched_for():
+    """A reading seconds old is better evidence than none: the replicas
+    that were in step when the master last spoke are the ones to use."""
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 2,
+        "master_repl_offset": 100 * 1024 ** 2,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online",
+                   "offset": 100 * 1024 ** 2, "lag": 0},
+        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+    })
+    p = _provider(conn)
+    assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"    # only this one is in step
+
+    _deaf_master(conn)
+    p._vouch_sample["g1"] = (time.monotonic() - _stale_sample(), p._vouch_sample["g1"][1])
+    for _ in range(4):
+        # …and the lagging sibling is still not handed the reads.
+        assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"
+
+
+def test_a_dead_master_is_not_asked_again_on_every_read():
+    conn = _deaf_master(_Conn())
+    p = _provider(conn)
+    for _ in range(20):
+        _run(p._replica_for("g1"))
+    # One round per window, not one per read: the master plus its two
+    # replicas, asked once and cached.
+    assert sum(1 for c in conn.calls if c[0] == "INFO") == 3
+
+
+def test_a_graph_this_pod_just_wrote_still_reads_once_its_master_goes():
+    """Read-your-own-writes pins a freshly written graph to its master. When
+    that master is the node that went away, the choice is a slightly stale
+    answer from a replica or no answer at all — and the work that genuinely
+    cannot tolerate the first, a rebuild, is pinned for its whole run by its
+    own contextvar rather than by this window."""
+    conn = _Conn()
+    p = _provider(conn)
+    p._note_local_write("g1")
+    assert _run(p._replica_for("g1")) is None          # healthy master: pinned
+
+    _deaf_master(conn)
+    p._vouch_sample.clear()                             # take a fresh reading
+    assert _run(p._replica_for("g1")) in (R1, R2)
+
+
+def test_a_provider_pinned_to_its_master_stays_pinned_even_then():
+    """"Master only" is a correctness choice an operator made; an outage is
+    not the moment to overrule it."""
+    p = _provider(_deaf_master(_Conn()), read_from_replicas="never")
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_the_failover_memo_never_blocks_a_read_aimed_at_a_replica():
+    """The memo is a verdict about the MASTER — it exists so master-bound
+    work fails fast instead of piling up. Applying it to a read already
+    pinned to a healthy replica turns the one path that still works into
+    the error it was meant to avoid."""
+    conn = _Conn()
+    p = _reading_provider(conn)
+    p._failing_over_until = time.monotonic() + 10
+    p._failing_over_endpoint = "10.0.0.1:6379"
+
+    # The real guard, not a stub: the memo lives inside it.
+    _run(p._ro_query("MATCH (n) RETURN n", op="read"))
+    assert p._replica_reads == 1
+    # …and it went to a replica, not to the node that is failing over.
+    assert conn.calls[-1][2] in (R1, R2)
+
+
+def test_replication_is_sampled_not_asked_per_read():
+    """One round per shard per window answers for every read of every graph
+    on it — otherwise the routing costs more than it saves.
+
+    The round is now one INFO per NODE (each node is asked about itself,
+    which is what removed the address matching) plus one for the master, to
+    know whether it is there. On the shipped one-replica-per-shard topology
+    that is two calls per 5s window; it is still bounded by the window and
+    not by the read rate, which is the property that matters."""
+    conn = _Conn()
+    p = _provider(conn)
+    for _ in range(20):
+        _run(p._replica_for("g1"))
+    assert sum(1 for c in conn.calls if c[0] == "INFO") == 3
+
+
+def test_a_write_pins_the_graph_it_actually_wrote():
+    """The projection graph is its OWN key on its own shard in dedicated
+    mode. Stamping the source key instead pins the one graph the write never
+    touched and leaves the just-rewritten one free to be served by a replica
+    that has not applied it — a half-built overlay that reads as a caching
+    bug."""
+    p = _provider(_Conn())
+    p._projection_mode = "dedicated"
+    p._proj_graph = _Graph(_Conn(), name="g1_proj")
+    p._WRITE_TIMEOUT = 5.0
+    p._write_semaphore = asyncio.Semaphore(1)
+    p._query_semaphore = asyncio.Semaphore(1)
+    p._check_quiesce_gate = lambda: None
+    p._db_timeout_ms = lambda t: 1000
+    p._record_write_latency = lambda s: None
+    p._run_guarded = lambda call: call()
+
+    _run(p._proj_query("CREATE ()"))
+    assert p._in_settle_window("g1_proj")
+    assert not p._in_settle_window("g1")
+
+    # …and a write to the source graph pins the source graph.
+    p._guarded_timed = lambda call, **kw: call()
+    _run(p._query("CREATE ()"))
+    assert p._in_settle_window("g1")
+
+
+def test_only_a_fault_the_replica_caused_sends_the_read_to_the_master():
+    """A query the store refused for its size fails the same way on the
+    master. Re-running it there doubles the load the routing exists to shed,
+    and benching the replica takes a healthy node out of rotation for
+    something it had nothing to do with."""
+    from redis.exceptions import ResponseError
+
+    from backend.common.adapters import ProviderFailingOver
+
+    refused = ResponseError("Query's mem consumption exceeded capacity")
+    assert not fp._replica_at_fault(refused)
+    assert not fp._replica_at_fault(ProviderFailingOver("p", "restarting"))
+    assert not fp._replica_at_fault(ResponseError("Query timed out"))
+    # These the master genuinely answers.
+    assert fp._replica_at_fault(ConnectionError("Error 111 connecting: Connection refused"))
+    # A deadline the replica did not answer inside is its fault — it is
+    # benched — but the caller's budget went with it, so the master is not
+    # handed a second full-length run of the same query.
+    assert fp._replica_at_fault(asyncio.TimeoutError())
+
+
+def _reading_provider(conn=None):
+    p = _provider(conn if conn is not None else _Conn())
+    p._READ_TIMEOUT = 5.0
+    p._db_timeout_ms = lambda t: 1000
+    p._query_semaphore = asyncio.Semaphore(4)
+    p._inflight = 0
+    return p
+
+
+def test_a_query_the_store_refuses_is_not_run_a_second_time_on_the_master():
+    """The master would refuse it for the same reason. Running it twice puts
+    the heaviest reads on the one node the routing exists to relieve."""
+    from redis.exceptions import ResponseError
+
+    p = _reading_provider()
+    calls = []
+
+    async def _guarded(call, **kw):
+        calls.append(1)
+        raise ResponseError("Query's mem consumption exceeded capacity")
+
+    p._guarded_timed = _guarded
+    with pytest.raises(ResponseError):
+        _run(p._ro_query("MATCH (n) RETURN n", op="read"))
+    assert len(calls) == 1                                # the replica, once
+    assert p._master_reads == 0 and p._replica_fallbacks == 0
+    assert p._replica_usable(R1) and p._replica_usable(R2)  # neither benched
+
+
+def test_a_replica_that_will_not_answer_sends_the_read_to_the_master():
+    p = _reading_provider()
+    calls = []
+
+    async def _guarded(call, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("Error 111 connecting. Connection refused.")
+        return "answered"
+
+    p._guarded_timed = _guarded
+    assert _run(p._ro_query("MATCH (n) RETURN n", op="read")) == "answered"
+    assert len(calls) == 2
+    assert p._replica_fallbacks == 1 and p._master_reads == 1
+
+
+def test_work_that_must_see_its_own_writes_pins_itself_to_the_master():
+    p = _provider(_Conn())
+    with fp.read_from_master_only():
+        assert _run(p._replica_for("g1")) is None
+    assert _run(p._replica_for("g1")) is not None
+
+
+def test_the_rebuild_pins_every_read_it_makes():
+    import inspect
+
+    from backend.app.providers.falkordb_materialize import AggregationPipeline
+
+    src = inspect.getsource(AggregationPipeline.run)
+    assert "read_from_master_only" in src
+
+
+# ── the plumbing ─────────────────────────────────────────────────────────
+
+
+def test_a_pinned_graph_addresses_one_node_and_shares_everything_else():
+    conn = _Conn()
+    p = _provider(conn)
+    pinned = p._pinned_to(p._graph, R1)
+    assert pinned is not p._graph
+    assert pinned.name == p._graph.name and pinned.client is p._graph.client
+    _run(pinned.execute_command("GRAPH.RO_QUERY", "g1", "RETURN 1"))
+    assert conn.calls[-1][2] is R1
+    # The original is untouched: a write must never inherit a replica.
+    _run(p._graph.execute_command("GRAPH.QUERY", "g1", "CREATE ()"))
+    assert conn.calls[-1][2] is None
+
+
+def test_the_cluster_client_does_the_readonly_handshake():
+    """Without it a replica answers MOVED to every targeted read — the
+    feature would silently fall back to the master on every request."""
+    import inspect
+
+    from backend.app.providers import falkordb_connection as fc
+
+    src = inspect.getsource(fc.build_cluster_conn)
+    assert "load_balancing_strategy" in src
+    # And it must NOT be a routing change: no GRAPH command is in redis-py's
+    # read table, so writes and untargeted reads still go to the primary.
+    from redis.cluster import READ_COMMANDS
+    assert not [c for c in READ_COMMANDS if "GRAPH" in c.upper()]
+
+
+def test_the_provider_setting_defaults_to_auto_and_only_never_pins():
+    from backend.app.providers.falkordb_connection import _read_from_replicas
+
+    assert _read_from_replicas(None) == "auto"
+    assert _read_from_replicas("auto") == "auto"
+    assert _read_from_replicas("typo") == "auto"          # a typo must not pin a fleet
+    for pinned in ("never", "NEVER", "master", "off", "false"):
+        assert _read_from_replicas(pinned) == "never"
+
+
+def test_the_counters_say_how_reads_were_served():
+    p = _provider(_Conn())
+    p._replica_reads, p._master_reads, p._replica_fallbacks = 7, 3, 1
+    assert p.read_routing_counters() == {
+        "replicaReads": 7, "masterReads": 3, "replicaFallbacks": 1,
+    }
+
+
+# ── vouching by interrogation, not by address arithmetic ────────────────
+#
+# The router used to ask the MASTER which of its replicas were in step, and
+# intersect that answer with the client's own node list. Two subsystems, two
+# address spaces, compared as strings — and on the shipped cluster topology
+# they never matched (see the address-space tests above).
+#
+# It also meant ROLE was inferred rather than known: from the master's
+# `slave<n>` list, or from the client's cached slot map (`server_type`).
+# Both go stale the instant a failover or a role swap happens, which is
+# exactly when routing a read to the wrong node matters most.
+#
+# So each candidate is asked about ITSELF. A node's own INFO replication
+# carries its current role, its link health, whether it is mid-resync, and
+# a lag computed from ONE snapshot (master_repl_offset - slave_repl_offset)
+# — so there is no cross-node skew and, crucially, nothing to match: the
+# candidates and the answer live in the client's address space alone.
+
+
+def _asking_provider(answers, *, replicas=(R1, R2)):
+    """A provider whose candidates answer INFO replication with ``answers``,
+    keyed by "host:port"."""
+    class _AskConn(_Conn):
+        async def execute_command(self, command, *args, target_nodes=None):
+            if command == "INFO":
+                key = f"{target_nodes.host}:{target_nodes.port}"
+                if key not in answers:
+                    raise ConnectionError(f"{key} unreachable")
+                return answers[key]
+            return "OK"
+
+    return _provider(_AskConn(replicas=replicas))
+
+
+def _replica_info(*, role="slave", link="up", syncing=0, master_off=1000, slave_off=1000):
+    return {
+        "role": role,
+        "master_link_status": link,
+        "master_sync_in_progress": syncing,
+        "master_repl_offset": master_off,
+        "slave_repl_offset": slave_off,
+    }
+
+
+def test_an_in_sync_replica_is_vouched_for_from_its_own_answer():
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
+
+
+def test_a_promoted_replica_is_never_read_from_as_a_replica():
+    """A failover makes one of these the MASTER. It answers role:master, and
+    a node that is the master must not be taken for a replica — whatever a
+    cached slot map or the old master's replica list still says."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(role="master"),   # promoted
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_a_replica_whose_link_is_down_is_not_vouched_for():
+    """The master still listing it as ``online`` is not evidence: only the
+    replica knows whether its own link is up. An asymmetric partition was
+    invisible to the master-side check."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(link="down"),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_a_replica_mid_full_resync_is_not_vouched_for():
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(syncing=1),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_a_replica_too_far_behind_is_not_vouched_for():
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(master_off=10 ** 12, slave_off=0),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_an_unreachable_candidate_is_skipped_not_fatal():
+    p = _asking_provider({"10.0.2.1:6379": _replica_info()})   # R1 absent
+    got = _run(p._vouched_replicas("g1", [R1, R2]))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_when_every_replica_has_lost_the_master_they_still_answer_reads():
+    """The master being gone is when its replicas matter MOST: they are the
+    only copies of the graph still standing. A stale answer beats no answer,
+    which is the rule the old code kept by holding the master's last vouched
+    set — expressed here without needing the master at all."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(link="down"),
+        "10.0.2.1:6379": _replica_info(link="down"),
+    })
+    # MASTER is absent from the answers, so it refuses — which is the FACT
+    # the relaxation turns on, not an inference from the replicas.
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
+    assert p._master_is_silent("g1") is True
+
+
+def test_a_node_that_says_master_is_not_a_fallback_even_when_the_link_is_down():
+    """Relaxing on a silent master must not sweep in the PROMOTED node —
+    that is the new master, and reading it as a replica would defeat the
+    read-your-own-writes pin the router keeps on the master."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _replica_info(role="master"),
+        "10.0.2.1:6379": _replica_info(link="down"),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_the_reading_is_cached_for_the_sample_window():
+    calls = {"n": 0}
+
+    class _CountingConn(_Conn):
+        async def execute_command(self, command, *args, target_nodes=None):
+            if command == "INFO":
+                calls["n"] += 1
+                return _replica_info()
+            return "OK"
+
+    p = _provider(_CountingConn())
+    _run(p._vouched_replicas("g1", [R1, R2]))
+    first = calls["n"]
+    _run(p._vouched_replicas("g1", [R1, R2]))
+    assert calls["n"] == first, "a second read inside the window re-asked every node"
+
+
+def test_master_only_by_operator_choice_routes_nowhere():
+    """`read_from_replicas="never"` is a decision an operator made, and it
+    holds in every mode."""
+    for mode in ("cluster", "sentinel", "standalone"):
+        p = _provider(_SentinelConn(), mode=mode, read_from_replicas="never")
+        assert _run(p._replica_for("g1")) is None
+
+
+# ── a node replaying its dataset cannot answer, for up to an hour ───────
+#
+# A rotated FalkorDB pod comes back and replays its AOF command-by-command
+# before it will serve anything — minutes per GB, and docker-compose's own
+# comment records a multi-GB incremental taking about an HOUR. Throughout,
+# the node accepts connections and answers INFO perfectly happily while
+# every data command gets `-LOADING Redis is loading the dataset in
+# memory`. Measured on a real node mid-load: `loading:1`, no
+# `master_link_status` at all (it has not reached its master yet), and a
+# `loading_eta_seconds` worth telling an operator.
+#
+# Two consequences, and the router has to get both right:
+#
+#   * A LOADING candidate is never a candidate. The strict gate happened to
+#     exclude it (no link), but the relaxed master-is-gone path would have
+#     swept it in — handing reads to the one node guaranteed to refuse them.
+#   * A LOADING MASTER cannot serve either, and it is NOT silent: it answers
+#     INFO, so nothing marked it unavailable. Reads stayed pinned to it for
+#     the whole replay while a perfectly good replica sat idle. An hour of
+#     -LOADING is the outage this routing exists to avoid.
+
+
+def _loading_info(*, role="slave", pct=15.7, eta=2400):
+    """What a node genuinely mid-replay reports (field names measured)."""
+    return {
+        "role": role,
+        "loading": 1,
+        "loading_total_bytes": 213777878,
+        "loading_loaded_perc": pct,
+        "loading_eta_seconds": eta,
+    }
+
+
+def test_a_loading_replica_is_never_vouched_for():
+    p = _asking_provider({
+        "10.0.1.1:6379": _loading_info(),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+
+
+def test_a_loading_replica_is_not_swept_in_when_the_master_is_gone_either():
+    """The relaxation exists to serve the copies still standing. A node
+    replaying its dataset is not one of them: every read it takes comes
+    back -LOADING."""
+    p = _asking_provider({
+        "10.0.1.1:6379": _loading_info(),
+        "10.0.2.1:6379": _loading_info(),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert got == [], "handed reads to nodes that can only answer -LOADING"
+
+
+def test_a_loading_master_hands_its_reads_to_an_in_sync_replica():
+    """THE case this is for. A rotated master replays for up to an hour. It
+    answers INFO, so it never looked silent — and every read stayed on it."""
+    p = _asking_provider(
+        {
+            "10.0.0.1:6379": _loading_info(role="master"),
+            "10.0.1.1:6379": _replica_info(link="down"),   # its master is busy loading
+            "10.0.2.1:6379": _replica_info(link="down"),
+        },
+        replicas=(R1, R2),
+    )
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
+    assert p._master_is_silent("g1") is True, (
+        "a master that cannot serve has to read as unavailable, whether it "
+        "is unreachable or merely busy replaying"
+    )
+
+
+def test_a_loading_node_says_how_long_it_has_left(caplog):
+    """An hour of -LOADING and an indefinite hang look identical in a log.
+    The node reports an ETA; pass it on."""
+    import logging
+
+    p = _asking_provider({
+        "10.0.1.1:6379": _loading_info(eta=2400, pct=15.7),
+        "10.0.2.1:6379": _replica_info(),
+    })
+    with caplog.at_level(logging.INFO):
+        _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "loading" in said.lower()
+    assert "40" in said or "2400" in said, f"no ETA in: {said!r}"
+
+
+def test_a_node_that_finished_loading_is_vouched_for_again():
+    """Nothing sticky: the next window asks again, and a node that finished
+    its replay goes straight back into service."""
+    answers = {
+        "10.0.1.1:6379": _loading_info(),
+        "10.0.2.1:6379": _replica_info(),
+    }
+    p = _asking_provider(answers)
+    assert {f"{n.host}:{n.port}" for n in _run(
+        p._vouched_replicas("g1", [R1, R2], master=MASTER))} == {"10.0.2.1:6379"}
+    answers["10.0.1.1:6379"] = _replica_info()      # replay finished
+    p._vouch_sample = {}
+    assert {f"{n.host}:{n.port}" for n in _run(
+        p._vouched_replicas("g1", [R1, R2], master=MASTER))} == {
+            "10.0.1.1:6379", "10.0.2.1:6379"}
+
+
+def test_a_second_rotation_of_the_same_node_is_reported_again(caplog):
+    """Pods get rotated more than once. A node that finished one replay and
+    starts another is news again, not a line already said."""
+    import logging
+
+    answers = {"10.0.1.1:6379": _loading_info(), "10.0.2.1:6379": _replica_info()}
+    p = _asking_provider(answers)
+
+    def rounds():
+        p._vouch_sample = {}
+        _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+
+    with caplog.at_level(logging.INFO):
+        rounds()                                    # replay 1
+        answers["10.0.1.1:6379"] = _replica_info()  # finished
+        rounds()
+        answers["10.0.1.1:6379"] = _loading_info()  # rotated again
+        rounds()
+
+    said = [r for r in caplog.records
+            if "10.0.1.1:6379 is loading" in r.getMessage()]
+    assert len(said) == 2, f"expected one line per replay, got {len(said)}"
+
+
+# ── sentinel and standalone reach their replicas by their own clients ───
+#
+# The cluster path pins a read with ``target_nodes``, a RedisCluster API, so
+# sentinel and standalone had no replica-read path at all: every read went
+# to the master however many healthy replicas were attached.
+#
+# They do not need one from the slot map. The master's own INFO replication
+# names its replicas at CONNECTABLE addresses — the peer address of each
+# replication link, not an announced alias — so there is no second address
+# space to reconcile here, and each one gets a client of its own through
+# ``build_node_client`` (which applies the same auth and TLS as the primary).
+# Vouching is unchanged: the node is still asked about itself, so an
+# unreachable or loading or promoted replica simply is not a candidate and
+# the master serves.
+
+
+class _SentinelConn:
+    """The PRIMARY client in sentinel/standalone mode: one endpoint, no
+    ``target_nodes``, and an INFO that names the replicas."""
+
+    def __init__(self, replicas=((("127.0.0.1"), 6501), ("127.0.0.1", 6502)),
+                 master_info=None, loading=False):
+        self._replicas = list(replicas)
+        self.calls = []
+        self._loading = loading
+        self._master_info = master_info
+
+    async def execute_command(self, command, *args, target_nodes=None):
+        self.calls.append((command, args, target_nodes))
+        if command != "INFO":
+            return "OK"
+        if self._master_info is not None:
+            return self._master_info
+        info = {"role": "master", "connected_slaves": len(self._replicas),
+                "master_repl_offset": 500}
+        if self._loading:
+            info["loading"] = 1
+        for i, (ip, port) in enumerate(self._replicas):
+            info[f"slave{i}"] = {"ip": ip, "port": str(port),
+                                 "state": "online", "offset": 500, "lag": 0}
+        return info
+
+
+def _sentinel_provider(monkeypatch, *, conn=None, replica_answers=None):
+    """A sentinel-mode provider whose per-replica clients are stubs."""
+    conn = conn or _SentinelConn()
+    p = _provider(conn, mode="sentinel")
+
+    built = []
+
+    class _Stub:
+        def __init__(self, host, port):
+            self.host, self.port = host, port
+            self.queries = []
+
+        async def execute_command(self, command, *args, target_nodes=None):
+            if command == "INFO":
+                ans = (replica_answers or {}).get(f"{self.host}:{self.port}")
+                if ans is None:
+                    raise ConnectionError("unreachable")
+                return ans
+            return "OK"
+
+        async def aclose(self):
+            self.closed = True
+
+    async def _mk(host, port):
+        s = _Stub(host, port)
+        built.append(s)
+        return s
+
+    monkeypatch.setattr(p, "_build_pinned_replica", _mk)
+    p._built = built
+    return p
+
+
+def test_sentinel_routes_a_read_to_a_vouched_replica(monkeypatch):
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    node = _run(p._replica_for("g1"))
+    assert node is not None, "sentinel still has no replica read path"
+    assert (node.host, node.port) in (("127.0.0.1", 6501), ("127.0.0.1", 6502))
+
+
+def test_sentinel_replicas_are_discovered_from_the_master_not_a_slot_map(monkeypatch):
+    """There is no slot map in sentinel mode. The master names its replicas
+    at addresses that are connectable by construction."""
+    conn = _SentinelConn(replicas=[("127.0.0.1", 6501)])
+    p = _sentinel_provider(monkeypatch, conn=conn, replica_answers={
+        "127.0.0.1:6501": _replica_info(),
+    })
+    node = _run(p._replica_for("g1"))
+    assert (node.host, node.port) == ("127.0.0.1", 6501)
+
+
+def test_sentinel_a_promoted_replica_is_refused(monkeypatch):
+    """The whole point of sentinel is that one of these gets promoted."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(role="master"),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    for _ in range(4):
+        node = _run(p._replica_for("g1"))
+        assert (node.host, node.port) == ("127.0.0.1", 6502)
+
+
+def test_sentinel_an_unreachable_replica_falls_back_to_the_master(monkeypatch):
+    """The master's reported peer address may not be reachable from here.
+    That fails SAFE: not vouched, so the master serves."""
+    p = _sentinel_provider(monkeypatch, replica_answers={})   # none answer
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_sentinel_a_loading_replica_is_refused(monkeypatch):
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _loading_info(),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    node = _run(p._replica_for("g1"))
+    assert (node.host, node.port) == ("127.0.0.1", 6502)
+
+
+def test_sentinel_a_loading_master_hands_over_to_its_replicas(monkeypatch):
+    """A rotated sentinel master replays for up to an hour, answering INFO
+    the whole time. Its replicas take the reads."""
+    conn = _SentinelConn(loading=True)
+    p = _sentinel_provider(monkeypatch, conn=conn, replica_answers={
+        "127.0.0.1:6501": _replica_info(link="down"),
+        "127.0.0.1:6502": _replica_info(link="down"),
+    })
+    node = _run(p._replica_for("g1"))
+    assert node is not None, "reads stayed on a master that can only answer -LOADING"
+    assert p._master_is_silent("g1") is True
+
+
+def test_the_pinned_replica_clients_are_built_once_and_closed(monkeypatch):
+    """One client per replica, reused across reads, and released on close —
+    a pool per read would leak connections at the rate of the read path."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(),
+        "127.0.0.1:6502": _replica_info(),
+    })
+    for _ in range(6):
+        p._vouch_sample = {}
+        _run(p._replica_for("g1"))
+    assert len(p._built) == 2, f"built {len(p._built)} clients for 2 replicas"
+    assert len(p._pinned_replicas) == 2
+    _run(p._release_pinned_replicas())
+    assert p._pinned_replicas == {}
+
+
+def test_a_failover_rebuild_drops_the_clients_pinned_to_the_old_replicas(monkeypatch):
+    """A failover changes which nodes are replicas. Clients pinned to the
+    old ones must go with the old primary, not linger and be vouched again."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(), "127.0.0.1:6502": _replica_info(),
+    })
+    _run(p._replica_for("g1"))
+    assert len(p._pinned_replicas) == 2
+    old = list(p._pinned_replicas.values())
+
+    async def _noop_build(*a, **k):
+        raise RuntimeError("rebuild internals not under test here")
+
+    # Drive only the release half of the rebuild.
+    _run(p._release_pinned_replicas())
+    assert p._pinned_replicas == {}
+    assert all(getattr(t, "closed", False) for t in old), "old clients left open"
+
+
+def test_close_releases_every_pinned_replica_client(monkeypatch):
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(), "127.0.0.1:6502": _replica_info(),
+    })
+    _run(p._replica_for("g1"))
+    targets = list(p._pinned_replicas.values())
+    assert targets, "nothing to close"
+    _run(p._release_pinned_replicas())
+    assert all(t.closed for t in targets)
+
+
+def test_the_number_of_pinned_replica_clients_is_bounded(monkeypatch):
+    """The list comes from a node's own report; a broken deployment must not
+    be able to make this unbounded."""
+    many = [("127.0.0.1", 6500 + i) for i in range(40)]
+    p = _sentinel_provider(
+        monkeypatch,
+        conn=_SentinelConn(replicas=many),
+        replica_answers={f"127.0.0.1:{6500+i}": _replica_info() for i in range(40)},
+    )
+    _run(p._replica_for("g1"))
+    assert len(p._pinned_replicas) <= fp._MAX_PINNED_REPLICAS

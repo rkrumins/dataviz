@@ -23,6 +23,7 @@ import { act, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getReadiness = vi.fn()
+const getProjectionHealth = vi.fn()
 vi.mock('@/services/aggregationService', async (importOriginal) => {
   const real = await importOriginal<Record<string, unknown>>()
   return {
@@ -31,6 +32,13 @@ vi.mock('@/services/aggregationService', async (importOriginal) => {
       ...(real.aggregationService as object),
       getReadiness: (...a: unknown[]) => {
         const p = Promise.resolve(getReadiness(...a))
+        answers.push(p)
+        return p
+      },
+      // What the notice actually reads. It used to come off readiness, which
+      // probes the graph store this condition is ABOUT — see the hook.
+      getProjectionHealth: (...a: unknown[]) => {
+        const p = Promise.resolve(getProjectionHealth(...a))
         answers.push(p)
         return p
       },
@@ -53,9 +61,9 @@ let answers: Array<Promise<unknown>> = []
  * A negative assertion on this canvas is only worth something if the code
  * under test actually ran, and getting there takes two hops: the aggregated
  * fan-out is debounced 300 ms before the stale reason exists at all, and only
- * then does the hook poll readiness. Worse, OTHER canvas surfaces poll the
- * same endpoint on mount, so "a readiness answer arrived" is not evidence
- * that THIS hook asked for one. So: wait for the aggregated request that
+ * then does the hook ask about the projection. Worse, OTHER canvas surfaces
+ * poll on mount too, so "an answer arrived" is not evidence that THIS hook
+ * asked for one. So: wait for the aggregated request that
  * carries the stale reason, then flush repeatedly — each round lets one more
  * await chain land — before looking. Proven to fail when the hook treats an
  * unknown reading as "behind".
@@ -70,6 +78,12 @@ async function settleAfterStaleReason(h: { settle: () => Promise<void>; aggregat
     await h.settle()
   }
 }
+
+/** The two fields the notice reads, from the cheap route that serves them. */
+const projection = (over: Record<string, unknown> = {}) => ({
+  dataSourceId: 'harness-ds',
+  ...over,
+})
 
 const readiness = (over: Record<string, unknown> = {}) => ({
   dataSourceId: 'harness-ds',
@@ -100,13 +114,15 @@ beforeEach(() => {
   // a reason that has nothing to do with what is being tested here.
   answers = []
   getReadiness.mockResolvedValue(readiness())
+  getProjectionHealth.mockReset()
+  getProjectionHealth.mockResolvedValue(projection())
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
 })
 
 describe('the canvas explains a source that is still catching up', () => {
   it('puts the explanation on the board, with how far behind', async () => {
-    getReadiness.mockResolvedValue(
-      readiness({ projectorCurrent: false, projectionCommitsBehind: 902 }),
+    getProjectionHealth.mockResolvedValue(
+      projection({ projectorCurrent: false, projectionCommitsBehind: 902 }),
     )
     const h = await canvasWithShortRollups()
     const notice = await waitFor(
@@ -135,8 +151,8 @@ describe('the canvas explains a source that is still catching up', () => {
     // "Showing the largest relationships — narrow the selection to see more"
     // banner. Under a source that is behind, that advice is simply wrong:
     // narrowing cannot recover connections the source is not serving yet.
-    getReadiness.mockResolvedValue(
-      readiness({ projectorCurrent: false, projectionCommitsBehind: 5 }),
+    getProjectionHealth.mockResolvedValue(
+      projection({ projectorCurrent: false, projectionCommitsBehind: 5 }),
     )
     const h = await canvasWithShortRollups()
     await waitFor(
@@ -154,8 +170,8 @@ describe('the canvas explains a source that is still catching up', () => {
   it('says nothing when the source is up to date', async () => {
     // Same short answer from the rollup layer — an ordinary cap, not a wedge.
     // The canvas must not accuse a healthy source of being behind.
-    getReadiness.mockResolvedValue(
-      readiness({ projectorCurrent: true, projectionCommitsBehind: 0 }),
+    getProjectionHealth.mockResolvedValue(
+      projection({ projectorCurrent: true, projectionCommitsBehind: 0 }),
     )
     const h = await canvasWithShortRollups()
     await settleAfterStaleReason(h)
@@ -166,8 +182,8 @@ describe('the canvas explains a source that is still catching up', () => {
     // Null is the answer for an unversioned source, a versioned graph pinned
     // to no graph target, and a store that could not be read. Unknown is not
     // healthy, but it is not a claim the board is allowed to make either.
-    getReadiness.mockResolvedValue(
-      readiness({ projectorCurrent: null, projectionCommitsBehind: null }),
+    getProjectionHealth.mockResolvedValue(
+      projection({ projectorCurrent: null, projectionCommitsBehind: null }),
     )
     const h = await canvasWithShortRollups()
     await settleAfterStaleReason(h)
@@ -183,8 +199,8 @@ describe('the canvas explains a source that is still catching up', () => {
     // be measuring them. That this hook issues no request on a healthy canvas
     // is pinned where it belongs, against the hook itself, in
     // `src/hooks/__tests__/useProjectionCatchUp.test.ts`.
-    getReadiness.mockResolvedValue(
-      readiness({ projectorCurrent: false, projectionCommitsBehind: 902 }),
+    getProjectionHealth.mockResolvedValue(
+      projection({ projectorCurrent: false, projectionCommitsBehind: 902 }),
     )
     const h = await renderCanvasWithTrace(cfoEstate(), {
       focus: 'cfo',

@@ -30,7 +30,7 @@ spec:
   template:
     spec:
       containers:
-        - name: controlplane
+        - name: aggregation-controlplane
           resources:
             requests:
               cpu: 250m
@@ -48,7 +48,7 @@ spec:
   template:
     spec:
       containers:
-        - name: worker
+        - name: aggregation-worker
           resources:
             requests:
               cpu: "1"

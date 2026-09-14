@@ -52,7 +52,23 @@ vi.mock('@/services/freshnessService', async () => {
 })
 vi.mock('@/services/providerService', () => ({ providerService: { list: listProviders } }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { list: listWorkspaces } }))
-vi.mock('@/services/aggregationService', () => ({ aggregationService: { listJobsGlobal } }))
+vi.mock('@/services/aggregationService', () => ({
+    aggregationService: {
+        listJobsGlobal,
+        // The capacity card reads the fleet sweep; an empty snapshot keeps the
+        // page quiet in these tests.
+        getFleetCapacity: vi.fn().mockResolvedValue({
+            limits: {
+                shardReservePct: { value: 20, source: 'default' }, bytesPerEdge: { value: 512, source: 'default' },
+                maxMaterializedEdges: { value: null, source: 'default' }, rollupStorage: { value: 'true', source: 'default' },
+                estimateMarginPct: 25, maxCubeEdges: 8_000_000, staticCap: 25_000_000, budgetRecheckEdges: 1_000_000,
+            },
+            shards: [], unresolved: [], sourcesTotal: 0, truncated: false, measuredAt: '2026-09-08T00:00:00Z', cacheAgeMs: 0,
+        }),
+        getSourceCapacity: vi.fn().mockRejectedValue(new Error('not in this test')),
+        getAggregationSettings: vi.fn().mockRejectedValue(new Error('not in this test')),
+    },
+}))
 
 // jsdom lacks the pointer-capture + scroll APIs Radix calls when a menu opens.
 beforeAll(() => {
@@ -79,14 +95,14 @@ const fleet = {
         {
             dataSourceId: 'ds-1', workspaceId: 'ws-1', providerId: 'prov-1',
             name: 'Orders Graph', providerName: 'Warehouse',
-            aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent,
+            aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, cacheBuiltAt: recent,
             generation: 4, staleReason: 'source_changed', drifted: null, runningJobId: null,
             lastEvent: { origin: 'api', outcome: 'accepted', ts: recent },
         },
         {
             dataSourceId: 'ds-2', workspaceId: 'ws-1', providerId: 'prov-1',
             name: 'Customers Graph', providerName: 'Warehouse',
-            aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent,
+            aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, cacheBuiltAt: recent,
             generation: 2, staleReason: null, drifted: null, runningJobId: null,
             lastEvent: null,
         },
@@ -427,7 +443,7 @@ describe('Freshness cockpit', () => {
         listFleet.mockResolvedValue({
             total: 1,
             rows: [
-                { dataSourceId: 'f1', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Broken Source', providerName: 'Warehouse', aggregationStatus: 'failed', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'f1', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Broken Source', providerName: 'Warehouse', aggregationStatus: 'failed', staleReason: 'source_changed', cacheAsOf: recent, cacheBuiltAt: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
             ],
         })
         renderTab()
@@ -460,9 +476,9 @@ describe('Freshness cockpit', () => {
         listFleet.mockResolvedValue({
             total: 3,
             rows: [
-                { dataSourceId: 'a1', workspaceId: 'ws-1', providerId: 'p-alpha', name: 'Alpha One', providerName: 'Alpha', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, staleReason: null, runningJobId: null, lastEvent: null },
-                { dataSourceId: 'a2', workspaceId: 'ws-1', providerId: 'p-alpha', name: 'Alpha Two', providerName: 'Alpha', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, staleReason: null, runningJobId: null, lastEvent: null },
-                { dataSourceId: 'b1', workspaceId: 'ws-1', providerId: 'p-bravo', name: 'Bravo One', providerName: 'Bravo', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, staleReason: 'source_changed', runningJobId: null, lastEvent: null },
+                { dataSourceId: 'a1', workspaceId: 'ws-1', providerId: 'p-alpha', name: 'Alpha One', providerName: 'Alpha', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, cacheBuiltAt: recent, staleReason: null, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'a2', workspaceId: 'ws-1', providerId: 'p-alpha', name: 'Alpha Two', providerName: 'Alpha', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, cacheBuiltAt: recent, staleReason: null, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'b1', workspaceId: 'ws-1', providerId: 'p-bravo', name: 'Bravo One', providerName: 'Bravo', aggregationStatus: 'ready', lastAggregatedAt: recent, cacheAsOf: recent, cacheBuiltAt: recent, staleReason: 'source_changed', runningJobId: null, lastEvent: null },
             ],
         })
         renderTab()
@@ -486,7 +502,7 @@ describe('Freshness cockpit', () => {
             total: 2,
             rows: [
                 // A marked row keeps the provider group expanded so the never-built row renders.
-                { dataSourceId: 'att', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Busy Source', providerName: 'Warehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'att', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Busy Source', providerName: 'Warehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, cacheBuiltAt: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
                 { dataSourceId: 'nb', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Fresh Source', providerName: 'Warehouse', aggregationStatus: 'none', staleReason: null, cacheAsOf: null, lastAggregatedAt: null, runningJobId: null, lastEvent: null },
             ],
         })
@@ -514,8 +530,8 @@ describe('Freshness cockpit', () => {
         listFleet.mockResolvedValue({
             total: 2,
             rows: [
-                { dataSourceId: 'ds-1', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Orders Graph', providerName: 'Warehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
-                { dataSourceId: 'ds-2', workspaceId: 'ws-1', providerId: 'prov-2', name: 'Customers Graph', providerName: 'Lakehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'ds-1', workspaceId: 'ws-1', providerId: 'prov-1', name: 'Orders Graph', providerName: 'Warehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, cacheBuiltAt: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
+                { dataSourceId: 'ds-2', workspaceId: 'ws-1', providerId: 'prov-2', name: 'Customers Graph', providerName: 'Lakehouse', aggregationStatus: 'ready', staleReason: 'source_changed', cacheAsOf: recent, cacheBuiltAt: recent, lastAggregatedAt: recent, runningJobId: null, lastEvent: null },
             ],
         })
 
@@ -540,7 +556,7 @@ describe('Freshness cockpit', () => {
     const healthyRow = (over: Partial<FreshnessRowData>): FreshnessRowData => ({
         dataSourceId: 'x', workspaceId: 'ws-1', providerId: 'prov-1', name: 'x',
         providerName: 'Warehouse', aggregationStatus: 'ready', lastAggregatedAt: recent,
-        cacheAsOf: recent, staleReason: null, runningJobId: null, lastEvent: null, ...over,
+        cacheAsOf: recent, cacheBuiltAt: recent, staleReason: null, runningJobId: null, lastEvent: null, ...over,
     })
 
     it('renders the coverage chip from the provider summary and degrades to a client count', async () => {
@@ -570,8 +586,10 @@ describe('Freshness cockpit', () => {
         listFleet.mockResolvedValue({
             total: 2,
             rows: [
-                healthyRow({ dataSourceId: 'ds-1', name: 'Orders Graph', cacheAsOf: recent }),
-                healthyRow({ dataSourceId: 'ds-2', name: 'Customers Graph', cacheAsOf: null }),
+                healthyRow({ dataSourceId: 'ds-1', name: 'Orders Graph', cacheAsOf: recent, cacheBuiltAt: recent }),
+                // Never invalidated AND nothing stored — the second is what
+                // coverage counts now, so it has to be said.
+                healthyRow({ dataSourceId: 'ds-2', name: 'Customers Graph', cacheAsOf: null, cacheBuiltAt: null }),
             ],
         })
         renderTab()
@@ -615,7 +633,7 @@ describe('Freshness cockpit', () => {
     const baseDoc = {
         dataSourceId: 'ds-1', name: 'Orders Graph', providerName: 'Warehouse',
         workspaceId: 'ws-1', aggregationStatus: 'ready', lastAggregatedAt: recent,
-        cacheAsOf: recent, generation: 4, events: [],
+        cacheAsOf: recent, cacheBuiltAt: recent, generation: 4, events: [],
     }
 
     it('renders the cache-contents breakdown, and distinguishes unavailable from empty', async () => {
@@ -678,6 +696,30 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText(/may fail again until memory is freed/i)).toBeInTheDocument()
         // Details: the verbatim error is available for operators.
         expect(screen.getByText(/OutOfMemoryError/)).toBeInTheDocument()
+    })
+
+    it('names the node that went away and offers a Resume, not a fresh attempt', async () => {
+        // What the operator used to get was the breaker's text — "Circuit
+        // open; will probe downstream again in ~28s" — which names no node
+        // and reads like the store is broken. The reason behind it does name
+        // one, and the run kept every byte it had written.
+        getSourceDoc.mockResolvedValue({
+            ...baseDoc,
+            aggregationStatus: 'failed',
+            lastFailureCategory: 'provider_unavailable',
+            lastFailureReason:
+                'the graph store node 10.0.0.7:6379 did not answer for 15 minute(s) during apply '
+                + '(ConnectionError: Error 111 connecting to 10.0.0.7:6379. Connection refused.). '
+                + 'The run keeps its checkpoint — Resume it once the node is back.',
+        })
+        renderDrawer()
+
+        expect(await screen.findByText(/stopped answering during the rebuild/i)).toBeInTheDocument()
+        expect(screen.getByText('10.0.0.7:6379')).toBeInTheDocument()
+        expect(screen.getByText(/carries on from its checkpoint/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /resume rebuild/i })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /retry rebuild/i })).not.toBeInTheDocument()
+        expect(screen.getByText(/work already done is not repeated/i)).toBeInTheDocument()
     })
 
     it('fires the clear scope from the drawer Clear-cache CTA', async () => {
@@ -865,6 +907,22 @@ describe('live rebuild progress in the row', () => {
         )
         expect(screen.getByText('Recomputing')).toBeInTheDocument()
         expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    })
+
+    it('says when the rebuild is narrowing its scans to fit the graph store', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow
+                    row={rebuildingRow}
+                    job={{ id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                           currentPhase: 'reconciling', progress: 61,
+                           runStats: { adapted: { scan_width: 12_500, reconcile_strategy: 'keys_only' } } } as never}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6}
+                />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByText(/61% · narrowing/)).toBeInTheDocument()
     })
 
     it('never guesses at an unrecognized phase', () => {

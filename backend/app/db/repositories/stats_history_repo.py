@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+from backend.common.derived_artifacts import is_derived_edge_type
+
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,9 +63,9 @@ _MIN_RETENTION_DAYS = 1
 _MIN_MAX_ROWS = 1
 _MIN_HEARTBEAT_SECS = 60
 
-#: Same 30s in-process memo as ``aggregation.service.read_global_cadence``.
-#: Capture consults the policy on every counts write, and the settings row
-#: changes roughly never; cross-process staleness is bounded by this TTL.
+#: A 30s in-process memo: capture consults the policy on every counts write,
+#: and the settings row changes roughly never; cross-process staleness is
+#: bounded by this TTL.
 _POLICY_CACHE_TTL_S = 30.0
 _POLICY_CACHE: dict = {"policy": None, "at": 0.0}
 
@@ -242,7 +244,78 @@ def count_of(row, metric: str) -> int:
     return int(getattr(row, _COUNT_ATTR[metric], 0) or 0)
 
 
-def change_baseline(rows: list, metric: str = "nodes") -> int:
+# ── The source's own data, with the platform's writes taken back out ──
+#
+# ``edge_count`` is the provider's raw total and INCLUDES the materialised
+# ``:AGGREGATED`` overlay — deliberately, because rollup volume is a real
+# operational number (see ``common.derived_artifacts``). But a rebuild wipes
+# and rewrites that overlay, so judging "did this source lose relationships"
+# against the total reports the platform's own work as a data incident: a
+# 5.6M-edge rebuild lands as a CRITICAL movement finding and a bell
+# notification, every single time.
+#
+# So the displayed COUNT keeps the total and the JUDGEMENT uses these. Node
+# counts need no equivalent — the derived labels are already excluded by the
+# provider, before they are ever stored.
+
+
+def overlay_count_of(row) -> int:
+    """How many of this observation's relationships are the platform's own
+    rollup, read off the stored per-type map."""
+    return sum(
+        v for k, v in loads_counts(getattr(row, "edge_type_counts", None)).items()
+        if is_derived_edge_type(k)
+    )
+
+
+def overlay_delta_of(row) -> int:
+    """How much of this observation's edge movement was the rollup.
+
+    From the row's OWN ``type_deltas``, not by differencing its neighbours:
+    the first row of a window has a real stored delta against a predecessor
+    outside it, and deriving deltas within the window would silently discard
+    that movement. ``type_deltas`` is NULL exactly when ``edge_delta`` is, so
+    the two agree about what cannot be judged.
+    """
+    try:
+        parsed = json.loads(getattr(row, "type_deltas", None) or "{}")
+        edges = (parsed or {}).get("edges") or {}
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(edges, dict):
+        return 0
+    total = 0
+    for name, value in (edges.get("added") or {}).items():
+        if is_derived_edge_type(name):
+            total += int(value or 0)
+    for name, value in (edges.get("removed") or {}).items():
+        if is_derived_edge_type(name):
+            total -= int(value or 0)
+    for name, pair in (edges.get("changed") or {}).items():
+        if is_derived_edge_type(name) and isinstance(pair, (list, tuple)) and len(pair) == 2:
+            total += int(pair[1] or 0) - int(pair[0] or 0)
+    return total
+
+
+def source_count_of(row, metric: str) -> int:
+    """:func:`count_of` less the platform's own writes."""
+    if metric != "edges":
+        return count_of(row, metric)
+    return max(0, count_of(row, metric) - overlay_count_of(row))
+
+
+def source_delta_of(row, metric: str) -> Optional[int]:
+    """:func:`delta_of` less the platform's own writes. None stays None —
+    "we cannot say" must never become "nothing moved"."""
+    delta = delta_of(row, metric)
+    if metric != "edges" or delta is None:
+        return delta
+    return int(delta) - overlay_delta_of(row)
+
+
+def change_baseline(
+    rows: list, metric: str = "nodes", *, delta_fn=None,
+) -> int:
     """The median non-zero absolute delta in the window, for one metric.
 
     "Is this drop big" has no answer in the absolute — 900 lost rows is
@@ -259,8 +332,9 @@ def change_baseline(rows: list, metric: str = "nodes") -> int:
     Zero deltas are excluded: heartbeat rows would otherwise drag the median to
     0 on any source that is mostly idle, which is most of them.
     """
+    measure = delta_fn or delta_of
     magnitudes = sorted(
-        abs(d) for d in (delta_of(r, metric) for r in rows)
+        abs(d) for d in (measure(r, metric) for r in rows)
         if d is not None and d != 0
     )
     if not magnitudes:

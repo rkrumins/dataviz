@@ -87,6 +87,30 @@ describe('useGraphHydration auto-retry (node-rotation outage)', () => {
     expect(mockProvider.getNodes.mock.calls.length).toBeGreaterThanOrEqual(7)
   })
 
+  it('failing over: a node being replaced waits like a warm-up, in its own words', async () => {
+    // A pod rotation, not an outage: the cluster promotes a replica in
+    // seconds. Reporting it as "unavailable" put this view behind the slow
+    // background cadence and told the person their data was gone.
+    let failures = 5
+    mockProvider.getNodes.mockImplementation(async () => {
+      if (failures > 0) {
+        failures--
+        throw new Error('{"detail":{"code":"PROVIDER_FAILING_OVER","endpoint":"10.0.0.3:6379"}}')
+      }
+      return []
+    })
+
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('warming'))
+    expect(result.current.hydrationError).toContain('Reconnecting to the graph store')
+    expect(result.current.hydrationError).not.toContain('unavailable')
+    await waitFor(
+      () => expect(result.current.hydrationStatus).toBe('ready'),
+      { timeout: 5_000 },
+    )
+  })
+
   it('unavailable: degrades to the slow cadence instead of stopping, then recovers', async () => {
     let down = true
     mockProvider.getNodes.mockImplementation(async () => {

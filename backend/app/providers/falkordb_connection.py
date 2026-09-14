@@ -109,6 +109,12 @@ class FalkorDBConnConfig:
     socket_timeout: Optional[float] = None
     graph_pool_size: Optional[int] = None
     socket_connect_timeout: Optional[float] = None
+    # "auto" (the default) lets read-only Cypher be served by a shard's
+    # in-sync replicas — the master's query threads are then left to writes
+    # and interactive load scales with the replica count. "never" pins every
+    # read to the master for a provider where the eventual consistency inside
+    # the lag threshold is not acceptable.
+    read_from_replicas: str = "auto"
     # probeDeadlineS EXTENDS (never shrinks) every fixed probe/verify budget —
     # the warmup preflight deadline, the connect verify-ping wall clock, and
     # the manual test-endpoint deadline — for one slow cross-cluster provider.
@@ -161,7 +167,13 @@ def _parse_nodes(raw: Any) -> List[Tuple[str, int]]:
       - ``"h1:26379,h2:26379"``                 (env-var CSV string)
       - ``[["h1", 26379], ["h2", 26379]]``      (JSON array of pairs)
       - ``[{"host": "h1", "port": 26379}, ...]`` (JSON array of objects)
+      - ``["h1:26379", "h2:26379"]``            (JSON array of strings)
     Unparseable entries are skipped with a warning.
+
+    The string-in-a-list shape is handled explicitly because indexing it
+    like a pair reads its first two CHARACTERS as a host and port: an entry
+    of ``"10.0.0.1:6379"`` became ``("1", 0)`` — a silently wrong address
+    rather than the skip-with-a-warning this function promises.
     """
     if not raw:
         return []
@@ -185,6 +197,10 @@ def _parse_nodes(raw: Any) -> List[Tuple[str, int]]:
             if isinstance(entry, dict):
                 host = entry.get("host")
                 port = int(entry.get("port"))
+            elif isinstance(entry, (str, bytes, bytearray)):
+                text = entry.decode() if isinstance(entry, (bytes, bytearray)) else entry
+                host, _, port_text = text.strip().rpartition(":")
+                port = int(port_text)
             else:  # pair/list/tuple
                 host, port = entry[0], int(entry[1])
             if host:
@@ -448,6 +464,9 @@ def load_connection_config(
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
         socket_connect_timeout=_coerce_float(cfg.get("connectTimeout"), "connectTimeout"),
         probe_deadline_s=_coerce_float(cfg.get("probeDeadlineS"), "probeDeadlineS"),
+        read_from_replicas=_read_from_replicas(
+            cfg.get("readFromReplicas") or os.getenv("FALKORDB_READ_FROM_REPLICAS")
+        ),
         tls_enabled=tls_on,
         tls_ca_certs=tls_ca,
         tls_certfile=tls_cert,
@@ -455,6 +474,13 @@ def load_connection_config(
         tls_cert_reqs=tls_reqs,
         tls_check_hostname=tls_check,
     )
+
+
+def _read_from_replicas(raw: Any) -> str:
+    """``"auto"`` or ``"never"``. Anything unrecognised reads as ``"auto"``:
+    a typo must not silently pin a fleet to its masters."""
+    value = str(raw or "").strip().lower()
+    return "never" if value in {"never", "false", "0", "master", "off"} else "auto"
 
 
 async def verify_not_cluster_node(
@@ -1158,6 +1184,40 @@ def build_cache_client(
 # provider side by side and every service reaches each of them correctly.
 
 
+#: A provider owns the source graph and its projection graph, which may hash
+#: to the same node and are read concurrently on every canvas open.
+_GRAPHS_PER_PROVIDER = 2
+#: Headroom for the commands that are not graph queries — ``INFO
+#: replication`` for the read router, ``EXISTS`` for empty-key verification,
+#: ``WAIT`` for the replication governor — which must not queue behind a
+#: saturated read path.
+_POOL_HOUSEKEEPING_SOCKETS = 4
+
+
+def default_graph_pool_size() -> int:
+    """How many sockets one process's graph pool holds — PER NODE in cluster
+    mode, where redis-py applies ``max_connections`` to each node's own pool.
+
+    ``FALKORDB_POOL_SIZE`` when the operator sets it; otherwise derived from
+    the concurrency that can DEMAND sockets rather than from a round number.
+    The manager admits ``PROVIDER_MAX_CONCURRENCY`` (8) calls per
+    ``(provider, graph)`` at once and a provider spans TWO graphs — the
+    source and its projection — so two graphs whose keys hash to the same
+    node ask one node pool for 16 sockets at the same instant. The flat 10
+    this used to default to could not serve that against a perfectly healthy
+    store: the 11th caller got redis-py's ``MaxConnectionsError``, which
+    SUBCLASSES redis ``ConnectionError`` and therefore read to the circuit
+    breaker as "the downstream is sick" — three of them opened the breaker
+    for every shard, and the transient-retry path then rebuilt the client,
+    discarding the pooled sockets that were the scarce resource.
+    """
+    configured = os.getenv("FALKORDB_POOL_SIZE")
+    if configured:
+        return int(configured)
+    per_graph = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
+    return per_graph * _GRAPHS_PER_PROVIDER + _POOL_HOUSEKEEPING_SOCKETS
+
+
 def build_graph_pool_kwargs(
     cfg: FalkorDBConnConfig,
     *,
@@ -1176,7 +1236,7 @@ def build_graph_pool_kwargs(
         "max_connections": (
             max_connections
             or cfg.graph_pool_size
-            or int(os.getenv("FALKORDB_POOL_SIZE", "10"))
+            or default_graph_pool_size()
         ),
         **resilient_pool_kwargs(
             socket_timeout=socket_timeout,
@@ -1244,6 +1304,22 @@ def falkordb_over(conn: Any) -> Any:
     return db
 
 
+def _round_robin_strategy() -> Any:
+    """redis-py's round-robin load-balancing value, or the literal it wraps.
+
+    It is a str enum, and the only thing this value does here is make the
+    client perform the READONLY handshake on its connections — so a redis-py
+    without the symbol (or a test double standing in for it) must not stop a
+    cluster client being built.
+    """
+    try:
+        from redis.cluster import LoadBalancingStrategy
+
+        return LoadBalancingStrategy.ROUND_ROBIN
+    except ImportError:                                   # pragma: no cover - old client
+        return "round_robin"
+
+
 def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwargs: dict) -> Any:
     """A ``RedisCluster`` over ``cfg``'s topology, honouring OUR pool kwargs.
 
@@ -1263,6 +1339,12 @@ def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwarg
                if (h, p) != (host, port)]
     return RedisCluster(
         host=host, port=port, startup_nodes=startup or None,
+        # NOT a routing change: redis-py only auto-routes commands in its own
+        # read table, and no GRAPH.* command is in it, so writes and untargeted
+        # reads still go to the primary. What this buys is the READONLY
+        # handshake on every connection — without it a replica answers MOVED
+        # to the reads the provider targets at one deliberately.
+        load_balancing_strategy=_round_robin_strategy(),
         # See _resolve_cluster_node_once: the async client defaults this to
         # True, the server runs --cluster-require-full-coverage no. A dead
         # shard must not fail client construction for graphs that live on
@@ -1422,7 +1504,14 @@ class ResilientGraph:
         return await self._call("query", *args, **kwargs)
 
     async def ro_query(self, *args, **kwargs):
-        return await self._call("ro_query", *args, **kwargs)
+        # Fall back when the wrapped graph has no ``ro_query``. A caller that
+        # guards with ``getattr(handle, "ro_query", None)`` is inspecting THIS
+        # wrapper, which always has it, so the guard would pass and the call
+        # would then raise AttributeError from inside ``_call`` — where it is
+        # not classified as retryable. Unreachable at the pinned FalkorDB
+        # floor; two lines so the fallback callers rely on is really there.
+        method = "ro_query" if hasattr(self._graph, "ro_query") else "query"
+        return await self._call(method, *args, **kwargs)
 
     async def delete(self, *args, **kwargs):
         return await self._call("delete", *args, **kwargs)
