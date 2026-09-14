@@ -43,7 +43,7 @@ def _bounded_query(client, cypher: str, params=None):
     its own init, so a module-level import is circular."""
     from .projection import _READ_TIMEOUT_MS, _q
 
-    return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
+    return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
 
 from . import config
 from .models import (

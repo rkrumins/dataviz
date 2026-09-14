@@ -202,6 +202,7 @@ What the application does about it (`_is_no_replicas_error`,
 | Circuit breaker | **Ignores it.** It is a logical `ProviderBusy`, like `ProviderLoading`. Before this it was an unclassified `ResponseError`: three refused writes opened the breaker, and a condition that blocked only writes started refusing every **read** of that graph too. |
 | Rebuilds | Park and resume — `AGGREGATION_MAX_QUIESCE_EVENTS` (20) waits of `FALKORDB_NOREPLICAS_RETRY_AFTER_S` (180 s) = **one hour**, none of them spending a retry. Raise either and the pair must still cover your reload time; `test_falkordb_no_replicas.py` fails if the product drops below an hour. |
 | Interactive writes | HTTP **429 + Retry-After**, naming the node and saying reads are unaffected — not a 500, and not "the store is down". |
+| Reads | Sent as `GRAPH.RO_QUERY`, which the guard does not touch. `-NOREPLICAS` is a **per-command** refusal and `GRAPH.QUERY` is write-flagged whatever the Cypher inside it says, so a projection probe, a reconcile count and a `/graph/neighbors` lookup — all pure `MATCH … RETURN` — used to be refused alongside the writes, and the raw error text reached operators. Same node either way: no `GRAPH.*` command is in redis-py's read table, so nothing is routed to a replica by this. |
 
 The rebuild does **not** treat it as the store being unreachable, deliberately:
 the node is answering, and holding the graph lease for an hour under a

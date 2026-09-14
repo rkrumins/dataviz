@@ -2142,6 +2142,13 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
     FalkorDB in the P6 integration tests)."""
     from backend.app.providers.falkordb_provider import _edge_from_row, _node_from_props
     d = int(depth)
+    # Both statements below are pure MATCH/RETURN, so they go as GRAPH.RO_QUERY:
+    # a master running with ``min-replicas-to-write`` refuses every write-flagged
+    # command while it is short of in-sync replicas, and GRAPH.QUERY is
+    # write-flagged whatever the Cypher says. It is the same node either way —
+    # no GRAPH.* command is in redis-py's read table, so nothing is routed to a
+    # replica. A client without ``ro_query`` (a test fake) behaves as before.
+    read = getattr(graph, "ro_query", None) or graph.query
     pat = {"out": f"(s)-[r*1..{d}]->(n)", "in": f"(s)<-[r*1..{d}]-(n)"}.get(direction, f"(s)-[r*1..{d}]-(n)")
     params = {"urn": urn, "limit": int(limit)}
     where = ""
@@ -2153,7 +2160,7 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
         f"WITH s, collect(DISTINCT n) AS ns "          # collect() drops nulls
         f"UNWIND ([s] + ns) AS x RETURN DISTINCT x LIMIT $limit"
     )
-    res = await asyncio.wait_for(graph.query(cypher, params=params), timeout=10.0)
+    res = await asyncio.wait_for(read(cypher, params=params), timeout=10.0)
     nodes, node_urns = [], set()
     for row in (getattr(res, "result_set", None) or []):
         props = dict(row[0].properties)
@@ -2169,7 +2176,7 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
                 node_urns.add(props["urn"])
     edges = []
     if node_urns:
-        er = await asyncio.wait_for(graph.query(
+        er = await asyncio.wait_for(read(
             "MATCH (a)-[r]->(b) WHERE a.urn IN $urns AND b.urn IN $urns "
             "RETURN a.urn, b.urn, type(r), r", params={"urns": list(node_urns)}), timeout=10.0)
         for row in (getattr(er, "result_set", None) or []):
