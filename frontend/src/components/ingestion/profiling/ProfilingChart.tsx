@@ -114,7 +114,12 @@ export function ProfilingChart({
             const slot = (payload.series ?? []).findIndex((x) => x.key === s.key)
             return {
                 key: s.key,
-                label: s.label,
+                // The rollup is drawn because the breakdown has to add up to
+                // the store, but it is OURS — a reader comparing this chart
+                // against their own model needs to see which band is not
+                // their data. Marked in the label rather than by colour: a
+                // hue is not a legend anyone can read aloud.
+                label: s.derived ? `${s.label} · platform` : s.label,
                 color: s.key === '__other__'
                     ? theme.neutralMark
                     : theme.series[Math.max(0, slot) % theme.series.length],

@@ -38,6 +38,9 @@ export interface SeriesQuery {
     breakdown?: ProfilingBreakdown
     top?: number
     compare?: boolean
+    /** Override the deployment's "show rolled-up relationship types"
+     *  setting for this read only. Omitted takes the policy. */
+    includeDerivedEdges?: boolean
 }
 
 function qs(params: Record<string, unknown>): string {

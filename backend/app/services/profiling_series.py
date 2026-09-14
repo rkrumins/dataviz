@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from backend.common.derived_artifacts import (
     derived_edge_total,
+    is_derived_edge_type,
     strip_derived_counts,
 )
 
@@ -80,21 +81,37 @@ def _loads(raw: Any) -> Dict[str, int]:
     return out
 
 
-def _counts(obs: Any, field: str) -> Dict[str, int]:
+def _counts(
+    obs: Any, field: str, *, include_derived_edges: bool = False,
+) -> Dict[str, int]:
     """One snapshot's type counts, with the platform's own artifacts removed.
 
-    Parsing stays in ``_loads``; the exclusion is policy and lives here. Every
-    series read goes through this, so a derived artifact can never reach the
-    chart, the type ledger or ``types_that_vanished`` — where ``_AggMeta``
-    (MERGEd per aggregation run, wiped by projection seeds and purges) showed
-    up as a type that repeatedly disappeared. Snapshots captured before the
-    providers stopped recording it stay readable for the retention window, so
-    filtering at the source alone would not have cleared the existing charts.
+    Parsing stays in ``_loads``; the exclusion is policy and lives here.
+
+    Derived NODE labels are always removed, and that is not negotiable:
+    ``_AggMeta`` is MERGEd per aggregation run and wiped by projection seeds
+    and purges, so it toggles 1 -> 0 -> 1 and showed up as a type that
+    repeatedly disappeared. Nobody asked to see the platform's bookkeeping
+    nodes and nothing is lost by hiding them.
+
+    Derived EDGE types are different, and ``include_derived_edges`` is why
+    they get their own switch — the ``derived_artifacts`` docstring already
+    warns that the two lists are excluded in different places and that one
+    must never be assumed to imply the other. The rollup is not bookkeeping:
+    it is the lineage every view draws, it is a large share of the graph, and
+    hiding it made the breakdown disagree with the store — a chart totalling
+    5.0M against a graph holding 5.6M, with nothing on screen to explain the
+    gap. Showing it is now safe because the JUDGEMENT paths no longer share
+    this one: findings measure ``source_delta_of`` and ``types_that_vanished``
+    strips unconditionally, so a rebuild cannot raise an alarm about it
+    whatever this returns.
     """
-    return strip_derived_counts(
-        _loads(getattr(obs, field, None)),
-        edges=(field == "edge_type_counts"),
-    )
+    counts = _loads(getattr(obs, field, None))
+    if field == "edge_type_counts":
+        return counts if include_derived_edges else strip_derived_counts(
+            counts, edges=True,
+        )
+    return strip_derived_counts(counts)
 
 
 def _overlay_value(obs) -> int:
@@ -167,7 +184,7 @@ def _carry_forward(
 
 def _rank_types(
     filled: Dict[str, Dict[str, Any]], buckets: Sequence[str], field: str,
-    top: int,
+    top: int, *, include_derived_edges: bool = False,
 ) -> List[str]:
     """Types to draw, ranked by PEAK rather than by final value.
 
@@ -179,7 +196,9 @@ def _rank_types(
     for bucket in buckets:
         totals: Dict[str, int] = {}
         for obs in filled.get(bucket, {}).values():
-            for name, value in _counts(obs, field).items():
+            for name, value in _counts(
+                obs, field, include_derived_edges=include_derived_edges,
+            ).items():
                 totals[name] = totals.get(name, 0) + value
         for name, value in totals.items():
             if value > peaks.get(name, 0):
@@ -191,6 +210,7 @@ def _rank_types(
 def build_series(
     observations: Sequence, *, metric: str = "total",
     breakdown: str = "none", top: int = DEFAULT_TOP,
+    include_derived_edges: bool = False,
 ) -> Dict[str, Any]:
     """Series-major payload for one scope and window.
 
@@ -272,7 +292,10 @@ def build_series(
         }
 
     field = _BREAKDOWN_FIELD[breakdown]
-    drawn = _rank_types(filled, buckets, field, top)
+    drawn = _rank_types(
+        filled, buckets, field, top,
+        include_derived_edges=include_derived_edges,
+    )
     drawn_set = set(drawn)
 
     per_type: Dict[str, List[int]] = {k: [] for k in drawn}
@@ -280,19 +303,29 @@ def build_series(
     for bucket in buckets:
         summed: Dict[str, int] = {}
         for obs in filled[bucket].values():
-            for name, value in _counts(obs, field).items():
+            for name, value in _counts(
+                obs, field, include_derived_edges=include_derived_edges,
+            ).items():
                 summed[name] = summed.get(name, 0) + value
         for key in drawn:
             per_type[key].append(summed.get(key, 0))
         other.append(sum(v for k, v in summed.items() if k not in drawn_set))
 
     for key in drawn:
-        series.append({
+        band: Dict[str, Any] = {
             "key": key, "label": key, "kind": "type",
             "points": [
                 {"t": b, "v": per_type[key][i]} for i, b in enumerate(buckets)
             ],
-        })
+        }
+        # Say which band is OURS. It is drawn because the chart has to add up
+        # to the graph, but a reader must be able to tell the platform's own
+        # rollup from a type they ingested — and the ledger uses this to skip
+        # the gone/new verdict, since a rebuild wiping and rewriting the
+        # overlay is not a type disappearing from their data.
+        if is_derived_edge_type(key):
+            band["derived"] = True
+        series.append(band)
     if any(other):
         series.append({
             "key": OTHER_KEY, "label": "Other", "kind": "type",

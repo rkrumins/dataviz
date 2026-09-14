@@ -175,6 +175,17 @@ async def get_series(
     breakdown: str = Query("none", description="none | entity_type | edge_type"),
     top: int = Query(profiling_series.DEFAULT_TOP, ge=1, le=20),
     compare: bool = Query(False, description="Also return the preceding window"),
+    includeDerivedEdges: Optional[bool] = Query(
+        None,
+        description=(
+            "Show the platform's own rolled-up relationship types in a "
+            "breakdown. Omitted takes the deployment's profiling policy, "
+            "which shows them: the rollup is the lineage every view draws, "
+            "and a breakdown without it does not add up to the store. Node "
+            "labels are unaffected — the platform's bookkeeping nodes are "
+            "never shown."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> dict:
@@ -197,8 +208,14 @@ async def get_series(
         session, scope=scope, scope_id=scope_id, visible=visible,
         frm=frm_iso, to=to_iso, grain=resolved_grain,
     )
+    include_derived = (
+        includeDerivedEdges
+        if includeDerivedEdges is not None
+        else await profiling_repo.resolve_include_derived_edges(session)
+    )
     payload = profiling_series.build_series(
         observations, metric=metric, breakdown=breakdown, top=top,
+        include_derived_edges=include_derived,
     )
     payload.update({
         "scope": scope,
@@ -213,6 +230,10 @@ async def get_series(
         # the series it asked for over one it did not.
         "requested_metric": payload.get("metric", metric),
         "breakdown": breakdown,
+        # Echoed so the chart can label the rollup band without guessing, and
+        # so a reader can tell "this source has no rollup" from "rollups are
+        # switched off for this deployment".
+        "include_derived_edges": include_derived,
         "platform_wide": platform_wide,
         "truncated": truncated,
         "vanished_types": profiling_series.types_that_vanished(
@@ -547,6 +568,11 @@ class PolicyRequest(BaseModel):
     alertsEnabled: Optional[bool] = None
     alertMinSeverity: Optional[str] = None
     alertCooldownSecs: Optional[int] = Field(None, ge=-1)
+    #: Show the platform's own rolled-up relationship types in breakdowns.
+    #: A display decision, not a retention one — it changes what a chart
+    #: draws, never what is captured or kept, so turning it off loses no
+    #: history and turning it back on needs no backfill.
+    includeDerivedEdges: Optional[bool] = None
 
 
 @router.get("/policy", summary="Retention and alerting policy")
@@ -583,6 +609,9 @@ async def get_policy(
         "alertsEnabled": alerts.enabled,
         "alertMinSeverity": alerts.min_severity,
         "alertCooldownSecs": alerts.cooldown_secs,
+        "includeDerivedEdges": await profiling_repo.resolve_include_derived_edges(
+            session,
+        ),
         # What the deployment would use with nothing persisted, so the editor
         # can show it as the placeholder and a blank field can mean "inherit"
         # rather than pinning today's default forever.
@@ -598,6 +627,7 @@ async def get_policy(
             "silentAfterSecs": resilience.PROFILING_SILENT_AFTER_SECS,
             "alertMinSeverity": count_alerts_repo.env_alert_policy().min_severity,
             "alertCooldownSecs": count_alerts_repo.env_alert_policy().cooldown_secs,
+            "includeDerivedEdges": profiling_repo._INCLUDE_DERIVED_EDGES_DEFAULT,
         },
         "overridden": sorted(overrides),
         "editable": _can_edit_policy(claims),

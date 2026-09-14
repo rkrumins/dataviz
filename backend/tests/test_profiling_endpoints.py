@@ -1192,3 +1192,92 @@ async def test_acknowledging_a_set_does_not_touch_the_bell(
     assert "notification" in src.lower(), "the decision is undocumented"
     assert "NotificationORM" not in src
     assert "read_at" not in src
+
+
+# ── showing the rollup is a setting, with a sane default ─────────────
+
+
+async def test_the_rollup_shows_without_anyone_configuring_anything(
+    db_session: AsyncSession,
+):
+    """Default on. A deployment that has never opened the settings page still
+    gets a breakdown that adds up to its store."""
+    await _source(db_session, "ds_a")
+    await _snap(
+        db_session, "ds_a", _iso(2), nodes=10, edges=100,
+        edge_types={"FLOWS_TO": 60, "AGGREGATED": 40},
+    )
+    out = await profiling.get_series(
+        scope="source", id="ds_a", window="30d", frm=None, to=None, grain="raw",
+        metric="edges", breakdown="edge_type", top=8, compare=False,
+        includeDerivedEdges=None, session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["include_derived_edges"] is True
+    assert {s["key"] for s in out["data"]["series"]} == {"FLOWS_TO", "AGGREGATED"}
+
+
+async def test_an_operator_can_switch_it_off_for_the_deployment(
+    db_session: AsyncSession,
+):
+    await _source(db_session, "ds_a")
+    await _snap(
+        db_session, "ds_a", _iso(2), nodes=10, edges=100,
+        edge_types={"FLOWS_TO": 60, "AGGREGATED": 40},
+    )
+    await profiling_repo.persist_policy(
+        db_session, {"includeDerivedEdges": False},
+    )
+    out = await profiling.get_series(
+        scope="source", id="ds_a", window="30d", frm=None, to=None, grain="raw",
+        metric="edges", breakdown="edge_type", top=8, compare=False,
+        includeDerivedEdges=None, session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["include_derived_edges"] is False
+    assert {s["key"] for s in out["data"]["series"]} == {"FLOWS_TO"}
+
+
+async def test_the_query_param_overrides_the_deployment_setting(
+    db_session: AsyncSession,
+):
+    """A display decision, so one reader may differ from the default without
+    changing it for everyone."""
+    await _source(db_session, "ds_a")
+    await _snap(
+        db_session, "ds_a", _iso(2), nodes=10, edges=100,
+        edge_types={"FLOWS_TO": 60, "AGGREGATED": 40},
+    )
+    await profiling_repo.persist_policy(
+        db_session, {"includeDerivedEdges": False},
+    )
+    out = await profiling.get_series(
+        scope="source", id="ds_a", window="30d", frm=None, to=None, grain="raw",
+        metric="edges", breakdown="edge_type", top=8, compare=False,
+        includeDerivedEdges=True, session=db_session, claims=OPERATOR,
+    )
+    assert {s["key"] for s in out["data"]["series"]} == {"FLOWS_TO", "AGGREGATED"}
+
+
+async def test_the_setting_reads_back_on_the_policy_page(db_session: AsyncSession):
+    before = await profiling.get_policy(session=db_session, claims=OPERATOR)
+    assert before["data"]["includeDerivedEdges"] is True
+    assert before["data"]["defaults"]["includeDerivedEdges"] is True
+
+    await profiling_repo.persist_policy(
+        db_session, {"includeDerivedEdges": False},
+    )
+    after = await profiling.get_policy(session=db_session, claims=OPERATOR)
+    assert after["data"]["includeDerivedEdges"] is False
+    # The DEFAULT is what the deployment would use with nothing persisted, so
+    # the editor can offer "back to the default" without pinning today's.
+    assert after["data"]["defaults"]["includeDerivedEdges"] is True
+
+
+async def test_a_settings_row_that_cannot_be_read_still_draws_a_chart(
+    db_session: AsyncSession,
+):
+    """A policy lookup must never be able to fail a chart."""
+    class _Broken:
+        async def get(self, *a, **kw):
+            raise RuntimeError("settings unreadable")
+
+    assert await profiling_repo.resolve_include_derived_edges(_Broken()) is True

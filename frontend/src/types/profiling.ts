@@ -36,6 +36,12 @@ export interface ProfilingSeries {
     label: string
     kind: 'metric' | 'type'
     points: SeriesPoint[]
+    /** The platform's OWN rolled-up lineage, not a type anyone ingested.
+     *  Drawn because the breakdown has to add up to the store, badged
+     *  because a reader must be able to tell the two apart — and excluded
+     *  from the gone/new verdict, since a rebuild wiping and rewriting the
+     *  rollup is not a type disappearing from their data. */
+    derived?: boolean
 }
 
 export interface SeriesPayload {
@@ -68,6 +74,10 @@ export interface SeriesPayload {
     platform_wide: boolean
     truncated: boolean
     vanished_types: { type: string; peak: number }[]
+    /** Whether the rolled-up relationship types are in this payload's
+     *  breakdown. Echoed so a reader can tell "this source has no rollup"
+     *  from "rollups are switched off for this deployment". */
+    include_derived_edges?: boolean
     /** Where this scope's record begins, so a short series can say so rather
      *  than reading as data loss. */
     coverage_from: string | null
@@ -211,6 +221,11 @@ export interface ProfilingPolicy {
     alertsEnabled: boolean
     alertMinSeverity: string
     alertCooldownSecs: number
+    /** Show the platform's own rolled-up relationship types in breakdowns.
+     *  A DISPLAY decision, not a retention one: it changes what a chart
+     *  draws, never what is captured or kept, so turning it off loses no
+     *  history and turning it back on needs no backfill. */
+    includeDerivedEdges: boolean
     /** What the deployment would use with nothing persisted — the editor shows
      *  these as placeholders, so a blank field means "inherit" rather than
      *  pinning today's value forever. */
@@ -223,6 +238,7 @@ export interface ProfilingPolicy {
         silentAfterSecs: number
         alertMinSeverity: string
         alertCooldownSecs: number
+        includeDerivedEdges: boolean
     }
     /** Fields an operator has actually set, so the editor can mark them. */
     overridden: string[]

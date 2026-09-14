@@ -239,6 +239,12 @@ class PlatformSettingsORM(Base):
     # non-null default because "the operator turned this off" and "nobody has
     # ever touched it" are different states, and only the first should
     # override the deployment default.
+    #: Whether the profiling breakdowns SHOW the platform's own rolled-up
+    #: relationship types. Default on (see `resolve_retention_policy`): the
+    #: rollup is the lineage every view draws and a large share of the graph,
+    #: so hiding it made the chart disagree with the store. NULL = unset.
+    #: Governs EDGE types only — derived NODE labels stay hidden always.
+    profiling_include_derived_edges = Column(Boolean, nullable=True)
     history_alerts_enabled = Column(Boolean, nullable=True)
     history_alert_min_severity = Column(Text, nullable=True)
     history_alert_cooldown_secs = Column(Integer, nullable=True)

@@ -366,3 +366,95 @@ def test_the_resolved_measure_is_reported_not_the_one_asked_for():
         [_o("a", "2026-08-01", edges=1, edge_types={"AGGREGATED": 1})],
         metric="aggregated",
     )["metric"] == "aggregated"
+
+
+# ── the breakdown has to add up to the graph ─────────────────────────
+
+
+def _split():
+    """The shape on screen: two ingested types and the platform's rollup."""
+    return [_o("a", "2026-08-01", edges=5_605_218, edge_types={
+        "FLOWS_TO": 2_926_594, "HAS": 2_083_200, "AGGREGATED": 595_424,
+    })]
+
+
+def test_the_relationship_breakdown_includes_the_rollup_by_default():
+    """THE bug. Split by relationship type totalled 5,009,794 against a store
+    holding 5,605,218, and nothing on screen accounted for the 595,424 — the
+    rollup, stripped on read. It is not bookkeeping: it is the lineage every
+    view draws."""
+    out = ps.build_series(
+        _split(), metric="edges", breakdown="edge_type",
+        include_derived_edges=True,
+    )
+    drawn = {s["key"]: s["points"][-1]["v"] for s in out["series"]}
+    assert drawn == {
+        "FLOWS_TO": 2_926_594, "HAS": 2_083_200, "AGGREGATED": 595_424,
+    }
+    assert sum(drawn.values()) == out["totals"]["edges"][-1] == 5_605_218
+
+
+def test_the_rollup_band_says_it_is_ours():
+    """Drawn because the chart must add up, badged because a reader has to be
+    able to tell the platform's own rollup from a type they ingested."""
+    out = ps.build_series(
+        _split(), metric="edges", breakdown="edge_type",
+        include_derived_edges=True,
+    )
+    by_key = {s["key"]: s for s in out["series"]}
+    assert by_key["AGGREGATED"].get("derived") is True
+    assert "derived" not in by_key["FLOWS_TO"]
+
+
+def test_turning_it_off_restores_the_customers_own_types():
+    out = ps.build_series(
+        _split(), metric="edges", breakdown="edge_type",
+        include_derived_edges=False,
+    )
+    assert [s["key"] for s in out["series"]] == ["FLOWS_TO", "HAS"]
+
+
+def test_the_rollup_is_ranked_like_any_other_band_not_pinned():
+    """It competes for the `top` slots on its size, because a rollup that
+    dwarfs every ingested type IS the headline and burying it in "Other"
+    would be the same hiding by another route."""
+    out = ps.build_series(
+        [_o("a", "2026-08-01", edges=100, edge_types={
+            "AGGREGATED": 90, "A": 5, "B": 3, "C": 2,
+        })],
+        metric="edges", breakdown="edge_type", top=2,
+        include_derived_edges=True,
+    )
+    assert [s["key"] for s in out["series"]][:2] == ["AGGREGATED", "A"]
+
+
+def test_showing_it_never_makes_it_a_disappearance():
+    """The reason it was stripped in the first place, and the line that must
+    hold: a rebuild wipes and rewrites the rollup, and that must not reach
+    the vanished-type banner however the breakdown is drawn."""
+    wiped = [
+        _o("a", "2026-08-01", edges=100, edge_types={"L": 60, "AGGREGATED": 40}),
+        _o("a", "2026-08-02", edges=60, edge_types={"L": 60}),
+    ]
+    assert ps.types_that_vanished(wiped, breakdown="edge_type") == []
+    # ...and it is still drawn, dipping to zero, which is the honest picture.
+    out = ps.build_series(
+        wiped, metric="edges", breakdown="edge_type", include_derived_edges=True,
+    )
+    agg = next(s for s in out["series"] if s["key"] == "AGGREGATED")
+    assert [p["v"] for p in agg["points"]] == [40, 0]
+
+
+def test_the_platforms_bookkeeping_NODES_have_no_such_switch():
+    """Deliberately asymmetric, and the asymmetry is the point. `_AggMeta` is
+    a singleton MERGEd per run and wiped by purges — nobody asked to see it
+    and nothing is lost by hiding it. The rollup is neither of those things.
+    ``derived_artifacts`` already warns the two lists are excluded in
+    different places and neither implies the other."""
+    obs = [_o("a", "2026-08-01", nodes=101, types={"Table": 100, "_AggMeta": 1})]
+    for flag in (True, False):
+        out = ps.build_series(
+            obs, metric="nodes", breakdown="entity_type",
+            include_derived_edges=flag,
+        )
+        assert [s["key"] for s in out["series"]] == ["Table"], flag
