@@ -1267,6 +1267,57 @@ different causes produce the same 10-15 minute window — CPU-bound cube
 expansion, a 900s outage hold on a flush write, and a low per-job
 `timeoutSecs` — and those fields separate them.
 
+### Sizing a full cube, and what does NOT size it
+
+Four things are worth saying plainly, because each of them has been guessed
+wrong:
+
+**The cube estimate is an upper bound on cells PRODUCED, not cells stored.**
+Every budget that matters consumes cells DISTINCT: the accumulator is a dict
+keyed by the packed pair, the write is a `MERGE` on `aggKey`, and the apply
+writes only what reconcile did not already observe. A graph that compresses
+50:1 estimates fifty times its real size, and the code refuses to refuse on
+that number while it is uncalibrated. `run_stats.cell_ratio_observed` is what
+converts the estimate into reality, and until a run has produced one, no
+projection — including `cube_slower_than_wall_clock` — is worth acting on.
+
+**`maxCubeEdges` does nothing to a FORCED cube.** The forced branch of
+`_decide_materialization_mode` returns before the ceiling is read; it gates
+Auto only. Setting it alongside `materializeFinePairs: "true"` changes
+nothing but the job record. It is essential with `auto` — where the default
+IS its own upper bound, so Auto has nothing to refuse against — and inert
+without it.
+
+**The estimator is not the geometry.** `_anc_count` is `1 + Σ over parents`,
+not a set union, so on a DAG it counts shared ancestors once per path. A
+node with two parents on disjoint depth-3 chains has a true closure of 9 and
+an estimated ancestor count of 19 — the estimate runs several times over the
+real cube, and the gap grows with depth. The extract logs
+`containment loaded — N child→parent entries (M multi-parent nodes)`; if `M`
+is non-trivial, every single-parent figure is a floor rather than an
+estimate.
+
+**Worker memory is the binding constraint, not any store-side timeout.** The
+accumulator costs about 100 bytes per distinct cell, and the memory-aware
+flush (`AGGREGATION_FLUSH_MEM_PCT`, 60% of the cgroup limit) bounds it —
+inside the merge loops. The END of a run builds a second full copy of the key
+set to report and reconcile what it wrote, where no flush can fire, so the
+peak is not the flush line. The production overlay gives the worker 12Gi for
+this reason.
+
+One CPU trap with no guard at all: leaf closures are memoised up to
+`_CLOSURE_MEMO_MAX` (400,000 nodes). Past that, a leaf's closure is re-walked
+per edge. On a graph with more than 400k distinct endpoints that is a long
+`compute_s` and nothing catches it — not a flush, not a budget, not a hold,
+because it is neither memory nor I/O.
+
+**What `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` does not do.** It is read once and
+feeds only the failover `Retry-After`, the failing-over memo and the worker's
+failover park. It touches no query timeout, no retry ladder, no write budget
+and nothing in the compute stage. There is no value of it that makes a cube
+succeed or fail; its only correct value is the cluster's own
+`--cluster-node-timeout`, which a test enforces.
+
 ## Finding the cluster from a cold start
 
 Seeds are tried in this order, first that answers wins:
