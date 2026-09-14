@@ -2083,9 +2083,15 @@ class AggregationWorker:
                     )[:2000]
                     job.updated_at = _now()
                     await session.commit()
+                    # With the traceback: ``str(e)`` alone is what made a
+                    # bare ResponseError ("UNBLOCKED force unblock ...")
+                    # unattributable — it named neither the call site nor
+                    # which Redis answered, and a rebuild retry costs the
+                    # whole extract and compute.
                     logger.warning(
-                        "Aggregation job %s: retry %d/%d after %.0fs — %s",
-                        job.id, attempt + 1, job.max_retries, delay, e,
+                        "Aggregation job %s: retry %d/%d after %.0fs — %s: %s",
+                        job.id, attempt + 1, job.max_retries, delay,
+                        type(e).__name__, e, exc_info=True,
                     )
                     await _park(f"retry {attempt + 1}/{job.max_retries}", delay)
                     attempt += 1

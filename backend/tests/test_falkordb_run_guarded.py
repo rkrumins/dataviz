@@ -14,7 +14,9 @@ from unittest.mock import AsyncMock
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.app.providers.falkordb_provider import (
+    FalkorDBProvider, _is_role_changed_error,
+)
 
 
 def _provider():
@@ -248,6 +250,84 @@ async def test_a_readonly_reply_re_resolves_the_master_and_retries(monkeypatch, 
     assert await p._run_guarded(call) == "ok"
     assert calls["n"] == 2
     assert rebuilds["n"] == 1
+
+
+# The SAME demotion, reaching a client that was mid-QUERY rather than
+# mid-write — and the spelling a rebuild actually meets.
+#
+# FalkorDB runs GRAPH.* on a module thread pool and BLOCKS the client for the
+# duration, so a long query is a blocked client in Redis's own sense. Redis
+# force-unblocks a blocked client when the instance changes role, and the
+# reply is `-UNBLOCKED force unblock from blocking operation, instance state
+# changed (master -> replica?)`. There is no redis-py class for it: it
+# arrives as a bare ResponseError, so the name match could not see it and the
+# branch above — the one that fixes this in under a second — was skipped for
+# exactly the case it exists for.
+#
+# What it cost: the error escaped to the worker's generic handler, which
+# spends a job retry. A retry re-runs EXTRACT and COMPUTE from zero
+# (`falkordb_materialize`: "EXTRACT + COMPUTE always re-run"), and the attempt
+# budget only resets when processed_edges advances past its high-water mark —
+# which a from-zero re-run never does. So a routine shard rotation turned an
+# hour of work into three of them and then a failed job.
+
+
+class _Unblocked(Exception):
+    """A bare ResponseError, as redis-py delivers -UNBLOCKED."""
+
+    def __init__(self):
+        super().__init__(
+            "UNBLOCKED force unblock from blocking operation, "
+            "instance state changed (master -> replica?)"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sentinel", "standalone", "cluster"])
+async def test_an_unblocked_reply_is_a_demotion_and_is_retried(monkeypatch, mode):
+    p = _provider()
+
+    class _Cfg:
+        pass
+
+    _Cfg.mode = mode
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+
+    rebuilds = {"n": 0}
+
+    async def _rebuild(gen):
+        rebuilds["n"] += 1
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", _rebuild)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Unblocked()
+        return "ok"
+
+    assert await p._run_guarded(call) == "ok"
+    assert calls["n"] == 2
+    assert rebuilds["n"] == 1
+
+
+def test_the_unblocked_match_stays_narrow():
+    """Matched on the verb, not on "instance state changed", so it cannot
+    swallow an unrelated error. Nothing in this repo issues CLIENT UNBLOCK,
+    so there is no legitimate -UNBLOCKED for this to absorb."""
+    assert _is_role_changed_error(_Unblocked())
+    assert _is_role_changed_error(
+        RuntimeError("unblocked force unblock from blocking operation"))
+    for other in [
+        RuntimeError("instance state changed"),
+        RuntimeError("blocked client"),
+        RuntimeError("NOREPLICAS Not enough good replicas to write."),
+        RuntimeError("LOADING FalkorDB is loading the dataset in memory"),
+    ]:
+        assert not _is_role_changed_error(other), other
 
 
 @pytest.mark.asyncio

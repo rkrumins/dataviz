@@ -485,6 +485,10 @@ class BootstrapRunner:
         return True
 
     async def _count(self, client, cypher: str) -> int:
+        # Deliberately NOT ``read_only``, though the cypher only counts: this
+        # is phase 1, and ``GRAPH.QUERY`` INSTANTIATES the graph key, which is
+        # what leaves the later read-only phases a graph to read. Converting
+        # it would lean the whole run on ``_q``'s empty-key retry instead.
         res = await _q(client, cypher, timeout_ms=_WRITE_TIMEOUT_MS)
         rs = getattr(res, "result_set", None) or []
         return int(rs[0][0]) if rs and rs[0] and rs[0][0] is not None else 0
@@ -848,7 +852,7 @@ class BootstrapRunner:
     # ------------------------------------------------------------- internals --
     async def _max_id(self, client, kind: str = "nodes") -> Optional[int]:
         """The node id space — every phase (nodes, edges, backfill) windows over it."""
-        res = await _q(client, _MAX_NODE_ID, timeout_ms=_READ_TIMEOUT_MS)
+        res = await _q(client, _MAX_NODE_ID, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
         rs = getattr(res, "result_set", None) or []
         val = rs[0][0] if rs and rs[0] else None
         return int(val) if val is not None else None
@@ -876,7 +880,7 @@ class BootstrapRunner:
 
     async def _count_window(self, client, lo: int, width: int) -> int:
         res = await _q(client, _COUNT_EDGES_IN_WINDOW, {"lo": lo, "hi": lo + width},
-                       timeout_ms=_READ_TIMEOUT_MS)
+                       timeout_ms=_READ_TIMEOUT_MS, read_only=True)
         rs = getattr(res, "result_set", None) or []
         return int(rs[0][0]) if rs and rs[0] and rs[0][0] is not None else 0
 
@@ -902,7 +906,8 @@ class BootstrapRunner:
         while True:
             try:
                 res = await _q(client, _SCAN_NODES if kind == "nodes" else _SCAN_EDGES,
-                               {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS)
+                               {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS,
+                               read_only=True)
                 return list(getattr(res, "result_set", None) or []), width
             except Exception as exc:
                 shrinkable = not _is_transient(exc) or _is_timeout(exc)
@@ -1053,11 +1058,12 @@ class BootstrapRunner:
         for label, group in by_label.items():
             cypher = (f"UNWIND $urns AS u MATCH (n:`{label.replace('`', '``')}` {{urn: u}}) "
                       "RETURN labels(n), properties(n)")
-            res = await _q(client, cypher, {"urns": group}, timeout_ms=_READ_TIMEOUT_MS)
+            res = await _q(client, cypher, {"urns": group}, timeout_ms=_READ_TIMEOUT_MS,
+                           read_only=True)
             rows.extend(getattr(res, "result_set", None) or [])
         for chunk in _chunks(unlabelled, 8):
             res = await _q(client, _SAMPLE_NODES, {"urns": list(chunk)},
-                           timeout_ms=_READ_TIMEOUT_MS)
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
             rows.extend(getattr(res, "result_set", None) or [])
 
         fresh: Dict[str, str] = {}

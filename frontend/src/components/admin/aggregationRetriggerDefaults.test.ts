@@ -9,7 +9,9 @@
  * projection lives rather than how fast it is built.
  */
 import { describe, expect, it } from 'vitest'
-import { buildInitialOverridesFromJob, gentleRetryReason, retryPresetReason } from './RegistryJobHistory'
+import {
+    buildInitialOverridesFromJob, gentleRetryReason, overridesFromRun, retryPresetReason,
+} from './RegistryJobHistory'
 import { balancedPreset, presetIdFor } from './shared/AggregationOverridesForm'
 import type { AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 
@@ -148,5 +150,62 @@ describe('a retry after the graph store kept refusing starts from the Gentle pro
             expect(buildInitialOverridesFromJob(job, CONFIGURED_DEFAULTS).tuning).toEqual(SEEDED_DEFAULTS)
             expect(gentleRetryReason(job)).toBeNull()
         }
+    })
+})
+
+describe('overridesFromRun — putting a run’s own settings back', () => {
+    it('reads what the run actually ran with, in the form’s spelling', () => {
+        const value = overridesFromRun(jobWithStaleTuning)!
+
+        // The run records the server's spelling; the form speaks the client's.
+        expect(value.tuning).toEqual({
+            scanRangeWidth: 250_000,
+            writePacingRatio: 0.5,
+            extractConcurrency: 2,
+            maxPendingPairs: 5_000_000,
+            maxMaterializedEdges: 2_000_000,
+        })
+        expect(value.maxRetries).toBe(1)
+        expect(value.timeoutMinutes).toBe(60)
+    })
+
+    it('carries the rollup storage the run was FORCED to, not today’s default', () => {
+        // The one setting that is not a number, and the one an operator most
+        // often means by "the same as last time".
+        const forced = {
+            ...jobWithStaleTuning,
+            tuning: { ...jobWithStaleTuning.tuning, materialize_fine_pairs: 'true' },
+        } as unknown as AggregationJobResponse
+        expect(overridesFromRun(forced)!.tuning?.materializeFinePairs).toBe(true)
+
+        const auto = {
+            ...jobWithStaleTuning,
+            tuning: { ...jobWithStaleTuning.tuning, materialize_fine_pairs: 'auto' },
+        } as unknown as AggregationJobResponse
+        expect(overridesFromRun(auto)!.tuning?.materializeFinePairs).toBe('auto')
+    })
+
+    it('is null when the run recorded nothing, so the control is not offered', () => {
+        // A job from before the self-tuning pipeline, or one that never
+        // reached its first checkpoint.
+        for (const tuning of [null, undefined, {}]) {
+            expect(overridesFromRun({ ...jobWithStaleTuning, tuning } as AggregationJobResponse)).toBeNull()
+        }
+    })
+
+    it('is NOT what the dialog opens on', () => {
+        // The whole reason it is a control and not a default: re-triggering
+        // exists to pick up the current defaults.
+        const opened = buildInitialOverridesFromJob(jobWithStaleTuning, CONFIGURED_DEFAULTS)
+        expect(opened.tuning).not.toEqual(overridesFromRun(jobWithStaleTuning)!.tuning)
+        expect(opened.tuning?.maxMaterializedEdges).toBeUndefined()
+    })
+
+    it('ignores junk rather than putting it in the form', () => {
+        const junk = {
+            ...jobWithStaleTuning,
+            tuning: { scan_range_width: 'wide', write_pacing_ratio: null, extract_concurrency: 2 },
+        } as unknown as AggregationJobResponse
+        expect(overridesFromRun(junk)!.tuning).toEqual({ extractConcurrency: 2 })
     })
 })

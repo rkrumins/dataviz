@@ -1504,7 +1504,14 @@ class ResilientGraph:
         return await self._call("query", *args, **kwargs)
 
     async def ro_query(self, *args, **kwargs):
-        return await self._call("ro_query", *args, **kwargs)
+        # Fall back when the wrapped graph has no ``ro_query``. A caller that
+        # guards with ``getattr(handle, "ro_query", None)`` is inspecting THIS
+        # wrapper, which always has it, so the guard would pass and the call
+        # would then raise AttributeError from inside ``_call`` — where it is
+        # not classified as retryable. Unreachable at the pinned FalkorDB
+        # floor; two lines so the fallback callers rely on is really there.
+        method = "ro_query" if hasattr(self._graph, "ro_query") else "query"
+        return await self._call(method, *args, **kwargs)
 
     async def delete(self, *args, **kwargs):
         return await self._call("delete", *args, **kwargs)
