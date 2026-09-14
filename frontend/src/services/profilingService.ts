@@ -115,6 +115,28 @@ export const profilingService = {
         )
     },
 
+    /** Mark a whole set seen. `ids` omitted means every OPEN finding in
+     *  scope; `dataSourceId` narrows to one source. The listing fields are
+     *  echoed so the response can seed the caller's exact cache entry —
+     *  `useProfilingFindings` keys on (id, openOnly, limit, offset), and a
+     *  payload built with different params would write a wrong answer into a
+     *  live key.
+     *
+     *  No `silent403`, unlike the reads above: this answers the person who
+     *  pressed the button. */
+    acknowledgeMany(body: {
+        ids?: string[]
+        dataSourceId?: string | null
+        openOnly?: boolean
+        limit?: number
+        offset?: number
+    }): Promise<FindingsPayload & { acknowledged: number }> {
+        return authFetch<Wrapped<FindingsPayload & { acknowledged: number }>>(
+            `${BASE}/alerts/acknowledge`,
+            { method: 'POST', body: JSON.stringify(body) },
+        ).then((r) => r.data)
+    },
+
     getPolicy(signal?: AbortSignal): Promise<ProfilingPolicy> {
         return authFetch<Wrapped<ProfilingPolicy>>(
             `${BASE}/policy`, { signal, silent403: true },

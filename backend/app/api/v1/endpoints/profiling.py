@@ -27,7 +27,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from fastapi import (
+    APIRouter, Body, Depends, HTTPException, Path, Query, Response,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -461,6 +463,68 @@ async def acknowledge_alert(
     )
     await session.commit()
     return {"data": profiling_repo.finding_model(updated or alert)}
+
+
+class BulkAcknowledgeRequest(BaseModel):
+    """Mark a whole set of findings seen.
+
+    ``ids`` omitted means every OPEN finding in scope — the contract
+    ``POST /me/notifications/read`` already uses, where an absent list is
+    "all" and an explicit empty one is nothing. ``dataSourceId`` narrows to
+    one source; without it the scope is every source the caller can see.
+
+    The listing fields are echoed back rather than defaulted, because the
+    response IS the caller's next cache entry: the findings query is keyed on
+    ``(id, openOnly, limit, offset)``, and a payload built with different
+    params seeded into that key writes a wrong answer into a live cache.
+    """
+    ids: Optional[List[str]] = None
+    dataSourceId: Optional[str] = None
+    openOnly: bool = True
+    limit: int = Field(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT)
+    offset: int = Field(0, ge=0)
+
+
+# NOTE: two path segments after ``/alerts``, where the single-finding verb
+# above has three, so neither can shadow the other whatever the declaration
+# order. That stops being true the moment someone adds ``POST /alerts/{id}``.
+@router.post("/alerts/acknowledge", summary="Mark a set of findings seen")
+async def acknowledge_alerts(
+    body: BulkAcknowledgeRequest = Body(default_factory=BulkAcknowledgeRequest),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> dict:
+    """Acknowledging is GLOBAL and it is what makes a finding purgeable —
+    retention only ever deletes acknowledged rows. So this returns the
+    post-mutation listing alongside the count, and the caller shows a person
+    both facts before it is pressed."""
+    data_source_id = body.dataSourceId
+    if data_source_id:
+        data_source_id = await profiling_repo.resolve_source_id(
+            session, data_source_id,
+        )
+        await ensure_data_source_visible(
+            session, claims, data_source_id,
+            not_found_detail="Finding not found",
+        )
+    visible = await _visible(session, claims)
+    actor = getattr(claims, "user_id", None) or "unknown"
+    acknowledged = await count_alerts_repo.acknowledge_many(
+        session, actor_id=actor, visible=visible,
+        ids=body.ids, data_source_id=data_source_id,
+    )
+    await session.commit()
+
+    rows, total, open_count = await profiling_repo.list_findings(
+        session, data_source_id=data_source_id, visible=visible,
+        open_only=body.openOnly, limit=body.limit, offset=body.offset,
+    )
+    return {"data": {
+        "alerts": rows, "total": total, "openCount": open_count,
+        "offset": body.offset, "limit": body.limit,
+        "platform_wide": visible is None,
+        "acknowledged": acknowledged,
+    }}
 
 
 # ── policy ───────────────────────────────────────────────────────────

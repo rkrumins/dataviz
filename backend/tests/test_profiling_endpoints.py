@@ -20,7 +20,9 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
-from backend.app.db.repositories import profiling_repo, stats_history_repo
+from backend.app.db.repositories import (
+    count_alerts_repo, profiling_repo, stats_history_repo,
+)
 from backend.app.services.permission_service import PermissionClaims
 
 
@@ -1030,3 +1032,163 @@ async def test_a_legitimate_csv_filename_is_still_readable(
         resp.headers["content-disposition"]
         == 'attachment; filename="profiling-workspace-ws_1-raw.csv"'
     )
+
+
+# ── marking a whole set seen ─────────────────────────────────────────
+
+
+async def _alert(session, ds_id: str, *, workspace: str = "ws_1", alert_id: str):
+    """One open finding, minimally shaped — enough for the acknowledge path."""
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    session.add(DataSourceCountAlertORM(
+        id=alert_id,
+        data_source_id=ds_id,
+        workspace_id=workspace,
+        provider_id="prov_1",
+        graph_name=f"g-{ds_id}",
+        detected_at=_iso(1),
+        observed_at=_iso(1),
+        severity="severe",
+        direction="drop",
+        node_delta=-100,
+        node_count=900,
+        baseline=25,
+        metric="nodes",
+        finding="movement",
+    ))
+    await session.flush()
+
+
+async def _open_ids(session) -> set:
+    from sqlalchemy import select
+
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    return set((await session.execute(
+        select(DataSourceCountAlertORM.id)
+        .where(DataSourceCountAlertORM.acknowledged_at.is_(None))
+    )).scalars().all())
+
+
+async def test_a_workspace_caller_cannot_acknowledge_another_tenants_finding(
+    db_session: AsyncSession,
+):
+    """THE test. ``notification_repo.mark_read`` can filter on ids alone
+    because ``user_id`` is already in its WHERE; there is no such column on a
+    finding, so without the tenant clause on the ids path a workspace user
+    acknowledges — and silences, for everyone — another tenant's finding by
+    guessing an id."""
+    await _source(db_session, "ds_mine", workspace="ws_1")
+    await _source(db_session, "ds_theirs", workspace="ws_2")
+    await _alert(db_session, "ds_mine", workspace="ws_1", alert_id="al_mine")
+    await _alert(db_session, "ds_theirs", workspace="ws_2", alert_id="al_theirs")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(ids=["al_mine", "al_theirs"]),
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert out["data"]["acknowledged"] == 1
+    assert await _open_ids(db_session) == {"al_theirs"}
+
+
+async def test_a_caller_bound_to_no_workspace_acknowledges_nothing(
+    db_session: AsyncSession,
+):
+    """``_visible`` returns None for a platform operator and a possibly-EMPTY
+    list for everyone else. Conflating the two is the difference between "you
+    may see no sources" and "you may see all of them"."""
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(),
+        session=db_session, claims=NOBODY,
+    )
+    assert out["data"]["acknowledged"] == 0
+    assert await _open_ids(db_session) == {"al_a"}
+
+
+async def test_an_operator_clears_every_source_at_once(db_session: AsyncSession):
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _source(db_session, "ds_b", workspace="ws_2")
+    await _alert(db_session, "ds_a", workspace="ws_1", alert_id="al_a")
+    await _alert(db_session, "ds_b", workspace="ws_2", alert_id="al_b")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(),
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["acknowledged"] == 2
+    # The response IS the caller's next cache entry — the count has to be
+    # right without a second GET, or the band re-renders the number it just
+    # cleared.
+    assert out["data"]["openCount"] == 0
+    assert await _open_ids(db_session) == set()
+
+
+async def test_one_source_leaves_the_others_alone(db_session: AsyncSession):
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _source(db_session, "ds_b", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+    await _alert(db_session, "ds_b", alert_id="al_b")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(dataSourceId="ds_a"),
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert out["data"]["acknowledged"] == 1
+    assert await _open_ids(db_session) == {"al_b"}
+
+
+async def test_an_explicit_empty_list_is_nothing_not_everything(
+    db_session: AsyncSession,
+):
+    """Omitted means all; ``[]`` means none. The same contract
+    ``POST /me/notifications/read`` already carries, and the difference
+    between a no-op and clearing a fleet."""
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(ids=[]),
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["acknowledged"] == 0
+    assert await _open_ids(db_session) == {"al_a"}
+
+
+async def test_the_first_acknowledgement_wins_across_a_bulk_clear(
+    db_session: AsyncSession,
+):
+    """No bulk verb may rewrite who actually looked at something. Matches
+    ``acknowledge``, which has always been first-wins."""
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+    await count_alerts_repo.acknowledge(db_session, "al_a", actor_id="alice")
+
+    await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(),
+        session=db_session, claims=OPERATOR,
+    )
+    row = await db_session.get(DataSourceCountAlertORM, "al_a")
+    assert row.acknowledged_by == "alice"
+
+
+async def test_acknowledging_a_set_does_not_touch_the_bell(
+    db_session: AsyncSession,
+):
+    """Deliberate, and the reason is stated where it would otherwise read as
+    an omission: the single-finding verb has never marked notifications read,
+    notifications are per-user rows while findings are global, and there is no
+    FK between them — only a kind + title match a one-shot migration can
+    justify and a request path cannot. The two verbs must mean the same
+    thing."""
+    import inspect
+
+    src = inspect.getsource(count_alerts_repo.acknowledge_many)
+    assert "notification" in src.lower(), "the decision is undocumented"
+    assert "NotificationORM" not in src
+    assert "read_at" not in src

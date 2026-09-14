@@ -713,6 +713,71 @@ async def acknowledge(
     return row
 
 
+async def acknowledge_many(
+    session: AsyncSession,
+    *,
+    actor_id: Optional[str],
+    visible: Optional[Sequence[str]],
+    ids: Optional[Sequence[str]] = None,
+    data_source_id: Optional[str] = None,
+) -> int:
+    """Mark a whole set as seen in one statement. Returns the row count.
+
+    ``ids=None`` means every OPEN finding in scope — the notifications
+    mark-all contract, where an omitted list is "all" and an explicit empty
+    one is nothing. ``data_source_id`` narrows to one source.
+
+    Four things here are load-bearing:
+
+    * ``acknowledged_at IS NULL`` in the WHERE keeps FIRST-WINS across the
+      whole set, matching :func:`acknowledge`. No bulk verb may rewrite who
+      actually looked at something.
+    * **The tenant clause applies to the ``ids`` path too.**
+      ``notification_repo.mark_read`` can filter on ids alone because
+      ``user_id`` is already in its WHERE; there is no such column here, so
+      without ``data_source_id.in_(visible)`` a workspace user could
+      acknowledge another tenant's finding by guessing an id.
+    * ``visible == []`` means NOTHING, never everything. ``_visible`` returns
+      ``None`` for a platform operator and a possibly-empty list for everyone
+      else, and conflating the two is the difference between "you may see no
+      sources" and "you may see all of them".
+    * No notification side-write. Acknowledging a finding has never touched
+      the bell (``acknowledge`` does not), notifications are per-user rows
+      while these are global, and there is no FK between them — only the
+      ``kind`` + title match a one-shot migration can justify and a request
+      path cannot. The two verbs must mean the same thing.
+    """
+    if ids is not None and not ids:
+        return 0
+    stmt = (
+        update(DataSourceCountAlertORM)
+        .where(DataSourceCountAlertORM.acknowledged_at.is_(None))
+        .values(
+            acknowledged_at=datetime.now(timezone.utc).isoformat(),
+            acknowledged_by=actor_id,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if visible is not None:
+        stmt = stmt.where(
+            DataSourceCountAlertORM.data_source_id.in_(list(visible))
+        )
+    if data_source_id:
+        stmt = stmt.where(
+            DataSourceCountAlertORM.data_source_id == data_source_id
+        )
+    if ids is not None:
+        stmt = stmt.where(DataSourceCountAlertORM.id.in_(list(ids)))
+    result = await session.execute(stmt)
+    count = int(getattr(result, "rowcount", 0) or 0)
+    logger.info(
+        "count alerts: %s acknowledged %d finding(s) (source=%s, ids=%s)",
+        actor_id or "unknown", count, data_source_id or "all",
+        "explicit" if ids is not None else "all-open",
+    )
+    return count
+
+
 async def purge_alerts(
     session: AsyncSession, *, retention_days: int, batch: int = 1000,
 ) -> int:
@@ -747,6 +812,7 @@ __all__: Sequence[str] = (
     "AlertIdentity",
     "PendingNotice",
     "acknowledge",
+    "acknowledge_many",
     "env_alert_policy",
     "evaluate_silent_sources",
     "evaluate_source",
