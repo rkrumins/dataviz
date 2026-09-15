@@ -105,13 +105,23 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
     of what an aggregate returns, rather than a guessed empty result: a
     ``count(n)`` answers ``[[0]]``, not ``[]``, and callers index it.
     """
+    # Bounded by the cluster's failure detector, like every query the
+    # provider issues. This helper talks to the graph client directly, so
+    # the provider's own boundary clamp never sees it — and a 60s projector
+    # write against a 15s ``cluster-node-timeout`` costs the shard its
+    # master exactly as a 60s rebuild batch does. See
+    # ``cluster_query_ceiling_s`` in ``falkordb_provider``.
+    from backend.app.providers.falkordb_provider import clamp_query_budget
+
+    budget_ms = int(1000 * clamp_query_budget(timeout_ms / 1000.0))
+
     async def _send(read: bool):
         call = (getattr(client, "ro_query", None) if read else None) or client.query
         try:
-            coro = call(cypher, params=params, timeout=timeout_ms)
+            coro = call(cypher, params=params, timeout=budget_ms)
         except TypeError:
             coro = call(cypher, params=params)
-        return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
+        return await asyncio.wait_for(coro, timeout=budget_ms / 1000 + 10)
 
     try:
         return await _send(read_only)
