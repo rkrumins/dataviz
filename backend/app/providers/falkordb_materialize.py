@@ -254,6 +254,10 @@ def _store_hold_max_s() -> int:
 #: debounce, not a share of someone else's patience.
 _REPLICA_ABSENCE_GRACE_S = 300
 
+#: Mirrors the provider's share so the warning can report the WINDOW the
+#: ceiling came from rather than the ceiling twice.
+_CLUSTER_WRITE_SHARE_FOR_LOG = 0.4
+
 
 #: FalkorDB's hard ceiling on DISTINCT attribute names per graph. Attribute
 #: ids are ``uint16_t`` with the top two values reserved as sentinels
@@ -516,10 +520,19 @@ def _reconcile_keys_only_width() -> int:
 
 def _write_timeout_s() -> float:
     """Per-query budget for the pipeline's write and delete queries; the
-    same env the provider's bulk-CREATE timeout reads, but the pipeline
-    allows up to 600s because the server clamps every query at its own
-    ``TIMEOUT_MAX`` anyway (``FALKORDB_SERVER_TIMEOUT_MAX_MS``)."""
-    return _env_float("FALKORDB_BULK_CREATE_TIMEOUT_S", 60.0, 5.0, 600.0)
+    same env the provider's bulk-CREATE timeout reads.
+
+    The configured value is only half the answer. It used to be clamped at
+    600s on the reasoning that "the server clamps every query at its own
+    ``TIMEOUT_MAX`` anyway" — true, and the wrong ceiling in cluster mode,
+    where the binding limit is how long the other masters will wait before
+    voting this one out. ``clamp_write_budget`` puts every write budget
+    beneath that window; see ``cluster_write_ceiling_s``."""
+    from backend.app.providers.falkordb_provider import clamp_write_budget
+
+    return clamp_write_budget(
+        _env_float("FALKORDB_BULK_CREATE_TIMEOUT_S", 60.0, 5.0, 600.0)
+    )
 
 
 def _stall_timeout_secs() -> int:
@@ -1306,6 +1319,9 @@ class AggregationPipeline:
         #: before reconciling — the evidence, when a run sat in Reconcile
         #: writing nothing, of what it was waiting for.
         self._index_wait_s: float = 0.0
+        #: Whether this run has already said that the cluster shortened its
+        #: write budget — once per run, not once per batch.
+        self._write_ceiling_logged: bool = False
         self._calibration: Optional[Dict[str, Any]] = None
         #: What the cube would cost in time, and why Auto stepped off it.
         self._cube_projection: Optional[Dict[str, Any]] = None
@@ -1682,12 +1698,36 @@ class AggregationPipeline:
 
     def _write_timeout(self) -> float:
         """Per-query budget for writes and deletes — same resolution as
-        :meth:`_scan_timeout` over the ``writeTimeoutS`` knob."""
+        :meth:`_scan_timeout` over the ``writeTimeoutS`` knob, and then
+        clamped beneath the cluster's failure-detector window.
+
+        The clamp is not advisory and an operator cannot raise past it,
+        because the thing it protects is not this run: a write that outlives
+        the window takes the master's role away mid-batch, which ends the
+        run AND moves the topology under every other reader of that shard.
+        A budget the cluster shortened says so once, with both numbers."""
+        from backend.app.providers.falkordb_provider import (
+            clamp_write_budget, cluster_write_ceiling_s,
+        )
+
         live = self._live.get("write_timeout_s")
         try:
-            return max(5.0, min(600.0, float(live))) if live else self._write_timeout_knob
+            asked = max(5.0, min(600.0, float(live))) if live else self._write_timeout_knob
         except (TypeError, ValueError):
-            return self._write_timeout_knob
+            asked = self._write_timeout_knob
+        budget = clamp_write_budget(asked)
+        if budget < asked and not self._write_ceiling_logged:
+            self._write_ceiling_logged = True
+            logger.warning(
+                "aggregation pipeline on %s: write budget cut from %.0fs to "
+                "%.1fs — the cluster votes a master out after %.0fs of "
+                "silence, so a write may not outlive that window. A batch "
+                "that needs longer is halved by the ladder instead of "
+                "costing this shard its master.",
+                self.p._graph_name, asked, budget,
+                cluster_write_ceiling_s() / _CLUSTER_WRITE_SHARE_FOR_LOG,
+            )
+        return budget
 
     def _live_pacing_ratio(self) -> float:
         """The pacing ratio in force: a value set on the running job (PATCH
@@ -2935,6 +2975,10 @@ class AggregationPipeline:
                    if self._attribute_names is not None else {}),
                 **({"index_wait_s": round(self._index_wait_s, 1)}
                    if self._index_wait_s > 0 else {}),
+                # The budget each write actually ran under. Worth storing
+                # because the knob an operator set and the budget the
+                # cluster allows are different numbers.
+                "write_timeout_s": round(self._write_timeout(), 1),
                 # What the run ran with and where each value came from.
                 "effective_tuning": {**self._effective, "sources": dict(self._effective_sources)},
                 # Conformance advisories (identity / casing gaps) — present

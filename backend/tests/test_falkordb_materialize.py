@@ -16,6 +16,7 @@ so we can assert the high-value correctness properties:
 """
 import asyncio
 import contextlib
+import inspect
 import re
 import time
 import types
@@ -3645,3 +3646,90 @@ def test_is_attribute_limit_error_walks_the_cause_chain():
     outer.__cause__ = inner
     assert mat._is_attribute_limit_error(outer)
     assert not mat._is_attribute_limit_error(RuntimeError("Query timed out"))
+
+
+# ---------------------------------------------------------------------------
+# Write budgets are derived from the cluster's failure detector
+#
+# Live (2026-09): rebuild writes ran under a 60s default budget, raisable to
+# 600s, against a cluster that votes a master out after 15s of silence. The
+# budget was sized against the SERVER's TIMEOUT_MAX — the wrong ceiling in
+# cluster mode. A long batch raced the election and lost: the replica was
+# promoted, the master demoted mid-write, and every blocked client came back
+# with "-UNBLOCKED force unblock". No pod had restarted.
+# ---------------------------------------------------------------------------
+
+
+def _with_node_timeout(monkeypatch, seconds):
+    monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(seconds))
+
+
+def test_no_cluster_window_means_no_clamp(monkeypatch):
+    """A standalone or sentinel deployment has no failure detector to lose a
+    race against, and an unset env is not a licence to invent one: the
+    configured budget stands exactly as it did."""
+    _with_node_timeout(monkeypatch, 0)
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
+    assert mat_provider.clamp_write_budget(7.5) == 7.5
+
+
+def test_the_window_bounds_every_write_budget(monkeypatch):
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert 0 < ceiling < 15, "a write must END inside the window, not at it"
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
+    assert mat_provider.clamp_write_budget(60.0) == ceiling
+    # A budget already under the ceiling is untouched.
+    assert mat_provider.clamp_write_budget(1.0) == 1.0
+
+
+def test_a_tiny_window_still_leaves_a_usable_budget(monkeypatch):
+    """The floor is not the pipeline's 5s minimum: on a 5s window a 5s write
+    is exactly the failure. The ceiling wins over the floor."""
+    _with_node_timeout(monkeypatch, 5)
+    assert mat_provider.cluster_write_ceiling_s() == 2.0
+    assert mat_provider.clamp_write_budget(60.0) == 2.0
+
+
+def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
+    """The knob protects other readers of the shard, not just this run: a
+    write that outlives the window costs the shard its master. So the live
+    override is clamped, not honoured."""
+    _with_node_timeout(monkeypatch, 15)
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    pipe._live["write_timeout_s"] = 600.0
+    assert pipe._write_timeout() == mat_provider.cluster_write_ceiling_s()
+    # Said once per run, not once per batch.
+    assert pipe._write_ceiling_logged
+    pipe._write_timeout()
+    assert pipe._write_ceiling_logged
+
+
+def test_the_budget_each_write_ran_under_is_on_the_record(monkeypatch):
+    _with_node_timeout(monkeypatch, 15)
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert result["run_stats"]["write_timeout_s"] == round(
+        mat_provider.cluster_write_ceiling_s(), 1,
+    )
+
+
+def test_every_provider_write_is_bounded_at_the_boundary(monkeypatch):
+    """Not each caller's job. A caller that passes its own generous timeout
+    — the bulk loader, a script, a future writer — is clamped too."""
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert mat_provider.clamp_write_budget(170.0) == ceiling
+    src = inspect.getsource(mat_provider.FalkorDBProvider._query)
+    assert "clamp_write_budget" in src
+    src = inspect.getsource(mat_provider.FalkorDBProvider._proj_query)
+    assert "clamp_write_budget" in src

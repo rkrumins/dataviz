@@ -1388,6 +1388,53 @@ account rather than trusted: `cube_estimate_upper` (what was counted),
 `cell_ratio_observed` (what actually happened). If the first and last diverge,
 the ratio is drifting and the graph's shape has changed.
 
+## Write budgets are derived from the cluster's failure detector
+
+A write budget sized against the server's own query limit is sized against the
+wrong ceiling in a cluster. `TIMEOUT_MAX` says how long FalkorDB will let a
+query run. `cluster-node-timeout` says how long the other masters will wait for
+this one to answer before voting it out. The second is smaller, and it is the
+one that decides whether a rebuild survives.
+
+The pipeline used to allow a write up to 600 s, on the reasoning that the
+server clamps every query at `TIMEOUT_MAX` anyway. It does, and that reasoning
+is correct for a standalone instance. In cluster mode a write allowed to run
+that long races the election and loses: the replica is promoted, this master is
+demoted part-way through the batch, and every blocked client comes back with
+`-UNBLOCKED force unblock from blocking operation, instance state changed
+(master -> replica?)`. Nothing restarted. The topology moved under the run.
+
+So the budget is now DERIVED. `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` is the
+deployment's own `cluster-node-timeout`, and `cluster_write_ceiling_s()` is a
+share of it, leaving the rest of the window for the rollback, the reply and the
+cluster pings that keep this node a master. `clamp_write_budget` applies it at
+the provider boundary, so every write is bounded no matter who set the timeout:
+the pipeline's batches, the bulk loader's, a `writeTimeoutS` an operator raised
+on a running job. An operator cannot raise past it, because what the clamp
+protects is not this run. A write that outlives the window costs the shard its
+master, and with it every other reader of that shard.
+
+The ordering that must hold, smallest first:
+
+| Budget | Where | Shipped |
+|---|---|---|
+| Write batch target | `writeBatchTargetS` | ~1 s |
+| Per-write budget | derived ceiling | a share of the node timeout |
+| Cluster failure detector | `--cluster-node-timeout` | 15 s |
+| Server query limit | `TIMEOUT_MAX` | 120 s |
+
+A batch that needs longer than the derived ceiling is aborted by the server and
+rolled back, the pressure ladder halves it, and the halves are re-issued. That
+is an ordinary in-run retry. Before this, the same batch was a cluster failover.
+
+`run_stats.write_timeout_s` records the budget the run's writes actually ran
+under, which is not always the one that was configured. When the clamp binds,
+the run says so once with both numbers.
+
+Leaving `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` unset is the honest answer for a
+standalone or sentinel deployment: there is no detector to lose a race against,
+so nothing is clamped. On a cluster, setting it is not optional.
+
 ## The attribute-name ceiling, and the index gate in front of Reconcile
 
 FalkorDB numbers property names with a 16-bit id per graph. Two values are

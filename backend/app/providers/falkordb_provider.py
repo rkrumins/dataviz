@@ -572,6 +572,45 @@ _CLUSTER_NODE_TIMEOUT_S = (
 #: anything, so the retry is spent before there is anything to answer it.
 _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 
+#: What share of the cluster's failure-detector window one write may spend.
+#:
+#: A write budget sized against the SERVER's ``TIMEOUT_MAX`` is sized against
+#: the wrong ceiling in cluster mode. The server's limit says how long it
+#: will let a query run; the cluster's ``cluster-node-timeout`` says how long
+#: the OTHER masters will wait for this one to answer before voting it out.
+#: A write allowed to run as long as that window races the election and loses
+#: about as often as it wins: the replica is promoted, this master is demoted
+#: mid-write, and every blocked client comes back with "-UNBLOCKED force
+#: unblock from blocking operation, instance state changed". No pod
+#: restarted; the topology moved under the run.
+#:
+#: So a write must END — abort, roll back, and let the node answer the
+#: cluster bus again — with the window still open. Two fifths leaves the
+#: rest of it for the rollback, the reply, and the pings that keep this node
+#: a master. The point is not the exact fraction; it is that the budget is
+#: DERIVED from the failure detector instead of set beside it.
+_CLUSTER_WRITE_SHARE = 0.4
+
+
+def cluster_write_ceiling_s() -> Optional[float]:
+    """The longest one write may be allowed to run on THIS deployment, or
+    ``None`` when the cluster's failure-detector window is unknown.
+
+    ``None`` is the honest answer for a standalone or sentinel deployment
+    and for a cluster whose ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` nobody set:
+    there is no detector to lose a race against, so the configured budget
+    stands unchanged. Set the env to the store's own ``cluster-node-timeout``
+    and every write budget in the pipeline is clamped beneath it."""
+    if _CLUSTER_NODE_TIMEOUT_S <= 0:
+        return None
+    return max(2.0, _CLUSTER_NODE_TIMEOUT_S * _CLUSTER_WRITE_SHARE)
+
+
+def clamp_write_budget(seconds: float) -> float:
+    """``seconds``, never longer than the cluster lets a write run."""
+    ceiling = cluster_write_ceiling_s()
+    return min(seconds, ceiling) if ceiling is not None else seconds
+
 #: What a client meeting ``-NOREPLICAS`` is told to wait.
 #:
 #: A master configured with ``min-replicas-to-write`` refuses EVERY write
@@ -4120,7 +4159,11 @@ class FalkorDBProvider(GraphDataProvider):
     async def _query(self, cypher: str, params: dict = None, *, timeout: float = None,
                      op: Optional[str] = None):
         """Timeout-guarded write query on the source graph."""
-        t = timeout if timeout is not None else self._WRITE_TIMEOUT
+        # Clamped at the boundary, not by each caller: EVERY write through
+        # this provider — the pipeline's batches, the bulk loader's, an
+        # operator's raised knob — is bounded by what the cluster lets a
+        # master go silent for. See ``cluster_write_ceiling_s``.
+        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             return await asyncio.wait_for(
@@ -4226,7 +4269,8 @@ class FalkorDBProvider(GraphDataProvider):
         # treats this as park-and-resume (not retry).
         self._check_quiesce_gate()
 
-        t = timeout if timeout is not None else self._WRITE_TIMEOUT
+        # Bounded by the cluster's failure detector, as in ``_query``.
+        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             t_start = time.monotonic()
