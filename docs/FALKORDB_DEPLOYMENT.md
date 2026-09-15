@@ -554,17 +554,20 @@ How the deployed `FALKORDB_ARGS` values are derived:
   `docs/TOP_LEVEL_NODES_PERFORMANCE.md` for the incident this alignment fixes.
 - **`FALKORDB_CLUSTER_NODE_TIMEOUT_MS`** must equal the shards'
   `--cluster-node-timeout` (15000 in this overlay). It is not only what a client
-  is told to wait during a failover: every WRITE budget in the aggregation
-  pipeline is derived from it. `TIMEOUT_MAX` bounds how long the server will let
+  is told to wait during a failover: every QUERY budget in the aggregation
+  pipeline, read and write alike, is derived from it. `TIMEOUT_MAX` bounds how long the server will let
   a query run; `cluster-node-timeout` bounds how long the other masters will wait
   for this one before voting it out, and that is the smaller, binding number. A
   write allowed to approach it races the election and loses — the replica is
   promoted, this master is demoted mid-batch, and blocked clients return
   `-UNBLOCKED force unblock from blocking operation, instance state changed`
-  with no pod having restarted. `clamp_write_budget` holds every write beneath a
-  share of the window at the provider boundary, so a batch that needs longer is
-  halved by the pressure ladder instead of costing the shard its master. An
-  operator cannot raise a job's `writeTimeoutS` past it. Leave the env UNSET on a
+  with no pod having restarted. `clamp_query_budget` holds every query beneath a
+  share of the window at the provider's read and write boundaries, so a batch
+  that needs longer is halved by the pressure ladder and a scan that needs
+  longer is narrowed by the scan ladder, instead of either costing the shard its
+  master. An operator cannot raise a job's `writeTimeoutS` or `scanTimeoutS`
+  past it. Reads are included because `-UNBLOCKED` reaches whichever client is
+  blocked when the role changes, not only the one that caused it. Leave the env UNSET on a
   standalone or sentinel deployment: there is no detector to lose a race against
   and nothing is clamped. On a cluster, setting it is not optional.
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error

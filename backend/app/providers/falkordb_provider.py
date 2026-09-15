@@ -572,43 +572,52 @@ _CLUSTER_NODE_TIMEOUT_S = (
 #: anything, so the retry is spent before there is anything to answer it.
 _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 
-#: What share of the cluster's failure-detector window one write may spend.
+#: What share of the cluster's failure-detector window ONE query may spend.
 #:
-#: A write budget sized against the SERVER's ``TIMEOUT_MAX`` is sized against
+#: A query budget sized against the SERVER's ``TIMEOUT_MAX`` is sized against
 #: the wrong ceiling in cluster mode. The server's limit says how long it
 #: will let a query run; the cluster's ``cluster-node-timeout`` says how long
 #: the OTHER masters will wait for this one to answer before voting it out.
-#: A write allowed to run as long as that window races the election and loses
+#: A query allowed to run as long as that window races the election and loses
 #: about as often as it wins: the replica is promoted, this master is demoted
-#: mid-write, and every blocked client comes back with "-UNBLOCKED force
+#: mid-query, and every blocked client comes back with "-UNBLOCKED force
 #: unblock from blocking operation, instance state changed". No pod
 #: restarted; the topology moved under the run.
 #:
-#: So a write must END — abort, roll back, and let the node answer the
+#: READS are clamped by the same number, for a reason that is NOT the write
+#: lock they do not take. ``-UNBLOCKED`` reaches whichever client is blocked
+#: when the role changes, so every second a long read is in flight is a
+#: second in which a demotion caused by anything else surfaces as this run's
+#: failure. A long read also holds a module thread on a node whose main
+#: thread has to keep answering the cluster bus. The ladders already narrow
+#: on a timeout, so the clamp engages behaviour the pipeline has rather than
+#: introducing a new failure.
+#:
+#: So a query must END — abort, roll back, and let the node answer the
 #: cluster bus again — with the window still open. Two fifths leaves the
 #: rest of it for the rollback, the reply, and the pings that keep this node
 #: a master. The point is not the exact fraction; it is that the budget is
 #: DERIVED from the failure detector instead of set beside it.
-_CLUSTER_WRITE_SHARE = 0.4
+_CLUSTER_QUERY_SHARE = 0.4
 
 
-def cluster_write_ceiling_s() -> Optional[float]:
-    """The longest one write may be allowed to run on THIS deployment, or
+def cluster_query_ceiling_s() -> Optional[float]:
+    """The longest one query may be allowed to run on THIS deployment, or
     ``None`` when the cluster's failure-detector window is unknown.
 
     ``None`` is the honest answer for a standalone or sentinel deployment
     and for a cluster whose ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` nobody set:
     there is no detector to lose a race against, so the configured budget
     stands unchanged. Set the env to the store's own ``cluster-node-timeout``
-    and every write budget in the pipeline is clamped beneath it."""
+    and every query budget in the pipeline is clamped beneath it."""
     if _CLUSTER_NODE_TIMEOUT_S <= 0:
         return None
-    return max(2.0, _CLUSTER_NODE_TIMEOUT_S * _CLUSTER_WRITE_SHARE)
+    return max(2.0, _CLUSTER_NODE_TIMEOUT_S * _CLUSTER_QUERY_SHARE)
 
 
-def clamp_write_budget(seconds: float) -> float:
-    """``seconds``, never longer than the cluster lets a write run."""
-    ceiling = cluster_write_ceiling_s()
+def clamp_query_budget(seconds: float) -> float:
+    """``seconds``, never longer than the cluster lets a query run."""
+    ceiling = cluster_query_ceiling_s()
     return min(seconds, ceiling) if ceiling is not None else seconds
 
 #: What a client meeting ``-NOREPLICAS`` is told to wait.
@@ -4028,6 +4037,11 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
                           op: Optional[str], *, kind: str):
+        # The single read boundary, clamped like the write one: a read takes
+        # no write lock, but it holds a module thread and leaves a client
+        # blocked, and a client blocked across a role change is exactly what
+        # reports "-UNBLOCKED". See ``cluster_query_ceiling_s``.
+        t = clamp_query_budget(t)
         """One read: on a replica when the router allows it, otherwise on the
         master — and on the master once more if the replica let us down."""
         replica = None
@@ -4163,7 +4177,7 @@ class FalkorDBProvider(GraphDataProvider):
         # this provider — the pipeline's batches, the bulk loader's, an
         # operator's raised knob — is bounded by what the cluster lets a
         # master go silent for. See ``cluster_write_ceiling_s``.
-        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
+        t = clamp_query_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             return await asyncio.wait_for(
@@ -4270,7 +4284,7 @@ class FalkorDBProvider(GraphDataProvider):
         self._check_quiesce_gate()
 
         # Bounded by the cluster's failure detector, as in ``_query``.
-        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
+        t = clamp_query_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             t_start = time.monotonic()

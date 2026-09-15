@@ -1388,7 +1388,7 @@ account rather than trusted: `cube_estimate_upper` (what was counted),
 `cell_ratio_observed` (what actually happened). If the first and last diverge,
 the ratio is drifting and the graph's shape has changed.
 
-## Write budgets are derived from the cluster's failure detector
+## Query budgets are derived from the cluster's failure detector
 
 A write budget sized against the server's own query limit is sized against the
 wrong ceiling in a cluster. `TIMEOUT_MAX` says how long FalkorDB will let a
@@ -1405,27 +1405,39 @@ demoted part-way through the batch, and every blocked client comes back with
 (master -> replica?)`. Nothing restarted. The topology moved under the run.
 
 So the budget is now DERIVED. `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` is the
-deployment's own `cluster-node-timeout`, and `cluster_write_ceiling_s()` is a
+deployment's own `cluster-node-timeout`, and `cluster_query_ceiling_s()` is a
 share of it, leaving the rest of the window for the rollback, the reply and the
-cluster pings that keep this node a master. `clamp_write_budget` applies it at
-the provider boundary, so every write is bounded no matter who set the timeout:
-the pipeline's batches, the bulk loader's, a `writeTimeoutS` an operator raised
+cluster pings that keep this node a master. `clamp_query_budget` applies it at
+the provider's two boundaries, the write one and the read one, so every query is
+bounded no matter who set the timeout: the pipeline's batches, its range scans,
+the bulk loader's writes, a `writeTimeoutS` or `scanTimeoutS` an operator raised
 on a running job. An operator cannot raise past it, because what the clamp
-protects is not this run. A write that outlives the window costs the shard its
+protects is not this run. A query that outlives the window costs the shard its
 master, and with it every other reader of that shard.
+
+Reads are clamped by the same number, and not because of the write lock they do
+not take. `-UNBLOCKED` reaches whichever client is blocked when the role
+changes, so every second a long read is in flight is a second in which a
+demotion caused by anything else surfaces as this run's failure. This matters
+most in the phase the UI calls **Compute**, which is dominated by EXTRACT's
+range scans and by the accumulator's overflow flushes: `_extract_and_compute`
+delegates to `_rollup_base`, which flushes to the graph through the paced write
+path whenever the pair cap or the memory guard trips. Compute both reads and
+writes, which is why clamping only writes would have left it exposed.
 
 The ordering that must hold, smallest first:
 
 | Budget | Where | Shipped |
 |---|---|---|
 | Write batch target | `writeBatchTargetS` | ~1 s |
-| Per-write budget | derived ceiling | a share of the node timeout |
+| Per-query budget, read and write | derived ceiling | a share of the node timeout |
 | Cluster failure detector | `--cluster-node-timeout` | 15 s |
 | Server query limit | `TIMEOUT_MAX` | 120 s |
 
 A batch that needs longer than the derived ceiling is aborted by the server and
-rolled back, the pressure ladder halves it, and the halves are re-issued. That
-is an ordinary in-run retry. Before this, the same batch was a cluster failover.
+rolled back, the pressure ladder halves it, and the halves are re-issued. A scan
+that needs longer is narrowed by the scan ladder the same way. Both are ordinary
+in-run retries. Before this, either was a cluster failover.
 
 `run_stats.write_timeout_s` records the budget the run's writes actually ran
 under, which is not always the one that was configured. When the clamp binds,

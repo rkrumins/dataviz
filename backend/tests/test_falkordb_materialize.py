@@ -3669,27 +3669,27 @@ def test_no_cluster_window_means_no_clamp(monkeypatch):
     race against, and an unset env is not a licence to invent one: the
     configured budget stands exactly as it did."""
     _with_node_timeout(monkeypatch, 0)
-    assert mat_provider.cluster_write_ceiling_s() is None
-    assert mat_provider.clamp_write_budget(600.0) == 600.0
-    assert mat_provider.clamp_write_budget(7.5) == 7.5
+    assert mat_provider.cluster_query_ceiling_s() is None
+    assert mat_provider.clamp_query_budget(600.0) == 600.0
+    assert mat_provider.clamp_query_budget(7.5) == 7.5
 
 
 def test_the_window_bounds_every_write_budget(monkeypatch):
     _with_node_timeout(monkeypatch, 15)
-    ceiling = mat_provider.cluster_write_ceiling_s()
+    ceiling = mat_provider.cluster_query_ceiling_s()
     assert 0 < ceiling < 15, "a write must END inside the window, not at it"
-    assert mat_provider.clamp_write_budget(600.0) == ceiling
-    assert mat_provider.clamp_write_budget(60.0) == ceiling
+    assert mat_provider.clamp_query_budget(600.0) == ceiling
+    assert mat_provider.clamp_query_budget(60.0) == ceiling
     # A budget already under the ceiling is untouched.
-    assert mat_provider.clamp_write_budget(1.0) == 1.0
+    assert mat_provider.clamp_query_budget(1.0) == 1.0
 
 
 def test_a_tiny_window_still_leaves_a_usable_budget(monkeypatch):
     """The floor is not the pipeline's 5s minimum: on a 5s window a 5s write
     is exactly the failure. The ceiling wins over the floor."""
     _with_node_timeout(monkeypatch, 5)
-    assert mat_provider.cluster_write_ceiling_s() == 2.0
-    assert mat_provider.clamp_write_budget(60.0) == 2.0
+    assert mat_provider.cluster_query_ceiling_s() == 2.0
+    assert mat_provider.clamp_query_budget(60.0) == 2.0
 
 
 def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
@@ -3705,7 +3705,7 @@ def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
         progress_callback=None, intra_batch_callback=None, should_cancel=None,
     )
     pipe._live["write_timeout_s"] = 600.0
-    assert pipe._write_timeout() == mat_provider.cluster_write_ceiling_s()
+    assert pipe._write_timeout() == mat_provider.cluster_query_ceiling_s()
     # Said once per run, not once per batch.
     assert pipe._write_ceiling_logged
     pipe._write_timeout()
@@ -3719,7 +3719,7 @@ def test_the_budget_each_write_ran_under_is_on_the_record(monkeypatch):
     result = _run(_materialize(p))
     assert result["errors"] == 0
     assert result["run_stats"]["write_timeout_s"] == round(
-        mat_provider.cluster_write_ceiling_s(), 1,
+        mat_provider.cluster_query_ceiling_s(), 1,
     )
 
 
@@ -3727,9 +3727,51 @@ def test_every_provider_write_is_bounded_at_the_boundary(monkeypatch):
     """Not each caller's job. A caller that passes its own generous timeout
     — the bulk loader, a script, a future writer — is clamped too."""
     _with_node_timeout(monkeypatch, 15)
-    ceiling = mat_provider.cluster_write_ceiling_s()
-    assert mat_provider.clamp_write_budget(170.0) == ceiling
+    ceiling = mat_provider.cluster_query_ceiling_s()
+    assert mat_provider.clamp_query_budget(170.0) == ceiling
     src = inspect.getsource(mat_provider.FalkorDBProvider._query)
-    assert "clamp_write_budget" in src
+    assert "clamp_query_budget" in src
     src = inspect.getsource(mat_provider.FalkorDBProvider._proj_query)
-    assert "clamp_write_budget" in src
+    assert "clamp_query_budget" in src
+
+
+def test_reads_are_bounded_by_the_same_window(monkeypatch):
+    """The phase the UI calls Compute is mostly EXTRACT's range scans plus
+    the accumulator's overflow flushes. Clamping only writes would leave the
+    scans able to outlive the cluster, and a client blocked across a role
+    change is exactly what reports -UNBLOCKED."""
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_query_ceiling_s()
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    pipe._live["scan_timeout_s"] = 600.0
+    assert pipe._scan_timeout() == ceiling
+    # Both provider read paths funnel through one boundary, and it clamps.
+    assert "clamp_query_budget" in inspect.getsource(
+        mat_provider.FalkorDBProvider._read_query,
+    )
+
+
+def test_the_overflow_flush_is_the_write_inside_compute(monkeypatch):
+    """The link between a write budget and a Compute-stage failure: the
+    accumulator flushes to the graph from inside the extract/compute scan
+    loops, so those writes ran under the same unclamped budget."""
+    src = inspect.getsource(mat.AggregationPipeline._maybe_overflow_flush)
+    assert "_write_keys" in src, "the flush must still write through the paced path"
+    # The chain, pinned: Compute delegates to the roll-up, and the roll-up
+    # (and the canonical merge under it) flush. If any link breaks, the
+    # clamp stops reaching this phase and this test says so.
+    compute = inspect.getsource(mat.AggregationPipeline._extract_and_compute)
+    assert "_rollup_base" in compute
+    rollup = inspect.getsource(mat.AggregationPipeline._rollup_base)
+    assert "_maybe_overflow_flush()" in rollup, (
+        "compute writes via the overflow flush — if that stops being true, "
+        "the query clamp no longer reaches this phase"
+    )
+    merge = inspect.getsource(mat.AggregationPipeline._merge_canonical_pairs)
+    assert "_maybe_overflow_flush()" in merge
