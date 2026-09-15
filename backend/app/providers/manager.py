@@ -1652,6 +1652,19 @@ class ProviderManager:
                 "Ignoring data-source cacheConnection override (provider-level only)."
             )
             override.pop("cacheConnection", None)
+        # nativePropertyBudget decides how many of a graph's 65,534 property
+        # names user keys may claim. Every name it admits is permanent —
+        # attribute ids are never freed — so a budget set too low makes that
+        # graph's keys unsearchable for good, and one set too high lets a
+        # source fill the map and block the platform's own rollup names. That
+        # is a graph-store capacity decision, so it stays with provider
+        # config; a data source (a lower privilege, as above) may not set it.
+        if "nativePropertyBudget" in override:
+            logger.warning(
+                "Ignoring data-source nativePropertyBudget override "
+                "(provider-level only)."
+            )
+            override.pop("nativePropertyBudget", None)
         if "schemaMapping" in base and "schemaMapping" in override:
             merged_mapping = dict(base["schemaMapping"])
             merged_mapping.update(

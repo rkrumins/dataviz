@@ -1660,16 +1660,21 @@ async def reserve_platform_property_names(
 _NATIVE_PROPERTY_BUDGET_DEFAULT = 50_000
 
 
-def _native_property_budget() -> int:
-    """``FALKORDB_NATIVE_PROPERTY_BUDGET``, clamped to 100-60,000 — the
-    ceiling less the room the platform's own names and a margin need."""
+def _clamp_native_property_budget(raw: Any) -> int:
+    """``raw`` as a budget, clamped to 100-60,000 — the ceiling less the room
+    the platform's own names and a margin need. Anything unreadable falls
+    back to the shipped default rather than to an accidental floor."""
     try:
-        raw = int(os.getenv(
-            "FALKORDB_NATIVE_PROPERTY_BUDGET", str(_NATIVE_PROPERTY_BUDGET_DEFAULT),
-        ))
-    except ValueError:
-        raw = _NATIVE_PROPERTY_BUDGET_DEFAULT
-    return max(100, min(60_000, raw))
+        return max(100, min(60_000, int(raw)))
+    except (TypeError, ValueError):
+        return _NATIVE_PROPERTY_BUDGET_DEFAULT
+
+
+def _native_property_budget() -> int:
+    """The fleet-wide budget: ``FALKORDB_NATIVE_PROPERTY_BUDGET``, clamped."""
+    return _clamp_native_property_budget(
+        os.getenv("FALKORDB_NATIVE_PROPERTY_BUDGET", _NATIVE_PROPERTY_BUDGET_DEFAULT)
+    )
 
 
 def _is_native_value(v: Any) -> bool:
@@ -13841,6 +13846,32 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, registered,
         ))
 
+    def _native_property_budget(self) -> int:
+        """This graph's budget: the PROVIDER's ``nativePropertyBudget``, else
+        the fleet env.
+
+        Provider-level and not per data source, deliberately. Every name the
+        budget admits is permanent, so a budget set too low leaves that
+        graph's keys unsearchable for good — which makes it a graph-store
+        capacity decision, at the privilege level that owns the store. The
+        merge in ``ProviderManager._merge_extra_config`` drops a data
+        source's attempt to set it, the way it drops ``cacheConnection``."""
+        cached = getattr(self, "_native_budget_cached", None)
+        if cached is not None:
+            return cached
+        raw = (self._extra_config or {}).get("nativePropertyBudget")
+        if raw is None:
+            budget = _native_property_budget()
+        else:
+            budget = _clamp_native_property_budget(raw)
+            logger.info(
+                "FalkorDB %s: native property budget %d from provider config "
+                "(fleet default %d).",
+                self._graph_name, budget, _native_property_budget(),
+            )
+        self._native_budget_cached = budget
+        return budget
+
     def _native_key_reserve(self) -> Set[str]:
         """Names the read path reads natively BEFORE it merges the blob back
         (``_node_from_props``): the source's identity and name properties,
@@ -14010,7 +14041,7 @@ class FalkorDBProvider(GraphDataProvider):
             # are folded into it so the budget counts them.
             registered = await self._registered_property_names()
             await self._reserve_platform_property_names(registered)
-            budget = _native_property_budget()
+            budget = self._native_property_budget()
             native_keys, demoted = _admit_native_keys(
                 (node.properties for node in nodes),
                 registered=registered,
@@ -14190,7 +14221,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
             registered = await self._registered_property_names(fresh=False)
             await self._reserve_platform_property_names(registered)
-            budget = _native_property_budget()
+            budget = self._native_property_budget()
             native_keys, demoted = _admit_native_keys(
                 [node.properties],
                 registered=registered,

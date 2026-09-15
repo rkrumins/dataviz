@@ -356,6 +356,14 @@ distinct ms to 1 s; discovery tens of ms.
 - No engine change is coming: maps cannot be stored, and the cap is the same in the Rust
   engine.
 
+The budget is fleet-wide through `FALKORDB_NATIVE_PROPERTY_BUDGET` and can be
+raised for one graph store by putting `nativePropertyBudget` on the PROVIDER's
+config. It is deliberately not settable per data source: every name the budget
+admits is permanent, so a budget set too low leaves that graph's keys
+unsearchable for good, which makes it a graph-store capacity decision at the
+privilege level that owns the store. Both merge paths drop a data source's
+attempt to set it, exactly as they drop `cacheConnection`.
+
 Before phase 1 ships: leave the 241k-node graph as it is; do not reload it under today's
 writer and do not run the blob migration script on it. Prepare 8-13 GB of Postgres disk
 and 2-4 GB of cache per 1M-node source, `pg_trgm`, and `maintenance_work_mem` of at least

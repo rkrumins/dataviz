@@ -468,6 +468,7 @@ import asyncio
 import types
 
 from backend.app.providers.falkordb_provider import (
+    _NATIVE_PROPERTY_BUDGET_DEFAULT,
     AttributeNameLimitReached,
     FalkorDBProvider,
     _admit_native_keys,
@@ -944,3 +945,94 @@ class TestProjectorStakesItsOwnNames:
         client = self._Client()
         asyncio.run(self._projector()._apply(client, [], [], [], []))
         assert not any("_PropReserve" in c for c in client.calls)
+
+
+class TestProviderLevelBudgetOverride:
+    """A graph store whose sources carry unusually wide key sets can raise
+    its own budget. It sits on the PROVIDER row, not the data source: every
+    name the budget admits is permanent, so a budget set too low leaves that
+    graph's keys unsearchable for good, and that is a capacity decision at
+    the privilege level that owns the store."""
+
+    def _provider(self, extra):
+        p = FalkorDBProvider(host="x", graph_name="g", extra_config=extra)
+        return p
+
+    def test_the_provider_value_wins_over_the_fleet_env(self, monkeypatch):
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "8000")
+        p = self._provider({"nativePropertyBudget": 40_000})
+        assert p._native_property_budget() == 40_000
+
+    def test_no_override_falls_back_to_the_fleet_env(self, monkeypatch):
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "12345")
+        assert self._provider(None)._native_property_budget() == 12_345
+        assert self._provider({})._native_property_budget() == 12_345
+
+    def test_the_override_is_clamped_at_both_ends(self):
+        assert self._provider({"nativePropertyBudget": 1})._native_property_budget() == 100
+        assert self._provider(
+            {"nativePropertyBudget": 999_999}
+        )._native_property_budget() == 60_000
+
+    def test_an_unreadable_override_falls_back_rather_than_to_the_floor(self):
+        """A typo must not silently pin a graph at 100 names and make almost
+        every key on it permanently unsearchable."""
+        for bad in ("lots", None, {}, [1]):
+            p = self._provider({"nativePropertyBudget": bad})
+            expected = (
+                _native_property_budget() if bad is None
+                else _NATIVE_PROPERTY_BUDGET_DEFAULT
+            )
+            assert p._native_property_budget() == expected, bad
+
+    def test_it_is_resolved_once_per_provider(self, monkeypatch):
+        p = self._provider({"nativePropertyBudget": 20_000})
+        assert p._native_property_budget() == 20_000
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+        assert p._native_property_budget() == 20_000
+
+    def test_the_writers_spend_the_provider_budget(self, monkeypatch):
+        """Not just resolved — actually applied to what gets demoted."""
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "60000")
+        p, calls = _stubbed_provider(set())
+        p._extra_config = {"nativePropertyBudget": 100}
+        p._native_budget_cached = None
+        room = 100 - len(p._native_key_reserve())
+        nodes = [_node(f"urn:{i}", {f"k{i:03d}": i}) for i in range(room + 25)]
+        asyncio.run(p.save_custom_graph(nodes, []))
+        items = [it for _, params in calls["batches"] for it in params["batch"]]
+        native_seen = set().union(*(it["nativeProps"].keys() for it in items))
+        assert len(native_seen) <= room, native_seen
+
+
+class TestBudgetOverrideIsProviderLevelOnly:
+    """A data source is a lower privilege than provider config. It may not
+    set the budget, for the same reason it may not set cacheConnection."""
+
+    def _merged(self, merge_fn):
+        return merge_fn(
+            {"nativePropertyBudget": 40_000},
+            {"nativePropertyBudget": 100, "schemaMapping": {"a": 1}},
+        )
+
+    def test_the_manager_drops_a_data_source_attempt(self):
+        from backend.app.providers.manager import ProviderManager
+
+        merged = self._merged(ProviderManager._merge_extra_config)
+        assert merged["nativePropertyBudget"] == 40_000
+        assert merged["schemaMapping"] == {"a": 1}, "unrelated keys still merge"
+
+    def test_the_registry_drops_it_too(self):
+        from backend.app.registry.provider_registry import ProviderRegistry
+
+        merged = self._merged(ProviderRegistry._merge_extra_config)
+        assert merged["nativePropertyBudget"] == 40_000
+
+    def test_a_data_source_cannot_introduce_one(self):
+        from backend.app.providers.manager import ProviderManager
+
+        merged = ProviderManager._merge_extra_config(
+            {"falkordbConnection": {"mode": "cluster"}},
+            {"nativePropertyBudget": 100},
+        )
+        assert "nativePropertyBudget" not in merged
