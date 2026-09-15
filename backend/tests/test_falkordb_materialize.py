@@ -3775,3 +3775,65 @@ def test_the_overflow_flush_is_the_write_inside_compute(monkeypatch):
     )
     merge = inspect.getsource(mat.AggregationPipeline._merge_canonical_pairs)
     assert "_maybe_overflow_flush()" in merge
+
+
+def _reset_window(monkeypatch, *, env_s=0.0, observed=None, mode=""):
+    monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(env_s))
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", observed)
+    monkeypatch.setattr(mat_provider, "_ASSUMED_WINDOW_WARNED", False)
+    monkeypatch.setenv("FALKORDB_MODE", mode)
+
+
+def test_a_cluster_with_no_configured_window_is_still_clamped(monkeypatch):
+    """The production case that made this necessary: nine nodes running a
+    15s failure detector, and a ConfigMap that predated the variable. The
+    old rule — unset means no clamp — ran every query unbounded on exactly
+    the deployment that needed the clamp most."""
+    _reset_window(monkeypatch, mode="cluster")
+    ceiling = mat_provider.cluster_query_ceiling_s()
+    assert ceiling is not None and 0 < ceiling < 15
+    assert mat_provider.clamp_query_budget(600.0) == ceiling
+
+
+def test_a_standalone_deployment_is_still_unclamped(monkeypatch):
+    """Not clustered means there is genuinely no detector to outlive, and
+    assuming one there would shorten budgets for no reason."""
+    _reset_window(monkeypatch, mode="standalone")
+    assert mat_provider.cluster_query_ceiling_s() is None
+    assert mat_provider.clamp_query_budget(600.0) == 600.0
+    _reset_window(monkeypatch, mode="")
+    assert mat_provider.cluster_query_ceiling_s() is None
+
+
+def test_what_the_node_reports_beats_the_env(monkeypatch):
+    """An env mirror can be stale or wrong; the node cannot be wrong about
+    its own configuration."""
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    mat_provider.note_cluster_node_timeout(6.0)
+    assert mat_provider.cluster_query_ceiling_s() == 6.0 * 0.4
+
+
+def test_the_smallest_reported_window_wins(monkeypatch):
+    """A process may talk to more than one cluster. The clamp has to hold
+    for the tightest of them, so the minimum is kept, not the latest."""
+    _reset_window(monkeypatch, mode="cluster")
+    mat_provider.note_cluster_node_timeout(20.0)
+    mat_provider.note_cluster_node_timeout(9.0)
+    mat_provider.note_cluster_node_timeout(30.0)
+    assert mat_provider._OBSERVED_NODE_TIMEOUT_S == 9.0
+
+
+def test_a_nonsense_report_is_ignored(monkeypatch):
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    mat_provider.note_cluster_node_timeout(0.0)
+    mat_provider.note_cluster_node_timeout(None)
+    assert mat_provider.cluster_query_ceiling_s() == 15.0 * 0.4
+
+
+def test_the_provider_asks_the_node_for_its_window():
+    """The probe lives beside the existing server-limit read, off the
+    request path. If it is removed, the clamp goes back to depending on a
+    ConfigMap somebody has to remember."""
+    src = inspect.getsource(mat_provider.FalkorDBProvider._seed_server_limits)
+    assert "cluster-node-timeout" in src
+    assert "note_cluster_node_timeout" in src

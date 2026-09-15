@@ -601,18 +601,78 @@ _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 _CLUSTER_QUERY_SHARE = 0.4
 
 
+#: Redis ships ``cluster-node-timeout`` at 15000 ms and this deployment runs
+#: it there. Assumed — with a warning — when we know we are clustered but
+#: neither the node nor the env has told us the real number, because the
+#: alternative was silence: an unset env used to mean NO clamp at all, so a
+#: cluster whose ConfigMap predated the variable ran every query unbounded
+#: and found out during a rebuild. A safety limit that disappears when a
+#: variable is missing is not a safety limit.
+_ASSUMED_CLUSTER_NODE_TIMEOUT_S = 15.0
+
+#: The smallest ``cluster-node-timeout`` any connected node has REPORTED,
+#: read off its own ``CONFIG GET`` (see ``note_cluster_node_timeout``). The
+#: node is the authority: an env mirror can be stale, wrong, or absent, and
+#: this one cannot. Smallest, not last, because the clamp has to hold for
+#: every shard a process talks to.
+_OBSERVED_NODE_TIMEOUT_S: Optional[float] = None
+
+#: Latched so the "assuming a window" warning is said once per process
+#: rather than once per query.
+_ASSUMED_WINDOW_WARNED = False
+
+
+def note_cluster_node_timeout(seconds: Optional[float]) -> None:
+    """Record a ``cluster-node-timeout`` a node reported about itself."""
+    global _OBSERVED_NODE_TIMEOUT_S
+    if seconds is None or seconds <= 0:
+        return
+    if _OBSERVED_NODE_TIMEOUT_S is None or seconds < _OBSERVED_NODE_TIMEOUT_S:
+        _OBSERVED_NODE_TIMEOUT_S = float(seconds)
+        logger.info(
+            "FalkorDB cluster-node-timeout observed as %.0fs — query budgets "
+            "are clamped to %.1fs.", float(seconds),
+            float(seconds) * _CLUSTER_QUERY_SHARE,
+        )
+
+
+def _in_cluster_mode() -> bool:
+    """Whether this process is configured to talk to a Redis Cluster.
+
+    The fleet-wide env, not a per-provider row: this decides whether an
+    UNKNOWN window is treated as "no detector exists" or as "we have not
+    been told yet", and the safe reading of that ambiguity is fleet-level."""
+    return (os.getenv("FALKORDB_MODE") or "").strip().lower() == "cluster"
+
+
 def cluster_query_ceiling_s() -> Optional[float]:
     """The longest one query may be allowed to run on THIS deployment, or
-    ``None`` when the cluster's failure-detector window is unknown.
+    ``None`` when there is no failure detector to lose a race against.
 
-    ``None`` is the honest answer for a standalone or sentinel deployment
-    and for a cluster whose ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` nobody set:
-    there is no detector to lose a race against, so the configured budget
-    stands unchanged. Set the env to the store's own ``cluster-node-timeout``
-    and every query budget in the pipeline is clamped beneath it."""
-    if _CLUSTER_NODE_TIMEOUT_S <= 0:
-        return None
-    return max(2.0, _CLUSTER_NODE_TIMEOUT_S * _CLUSTER_QUERY_SHARE)
+    Three sources, most authoritative first: what a node REPORTED about
+    itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and — when
+    we know we are clustered but neither has answered — an assumed window,
+    announced once. ``None`` is returned only for a standalone or sentinel
+    deployment, where the budget genuinely has no cluster to outlive."""
+    global _ASSUMED_WINDOW_WARNED
+    window = _OBSERVED_NODE_TIMEOUT_S
+    if window is None and _CLUSTER_NODE_TIMEOUT_S > 0:
+        window = _CLUSTER_NODE_TIMEOUT_S
+    if window is None:
+        if not _in_cluster_mode():
+            return None
+        window = _ASSUMED_CLUSTER_NODE_TIMEOUT_S
+        if not _ASSUMED_WINDOW_WARNED:
+            _ASSUMED_WINDOW_WARNED = True
+            logger.warning(
+                "FALKORDB_MODE=cluster but no cluster-node-timeout is known "
+                "(FALKORDB_CLUSTER_NODE_TIMEOUT_MS unset and no node has "
+                "answered CONFIG GET yet) — assuming %.0fs and clamping every "
+                "query budget to %.1fs. Set the env to the shards' own "
+                "--cluster-node-timeout so this is measured, not assumed.",
+                window, window * _CLUSTER_QUERY_SHARE,
+            )
+    return max(2.0, window * _CLUSTER_QUERY_SHARE)
 
 
 def clamp_query_budget(seconds: float) -> float:
@@ -2874,6 +2934,25 @@ class FalkorDBProvider(GraphDataProvider):
                     thread_count=reading.thread_count,
                     timeout_default_ms=reading.timeout_default_ms,
                 )
+                # The node's own failure-detector window, from the node.
+                # Every query budget is derived from this, so reading it
+                # here is what stops the clamp depending on a ConfigMap
+                # somebody has to remember. Best-effort, like the rest.
+                try:
+                    from backend.app.providers.shard_capacity import _config_get
+
+                    pairs = await _config_get(self._db, None, "cluster-node-timeout")
+                    raw = pairs.get("cluster-node-timeout")
+                    if raw is not None:
+                        note_cluster_node_timeout(float(raw) / 1000.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:              # noqa: BLE001 — advisory
+                    logger.debug(
+                        "cluster-node-timeout not readable from %s (%s) — the "
+                        "env mirror or the assumed window stays in force.",
+                        self._endpoint_label(), exc,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

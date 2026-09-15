@@ -567,9 +567,13 @@ How the deployed `FALKORDB_ARGS` values are derived:
   longer is narrowed by the scan ladder, instead of either costing the shard its
   master. An operator cannot raise a job's `writeTimeoutS` or `scanTimeoutS`
   past it. Reads are included because `-UNBLOCKED` reaches whichever client is
-  blocked when the role changes, not only the one that caused it. Leave the env UNSET on a
-  standalone or sentinel deployment: there is no detector to lose a race against
-  and nothing is clamped. On a cluster, setting it is not optional.
+  blocked when the role changes, not only the one that caused it. The env is now a MIRROR, not the
+  source: each provider reads `CONFIG GET cluster-node-timeout` from the node
+  itself and prefers that, and when `FALKORDB_MODE=cluster` with neither
+  available it assumes the Redis default and says so once at WARNING rather than
+  running unclamped. Setting the env is still worth doing so the window is known
+  before the first node answers. Leave it unset on a standalone or sentinel
+  deployment, where nothing is clamped because there is no detector to outlive.
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling

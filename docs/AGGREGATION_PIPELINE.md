@@ -1443,9 +1443,30 @@ in-run retries. Before this, either was a cluster failover.
 under, which is not always the one that was configured. When the clamp binds,
 the run says so once with both numbers.
 
-Leaving `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` unset is the honest answer for a
-standalone or sentinel deployment: there is no detector to lose a race against,
-so nothing is clamped. On a cluster, setting it is not optional.
+The window comes from three places, most authoritative first:
+
+1. **What a node reported about itself.** Each provider reads
+   `CONFIG GET cluster-node-timeout` off the request path, beside the existing
+   server-limit read, and records it. The node cannot be wrong about its own
+   configuration, and the smallest window any node reports is the one kept,
+   because the clamp has to hold for every shard the process talks to.
+2. **`FALKORDB_CLUSTER_NODE_TIMEOUT_MS`**, the env mirror, until a node answers.
+3. **An assumed window**, announced once at WARNING, when `FALKORDB_MODE=cluster`
+   and neither of the above has answered.
+
+That third case exists because the first version of this clamp treated an unset
+env as "no failure detector", so a cluster whose ConfigMap predated the variable
+ran every query unbounded — the deployment that needed the clamp most was the
+one that silently did not get it. A safety limit that disappears when a variable
+is missing is not a safety limit.
+
+No clamp at all applies only to a standalone or sentinel deployment, where the
+budget genuinely has no cluster to outlive.
+
+**The clamp is only as strong as `TIMEOUT_MAX`.** FalkorDB honours a per-query
+timeout on WRITE queries only when that is configured on the shard. Without it
+the server ignores the budget: the client gives up, the server keeps executing,
+the write lock stays held, and the election proceeds. Check it on every node.
 
 ## The attribute-name ceiling, and the index gate in front of Reconcile
 
