@@ -68,6 +68,7 @@ tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
 tests/test_projection_stalled_reconcile.py
+tests/test_property_index.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
