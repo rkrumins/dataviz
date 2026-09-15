@@ -3837,3 +3837,68 @@ def test_the_provider_asks_the_node_for_its_window():
     src = inspect.getsource(mat_provider.FalkorDBProvider._seed_server_limits)
     assert "cluster-node-timeout" in src
     assert "note_cluster_node_timeout" in src
+
+
+def test_an_unreadable_cube_size_counts_as_large(monkeypatch):
+    """A regression the query clamp made reachable: counting 20M
+    relationships is itself a long query, it times out first on exactly the
+    graphs the index gate protects, and _count_aggregated used to answer 0
+    — so the gate read the cube as small and scanned without the index.
+    Unknown is not zero."""
+    _patched_wait(monkeypatch, "absent")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    orig = fake.ro_query
+
+    async def count_times_out(cypher, params=None, **kw):
+        if "count(r)" in cypher and "r:AGGREGATED" in cypher:
+            raise asyncio.TimeoutError("count(r) over a large relation")
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = count_times_out
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        _run(_materialize(p))
+    assert "unknown number of rollup edges" in str(exc.value)
+    assert fake.write_queries == 0
+
+
+def test_an_unreadable_count_still_budgets_every_cell_as_growth(monkeypatch):
+    """The write budget's reading of 'unknown' is unchanged: 0 known
+    edges means every cell is growth, which is conservative in ITS
+    direction. The two gates disagree deliberately."""
+    _patched_wait(monkeypatch, "operational")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.ro_query
+
+    async def count_times_out(cypher, params=None, **kw):
+        if "count(r)" in cypher and "r:AGGREGATED" in cypher:
+            raise asyncio.TimeoutError("count(r) over a large relation")
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = count_times_out
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    assert _run(pipe._count_aggregated()) is None
+    # The run still reports no edges_before, rather than a made-up zero.
+    assert not pipe._edges_before_read
+    assert "edges_before" not in pipe._result(0)["run_stats"]
+
+
+def test_a_real_zero_is_still_a_reading(monkeypatch):
+    """A genuinely empty cube must NOT be treated as unknown, or every
+    first build would wait out its whole wall clock for an index that has
+    nothing to build."""
+    _patched_wait(monkeypatch, "operational")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    assert _run(pipe._count_aggregated()) == 0

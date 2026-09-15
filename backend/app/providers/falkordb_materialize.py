@@ -4461,10 +4461,19 @@ class AggregationPipeline:
         else:
             await admission.update(self._reservation, nbytes)
 
-    async def _count_aggregated(self) -> int:
+    async def _count_aggregated(self) -> Optional[int]:
         """How many :AGGREGATED edges the graph holds — what a rebuild
-        re-materialises rather than grows. Best-effort: unknown reads as 0,
-        which budgets every cell as growth (the conservative direction)."""
+        re-materialises rather than grows. ``None`` when the count did not
+        answer, which is NOT the same as zero and must not be flattened
+        into it: counting twenty million relationships is itself a long
+        query, and it is longest on exactly the graphs where the answer
+        decides whether RECONCILE may scan without the aggKey index.
+
+        The write budget still treats unknown as zero — budgeting every
+        cell as growth is conservative in ITS direction. The index gate
+        treats unknown as large, which is conservative in its own. They
+        disagree because "unknown" means something different to each, and
+        one shared 0 gave the gate the dangerous reading."""
         try:
             res = await self.p._proj_ro_query(
                 "MATCH ()-[r:AGGREGATED]->() RETURN count(r)",
@@ -4475,9 +4484,10 @@ class AggregationPipeline:
         except Exception as exc:
             logger.info(
                 "aggregation pipeline on %s: existing rollup count unavailable "
-                "(%s) — budgeting every cell as growth.", self.p._graph_name, exc,
+                "(%s) — budgeting every cell as growth, and treating the cube "
+                "as large enough to need its index.", self.p._graph_name, exc,
             )
-            return 0
+            return None
 
     async def _registered_attribute_names(self) -> Optional[Set[str]]:
         """Every attribute name the graph the rollups are written to has
@@ -4569,8 +4579,11 @@ class AggregationPipeline:
         the calibration on a FRESH run only (a resumed run's start is gone).
         Also the run's first look at how the write node replicates — and at
         whether the graph has any attribute ids left to write with."""
-        self._edges_before = await self._count_aggregated()
-        self._edges_before_read = True
+        counted = await self._count_aggregated()
+        # 0 for every budget that asks "how much of this is growth"; the
+        # flag is what tells the index gate the number is a READING.
+        self._edges_before = counted or 0
+        self._edges_before_read = counted is not None
         names = await self._registered_attribute_names()
         if names is not None:
             self._check_attribute_room(names)
@@ -5652,7 +5665,14 @@ class AggregationPipeline:
         # cube the provider can hold is one it can index — and then stops
         # for a person, checkpoint kept, rather than write unindexed into a
         # master the cluster is about to demote.
-        large = self._edges_before >= _INDEX_GATE_EDGES
+        # Unknown counts as large. A cube whose size we could not read is
+        # not a small one — the count fails by TIMING OUT, which only a big
+        # relation does — and proceeding without the index is the failure
+        # this gate exists to prevent.
+        large = (
+            not self._edges_before_read
+            or self._edges_before >= _INDEX_GATE_EDGES
+        )
         waited_from = time.monotonic()
         state = await self._await_agg_index_ready(
             budget_s=self._index_wait_budget_s() if large else 60.0,
@@ -5664,10 +5684,17 @@ class AggregationPipeline:
                 if state == "building" else "not on the graph"
             )
             if large:
+                held = (
+                    f"the graph holds {self._edges_before:,} rollup edges"
+                    if self._edges_before_read
+                    else "the graph holds an unknown number of rollup edges "
+                         "(the count did not answer, which only a large "
+                         "relation does)"
+                )
                 raise MaterializationStoreUnstable(
                     f"the AGGREGATED(aggKey) index on {self.p._graph_name} is "
-                    f"{what} and the graph holds {self._edges_before:,} rollup "
-                    f"edges: reconciling without it scans the whole cube once "
+                    f"{what} and {held}"
+                    f": reconciling without it scans the whole cube once "
                     f"per key, under the write lock, for the length of every "
                     f"statement — which is what the cluster's failure detector "
                     f"reads as a dead master. The run keeps its checkpoint. "
