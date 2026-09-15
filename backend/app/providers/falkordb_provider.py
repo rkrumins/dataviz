@@ -1476,6 +1476,163 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 })
 
 
+#: The platform-owned property names that live nowhere else. The rollup
+#: edge's names, the ``_AggMeta`` stamp's and the projection node's are
+#: ``falkordb_materialize._ROLLUP_ATTRIBUTE_NAMES`` /
+#: ``_META_ATTRIBUTE_NAMES`` / ``_PROJECTION_NODE_ATTRIBUTE_NAMES`` and are
+#: IMPORTED, not copied — one definition, per ``derived_artifacts``'s house
+#: rule. These four have no other home:
+#:
+#: * ``confidence`` — every edge writer SETs it (``save_custom_graph``'s edge
+#:   batch, ``create_node``'s containment edge, ``create_edge``, and the
+#:   versioning projector's ``_edge_merge_cypher``), and a read predicate
+#:   filters on it.
+#: * ``gvSeq`` / ``seq`` — the versioning projector's OWN rollup schema:
+#:   ``r.gvSeq = item.seq`` on the AGGREGATED edge and
+#:   ``MERGE (m:_GVRollupMeta {id:'meta'}) SET m.seq = $seq``
+#:   (``projection.py``). Covered by no pre-flight anywhere — the
+#:   materializer's capacity baseline checks its own nine names only.
+#: * ``purgedAt`` — the ``_AggMeta`` purge stamp.
+_PROJECTOR_ATTRIBUTE_NAMES: frozenset = frozenset({
+    "confidence", "gvSeq", "seq", "purgedAt",
+})
+
+
+class AttributeNameLimitReached(RuntimeError):
+    """The graph has no attribute ids left, found before a data write.
+
+    Terminal and operator-facing: ids are never freed, so no retry, delete or
+    lower budget changes the answer. The operator has to recreate the graph
+    (drop and re-ingest) before loading into it."""
+
+
+# A logical/control-flow signal, not a downstream failure: registered here so
+# a CircuitBreakerProxy-wrapped provider re-raises it untouched instead of
+# counting it and wrapping it as a transient ProviderUnavailable — three
+# refused ingests would otherwise open the breaker and take READS off a graph
+# that serves them perfectly. Registered at module top level, after the class,
+# which is the supported pattern (see cancel.py) and runs long before any
+# provider instance — and therefore any proxy — is constructed.
+try:
+    from backend.common.adapters.circuit import register_logical_exception
+
+    register_logical_exception(AttributeNameLimitReached)
+except Exception:  # pragma: no cover - import-time best-effort
+    logger.exception("Failed to register AttributeNameLimitReached with circuit breaker")
+
+
+async def reserve_platform_property_names(
+    run: Callable[..., Awaitable[Any]], graph_name: str, registered: Set[str],
+) -> Set[str]:
+    """Stake every property name the PLATFORM owns on the graph, BEFORE the
+    first data write. Returns the names it staked, for the caller to fold
+    into ``registered``; empty when there was nothing to do and empty when
+    the reserve failed.
+
+    These names are SCHEMA — fixed, known at compile time, and needed by
+    every rollup the graph will ever hold. A source's property keys are
+    DATA. Both draw on the same 65,534 attribute ids, first-come-first-served
+    and never freed, so a source carrying tens of thousands of keys can spend
+    the last id before the platform has written its first rollup. That is not
+    hypothetical: a ~65,000-key source filled a production graph and its
+    first aggregation run found room for none of the nine names a rollup
+    write needs.
+
+    Nothing else stakes a claim. ``ensure_indices`` would register five of
+    the rollup names as a side effect of its edge-index DDL, but it is
+    dispatched fire-and-forget so a bulk loader racing it wins, and its
+    failures are collected and swallowed by contract. The names the platform
+    needs then belong to whichever data key asked first, permanently.
+
+    MECHANISM: a name is registered by being written and is never freed, so
+    writing every platform name once and deleting the carrier reserves them
+    all for the life of the graph — the property that causes the problem is
+    the one that solves it. The carrier is a single ``:_PropReserve`` node
+    (labels and relationship types have their own id spaces, so the label
+    costs no attribute id) and no node persists. The attribute map is shared
+    between node and edge properties, so one node reserves the rollup EDGE
+    names too. The durability is the engine's, not an assumption: ids are
+    minted in ``GraphContext_FindOrAddAttribute`` (src/graph/graphcontext.c),
+    the only removal is the undo-log rollback of a failed query
+    (src/undo_log/undo_log.c), and the RDB encoder serialises ALL attribute
+    keys, so the reservation survives node deletion, restart and reload.
+
+    NO LATCH: the caller passes what the graph has registered and this
+    no-ops when that already covers the platform. Self-healing by
+    construction — a graph a full seed DROPped, or one an operator recreated
+    out of band, reads back without them and is reserved again, and a
+    transient failure here is retried on the next write rather than latched
+    away.
+
+    Two statements, not one: ``CREATE … SET … DELETE`` in a single statement
+    parses (FalkorDB's own flow suite has ``CREATE (n) SET n = {v:null}
+    DELETE n RETURN n``), so the pair is a deliberate choice for an
+    unambiguous shape on every build, not a workaround. A run that dies
+    between them leaves a stray ``:_PropReserve`` node behind, which is why
+    the label is in ``DERIVED_LABELS``.
+
+    FAILURE POLICY: only the attribute limit itself is terminal — the graph
+    is already full, so no rollup can be written or indexed on it ever
+    again. Any other failure (an unimportable materializer, a transient
+    store error) is logged at WARNING and the write proceeds: blocking every
+    ingest would be worse than the problem being solved.
+    """
+    try:
+        # Imported inside the call: the materializer imports THIS module, so
+        # the provider must not import it at module scope. Inside the try,
+        # so an ImportError takes the warn-and-proceed path like any other
+        # failure rather than blocking every ingest.
+        from backend.app.providers.falkordb_materialize import (
+            _is_attribute_limit_error,
+            _META_ATTRIBUTE_NAMES,
+            _PROJECTION_NODE_ATTRIBUTE_NAMES,
+            _ROLLUP_ATTRIBUTE_NAMES,
+        )
+    except Exception as exc:  # pragma: no cover - import-time only
+        logger.warning(
+            "reserving the platform's property names on %s failed (%s) — "
+            "continuing: the names are registered by whatever writes them "
+            "first, as before.", graph_name, exc,
+        )
+        return set()
+
+    platform = (
+        _RESERVED_NODE_KEYS | _ROLLUP_ATTRIBUTE_NAMES | _META_ATTRIBUTE_NAMES
+        | _PROJECTION_NODE_ATTRIBUTE_NAMES | _PROJECTOR_ATTRIBUTE_NAMES
+    )
+    if platform <= registered:
+        return set()
+
+    # The value is a placeholder — registering the NAME is the whole point,
+    # and the node carrying it is gone by the end of the pair.
+    names = {name: True for name in sorted(platform)}
+    try:
+        await run("CREATE (r:_PropReserve) SET r += $names", {"names": names})
+        await run("MATCH (r:_PropReserve) DELETE r", None)
+    except Exception as exc:
+        if _is_attribute_limit_error(exc):
+            raise AttributeNameLimitReached(
+                f"the graph {graph_name} has no FalkorDB attribute ids left, so "
+                f"the platform's own property names cannot be registered: every "
+                f"new key this ingest writes is stored as a value in "
+                f"propertiesRaw instead of as a property — visible in the "
+                f"Properties panel, unreachable by search, sort or predicates — "
+                f"and the store refuses every rollup write and index on this "
+                f"graph. Attribute ids are never freed — the graph's registered "
+                f"names have spent them — so no retry and no delete changes "
+                f"this: recreate the graph (drop and re-ingest the source) "
+                f"before loading into it."
+            ) from exc
+        logger.warning(
+            "reserving the platform's property names on %s failed (%s) — "
+            "continuing: the write proceeds and the names are registered by "
+            "whatever writes them first, as before.",
+            graph_name, exc,
+        )
+        return set()
+    return set(platform)
+
+
 #: How many DISTINCT property names one graph may hold as native node
 #: properties before a new name is stored as a value in ``propertiesRaw``
 #: instead. FalkorDB numbers names with a 16-bit id per graph and never
@@ -1488,12 +1645,24 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 #: the graph has registered, platform names included. Applies as a graph is
 #: written, and a name already registered stays native — so raising it
 #: takes full effect only on a recreated graph.
-_NATIVE_PROPERTY_BUDGET_DEFAULT = 8_000
+#:
+#: 50,000, not the 8,000 this shipped with, because
+#: :func:`reserve_platform_property_names` now stakes the platform's own
+#: names before the first data write: the budget no longer protects the
+#: platform, and its only remaining job is to stop a graph reaching the
+#: ceiling, where the store refuses every further new name — no rollup
+#: write, no index — and the graph can only be recreated. What a demoted key
+#: actually costs is searchability, not memory or the value itself: a
+#: registered name that appears on few nodes costs almost nothing, because a
+#: FalkorDB entity's attribute set is sized by the attributes PRESENT on it,
+#: not by the names the graph has registered — so a generous default is
+#: strictly safer than a tight one.
+_NATIVE_PROPERTY_BUDGET_DEFAULT = 50_000
 
 
 def _native_property_budget() -> int:
-    """``FALKORDB_NATIVE_PROPERTY_BUDGET``, clamped 100-60,000: the ceiling
-    less the room the platform's own names and a margin need."""
+    """``FALKORDB_NATIVE_PROPERTY_BUDGET``, clamped to 100-60,000 — the
+    ceiling less the room the platform's own names and a margin need."""
     try:
         raw = int(os.getenv(
             "FALKORDB_NATIVE_PROPERTY_BUDGET", str(_NATIVE_PROPERTY_BUDGET_DEFAULT),
@@ -13657,6 +13826,21 @@ class FalkorDBProvider(GraphDataProvider):
         self._property_names_cache = (now, names)
         return names
 
+    async def _reserve_platform_property_names(self, registered: Set[str]) -> None:
+        """Stake the platform's own property names before this instance's
+        next data write — see :func:`reserve_platform_property_names`.
+
+        Not latched. ``registered`` is the graph's own registered-name set
+        (the cached reading is authoritative enough — this only ever adds
+        names), so the reserve no-ops once the graph holds them and happens
+        again by itself after a drop, a re-create out of band, or a
+        transient failure here. The names staked are folded into the caller's
+        set, which is the cache object, so the next call sees them."""
+        registered.update(await reserve_platform_property_names(
+            lambda cypher, params: self._query(cypher, params=params),
+            self._graph_name, registered,
+        ))
+
     def _native_key_reserve(self) -> Set[str]:
         """Names the read path reads natively BEFORE it merges the blob back
         (``_node_from_props``): the source's identity and name properties,
@@ -13819,10 +14003,17 @@ class FalkorDBProvider(GraphDataProvider):
         # the write node once per call.
         native_keys: Optional[Set[str]] = None
         if nodes:
+            # Before the first data write: the platform's names are
+            # registered by us, not by whichever source key happens to
+            # arrive first. The reading this call already takes is what
+            # decides whether the reserve is needed, and the names staked
+            # are folded into it so the budget counts them.
+            registered = await self._registered_property_names()
+            await self._reserve_platform_property_names(registered)
             budget = _native_property_budget()
             native_keys, demoted = _admit_native_keys(
                 (node.properties for node in nodes),
-                registered=await self._registered_property_names(),
+                registered=registered,
                 budget=budget, reserve=self._native_key_reserve(),
             )
             if demoted:
@@ -13997,10 +14188,12 @@ class FalkorDBProvider(GraphDataProvider):
             label = self._consistent_casing(
                 _sanitize_label(str(node.entity_type)), label_casing,
             )
+            registered = await self._registered_property_names(fresh=False)
+            await self._reserve_platform_property_names(registered)
             budget = _native_property_budget()
             native_keys, demoted = _admit_native_keys(
                 [node.properties],
-                registered=await self._registered_property_names(fresh=False),
+                registered=registered,
                 budget=budget, reserve=self._native_key_reserve(),
             )
             if demoted:
@@ -14065,6 +14258,10 @@ class FalkorDBProvider(GraphDataProvider):
                     },
                 )
             return True
+        except AttributeNameLimitReached:
+            # Terminal and operator-facing: a graph with no attribute ids
+            # left is not one more failed write to log and return False for.
+            raise
         except Exception as e:
             logger.error(f"create_node failed: {e}")
             return False

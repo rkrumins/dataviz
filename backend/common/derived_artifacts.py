@@ -36,8 +36,20 @@ from typing import Dict, Iterable, Mapping
 
 
 #: In-graph bookkeeping NODES: the projector's rollup watermark, the
-#: aggregation pipeline's run stamp, and the dedicated-projection scaffolding.
-DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection")
+#: aggregation pipeline's run stamp, the dedicated-projection scaffolding,
+#: and the writers' property-name reserve.
+#:
+#: ``_PropReserve`` is the carrier the writers create, stamp with every
+#: platform-owned property name and delete again in the next statement (see
+#: ``reserve_platform_property_names``). The NODE is therefore only ever
+#: seen when a run dies between the two statements. The LABEL is not: a
+#: FalkorDB node schema is created on first write and never removed —
+#: ``db.labels()`` walks the schema table, not the rows — so once the
+#: writers have touched a graph, ``_PropReserve`` is in its label catalogue
+#: for good, with no rows behind it. Every catalogue-driven surface has to
+#: exclude it, count or no count, and this list is what they all filter on —
+#: which is the whole reason the two incidents above happened.
+DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection", "_PropReserve")
 
 #: Derived RELATIONSHIP types — materialised rollups, not ingested lineage.
 #:

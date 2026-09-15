@@ -468,6 +468,7 @@ import asyncio
 import types
 
 from backend.app.providers.falkordb_provider import (
+    AttributeNameLimitReached,
     FalkorDBProvider,
     _admit_native_keys,
     _native_property_budget,
@@ -517,9 +518,9 @@ class TestAdmitNativeKeys:
         monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "10")
         assert _native_property_budget() == 100
         monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "nope")
-        assert _native_property_budget() == 8_000
+        assert _native_property_budget() == 50_000
         monkeypatch.delenv("FALKORDB_NATIVE_PROPERTY_BUDGET")
-        assert _native_property_budget() == 8_000
+        assert _native_property_budget() == 50_000
 
 
 class TestSplitUnderBudget:
@@ -596,13 +597,35 @@ def _node(urn, props):
     return GraphNode(urn=urn, entityType="Table", displayName=urn, properties=props)
 
 
+def _platform_names():
+    """Every property name the platform owns, from the modules that define
+    them — the materializer's three sets, the provider's reserved node keys
+    and the four names that live nowhere else."""
+    from backend.app.providers import falkordb_materialize as mat
+
+    return (
+        set(_RESERVED_NODE_KEYS)
+        | set(mat._ROLLUP_ATTRIBUTE_NAMES)
+        | set(mat._META_ATTRIBUTE_NAMES)
+        | set(mat._PROJECTION_NODE_ATTRIBUTE_NAMES)
+        | set(fp._PROJECTOR_ATTRIBUTE_NAMES)
+    )
+
+
+def _graph_of(n):
+    """A graph holding ``n`` registered names, the platform's own among them
+    — so the reserve no-ops and the budget arithmetic below is about the
+    user's keys, which is what these tests are about."""
+    platform = _platform_names()
+    return platform | {f"filler{i}" for i in range(n - len(platform))}
+
+
 class TestWritersUnderBudget:
     def test_save_custom_graph_keeps_the_common_keys_and_stores_the_long_tail(
         self, monkeypatch, caplog,
     ):
         monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
-        registered = {f"platform{i}" for i in range(90)}
-        p, calls = _stubbed_provider(registered)
+        p, calls = _stubbed_provider(_graph_of(90))
         room = 100 - 90 - len(p._native_key_reserve())
         assert room >= 2
         tail = [f"k{i:02d}" for i in range(12)]
@@ -630,8 +653,7 @@ class TestWritersUnderBudget:
         """The user's graph: every id spent. Nothing already native may move
         to the blob, and nothing new may be registered."""
         monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
-        registered = {f"platform{i}" for i in range(100)} | {"owner"}
-        p, calls = _stubbed_provider(registered)
+        p, calls = _stubbed_provider(_graph_of(100) | {"owner"})
         nodes = [_node("urn:1", {"owner": "x", "brand_new": 1})]
         asyncio.run(p.save_custom_graph(nodes, []))
         (item,) = [it for _, params in calls["batches"] for it in params["batch"]]
@@ -647,8 +669,7 @@ class TestWritersUnderBudget:
         self, monkeypatch,
     ):
         monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
-        registered = {f"platform{i}" for i in range(90)}
-        p, calls = _stubbed_provider(registered)
+        p, calls = _stubbed_provider(_graph_of(90))
         room = 100 - 90 - len(p._native_key_reserve())
         first = {f"a{i}": i for i in range(room)}            # fills the budget
         asyncio.run(p.create_node(_node("urn:1", first)))
@@ -679,7 +700,9 @@ class TestProjectorUnderBudget:
             async def query(self, cypher, params=None, timeout=None):
                 self.calls.append((cypher, params))
                 if "db.propertyKeys" in cypher:
-                    return types.SimpleNamespace(result_set=[[f"n{i}"] for i in range(96)])
+                    return types.SimpleNamespace(
+                        result_set=[[n] for n in sorted(_graph_of(96))]
+                    )
                 return types.SimpleNamespace(result_set=[])
 
         client = Client()
@@ -717,3 +740,207 @@ class TestProjectorUnderBudget:
         projector._batch = 1000
         asyncio.run(projector._apply(client, [], [], [], []))
         assert not any("db.propertyKeys" in c for c in client.calls)
+
+
+# ---------------------------------------------------------------------------
+# Reserving the platform's own property names (the schema/data race)
+#
+# The rollup names are schema: fixed, known here, needed by every rollup a
+# graph will ever hold. A source's keys are data. Both draw on the same
+# 65,534 attribute ids, never freed, and until the writers staked a claim the
+# data got there first: a ~65,000-key source filled a production graph and
+# the first aggregation run found room for none of the nine names a rollup
+# write needs.
+# ---------------------------------------------------------------------------
+
+import re
+
+from backend.app.providers import falkordb_provider as fp
+from backend.common.derived_artifacts import is_derived_label
+
+
+def _reserve_calls(queries):
+    """The (cypher, params) pairs of the reserve statement pair."""
+    return [(c, p) for c, p in queries if "_PropReserve" in c]
+
+
+class TestPlatformNameReserve:
+    def test_the_names_on_the_wire_are_every_name_the_platform_writes(self):
+        """Asserted on what the reserve actually put on the wire, not on a
+        constant. The four in _PROJECTOR_ATTRIBUTE_NAMES are spelled out
+        because no imported set pins them: `confidence` is SET by every edge
+        writer (save_custom_graph's edge batch, create_node's containment
+        edge, create_edge, projection._edge_merge_cypher); `gvSeq` and `seq`
+        are the versioning projector's own rollup schema (projection.py
+        `r.gvSeq = item.seq` and `MERGE (m:_GVRollupMeta) SET m.seq`), which
+        no capacity pre-flight covers; `purgedAt` is the _AggMeta purge
+        stamp."""
+        p, calls = _stubbed_provider(set())
+        asyncio.run(p.save_custom_graph([_node("urn:1", {"a": 1})], []))
+        (_, params), _ = _reserve_calls(calls["queries"])
+
+        staked = set(params["names"])
+        assert staked == _platform_names()
+        assert {"confidence", "gvSeq", "seq", "purgedAt"} <= staked
+
+    def test_the_carrier_label_is_one_every_count_excludes(self):
+        """A run that dies between the two statements leaves a carrier
+        behind — and DERIVED_LABELS is what every count and fingerprint
+        surface filters on."""
+        p, calls = _stubbed_provider(set())
+        asyncio.run(p.save_custom_graph([_node("urn:1", {"a": 1})], []))
+        (create, _), _ = _reserve_calls(calls["queries"])
+        assert is_derived_label(re.search(r"CREATE \(r:(\w+)\)", create).group(1))
+
+    def test_save_custom_graph_stakes_the_names_before_its_first_write(self):
+        p, calls = _stubbed_provider(set())
+        assert asyncio.run(p.save_custom_graph([_node("urn:1", {"owner": "x"})], []))
+
+        order = [c for c, _ in calls["queries"]]
+        counted = next(i for i, c in enumerate(order) if "db.propertyKeys" in c)
+        create = next(i for i, c in enumerate(order) if c.startswith("CREATE (r:_PropReserve)"))
+        delete = next(i for i, c in enumerate(order) if "_PropReserve" in c and "DELETE" in c)
+        # The reading the call already takes decides whether to reserve; the
+        # data write follows both.
+        assert counted < create < delete
+        assert calls["batches"]
+
+    def test_a_graph_that_already_holds_them_is_not_reserved_again(self):
+        """No latch and no wasted statement pair: the graph's own registered
+        names are the state, so a dropped or recreated graph reads back
+        without them and is staked again by construction."""
+        p, calls = _stubbed_provider(_platform_names())
+        asyncio.run(p.save_custom_graph([_node("urn:1", {"a": 1})], []))
+        assert not _reserve_calls(calls["queries"])
+
+    def test_create_node_stakes_them_too(self):
+        p, calls = _stubbed_provider(set())
+        assert asyncio.run(p.create_node(_node("urn:1", {"a": 1})))
+        assert len(_reserve_calls(calls["queries"])) == 2
+
+    def test_a_graph_with_no_attribute_ids_left_refuses_the_ingest(self):
+        """Terminal, and before a single row lands: ids are never freed, so
+        the store refuses every rollup write and index on that graph for
+        good."""
+        p, calls = _stubbed_provider(set())
+        inner = p._query
+
+        async def _query(cypher, params=None, **kw):
+            if "_PropReserve" in cypher:
+                raise RuntimeError(
+                    "Max number of attributes exceeded, graph does not support "
+                    "more than 65534 unique attribute names"
+                )
+            return await inner(cypher, params, **kw)
+
+        p._query = _query
+        with pytest.raises(AttributeNameLimitReached) as exc:
+            asyncio.run(p.save_custom_graph([_node("urn:1", {"a": 1})], []))
+        assert "never freed" in str(exc.value) and "recreate" in str(exc.value)
+        assert not calls["batches"]
+
+    def test_create_node_surfaces_the_refusal_rather_than_returning_false(self):
+        """create_node reports every other failure as False; this one the
+        operator has to hear, so its except tail re-raises this class."""
+        p, _ = _stubbed_provider(set())
+        inner = p._query
+
+        async def _query(cypher, params=None, **kw):
+            if "_PropReserve" in cypher:
+                raise RuntimeError("Max number of attributes exceeded")
+            return await inner(cypher, params, **kw)
+
+        p._query = _query
+        with pytest.raises(AttributeNameLimitReached):
+            asyncio.run(p.create_node(_node("urn:1", {"a": 1})))
+
+    def test_the_refusal_reaches_the_operator_through_the_breaker(self):
+        """Every application caller reaches the provider through a
+        CircuitBreakerProxy. A terminal, operator-facing refusal must not be
+        counted as a downstream failure and relabelled ProviderUnavailable —
+        three refused ingests would otherwise open the breaker and take the
+        graph's READS offline for a condition reads do not have."""
+        from backend.common.adapters.circuit import CircuitBreakerProxy
+
+        class _Target:
+            async def create_node(self, node):
+                raise AttributeNameLimitReached("full")
+
+        proxy = CircuitBreakerProxy(_Target(), name="g", fail_max=3, reset_timeout=30)
+        for _ in range(3):
+            with pytest.raises(AttributeNameLimitReached):
+                asyncio.run(proxy.create_node(_node("urn:1", {})))
+        assert proxy.breaker_state == "closed"
+
+    def test_any_other_failure_warns_the_ingest_proceeds_and_it_retries(self, caplog):
+        """Blocking every ingest because a statement did not parse on some
+        build would be worse than the problem being solved — and because
+        nothing is latched, the next write tries again rather than leaving
+        the platform unstaked for the life of the provider."""
+        p, calls = _stubbed_provider(set())
+        inner = p._query
+        failing = {"on": True}
+
+        async def _query(cypher, params=None, **kw):
+            if "_PropReserve" in cypher and failing["on"]:
+                calls["queries"].append((cypher, params))
+                raise RuntimeError("errMsg: some transient store error")
+            return await inner(cypher, params, **kw)
+
+        p._query = _query
+        with caplog.at_level("WARNING"):
+            assert asyncio.run(p.save_custom_graph([_node("urn:1", {"a": 1})], []))
+        assert calls["batches"]
+        assert any(
+            "reserving the platform's property names" in r.getMessage()
+            for r in caplog.records
+        )
+
+        failing["on"] = False
+        asyncio.run(p.save_custom_graph([_node("urn:2", {"a": 1})], []))
+        assert len(_reserve_calls(calls["queries"])) == 3   # failed CREATE, then the pair
+
+
+class TestProjectorStakesItsOwnNames:
+    """The projector writes through its own client and never touches a
+    provider, so it makes the call itself — off the registered names it
+    already reads, so a full seed that DROPs the graph stakes them again."""
+
+    class _Client:
+        def __init__(self, registered=()):
+            self.calls = []
+            self.registered = sorted(registered)
+
+        async def query(self, cypher, params=None, timeout=None):
+            self.calls.append(cypher)
+            if "db.propertyKeys" in cypher:
+                return types.SimpleNamespace(result_set=[[n] for n in self.registered])
+            return types.SimpleNamespace(result_set=[])
+
+    def _upsert(self):
+        return [("e1", "urn:1", {"entityType": "T", "properties": {"a": 1}})]
+
+    def _projector(self):
+        from backend.app.services.versioning import projection as proj
+
+        projector = proj.FalkorProjector.__new__(proj.FalkorProjector)
+        projector._batch = 1000
+        return projector
+
+    def test_a_pass_with_nodes_stakes_them_before_the_first_merge(self):
+        client = self._Client()
+        asyncio.run(self._projector()._apply(client, self._upsert(), [], [], []))
+
+        assert client.calls.index("MATCH (r:_PropReserve) DELETE r") < next(
+            i for i, c in enumerate(client.calls) if "MERGE (n:" in c
+        )
+
+    def test_a_graph_that_already_holds_them_is_not_reserved_again(self):
+        client = self._Client(_platform_names())
+        asyncio.run(self._projector()._apply(client, self._upsert(), [], [], []))
+        assert not any("_PropReserve" in c for c in client.calls)
+
+    def test_a_pass_with_no_node_upserts_stakes_nothing(self):
+        client = self._Client()
+        asyncio.run(self._projector()._apply(client, [], [], [], []))
+        assert not any("_PropReserve" in c for c in client.calls)

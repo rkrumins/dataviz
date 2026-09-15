@@ -48,6 +48,7 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
     _native_property_budget,
     _sanitize_label,
     _split_user_properties,
+    reserve_platform_property_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -1496,18 +1497,32 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None) -> None:
-        # Nodes in (grouped by label), edges in (grouped by type + endpoint
-        # labels — the per-label URN indexes drive every node match), edges
-        # out, nodes out.
+        """Apply one pass: nodes in (grouped by label), edges in (grouped by
+        type + endpoint labels — the per-label URN indexes drive every node
+        match), edges out, nodes out.
+
+        This writes through its own client and never touches a provider
+        instance, so it stakes the platform's property names itself
+        (``reserve_platform_property_names``) and spends the ENV-wide
+        ``FALKORDB_NATIVE_PROPERTY_BUDGET``. The reserve is decided from the
+        registered names this pass already reads, so it costs nothing on a
+        graph that holds them and happens again by itself after a full seed
+        DROPs the graph and takes every registered name with it."""
         # Which user property keys this pass writes natively — the same
         # budget the provider's own writers apply, so a versioned graph and
         # a direct-load graph spend their attribute ids the same way.
         native_keys: Optional[Set[str]] = None
         if node_upserts:
+            registered = await _registered_property_names(client)
+            registered |= await reserve_platform_property_names(
+                lambda cypher, params: _q(client, cypher, params=params),
+                str(getattr(client, "name", "") or "the graph"),
+                registered,
+            )
             budget = _native_property_budget()
             native_keys, demoted = _admit_native_keys(
                 [p.get("properties") for _, _, p in node_upserts],
-                registered=await _registered_property_names(client),
+                registered=registered,
                 budget=budget, reserve=_NAME_FALLBACK_KEYS,
             )
             if demoted:

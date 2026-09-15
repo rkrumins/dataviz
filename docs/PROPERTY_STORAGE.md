@@ -340,7 +340,15 @@ distinct ms to 1 s; discovery tens of ms.
   no ids back. Only `GRAPH.DELETE` does.
 - The budget is a knob, not a fix: every key past it is invisible to predicates, sort,
   distinct, discovery and "search everything" while the panel still shows it. Leave it at
-  its default until phase 1 deletes it.
+  its default (50,000) until phase 1 deletes it. It no longer protects the PLATFORM:
+  both writers now register every platform-owned property name on a graph before their
+  first data write, by stamping them onto one `(:_PropReserve)` node and deleting it
+  again (`reserve_platform_property_names`). Names are never freed, so that reservation
+  is permanent; its only remaining job is to keep a graph off the ceiling, where the
+  store refuses every further new name — no rollup write, no index — and the graph can
+  only be recreated. A registered name that appears on few nodes costs almost nothing
+  — an entity's attribute set is sized by the attributes PRESENT on it — so what a
+  demoted key costs is searchability, not memory, and a generous budget is the safer one.
 - FalkorDB indexes on user keys were never serving deep search: the candidate scan is a
   bare `MATCH (n)` the planner never rewrites to an index scan.
 - The graph at the ceiling does not have to be dropped for search to come back: Mode A

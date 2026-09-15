@@ -1569,7 +1569,7 @@ lost, because it wrote nothing.
 
 Recreating a graph helps only if the second ingest does not spend the ids the
 same way, so both writers now draw the line at ingest. `FALKORDB_NATIVE_PROPERTY_BUDGET`
-(default 8,000; clamped 100–60,000) is how many distinct property names one
+(default 50,000; clamped 100–60,000) is how many distinct property names one
 graph may hold as native node properties. Each write call reads the graph's
 registered names (`CALL db.propertyKeys()`, on the write node, one round trip)
 and admits this call's keys against what is left: a name the graph already
@@ -1586,10 +1586,40 @@ spend their ids the same way; the graph itself is the only counter, so a
 recreate is correct by construction. A writer that demotes keys says so once
 per call, at WARNING, with the count, the budget and the most common keys it
 demoted. Because a registered name stays native, raising the budget takes
-full effect only on a recreated graph. A graph written by something other
-than this product's writers is outside the budget: its writer has to stop
+full effect only on a recreated graph. The default is 50,000 rather than the 8,000
+this shipped with because the budget no longer protects the platform (the reserve
+below does) and a demoted key costs searchability, not memory: a name on few nodes
+costs almost nothing, since an entity's attribute set is sized by the attributes
+PRESENT on it, not by the names the graph has registered. Its one remaining job is to
+keep a graph off the ceiling, where the store refuses every further new name — no
+rollup write, no index — and the graph can only be recreated. A graph written by
+something other than this product's writers is outside the budget: its writer has to stop
 registering names, or the pre-flight refuses its rebuilds until it is
 recreated.
+
+**The platform's own names are staked before any data write.** Nothing used to
+claim them: the rollup names are SCHEMA (fixed, known at compile time), the source's
+keys are DATA, and the ids went first-come-first-served — `ensure_indices` would have
+registered five of the nine as a side effect of its edge-index DDL, but it is
+dispatched fire-and-forget, so a bulk loader racing it wins and the swallowed DDL
+failure is the only trace. So `save_custom_graph`, `create_node` and the versioning
+projector each call `reserve_platform_property_names` before their first write: one
+`(:_PropReserve)` node is created carrying every platform-owned property name and
+deleted in the next statement. A name is registered by being written and is never
+freed, so the reservation outlives the carrier; the label costs no attribute id
+(labels have their own id space) and `_PropReserve` is in `DERIVED_LABELS` so a
+carrier left behind by a crashed run is excluded from every count. The attribute map
+is shared between node and edge properties, so one node reserves the rollup EDGE names
+too. Nothing is latched: each writer decides from the registered names it already
+reads, so the reserve costs nothing on a graph that holds them and happens again by
+itself after a drop, after an out-of-band recreate, or after a failure here. A graph
+that is ALREADY at the ceiling refuses the ingest there, terminally
+(`AttributeNameLimitReached`, registered with the circuit breaker as a logical
+exception so the refusal reaches the operator instead of opening the breaker on the
+graph's reads): every key such an ingest writes would be stored as a value in
+`propertiesRaw` rather than as a property, and no rollup could be written or indexed
+on that graph again. Any other failure of the reserve is logged at WARNING and the
+write proceeds.
 
 **Recreating** a graph at the ceiling:
 
