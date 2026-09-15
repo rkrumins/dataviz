@@ -9,6 +9,262 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — The cluster window, and the names a graph can hold
+
+### Fixed
+
+**A rebuild's writes were budgeted against the wrong ceiling, and the cluster voted the
+master out.** Writes ran under a 60-second default raisable to 600, on the reasoning that
+"the server clamps every query at its own `TIMEOUT_MAX` anyway" — true for a standalone
+instance, and the wrong limit in cluster mode. `TIMEOUT_MAX` says how long FalkorDB will
+let a query run (120 s as shipped); `--cluster-node-timeout` says how long the OTHER
+masters wait before voting this one out (15 s as shipped), and the second is eight times
+smaller. FalkorDB blocks the client for a query's duration, and Redis force-unblocks a
+blocked client when the instance changes role — so a long write raced the election and
+returned `-UNBLOCKED force unblock from blocking operation, instance state changed (master
+-> replica?)` with no pod having restarted. Every query budget is now derived from the
+failure detector (40% of it, floor 2 s) and clamped at the boundary, so the pipeline's
+batches, the bulk loader's, the versioning projector's and a `writeTimeoutS` raised on a
+running job are all bounded. An operator cannot raise past it. A batch that needs longer is
+aborted by the server, halved by the pressure ladder and re-issued — an ordinary in-run
+retry where it used to be a failover. Reads are clamped too: `-UNBLOCKED` reaches whichever
+client is blocked, and a long read holds a module thread on a node whose main thread has to
+keep answering the cluster bus.
+
+**The clamp depended on an environment variable that was set nowhere.** A production
+cluster running nine nodes at a 15-second failure detector had a ConfigMap that predated
+`FALKORDB_CLUSTER_NODE_TIMEOUT_MS`, so the deployment that needed the clamp most silently
+did not get it — and the client used its 3-second fallback for every failover wait, park
+and `Retry-After`. A safety limit that disappears when a variable is missing is not a
+safety limit. The window now comes from `CONFIG GET cluster-node-timeout` read off the node
+itself (the smallest any node reports, since the clamp must hold for every shard), with the
+env as a mirror until a node answers, and an assumed 15 s announced once at `WARNING` when
+`FALKORDB_MODE` says cluster and neither has. No clamp at all now applies only to a
+standalone or sentinel deployment. The cluster overlay declares the value, and a test fails
+the build if it disagrees with the shards' own `--cluster-node-timeout`.
+
+**A demotion was retried into rather than waited out, and cost the whole run.** There is no
+redis-py class for `-UNBLOCKED`; it arrives as a bare `ResponseError`, and the role-changed
+check matched only on class name — so the one branch that fixes a demotion in under a
+second was skipped for exactly the case it exists for. The branch was also too short to
+reach one: three retries with NO WAIT AT ALL, never reading the backoff schedule its own
+cap came from, then the raw error, which spent a job retry. A retry re-runs EXTRACT and
+COMPUTE from zero, and the attempt budget only resets when `processed_edges` passes its
+high-water mark, which a from-zero re-run never does — so one routine shard rotation became
+three hours of repeated work and then a failed job. `-UNBLOCKED` is now matched by message
+on the verb alone, and a write waits on the same ladder a refused connection gets (17.5 s
+in cluster mode) before raising `ProviderFailingOver`, so the job parks with its checkpoint.
+A read keeps the short path deliberately — its wall clock is sized for the transient window
+only, so an escalated ladder there would surface as `asyncio.TimeoutError`, which nothing
+reads as a failover.
+
+**The idle reaper closed a provider underneath a running rebuild.** "Idle" was measured
+from the checkout stamp and nowhere else, and a worker checks out once per job — so any run
+longer than `PROVIDER_CACHE_IDLE_TTL_SECS` (900) read as untouched since minute zero.
+`inflight_ops()` did not save it: that answers "busy this instant", and Compute is the one
+stage that issues no graph I/O at all. The reaper now takes the later of the checkout stamp
+and the provider's last completed operation, and the worker ConfigMap raises the TTL to
+7200 — the code fix alone cannot cover a Compute that exceeds the TTL with nothing in
+flight. The web tier keeps 900.
+
+**A graph filled all 65,534 of its property names with source metadata keys, and the first
+rollup write found room for none of the nine it needs.** FalkorDB numbers property names
+with a 16-bit id per graph and never frees one — ids are minted in
+`GraphContext_FindOrAddAttribute`, the only removal is an undo-log rollback, and the RDB
+encoder saves every key, so only `GRAPH.DELETE` discards the map and a purge frees nothing.
+The raw data did not land fine WHILE the rollups failed; it landed FIRST and took every id.
+Nothing staked a claim on the platform's behalf: `ensure_indices` would register five of
+the nine as a side effect of its edge-index DDL, but it is dispatched fire-and-forget so a
+bulk loader racing it wins, and its failures are collected and swallowed by contract. Both
+writers now reserve all 38 platform-owned names before their first data write, via one
+`:_PropReserve` carrier node deleted in the same pass — the name is registered by being
+written and never freed, so the property that causes the problem is the one that solves it.
+The carrier's label costs no attribute id, and the attribute map is shared between node and
+edge properties, so a node reserves the rollup EDGE names too. The reserve reads what is
+registered first and no-ops when the platform is covered, so it is self-healing across a
+drop or an out-of-band recreate rather than latched to a provider instance.
+
+**Reconcile scanned a 7.8M-edge cube under the write lock while its index was still
+building.** FalkorDB populates indexes in the background and a graph read back off disk
+rebuilds them the same way; the readiness wait gave up after sixty seconds and proceeded,
+so every keyed delete was a full pass over the cube — which the cluster's failure detector
+reads as a dead node. Reconcile now asks `db.indexes()` and, above 100,000 existing rollup
+edges, waits for what is left of the job's wall clock (never less than one hold) and then
+stops with `MaterializationStoreUnstable`, checkpoint kept, rather than scanning. An absent
+index stops the same way. A small cube still proceeds after the sixty-second wait. The wait
+heartbeats and `run_stats.index_wait_s` records it.
+
+**A missing replica had the same answer as a sick one, and every node drain killed the
+run.** A rebuild harms replication by outrunning an attached replica or by writing through
+the fork that streams one back — neither needs a replica to be away. The shipped cluster
+overlay is 3 shards × (1 master + 1 replica), so every drain, rolling upgrade and OOM kill
+took out the only replica a shard had and the rebuild held, then died. The hold could not
+buy what it claimed: a partial resync needs the master's backlog to still hold every byte
+written while the replica was away, and a rebuild writes past that in seconds. Absence now
+gets a five-minute grace and then the run carries on, recording `replicas_forgone`. The
+grace is judged on how long the replicas have been MISSING, never on the age of the hold —
+an episode can begin as lag, and a run holding twenty minutes for a replica that is behind
+would otherwise forgive an absence it had watched for one turn. Replicas fully back re-arm
+it, and an absence this run caused by pushing a replica toward the drop limit is not
+forgiven at all.
+
+**Cancel was not noticed during Compute.** Every other cancel check sits on a query and
+Compute issues none, so a Cancel was not seen until the stage ended — on a large cube,
+fifteen minutes of the UI showing a job the operator had already stopped, with the clock
+running. Both merge loops already yielded every 1024 / 4096 pairs and simply never asked.
+
+**A node that refused the index DDL made every reader re-issue all 128 statements.**
+`ensure_indices` is on the interactive read path, calls the graph handle directly (so the
+semaphore, the breaker and the admission controller apply to none of it), and nothing
+serialised concurrent readers. When the NODE refused rather than the statement — no in-sync
+replica, a dataset still loading, a shard mid-failover — every statement failed, the
+success memo was never written, and the next cache miss ran the whole set again for as long
+as the condition lasted. The sweep now stops at the first statement the node refuses,
+writes a short-lived backoff key (`FALKORDB_INDEX_BACKOFF_S`, 120) where every pod looks,
+and admits one sweep per pod with later arrivals skipping rather than queuing. A per-query
+memory ceiling and a SERVER-aborted deadline stay deterministic for that statement and keep
+running the set; only the CLIENT deadline defers.
+
+**Every versioning read went out write-flagged and was refused during a node restart.**
+`-NOREPLICAS Not enough good replicas to write` is a per-command refusal and `GRAPH.QUERY`
+is write-flagged whatever the Cypher inside it says, so reconcile counts, the bootstrap
+copy's reads and `/graph/neighbors` — all pure `MATCH`/`RETURN` — were refused alongside
+the writes, with the raw text reaching the UI. They go as `GRAPH.RO_QUERY` now. This is not
+a routing change: no `GRAPH.*` command is in redis-py's read table, so these still go to
+the primary that owns the key. The projector's pre-drop probe and the bootstrap's phase-1
+count stay write-flagged deliberately, each pinned by a test, and the one real behavioural
+gap is closed — a read-only call that meets `Invalid graph operation on empty key` re-sends
+the same statement as `GRAPH.QUERY` rather than guessing an empty result, because an
+aggregate answers `[[0]]`, not `[]`.
+
+**A full-cube rebuild was OOM-killed at 4Gi.** The accumulator is one dict entry per
+DISTINCT rollup cell at roughly 100 bytes and the cube grows as edges × depth², so a few
+million cells costs over a gigabyte. The memory-aware flush bounds that INSIDE the merge
+loops; the end of a run builds a second full copy of the key set to report and reconcile
+what it wrote, where no flush can fire, so the peak is not the flush line. The production
+aggregation worker goes to 2Gi requests / 12Gi limits.
+
+### Changed
+
+**The native property budget default goes from 8,000 to 50,000, and can be raised per graph
+store.** With the platform's names reserved the budget no longer protects the platform; its
+only remaining job is to stop a graph becoming un-ingestable, and a registered name on few
+nodes costs almost nothing because attribute sets are sized by PRESENT attributes rather
+than registered names — which makes a generous default strictly safer than a tight one. A
+graph store whose sources carry unusually wide key sets can set `nativePropertyBudget` on
+its PROVIDER config. Not per data source: that is a lower privilege, and every name the
+budget admits is permanent, so a data-source-level setting would let that role pin a graph
+to a hundred names and make nearly every key on it unsearchable for good. Both merge paths
+drop a data source's attempt to set it, with the same guard as `cacheConnection`.
+
+**The attribute pre-flight refuses only a graph that cannot register the names the run
+writes.** A fixed 500-name margin refused any graph within 500 of the ceiling — including
+one already holding rollups written by this pipeline, where every name the run writes is
+registered and the rebuild would have completed. The pre-flight now reads the registered
+names and asks the one question that decides it, naming the missing names and the room when
+it refuses. A graph at the ceiling that can still be rebuilt carries an
+`attribute_names_exhausted` advisory instead. A drift test pins the hand-kept name sets to
+the Cypher the pipeline issues and to the declared edge indexes.
+
+**A re-trigger can put the last run's settings back — as a control, not a default.** The
+dialog still opens on the configured defaults, because replaying a job's frozen tuning is
+how a graph that failed under bad settings kept failing under them. But a run dialled in by
+hand and WORKING had to be re-entered knob by knob from a screenshot. `overridesFromRun`
+reads what the run actually recorded and the dialog offers it beside a line saying why it
+is not already loaded. Rollup storage comes across too, because a run forced to full detail
+must come back forced rather than resolved against today's default. The control is absent
+when there is nothing to put back.
+
+**A manual trigger opens on Balanced and states the replica acknowledgement.** With nothing
+stored, every profile knob was undefined, no profile matched, and the operator was shown
+"Custom" over settings that were exactly Balanced. Nothing about what runs changes —
+Balanced's knobs ARE the server's environment defaults. It deliberately does not write
+`materializeFinePairs` (that would overrule a fleet that had chosen Auto) and does not seed
+through a missing settings fetch.
+
+### Added
+
+**`attribute_limit` is a typed, terminal failure with its own guidance.** The category is
+unresumable, has a drawer explanation and a fleet facet, and the store refusing a name
+mid-run is classified the same way instead of entering the pressure ladder. It is
+registered as a logical exception: as a bare `RuntimeError` the circuit breaker counted it,
+so three ingest attempts into a full graph would have opened the breaker and taken the data
+source offline for reads, which work perfectly well on such a graph. The guidance names the
+two recreate paths — Data health → Rebuild for a versioned source, and `GRAPH.DELETE` plus
+the loader plus `signal_data_changed` for a direct load — instead of Purge, which frees no
+name.
+
+**The property-name count is on screen.** The capacity card and chip show
+`N of 65,534 property names` from the last completed rebuild, and the drawer's technical
+block gains a Property names row. New `run_stats` fields: `attribute_names`,
+`attribute_names_room`, `index_wait_s`, `write_timeout_s`, `replicas_forgone`.
+
+**The `propidx` schema and its client, wired to nothing.** Phase 1 slice A of
+`docs/PROPERTY_STORAGE.md`: a Postgres schema holding the complete user property bag with
+one LIST partition per physical graph and an expression GIN over a case-folded copy, plus
+`PostgresPropertyIndex` — identity, digest, the unnest upsert with a content-hash skip
+guard, the epoch sweep, the load lifecycle and the read side a predicate router will use.
+Nothing imports it on any request path and the graph's behaviour is unchanged. The design
+record itself is the substantive part: it weighs four architectures, states the invariant,
+the write-ordering contract, routing, the read path per capability, the migration modes (a
+graph at the ceiling flips with zero graph writes), the cost model at a million nodes, and
+what is honestly lost.
+
+### Upgrading
+
+**Full detail:** `docs/RELEASE_NOTES_2026-09-15_falkordb-cluster-and-property-names.md` —
+what was wrong at each layer, the value table, rollout order, verification, and the knob
+that turns each piece off.
+
+**Confirm `TIMEOUT_MAX` is configured on every shard.** FalkorDB honours a per-query
+timeout on WRITES only when `TIMEOUT_MAX` is set; without it the server keeps executing
+after the client gives up, still holding the write lock — and the derived ceiling then
+bounds only what the client waits for, not what the node does. This is the one prerequisite
+the clamp cannot check for itself.
+
+**Apply the cluster ConfigMap and check the shards agree.**
+`FALKORDB_CLUSTER_NODE_TIMEOUT_MS: "15000"` must equal the shards' own
+`--cluster-node-timeout`. A test fails the build if the overlay and the StatefulSets
+disagree, but a hand-edited ConfigMap in a live namespace is outside its reach. If the
+deployment runs a different node timeout, set this to that value — the clamp is a share of
+whatever is real.
+
+**Apply the worker ConfigMap** for `PROVIDER_CACHE_IDLE_TTL_SECS: "7200"`. Worker only — do
+not add it to `viz-config`. **And the production resource patch** for the aggregation
+worker's 2Gi/12Gi, after confirming the node pool can still schedule it.
+
+**A graph already at the ceiling has to be recreated.** No code in this release can fix it:
+ids are never freed and a purge frees none. Versioned source → Data health → Rebuild, which
+drops the graph and re-seeds from the version store under the budget. Direct load →
+`GRAPH.DELETE` on the shard that owns it, run the loader again, then `signal_data_changed`.
+The second ingest spends its ids differently because of the budget and the reservation, so
+the recreate is correct by construction. Runbook in `docs/AGGREGATION_PIPELINE.md`.
+
+**Nothing requires the `propidx` schema.** The Alembic revision creates it; no code imports
+it.
+
+### Known limitations
+
+- **A key past the native budget is stored as a value in `propertiesRaw` and shown in the
+  Properties panel** — it is unreachable only by search, sort and predicates. This was
+  described as "silently dropped" in code and two documents and is corrected everywhere;
+  the engine does not drop a name either, it refuses the write.
+- `backend/scripts/migrate_native_properties.py` writes native properties without
+  consulting the budget, so running it on a graph near the ceiling can still exhaust it.
+- `backend/tests/integration/test_property_index_live.py` runs nowhere in CI — it needs a
+  live Postgres 16 via `PROPIDX_TEST_DATABASE_URL`, and it is the suite that found all
+  three `property_index.py` defects.
+- Phase 1 slices B and C of `PROPERTY_STORAGE.md` are paused, on the evidence of one
+  source. The reservation plus a 50,000-name budget make a graph un-exhaustible in
+  practice; check `db.propertyKeys()` on the other sources before building the rest. Until
+  that is decided, `propidx` is dead weight.
+- The cube estimator over-counts on a DAG: `_anc_count` sums over parents instead of
+  unioning, so it counts shared ancestors once per path, and leaf closures stop being
+  memoised past 400,000 nodes. `maxCubeEdges` is inert for a forced cube — the forced branch
+  returns before the ceiling is read. All documented; none fixed here.
+
+---
+
 ## [Unreleased] — Analytics, and measuring value rather than attention
 
 ### Added
