@@ -1493,6 +1493,13 @@ class CapacitySource(BaseModel):
     #: completed rebuild looked — against FalkorDB's ceiling of 65,534, which
     #: a source's per-node metadata keys spend and a graph never gets back.
     attribute_names: Optional[int] = Field(None, alias="attributeNames")
+    #: The same figure as COLLECTED by the counts pipeline, which runs for
+    #: every source rather than only for one that has rebuilt. That is the
+    #: difference that matters: the ceiling was reached by a graph whose
+    #: climb nothing was recording, and a reading that only exists after a
+    #: successful rebuild cannot warn about a graph too full to rebuild.
+    #: None means not measured — never zero.
+    property_key_count: Optional[int] = Field(None, alias="propertyKeyCount")
 
     class Config:
         populate_by_name = True

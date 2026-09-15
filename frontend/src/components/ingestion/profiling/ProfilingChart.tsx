@@ -39,6 +39,12 @@ const METRICS: { key: SeriesMetric; label: string }[] = [
     // has come back — the question the Relationships total cannot answer
     // because the overlay is inside it.
     { key: 'aggregated', label: 'Aggregated' },
+    // How many distinct property NAMES the graph has registered. A ratchet
+    // against a hard per-graph ceiling the store never gives back, so the
+    // only useful question is the TREND — one production graph reached the
+    // wall with nothing anywhere having recorded it climbing. Sparse by
+    // design: a bucket nothing measured draws no point rather than a zero.
+    { key: 'property_keys', label: 'Property names' },
 ]
 
 /**

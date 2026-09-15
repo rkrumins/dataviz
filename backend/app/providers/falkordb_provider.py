@@ -13181,6 +13181,11 @@ class FalkorDBProvider(GraphDataProvider):
         node_count = 0
         edge_type_counts: Dict[str, Any] = {}
         edge_count = 0
+        #: Set when the graph KEY is not there. Its only job is to keep the
+        #: property-name probe below from asking a graph that does not exist,
+        #: which on a cluster costs a second empty-key verification for an
+        #: answer already known.
+        missing = False
         # The node/edge count scans are O(nodes)+O(edges) — on a million-edge
         # graph they exceed the 5s read default and the stats refresh fails
         # (then the asset shows stale). Give them a dedicated, generous
@@ -13228,12 +13233,19 @@ class FalkorDBProvider(GraphDataProvider):
             )
             entity_type_counts, node_count = {}, 0
             edge_type_counts, edge_count = {}, 0
+            # A graph key that is not there has no property names to count,
+            # and asking anyway costs a SECOND cluster empty-key verification
+            # for an answer already known.
+            missing = True
 
         result = {
             "nodeCount": node_count,
             "edgeCount": edge_count,
             "entityTypeCounts": entity_type_counts,
             "edgeTypeCounts": edge_type_counts,
+            "propertyKeyCount": (
+                None if missing else await self.property_key_count()
+            ),
         }
 
         if self._SCHEMA_CACHE_TTL > 0:
@@ -13353,11 +13365,67 @@ class FalkorDBProvider(GraphDataProvider):
             "edgeCount": edge_count,
             "entityTypeCounts": entity_type_counts,
             "edgeTypeCounts": edge_type_counts,
+            "propertyKeyCount": await self.property_key_count(),
         }
         # Same payload get_stats would have produced, so priming its cache
         # keeps the two from disagreeing for the TTL.
         await self.prime_stats_cache(result)
         return result
+
+    #: How long a property-name count is reused. The number only moves when a
+    #: writer registers a name the graph has never held, which is rare once a
+    #: source has loaded once — and every reader of THIS is a statistic, not a
+    #: decision. The budget and the rebuild pre-flight take their own fresh
+    #: readings precisely because they decide something.
+    _PROPERTY_KEY_COUNT_TTL_S = 60.0
+
+    async def property_key_count(self) -> Optional[int]:
+        """How many distinct property NAMES this graph has registered, or
+        ``None`` when the store would not say.
+
+        FalkorDB numbers property names with a 16-bit id per graph and never
+        frees one, so this is a RATCHET: it only goes up, and a graph that
+        reaches ``_ATTRIBUTE_NAME_LIMIT`` can only be recreated. Collecting
+        it as a statistic is what turns that from a surprise into a trend —
+        one production graph reached the ceiling with nothing anywhere having
+        recorded it climbing.
+
+        Counted in the ENGINE rather than enumerated here. The native budget's
+        ``_registered_property_names`` needs every name and pays for them; a
+        statistic needs only the number, and on a graph near the ceiling that
+        is one row against 65,534 strings per poll. It is also what keeps this
+        inside the cluster query ceiling that now bounds every read.
+
+        Never raises. A probe that fails leaves the figure UNKNOWN, which is
+        what the column then stores: null is not zero, and a graph nobody
+        could measure must never read as a graph carrying no properties.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_property_key_count_cache", None)
+        if (
+            cached is not None
+            and now - cached[0] < self._PROPERTY_KEY_COUNT_TTL_S
+        ):
+            return cached[1]
+        try:
+            res = await self._ro_query_tolerant(
+                "CALL db.propertyKeys() YIELD propertyKey "
+                "RETURN count(propertyKey)",
+                op="probe.property_keys",
+            )
+        except Exception as exc:                          # noqa: BLE001 — a statistic
+            logger.debug(
+                "property_key_count on %s: %s", self._graph_name, exc,
+            )
+            return None
+        rows = getattr(res, "result_set", None) or []
+        # A graph key that does not exist yields an empty result, and that is
+        # not a count of zero — there is no graph to have properties.
+        if not rows or not rows[0] or rows[0][0] is None:
+            return None
+        count = int(rows[0][0])
+        self._property_key_count_cache = (now, count)
+        return count
 
     async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:
         """Write-through prime of the ``{graph}:stats_cache`` Redis key.

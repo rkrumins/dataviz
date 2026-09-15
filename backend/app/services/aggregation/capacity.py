@@ -268,7 +268,7 @@ def shard_row(
 def source_row(
     ds: Any, *, provider_name: Optional[str], graph_key: Optional[str],
     state: Dict[str, Any], stats: Dict[str, Any], failure: Dict[str, Any],
-    limits: CapacityLimits,
+    limits: CapacityLimits, property_key_count: Optional[int] = None,
 ) -> CapacitySource:
     """What one source costs its shard today, and what its last run learned."""
     edge_count = _int_or(state.get("aggregation_edge_count"))
@@ -298,6 +298,7 @@ def source_row(
         last_regime=stats.get("regime") if isinstance(stats.get("regime"), str) else None,
         last_failure_category=failure.get("category"),
         attribute_names=int(names) if isinstance(names, (int, float)) else None,
+        property_key_count=property_key_count,
     )
 
 
@@ -365,6 +366,46 @@ def _safe_json(raw: Optional[str]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+async def property_key_counts(
+    session: AsyncSession, ds_ids: List[str],
+) -> Dict[str, int]:
+    """``{ds_id: property_key_count}`` for the sources that have a reading.
+
+    The counts lanes collect this for EVERY source they observe, so unlike
+    ``latest_completed_stats_map`` it does not require a completed rebuild —
+    which is the reason it exists. A graph at the property-name ceiling is a
+    graph that can no longer rebuild, so the rebuild's own reading is exactly
+    the one that stops arriving at the moment it starts to matter.
+
+    Sources with no reading are ABSENT from the map rather than zero: a
+    provider that cannot answer, a store that is not FalkorDB, and a source
+    observed before the figure was collected all mean "unknown", and a zero
+    here would read as a graph carrying no properties at all.
+    """
+    if not ds_ids:
+        return {}
+    from backend.app.db.models import DataSourceStatsORM
+
+    try:
+        rows = (await session.execute(
+            select(
+                DataSourceStatsORM.data_source_id,
+                DataSourceStatsORM.property_key_count,
+            ).where(
+                DataSourceStatsORM.data_source_id.in_(list(ds_ids)),
+                DataSourceStatsORM.property_key_count.isnot(None),
+            )
+        )).all()
+    except Exception as exc:                              # noqa: BLE001
+        # Supplementary, and never load-bearing. This page exists to say
+        # whether a shard has memory for the next rebuild; the property-name
+        # count rides along on it. Failing the whole capacity view because one
+        # extra SELECT did not answer would trade a figure for the page.
+        logger.debug("property key counts unavailable: %s", exc)
+        return {}
+    return {r[0]: int(r[1]) for r in rows}
 
 
 async def latest_completed_stats_map(
@@ -508,6 +549,11 @@ async def _assemble(
     failed_ids = [ds.id for ds, _ in sources if getattr(ds, "aggregation_status", None) == "failed"]
     failures = await _latest_failure_map(session, failed_ids)
     stats = await latest_completed_stats_map(session, ds_ids)
+    # Collected for EVERY source by the counts lanes, not only for one that
+    # has completed a rebuild — which is the whole point: a graph at the
+    # ceiling is a graph that can no longer rebuild, so the rebuild's own
+    # reading is exactly the one that stops arriving when it starts to matter.
+    property_keys = await property_key_counts(session, ds_ids)
     limits = effective_limits(await _stored_tuning(session))
 
     # The same rule the topology route follows: a request never runs the
@@ -578,6 +624,7 @@ async def _assemble(
             ds, provider_name=provider_name, graph_key=key,
             state=states.get(ds.id, {}), stats=stats.get(ds.id, {}),
             failure=failures.get(ds.id, {}), limits=limits,
+            property_key_count=property_keys.get(ds.id),
         )
         rows_by_id[ds.id] = row
         by_endpoint.setdefault(endpoint, []).append(row)
@@ -601,6 +648,7 @@ async def _assemble(
         "sources_total": total, "truncated": truncated,
         "rows_by_id": rows_by_id, "readings": readings, "placed": placed,
         "reservations": reservations, "states": states, "stats": stats,
+        "property_keys": property_keys,
         "stale": snapshot.stale, "last_error": snapshot.last_error,
     }
 
@@ -695,6 +743,7 @@ async def assemble_source_capacity(
             ds, provider_name=provider_name, graph_key=None,
             state=parts["states"].get(ds_id, {}), stats=parts["stats"].get(ds_id, {}),
             failure={}, limits=limits,
+            property_key_count=parts["property_keys"].get(ds_id),
         )
         shard = shard_row(reading, limits)
         shard.why_not = why

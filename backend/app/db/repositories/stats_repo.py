@@ -165,6 +165,7 @@ async def _capture_history(
     edge_type_counts: str,
     digest: str,
     previous: Optional[DataSourceStatsORM],
+    property_key_count: Optional[int] = None,
 ) -> Optional[str]:
     """Record this observation into ``data_source_count_snapshots``.
 
@@ -201,6 +202,7 @@ async def _capture_history(
         digest=digest,
         previous=previous,
         policy=policy,
+        property_key_count=property_key_count,
     )
     return snapshot.captured_at if snapshot is not None else None
 
@@ -229,6 +231,7 @@ async def upsert_data_source_stats_counts(
     entity_type_counts: str,
     edge_type_counts: str,
     *,
+    property_key_count: Optional[int] = None,
     probed: bool = False,
     lane: str = "poll",
 ) -> DataSourceStatsORM:
@@ -255,6 +258,23 @@ async def upsert_data_source_stats_counts(
     ``lane`` names which collection lane observed these counts, carried onto
     the history snapshot this write may capture. It is a label, not a
     behaviour: nothing about the current-state row depends on it.
+
+    ``property_key_count`` is the graph's registered property-NAME count.
+    Two rules, both deliberate.
+
+    It is NOT part of ``counts_digest``. The digest decides whether an
+    observation counts as movement, and movement drives the change ledger and
+    the counts alerts. A name count that ticks while the counts stand still is
+    not a change to the DATA, and folding it in would raise a finding and a
+    bell notification every time a loader wrote one new key. The figure rides
+    along on whatever snapshot the counts justify, and the hourly heartbeat
+    gives it a floor of one reading an hour regardless.
+
+    ``None`` means NOT MEASURED and never overwrites a reading. A probe that
+    timed out, a provider with no property-name concept, a store that is not
+    FalkorDB: all answer None, and clobbering yesterday's known 64,000 with a
+    null because one poll failed would erase exactly the trend this exists to
+    show.
     """
     now = datetime.now(timezone.utc).isoformat()
     digest = _counts_digest(entity_type_counts, edge_type_counts)
@@ -269,6 +289,7 @@ async def upsert_data_source_stats_counts(
         edge_type_counts=edge_type_counts,
         digest=digest,
         previous=existing,
+        property_key_count=property_key_count,
     )
     if existing:
         existing.node_count = node_count
@@ -277,6 +298,8 @@ async def upsert_data_source_stats_counts(
         existing.edge_type_counts = edge_type_counts
         existing.updated_at = now
         existing.counts_digest = digest
+        if property_key_count is not None:
+            existing.property_key_count = property_key_count
         if probed:
             existing.last_probed_at = now
         if captured_at:
@@ -290,6 +313,7 @@ async def upsert_data_source_stats_counts(
         edge_count=edge_count,
         entity_type_counts=entity_type_counts,
         edge_type_counts=edge_type_counts,
+        property_key_count=property_key_count,
         counts_digest=digest,
         last_probed_at=now if probed else None,
         last_snapshot_at=captured_at,

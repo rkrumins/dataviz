@@ -21,6 +21,34 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     )
 }
 
+/** The graph's registered property-name count, and where the number came
+ *  from. Prefer the COLLECTED reading over the last rebuild's: the counts
+ *  lanes observe every source, while a rebuild's reading only exists for a
+ *  source that managed to rebuild — and a graph at the ceiling is precisely
+ *  one that cannot. Names are never freed, so this only goes up. */
+function propertyNames(source: {
+    propertyKeyCount?: number | null
+    attributeNames?: number | null
+}) {
+    const collected = source.propertyKeyCount
+    const atRebuild = source.attributeNames
+    const value = collected ?? atRebuild
+    if (value == null) return 'not measured yet'
+    const near = value >= 60_000
+    return (
+        <>
+            <span className={near ? 'text-amber-600 dark:text-amber-400 font-medium' : undefined}>
+                {value.toLocaleString()}
+            </span>
+            {' of 65,534 the graph store allows a graph'}
+            <span className="text-ink-muted">
+                {collected == null ? ' (at the last completed rebuild)' : ''}
+                {near ? ' — names are never freed, so this graph will need recreating' : ''}
+            </span>
+        </>
+    )
+}
+
 export function SourceCapacityBlock({ dsId }: { dsId: string }) {
     const q = useSourceCapacity(dsId, true)
     const remeasure = useRemeasureCapacity()
@@ -110,12 +138,7 @@ export function SourceCapacityBlock({ dsId }: { dsId: string }) {
                             ) : '—'}
                         </Row>
                         <Row label="Property names">
-                            {doc.source.attributeNames != null
-                                ? <>
-                                    {doc.source.attributeNames.toLocaleString()} of 65,534 the graph store allows a graph
-                                    <span className="text-ink-muted"> (at the last completed rebuild)</span>
-                                </>
-                                : 'not measured until a rebuild completes'}
+                            {propertyNames(doc.source)}
                         </Row>
                         <Row label="Last decision">
                             {doc.source.lastRegime

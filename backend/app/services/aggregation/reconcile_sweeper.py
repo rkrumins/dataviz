@@ -854,6 +854,9 @@ class ReconciliationSweeper:
                             edge_count=edge_count,
                             entity_type_counts=json.dumps(entity),
                             edge_type_counts=json.dumps(edges),
+                            # None when the provider would not say, which is
+                            # not zero and does not overwrite a reading.
+                            property_key_count=raw.get("propertyKeyCount"),
                             lane="sweep",
                         )
                         await session.commit()

@@ -681,6 +681,12 @@ export interface CapacitySource {
   /** Distinct property names the graph had registered at its last completed
    *  rebuild, against the graph store's ceiling of 65,534 per graph. */
   attributeNames?: number | null;
+  /** The same figure as COLLECTED by the counts lanes, which observe every
+   *  source rather than only one that has rebuilt. Prefer this: a graph at
+   *  the ceiling can no longer rebuild, so `attributeNames` is exactly the
+   *  reading that stops arriving when it starts to matter. Null/absent means
+   *  not measured — never zero. */
+  propertyKeyCount?: number | null;
 }
 
 export interface ShardCapacity {

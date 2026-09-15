@@ -43,7 +43,13 @@ OTHER_KEY = "__other__"
 #: reported ALONGSIDE the relationship types rather than among them. It is a
 #: ``breakdown="none"`` measure only: the overlay IS one edge type, so
 #: decomposing it by edge type is a tautology (see ``_BREAKDOWN_METRIC``).
-METRICS = ("total", "nodes", "edges", "aggregated")
+#: ``property_keys`` is the graph's registered property-NAME count against
+#: FalkorDB's per-graph ceiling. Like ``aggregated`` it is a
+#: ``breakdown="none"`` measure — names are not decomposable by entity or
+#: relationship type — and unlike EVERY other measure here it does not SUM
+#: across a scope: each graph carries its own ceiling, so two graphs' counts
+#: added together describe nothing. See ``_MAX_METRIC``.
+METRICS = ("total", "nodes", "edges", "aggregated", "property_keys")
 BREAKDOWNS = ("none", "entity_type", "edge_type")
 
 _BREAKDOWN_FIELD = {
@@ -60,7 +66,15 @@ _METRIC_LABEL = {
     "nodes": "Entities",
     "edges": "Relationships",
     "aggregated": "Aggregated",
+    "property_keys": "Property names",
 }
+
+#: Measures whose scope total is the MAXIMUM across sources, not the sum.
+#: The question an operator asks of a scope here is "is ANY graph in it close
+#: to the wall", and a sum answers a question nobody has: a workspace of ten
+#: graphs at 6,000 names each is nowhere near a ceiling that applies to each
+#: of them separately, but its sum reads as 60,000.
+_MAX_METRIC = frozenset({"property_keys"})
 
 
 def _loads(raw: Any) -> Dict[str, int]:
@@ -137,6 +151,10 @@ def _metric_value(obs, metric: str) -> int:
         return int(obs.edge_count or 0)
     if metric == "aggregated":
         return _overlay_value(obs)
+    if metric == "property_keys":
+        # Callers that reach here have already filtered to observations that
+        # measured one; an unmeasured row must never be read as zero.
+        return int(getattr(obs, "property_key_count", None) or 0)
     return int(obs.node_count or 0) + int(obs.edge_count or 0)
 
 
@@ -145,6 +163,10 @@ def _metric_extremes(obs, metric: str) -> Tuple[Optional[int], Optional[int]]:
         return obs.node_min, obs.node_max
     if metric == "edges":
         return obs.edge_min, obs.edge_max
+    if metric == "property_keys":
+        # No per-bucket extremes are stored for it, and the closing value is
+        # already the bucket's high-water mark: the count is a ratchet.
+        return None, None
     if metric == "aggregated":
         # The rollup tiers keep ``edge_min``/``edge_max`` for the TOTAL only —
         # there are no per-type extremes anywhere. Returning the total's would
@@ -239,8 +261,9 @@ def build_series(
         for o in observations
     }
 
-    totals: Dict[str, List[int]] = {
+    totals: Dict[str, List[Any]] = {
         "nodes": [], "edges": [], "total": [], "aggregated": [],
+        "property_keys": [],
     }
     for bucket in buckets:
         observed = filled[bucket].values()
@@ -256,6 +279,16 @@ def build_series(
             overlay.get((getattr(o, "data_source_id", None), o.bucket), 0)
             for o in observed
         ))
+        # The MAX, not the sum (see ``_MAX_METRIC``), and None — not zero —
+        # when nothing in the bucket answered. A graph the probe could not
+        # reach has an unknown name count, and drawing that as zero would put
+        # a source on the floor of a chart whose whole purpose is showing how
+        # close it is to the ceiling.
+        measured = [
+            o.property_key_count for o in observed
+            if getattr(o, "property_key_count", None) is not None
+        ]
+        totals["property_keys"].append(max(measured) if measured else None)
 
     series: List[Dict[str, Any]] = []
 
@@ -274,7 +307,12 @@ def build_series(
                         break
                     lo += o_lo
                     hi += o_hi
-                point = {"t": bucket, "v": totals[name][i]}
+                value = totals[name][i]
+                if value is None:
+                    # Sparse by design: the point carries its own ``t``, so a
+                    # gap reads as "not measured then" instead of "zero then".
+                    continue
+                point = {"t": bucket, "v": value}
                 if known and observed:
                     point["min"], point["max"] = lo, hi
                 points.append(point)

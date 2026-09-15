@@ -166,10 +166,15 @@ async def get_series(
     metric: str = Query(
         "total",
         description=(
-            "total | nodes | edges | aggregated. ``aggregated`` is the "
-            "platform's own materialised rollup, reported alongside the "
-            "relationship types rather than among them; it has no meaning "
-            "under a breakdown, which implies its own measure."
+            "total | nodes | edges | aggregated | property_keys. "
+            "``aggregated`` is the platform's own materialised rollup, "
+            "reported alongside the relationship types rather than among "
+            "them. ``property_keys`` is the graph's registered "
+            "property-NAME count against the store's per-graph ceiling, and "
+            "is the one measure reported as the MAXIMUM over a scope rather "
+            "than the sum, because the ceiling applies to each graph "
+            "separately. Neither has meaning under a breakdown, which "
+            "implies its own measure."
         ),
     ),
     breakdown: str = Query("none", description="none | entity_type | edge_type"),
@@ -387,7 +392,9 @@ async def export_csv(
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None),
     breakdown: str = Query("none"),
-    metric: str = Query("total", description="total | nodes | edges | aggregated"),
+    metric: str = Query(
+        "total", description="total | nodes | edges | aggregated | property_keys",
+    ),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> Response:

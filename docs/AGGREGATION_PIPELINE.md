@@ -1486,6 +1486,57 @@ the long tail of keys that appear once. `CALL db.propertyKeys() YIELD
 propertyKey RETURN count(*)` is the count; `run_stats.attribute_names` records
 it on every run.
 
+### Seeing a graph approach the ceiling, before it arrives
+
+`run_stats.attribute_names` is written by a **rebuild**, which makes it the
+wrong instrument for this on its own: a source that has never rebuilt has no
+reading at all, and a graph AT the ceiling is precisely one that can no longer
+rebuild — so the only number available stops arriving exactly when it starts
+to matter. The production graph that filled its attribute map did so with
+nothing anywhere recording the climb.
+
+So the figure is also **collected as an ordinary statistic**, on the same road
+the node and edge counts already travel:
+
+| Tier | Column | Written by |
+|---|---|---|
+| Current state | `data_source_stats.property_key_count` | every counts lane (`probe`, `poll`, `deep`, `sweep`, `write`) |
+| History | `data_source_count_snapshots.property_key_count` | `maybe_capture_snapshot`, alongside the counts |
+| Compacted | `data_source_count_rollups.property_key_count` | the hour/day compactor, closing value per bucket |
+
+The provider measures it with `FalkorDBProvider.property_key_count()` — the
+count is taken in the ENGINE (`RETURN count(propertyKey)`), not by enumerating
+names here, so a graph near the ceiling costs one row rather than 65,534
+strings, and the read fits inside the cluster query ceiling. It is cached for
+60 s and rides in the `get_stats` / `get_counts_fast` payload as
+`propertyKeyCount`.
+
+Four rules, each of which matters:
+
+* **Null is not zero.** A probe that could not answer, a provider with no
+  property-name concept and every row captured before this shipped all store
+  null. A zero would draw a graph on the floor of the one chart whose purpose
+  is showing how close it is to the ceiling.
+* **A failed probe never overwrites a reading.** The count is a ratchet, so
+  yesterday's figure is still the best answer available; clobbering it with a
+  null because one poll timed out erases the trend.
+* **It is not part of `counts_digest`.** The digest decides what reads as
+  movement, and movement drives the change ledger, the counts alerts and a
+  bell notification. A loader registering one new property key has not changed
+  the data. The figure rides on a snapshot the counts justified, or on the
+  hourly heartbeat.
+* **A scope reports the MAXIMUM, not the sum.** Every graph carries its own
+  65,534-name ceiling, so ten graphs at 6,000 names each are nowhere near it
+  while their sum reads as 60,000. This is the only measure in the profiling
+  series that does not add up across a scope.
+
+Where it shows: **Data Ingestion → Profiling** as the `property_keys` measure
+(a `breakdown="none"` series — names are not decomposable by entity or
+relationship type, and a bucket nothing measured draws no point rather than a
+zero), and **Admin → Graph store** on the capacity card and the source drawer,
+which prefer the collected reading over the last rebuild's and say which one
+they are showing.
+
 What the ceiling does to a rebuild is not a refusal on the first write. The
 rollup's own names (`aggKey`, `weight`, the level and depth stamps) were
 registered by the first run that ever wrote a rollup, so on a graph that
