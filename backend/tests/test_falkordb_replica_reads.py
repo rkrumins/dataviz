@@ -306,7 +306,7 @@ def test_a_master_that_answered_recently_hands_over_the_replicas_it_vouched_for(
     assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"    # only this one is in step
 
     _deaf_master(conn)
-    p._vouch_sample["g1"] = (time.monotonic() - _stale_sample(), p._vouch_sample["g1"][1])
+    p._repl_sample["g1"] = (time.monotonic() - _stale_sample(), p._repl_sample["g1"][1])
     for _ in range(4):
         # …and the lagging sibling is still not handed the reads.
         assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"
@@ -334,7 +334,7 @@ def test_a_graph_this_pod_just_wrote_still_reads_once_its_master_goes():
     assert _run(p._replica_for("g1")) is None          # healthy master: pinned
 
     _deaf_master(conn)
-    p._vouch_sample.clear()                             # take a fresh reading
+    p._repl_sample.clear()                             # take a fresh reading
     assert _run(p._replica_for("g1")) in (R1, R2)
 
 
@@ -790,7 +790,7 @@ def test_a_node_that_finished_loading_is_vouched_for_again():
     assert {f"{n.host}:{n.port}" for n in _run(
         p._vouched_replicas("g1", [R1, R2], master=MASTER))} == {"10.0.2.1:6379"}
     answers["10.0.1.1:6379"] = _replica_info()      # replay finished
-    p._vouch_sample = {}
+    p._repl_sample = {}
     assert {f"{n.host}:{n.port}" for n in _run(
         p._vouched_replicas("g1", [R1, R2], master=MASTER))} == {
             "10.0.1.1:6379", "10.0.2.1:6379"}
@@ -805,7 +805,7 @@ def test_a_second_rotation_of_the_same_node_is_reported_again(caplog):
     p = _asking_provider(answers)
 
     def rounds():
-        p._vouch_sample = {}
+        p._repl_sample = {}
         _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
 
     with caplog.at_level(logging.INFO):
@@ -965,7 +965,7 @@ def test_the_pinned_replica_clients_are_built_once_and_closed(monkeypatch):
         "127.0.0.1:6502": _replica_info(),
     })
     for _ in range(6):
-        p._vouch_sample = {}
+        p._repl_sample = {}
         _run(p._replica_for("g1"))
     assert len(p._built) == 2, f"built {len(p._built)} clients for 2 replicas"
     assert len(p._pinned_replicas) == 2

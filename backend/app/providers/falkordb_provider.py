@@ -418,6 +418,19 @@ _REPLICA_SAMPLE_S = 5.0
 #: that cannot answer this promptly is not one to hand a read to, and
 #: the master is always there to fall back on.
 _REPLICA_ASK_TIMEOUT_S = 1.0
+
+#: What a node probe returns when the node TOOK the connection and simply did
+#: not answer inside its deadline — as distinct from ``None``, which means it
+#: refused, or is not there.
+#:
+#: For a REPLICA the distinction does not arise: either way it failed to
+#: describe itself, so it is not a candidate. For the MASTER the two are
+#: OPPOSITE verdicts. A master that is merely busy is still the node holding
+#: this process's own writes, and calling it silent bypasses the settle
+#: window and sends a read-back to a replica. A master that is absent makes
+#: its replicas the only copies of the graph still standing, which is exactly
+#: when the link-and-sync requirements have to relax.
+_PROBE_TIMED_OUT = object()
 #: How many per-replica clients one provider may hold. The list comes from a
 #: node's own report, and a broken deployment must not be able to make this
 #: unbounded.
@@ -479,6 +492,21 @@ _REPLICA_SAMPLE_TIMEOUT_S = float(os.getenv("FALKORDB_REPLICA_SAMPLE_TIMEOUT_S",
 #: the cluster's own failover window, after which a promoted replica IS the
 #: master and the question has changed.
 _REPLICA_VOUCH_MAX_AGE_S = 3 * _REPLICA_SAMPLE_S
+
+
+def _vouch_is_current(vouched_at: Optional[float], now: float) -> bool:
+    """Whether a set the master last vouched for is young enough to drop the
+    link and sync requirements on.
+
+    A stamp we NEVER HAD is not a stale one. A process that meets an absent
+    master on its very first sample has no cached verdict to be old — only
+    each replica's own first-hand reading, taken just now — and refusing
+    then would take a shard's reads offline for the whole of a failover, in
+    the one case the relaxation exists to cover. What the ceiling stops is a
+    verdict being REUSED while the master it was measured against stays
+    gone.
+    """
+    return vouched_at is None or (now - vouched_at) <= _REPLICA_VOUCH_MAX_AGE_S
 
 #: The master's share of a shard's reads, in round-robin slots against one
 #: slot per in-step replica. 0 keeps every read off the master.
@@ -769,6 +797,18 @@ try:  # pragma: no cover - redis is always installed in practice
     _TRANSIENT_REDIS_EXC: tuple = (_RedisConnectionError, _RedisTimeoutError)
 except Exception:  # pragma: no cover
     _TRANSIENT_REDIS_EXC = ()
+
+# A probe that TIMED OUT, split from one that was REFUSED. Only the asyncio
+# deadline and the redis SOCKET timeout count here: a redis ``ConnectionError``
+# means the node is not there, which is the opposite verdict for a master and
+# the one that lets its replicas answer in its place.
+try:  # pragma: no cover - redis is always installed in practice
+    from redis.exceptions import TimeoutError as _RedisProbeTimeoutError
+    _PROBE_TIMEOUT_EXC: tuple = (
+        asyncio.TimeoutError, TimeoutError, _RedisProbeTimeoutError,
+    )
+except Exception:  # pragma: no cover
+    _PROBE_TIMEOUT_EXC = (asyncio.TimeoutError, TimeoutError)
 
 # BusyLoadingError (subclass of redis ConnectionError) is raised while
 # FalkorDB replays its RDB snapshot into memory on restart — a transient,
@@ -3190,7 +3230,8 @@ class FalkorDBProvider(GraphDataProvider):
             # are called, so the clients pinned to the old ones go with the
             # old primary rather than lingering and being vouched again.
             await self._release_pinned_replicas()
-            self._vouch_sample = {}
+            self._repl_sample = {}
+            self._repl_vouched_at = {}
 
             old_pool, old_proj_pool = self._pool, self._proj_pool
             old_db, old_proj_db = self._db, self._proj_db
@@ -3466,9 +3507,13 @@ class FalkorDBProvider(GraphDataProvider):
         qualified", and the caller treats both the same way. Callers asking
         only "is there a usable replica?" leave it off.
 
-        Never raises and never blocks on a store that is unwell: everything
-        it needs is either in the client's own slot map or in a cached
-        ``INFO replication`` reading a few seconds old.
+        Never raises, and never blocks longer than one sample deadline
+        (``_REPLICA_SAMPLE_TIMEOUT_S``) on a store that is unwell:
+        everything it needs is either in the client's own slot map or in a
+        cached ``INFO replication`` reading a few seconds old, and taking
+        that reading is bounded as a whole rather than per node. The bound
+        matters because this runs in FRONT of the read's own budget, not
+        inside it.
         """
         if not self._replica_reads_enabled():
             return None
@@ -3532,11 +3577,27 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, endpoint, type(exc).__name__, _REPLICA_PENALTY_S,
         )
 
-    async def _ask_node_role(self, node: Any) -> Optional[Dict[str, Any]]:
-        """What ``node`` says about ITSELF, or None if it will not answer.
+    async def _ask_node_role(
+        self, node: Any, *, timeout_s: Optional[float] = None,
+    ) -> Any:
+        """What ``node`` says about ITSELF.
 
-        One ``INFO replication`` addressed at the node. Never raises: an
-        unreachable candidate is simply not a candidate.
+        One ``INFO replication`` addressed at the node. Never raises, and
+        answers in three ways rather than two: the parsed reading;
+        ``_PROBE_TIMED_OUT`` when the node took the connection and did not
+        answer in time; ``None`` when it refused, was unreachable, or said
+        something unparseable. An unreachable candidate is simply not a
+        candidate, but for the MASTER those last two are different facts —
+        see ``_PROBE_TIMED_OUT``.
+
+        ``timeout_s`` is deliberately longer for the master than for a
+        replica candidate, because the two probes answer different
+        questions. A replica has to prove it is FIT to serve, and one that
+        cannot say so promptly is not one to hand a read to. The master only
+        has to prove it is THERE, and misjudging that is what costs
+        read-your-own-writes — so it gets the deadline a loaded master's p99
+        actually needs (``_REPLICA_SAMPLE_TIMEOUT_S``) rather than the one
+        sized for discarding a slow replica.
         """
         from backend.app.services.graph_store import info_parse
 
@@ -3558,8 +3619,12 @@ class FalkorDBProvider(GraphDataProvider):
                     "INFO", "replication", "persistence",
                     **({} if sender is not None else {"target_nodes": node}),
                 ),
-                timeout=_REPLICA_ASK_TIMEOUT_S,
+                timeout=(
+                    _REPLICA_ASK_TIMEOUT_S if timeout_s is None else timeout_s
+                ),
             )
+        except _PROBE_TIMEOUT_EXC:                        # busy, not gone
+            return _PROBE_TIMED_OUT
         except Exception:                                 # noqa: BLE001 — not a candidate
             return None
         try:
@@ -3632,9 +3697,12 @@ class FalkorDBProvider(GraphDataProvider):
         is never swept in by that relaxation: it IS the new master, and the
         router pins the master separately for read-your-own-writes.
         """
-        cache = getattr(self, "_vouch_sample", None)
+        cache = getattr(self, "_repl_sample", None)
         if cache is None:
-            cache = self._vouch_sample = {}
+            cache = self._repl_sample = {}
+        vouched_at = getattr(self, "_repl_vouched_at", None)
+        if vouched_at is None:
+            vouched_at = self._repl_vouched_at = {}
         now = time.monotonic()
         by_key = {f"{n.host}:{n.port}": n for n in candidates}
         cached = cache.get(graph_key)
@@ -3648,8 +3716,27 @@ class FalkorDBProvider(GraphDataProvider):
         # serving. One extra INFO per shard per window buys a fact.
         probes = [self._ask_node_role(n) for n in candidates]
         if master is not None:
-            probes.append(self._ask_node_role(master))
-        results = await asyncio.gather(*probes, return_exceptions=True)
+            probes.append(
+                self._ask_node_role(master, timeout_s=_REPLICA_SAMPLE_TIMEOUT_S)
+            )
+        # ONE deadline for the WHOLE sample, not merely one per probe inside
+        # it. ``_replica_for`` runs in FRONT of the read's own budget rather
+        # than inside it, so every millisecond spent here is added to the
+        # read — and it is spent exactly when the store is unwell. The
+        # master is allowed the longer per-probe deadline because a loaded
+        # master's ``INFO`` is slower than a replica's and misreading it is
+        # what costs read-your-own-writes; this window is what stops that
+        # generosity turning into unbounded routing latency.
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*probes, return_exceptions=True),
+                timeout=_REPLICA_SAMPLE_TIMEOUT_S,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            # Nothing described itself in time. Every probe counts as TIMED
+            # OUT rather than absent: the nodes took the connections, so
+            # this is load, and a master under load keeps its own reads.
+            results = [_PROBE_TIMED_OUT] * len(probes)
         answers = results[:len(candidates)]
         master_answer = results[len(candidates)] if master is not None else None
         # A master that is REPLAYING cannot serve either, and it is not
@@ -3663,8 +3750,16 @@ class FalkorDBProvider(GraphDataProvider):
             self._log_loading(f"{master.host}:{master.port}", master_answer)
         elif isinstance(master_answer, dict) and master is not None:
             self._clear_loading_note(f"{master.host}:{master.port}")
-        master_silent = master is not None and (
-            not isinstance(master_answer, dict) or master_loading
+        # SILENT means "not there" — never "slow". A master that took the
+        # connection and missed the deadline is BUSY, which is the routine
+        # shape under load, and it is still the only node holding this
+        # process's own writes: calling it silent bypasses the settle window
+        # and hands the read-back to a replica. Only a refusal, or an answer
+        # that says it is replaying, makes the replicas the copies standing.
+        master_answered = isinstance(master_answer, dict)
+        master_timed_out = master_answer is _PROBE_TIMED_OUT
+        master_silent = master is not None and not master_timed_out and (
+            not master_answered or master_loading
         )
 
         strict: List[str] = []
@@ -3708,7 +3803,9 @@ class FalkorDBProvider(GraphDataProvider):
 
         if strict:
             chosen = strict
-        elif master_silent and alive_replicas:
+        elif master_silent and alive_replicas and _vouch_is_current(
+            vouched_at.get(graph_key), now
+        ):
             # The master is not there. Its replicas are the only copies of
             # this graph still standing, so a stale answer beats no answer —
             # the rule the old master-side sampling kept by holding the last
@@ -3717,6 +3814,16 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             chosen = []
         cache[graph_key] = (now, chosen)
+        # Only a reading the MASTER took part in renews the vouch. The sample
+        # it MISSED is precisely the one that has to age: re-stamping on every
+        # miss is what left the relaxed set with no maximum age at all, so one
+        # master that stayed unreachable froze its shard's lag verdict for as
+        # long as it stayed gone. That verdict decays in a way the figures do
+        # not show — a detached replica goes on reporting the offsets from the
+        # moment it detached, so ``lagBytes`` stays readable and stops being
+        # true. The ceiling is the only thing that notices.
+        if master_answered:
+            vouched_at[graph_key] = now
         self._note_master_silent(graph_key, master_silent)
         return [by_key[k] for k in chosen]
 

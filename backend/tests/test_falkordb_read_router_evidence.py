@@ -33,7 +33,7 @@ import pytest
 from backend.app.providers import falkordb_provider as fp
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 from test_falkordb_replica_reads import (            # noqa: E402 — shared doubles
-    R1, R2, _Conn, _deaf_master, _provider,
+    MASTER as fp_MASTER, R1, R2, _Conn, _deaf_master, _provider,
 )
 
 
@@ -217,6 +217,94 @@ def test_a_reading_inside_the_maximum_age_still_stands():
 
 def test_the_maximum_age_is_a_few_sample_windows_not_forever():
     assert fp._REPLICA_VOUCH_MAX_AGE_S == 3 * fp._REPLICA_SAMPLE_S
+
+
+def test_a_sample_the_master_missed_does_not_renew_the_vouch():
+    """The re-stamp IS the defect. A master that stops answering has to let
+    its last real reading age out, not refresh it by failing to answer."""
+    conn = _Conn()
+    p = _provider(conn)
+    assert _run(p._replica_for("g1")) in (R1, R2)
+    first = p._repl_vouched_at["g1"]
+
+    _slow_master(conn)
+    p._repl_sample["g1"] = (time.monotonic() - fp._REPLICA_SAMPLE_S - 1,
+                            p._repl_sample["g1"][1])
+    _run(p._replica_for("g1"))
+    assert p._repl_vouched_at["g1"] == first
+
+
+def test_a_redis_socket_timeout_is_a_busy_master_too():
+    """``asyncio.TimeoutError`` is OUR deadline; redis raises its own class
+    of the same name when the socket stalls. Both mean the node TOOK the
+    connection, so matching only the first would have gone on calling half
+    the busy masters dead."""
+    from redis.exceptions import TimeoutError as _RedisTimeout
+
+    conn = _Conn()
+
+    async def _stall(command, *args, target_nodes=None):
+        conn.calls.append((command, args, target_nodes))
+        if command == "INFO":
+            raise _RedisTimeout("Timeout reading from socket")
+        return "OK"
+
+    conn.execute_command = _stall
+    p = _provider(conn)
+    assert _run(p._replica_for("g1")) is None
+    assert not p._master_is_silent("g1")
+
+
+def test_a_master_that_is_replaying_is_still_not_a_node_to_read_from():
+    """LOADING is the one non-answer that IS silence: the node is there and
+    talking, and every data command it takes comes back ``-LOADING``."""
+    conn = _Conn()
+
+    async def _loading(command, *args, target_nodes=None):
+        conn.calls.append((command, args, target_nodes))
+        if command != "INFO":
+            return "OK"
+        if target_nodes is not None and target_nodes is not fp_MASTER:
+            report = conn._self_report(target_nodes)
+            if report.get("role") == "slave":
+                report["master_link_status"] = "down"
+            return report
+        return {"role": "master", "loading": 1, "master_repl_offset": 100}
+
+    conn.execute_command = _loading
+    p = _provider(conn)
+    assert _run(p._replica_for("g1")) in (R1, R2)
+    assert p._master_is_silent("g1")
+
+
+def test_one_node_that_ignores_its_deadline_cannot_stall_a_read(monkeypatch):
+    """Every probe carries its own deadline, but a client that does not
+    honour cancellation would still hold the gather — and the router runs in
+    FRONT of the read's budget, not inside it. The sample is bounded as a
+    WHOLE so routing can never cost a read more than one window."""
+    monkeypatch.setattr(fp, "_REPLICA_ASK_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(fp, "_REPLICA_SAMPLE_TIMEOUT_S", 0.2)
+
+    conn = _Conn()
+
+    async def _never(command, *args, target_nodes=None):
+        if command == "INFO":
+            await asyncio.sleep(30)
+        return "OK"
+
+    conn.execute_command = _never
+    p = _provider(conn)
+
+    async def _timed():
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        node = await p._replica_for("g1")
+        return node, loop.time() - start
+
+    node, elapsed = _run(_timed())
+    assert node is None                                   # no evidence, master serves
+    assert elapsed < 2.0                                  # bounded by the window
+    assert not p._master_is_silent("g1")                  # stalled is not gone
 
 
 # ── the master takes its share of the reads ──────────────────────────────
