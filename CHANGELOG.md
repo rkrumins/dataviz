@@ -27,9 +27,13 @@ failure detector (40% of it, floor 2 s) and clamped at the boundary, so the pipe
 batches, the bulk loader's, the versioning projector's and a `writeTimeoutS` raised on a
 running job are all bounded. An operator cannot raise past it. A batch that needs longer is
 aborted by the server, halved by the pressure ladder and re-issued — an ordinary in-run
-retry where it used to be a failover. Reads are clamped too: `-UNBLOCKED` reaches whichever
-client is blocked, and a long read holds a module thread on a node whose main thread has to
-keep answering the cluster bus.
+retry where it used to be a failover. The ceiling is a WRITE ceiling and nothing else:
+FalkorDB dispatches `GRAPH.*` to a module thread pool while the main thread keeps answering
+the cluster bus, so a long read cannot cost a vote — only a write, which holds the write
+lock, can. Clamping reads to it cut the canvas's own 15-second children query, the 30-second
+stats scan and the aggregated ladder's 36 seconds down to 6, turning ordinary slow reads
+into errors. Reads run on their own budget, and the generic read default is 15 s to match
+the canvas.
 
 **The clamp depended on an environment variable that was set nowhere.** A production
 cluster running nine nodes at a 15-second failure detector had a ConfigMap that predated
@@ -143,6 +147,26 @@ million cells costs over a gigabyte. The memory-aware flush bounds that INSIDE t
 loops; the end of a run builds a second full copy of the key set to report and reconcile
 what it wrote, where no flush can fire, so the peak is not the flush line. The production
 aggregation worker goes to 2Gi requests / 12Gi limits.
+
+**Refresh counted one more data source than the tab lists.** Ingestion → Data Sources
+reported "Refreshing all 129 sources" over a list of 128. Each provider's discovery cache
+holds one empty-string row — the list-all sentinel, whose payload is the inventory of graphs
+rather than a graph — and `jobs_queued` added it to the per-asset fan-out, so the toast was
+the asset count plus one on EVERY refresh, for every provider. It now counts assets; the
+sentinel's job id is still returned for callers that track it. The same row was also filtered
+after the capped query rather than in it, so a provider at the 200 cap returned 199 assets and
+`truncated` could never be true. Two other outcomes had been rendering as one: a provider with
+nothing cached yet now says its sources are being looked for, and a queue that is down says so
+instead of claiming a refresh it never queued.
+
+**A newly created graph stayed invisible after a refresh.** The asset list re-fetched only
+while the backend reported `computing`, which is the cold-cache state — a provider that
+already has a list is served its previous one as `fresh` or `stale` with `refreshing` set,
+never `computing`. So nothing polled while the inventory job ran: the re-list at the end of
+a refresh raced that job and usually landed on the same stale payload, and the new graph did
+not appear until the 30-second staleness lapsed with a remount or the window regained focus.
+The list now also polls on `refreshing` — the worker's own dedup claim, released on success
+and on failure — so it follows the inventory job to its result and stops there.
 
 ### Changed
 

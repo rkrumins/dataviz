@@ -327,13 +327,20 @@ describe('silent sign-in', () => {
             at: Date.now(), reason: 'Your session there has ended.',
         }))
         renderLogin()
-        expect(await screen.findByText(/could not be renewed automatically/i))
-            .toBeInTheDocument()
-        expect(screen.queryByText(/try signing in again/i))
-            .not.toBeInTheDocument()
+        // Wait on the Retry button, not on the banner. The banner's first
+        // sentence is rendered by BOTH branches (LoginPage.tsx:1102-1120)
+        // — it is the " Try signing in again." tail and the Retry button
+        // that differ, on `portalHasAffordance`, which is false only once
+        // the awaited login context lands. So awaiting the shared sentence
+        // let the absence assertion run against the pre-context render,
+        // where local login is still assumed on.
         expect(
             await screen.findByRole('button', { name: /^retry$/i }),
         ).toBeInTheDocument()
+        expect(screen.getByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/try signing in again/i))
+            .not.toBeInTheDocument()
     })
 })
 

@@ -1160,11 +1160,21 @@ export function RegistryAssets() {
         const providerId = selectedProviderId
         try {
             const result = await providerService.refreshAllAssets(providerId)
+            // ``jobs_queued`` counts ASSETS. Two other outcomes are real and
+            // must not both render as "Refreshing all 0 sources": a provider
+            // with nothing cached yet (only the inventory job runs), and a
+            // queue that is down (nothing ran at all — ``list_job_id`` null).
             const n = result.jobs_queued
-            notify(
-                'success',
-                `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
-            )
+            if (n === 0 && !result.list_job_id) {
+                notify('warning', "Couldn't queue a refresh right now — showing the latest available data.")
+            } else if (n === 0) {
+                notify('success', 'Looking for this provider\'s data sources — figures follow as each is found.')
+            } else {
+                notify(
+                    'success',
+                    `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
+                )
+            }
         } catch (err: any) {
             // err.message is already run through friendlyError at the
             // service boundary, so this reads as human copy (e.g. "The

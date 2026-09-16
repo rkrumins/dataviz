@@ -179,7 +179,7 @@ async def test_refresh_scopes_fanout_to_requested_assets(monkeypatch) -> None:
     # per-asset fan-out is requested ∩ cached only — arbitrary names
     # can't seed stub cache rows, and nothing beyond the view refreshes.
     assert forced == ["", "g2"]
-    assert res["jobs_queued"] == 2
+    assert res["jobs_queued"] == 1     # assets only; the sentinel is not a source
 
     # Legacy no-body call keeps refresh-everything behavior.
     forced.clear()
@@ -187,7 +187,52 @@ async def test_refresh_scopes_fanout_to_requested_assets(monkeypatch) -> None:
         provider_id="p1", body=None, session=_S(),
     )
     assert forced == ["", "g1", "g2", "g3"]
-    assert res["jobs_queued"] == 4
+    assert res["jobs_queued"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_list_sentinel_is_not_a_data_source(monkeypatch) -> None:
+    """``jobs_queued`` counts ASSETS. The empty-string row is the
+    provider's list-all inventory job, and the UI renders this number
+    verbatim as "Refreshing all N sources" — so counting it made every
+    refresh report one more source than the tab lists (the reported
+    "129 data sources but only 128 appear").
+
+    It must also not spend a slot of the LIMIT: filtered after the query,
+    a provider at the cap returns cap-1 assets and ``truncated`` can never
+    be true."""
+    async def fake_force(provider_id, asset_name=""):
+        return "1-1"
+
+    monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_force", fake_force)
+
+    async def no_check(_session, _provider_id):
+        return None
+
+    monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
+
+    seen: list[str] = []
+
+    class _Rows:
+        def all(self):
+            return [("g1",), ("g2",)]
+
+    class _S:
+        async def execute(self, stmt):
+            seen.append(str(stmt))
+            return _Rows()
+
+    res = await insights.refresh_all_assets(
+        provider_id="p1", body=None, session=_S(),
+    )
+
+    # Two assets — not three, even though the sentinel job really ran.
+    assert res["jobs_queued"] == 2
+    assert res["list_job_id"] == "1-1"     # still enqueued, still reported
+
+    # ... and the database never hands the sentinel back in the first
+    # place, so it cannot consume one of the capped rows.
+    assert "asset_name != " in seen[0]
 
 
 @pytest.mark.asyncio
@@ -229,7 +274,7 @@ async def test_refresh_bounds_enqueue_concurrency(monkeypatch) -> None:
 
     res = await insights.refresh_all_assets(provider_id="p1", body=None, session=_S())
 
-    assert res["jobs_queued"] == 11        # list sentinel + 10 assets
+    assert res["jobs_queued"] == 10        # 10 assets (the sentinel is not one)
     assert peak <= 3                       # never exceeds the cap
     assert peak > 1                        # ... but genuinely runs concurrently
 

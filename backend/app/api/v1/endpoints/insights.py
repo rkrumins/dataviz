@@ -425,13 +425,20 @@ async def refresh_all_assets(
 
     await _ensure_provider_exists(session, provider_id)
 
-    # Pull every cached asset_name for this provider, capped.
+    # Pull every cached asset_name for this provider, capped. The
+    # empty-string row is the list-all sentinel, not an asset — exclude it
+    # in the WHERE clause (as ``list_assets`` does) rather than after the
+    # LIMIT, or it spends one of the N slots and ``truncated`` can never
+    # be true.
     rows = await session.execute(
         select(AssetDiscoveryCacheORM.asset_name)
-        .where(AssetDiscoveryCacheORM.provider_id == provider_id)
+        .where(
+            AssetDiscoveryCacheORM.provider_id == provider_id,
+            AssetDiscoveryCacheORM.asset_name != "",
+        )
         .limit(resilience.INSIGHTS_MAX_PROVIDER_REFRESH)
     )
-    cached_names = [row[0] for row in rows.all() if row[0]]
+    cached_names = [row[0] for row in rows.all()]
 
     requested = body.asset_names if body is not None else None
     if requested is not None:
@@ -456,9 +463,13 @@ async def refresh_all_assets(
     )
 
     return {
+        # Assets only. The list-all sentinel is the provider's inventory
+        # job, not a data source, and the UI renders this number verbatim
+        # as "Refreshing all N sources" — counting it made every refresh
+        # report one more source than the tab lists. Its id is still
+        # returned below for callers that track the inventory job.
         "provider_id": provider_id,
-        "jobs_queued": int(list_job_id is not None)
-        + sum(1 for j in asset_job_ids if j is not None),
+        "jobs_queued": sum(1 for j in asset_job_ids if j is not None),
         "list_job_id": list_job_id,
         "asset_job_ids": asset_job_ids,
         "truncated": len(asset_names) >= resilience.INSIGHTS_MAX_PROVIDER_REFRESH,
