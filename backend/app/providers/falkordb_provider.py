@@ -3155,7 +3155,21 @@ class FalkorDBProvider(GraphDataProvider):
                 try:
                     from backend.app.providers.shard_capacity import _config_get
 
-                    pairs = await _config_get(self._db, None, "cluster-node-timeout")
+                    # The REDIS SERVER config, not the graph module's, and
+                    # the distinction is the whole probe. Handed the client
+                    # facade, ``_config_get`` reaches FalkorDB's own
+                    # ``config_get``, which sends ``GRAPH.CONFIG GET`` — a
+                    # namespace that knows nothing of ``cluster-node-timeout``
+                    # and answers "unknown configuration field", swallowed
+                    # into the DEBUG log below. The window then never came
+                    # from the node at all and the clamp ran on the env
+                    # mirror alone, which is exactly the dependency this read
+                    # exists to remove. Every other caller passes the
+                    # underlying connection; so does this one now.
+                    conn = getattr(self._db, "connection", None)
+                    if conn is None:
+                        raise RuntimeError("no redis connection to ask")
+                    pairs = await _config_get(conn, None, "cluster-node-timeout")
                     raw = pairs.get("cluster-node-timeout")
                     if raw is not None:
                         note_cluster_node_timeout(float(raw) / 1000.0)

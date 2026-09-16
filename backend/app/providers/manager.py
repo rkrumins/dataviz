@@ -1665,6 +1665,26 @@ class ProviderManager:
                 "(provider-level only)."
             )
             override.pop("nativePropertyBudget", None)
+        # falkordbConnection is the PROVIDER's connection topology — host,
+        # port, mode, the cluster's startupNodes, the sentinel block, TLS and
+        # the authEnabled gate — and the provider's DECRYPTED graph
+        # credentials are handed to whatever it names
+        # (``provider_registry._create_provider_instance``:
+        # ``connection_config=_falkor_conn`` beside ``username``/``password``).
+        # A data source is a lower privilege, so letting it set this is the
+        # same exfiltration cacheConnection is guarded against one key over:
+        # point it at an attacker host and the provider dials out with the
+        # credentials, or set authEnabled false and it dials out without them.
+        # Nothing legitimately varies it per data source — every reader of it
+        # in this codebase calls it the provider's own, and a source pointing
+        # at a different store than its provider is the read-not-equal-
+        # projection drift ``resolve_falkordb_target`` exists to prevent.
+        if "falkordbConnection" in override:
+            logger.warning(
+                "Ignoring data-source falkordbConnection override "
+                "(provider-level only)."
+            )
+            override.pop("falkordbConnection", None)
         if "schemaMapping" in base and "schemaMapping" in override:
             merged_mapping = dict(base["schemaMapping"])
             merged_mapping.update(

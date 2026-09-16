@@ -3839,6 +3839,64 @@ def test_the_provider_asks_the_node_for_its_window():
     assert "note_cluster_node_timeout" in src
 
 
+def test_the_window_is_asked_of_the_SERVER_not_the_graph_module(monkeypatch):
+    """The probe must be handed the redis CONNECTION, never the FalkorDB
+    client facade.
+
+    ``cluster-node-timeout`` is a Redis server setting. The facade's own
+    ``config_get`` sends ``GRAPH.CONFIG GET``, the graph MODULE's namespace,
+    which has no such field and answers "unknown configuration field" — into
+    a DEBUG log. The probe then never reads anything, ``_OBSERVED_NODE_TIMEOUT_S``
+    stays None for the life of the process, and the clamp silently falls back
+    to the env mirror it exists to stop depending on. The assertion above is a
+    substring check and passes either way, which is how that shipped."""
+    import asyncio as _asyncio
+    import types as _types
+
+    seen = {}
+
+    async def _fake_config_get(conn, node, name):
+        seen["conn"] = conn
+        seen["name"] = name
+        return {name: "15000"}
+
+    async def _fake_read_shard_memory(db, **kw):
+        return _types.SimpleNamespace(
+            endpoint="10.0.0.1:6379", timeout_max_ms=None, query_mem_capacity=None,
+            thread_count=None, timeout_default_ms=None,
+        )
+
+    from backend.app.providers import shard_capacity as _sc
+    monkeypatch.setattr(_sc, "_config_get", _fake_config_get)
+    monkeypatch.setattr(_sc, "read_shard_memory", _fake_read_shard_memory)
+    # ``note_cluster_node_timeout`` writes a PROCESS-global observed window.
+    # Taking it through monkeypatch restores it at teardown, so this test
+    # cannot leave a later one clamped by a reading it never took.
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", None)
+
+    connection = object()
+    facade = _types.SimpleNamespace(connection=connection)
+
+    p = object.__new__(mat_provider.FalkorDBProvider)
+    p._server_limits_seeded = False
+    p._db = facade
+    p._conn_cfg = _types.SimpleNamespace(mode="cluster")
+    p._graph_name = "g1"
+    p._host, p._port = "10.0.0.1", 6379
+    p.note_server_limits = lambda *a, **k: None
+
+    async def _drive():
+        p._seed_server_limits()
+        await p._server_limits_task
+
+    _asyncio.run(_drive())
+
+    assert seen["name"] == "cluster-node-timeout"
+    # THE assertion: the underlying connection, not the graph-module facade.
+    assert seen["conn"] is connection
+    assert seen["conn"] is not facade
+
+
 def test_an_unreadable_cube_size_counts_as_large(monkeypatch):
     """A regression the query clamp made reachable: counting 20M
     relationships is itself a long query, it times out first on exactly the
