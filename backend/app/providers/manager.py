@@ -1706,8 +1706,15 @@ class ProviderManager:
         credentials: Optional[dict] = None,
         extra_config: Optional[dict] = None,
         provider_id: Optional[str] = None,
+        auto_reconcile: bool = True,
     ) -> GraphDataProvider:
-        """Dispatch to the correct provider constructor."""
+        """Dispatch to the correct provider constructor.
+
+        ``auto_reconcile=False`` builds a provider that will NOT run the
+        connect-time index/projection reconcile. A read-only caller wants
+        this: the reconcile writes (CREATE INDEX), and a write creates the
+        graph key. Only the FalkorDB branch reads it; the others ignore it.
+        """
         ptype = provider_type.lower()
         creds = credentials or {}
 
@@ -1754,6 +1761,7 @@ class ProviderManager:
                 provider_id=provider_id,
                 extra_config=extra_config,
                 credentials=creds,
+                auto_reconcile=auto_reconcile,
             )
 
         elif ptype == "neo4j":

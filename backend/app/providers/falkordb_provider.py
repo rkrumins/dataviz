@@ -2085,6 +2085,7 @@ class FalkorDBProvider(GraphDataProvider):
         provider_id: Optional[str] = None,
         extra_config: Optional[dict] = None,
         credentials: Optional[dict] = None,
+        auto_reconcile: bool = True,
     ):
         # IPv6 dual-stack guard: "localhost" resolves to BOTH ::1 and
         # 127.0.0.1, and Docker commonly publishes IPv4 only, so the redis
@@ -2096,6 +2097,15 @@ class FalkorDBProvider(GraphDataProvider):
         self._host = _normalize_falkordb_host(host)
         self._port = port
         self._graph_name = graph_name
+        # Connect-time index/projection reconcile. A READ-ONLY caller must
+        # turn this off: the reconcile issues CREATE INDEX, which is a WRITE,
+        # and a write to a graph key that does not exist CREATES it (this
+        # file says so itself at the _build_and_verify PING comment). The
+        # insights discovery probe is pointed at a graph name it only wants
+        # to ASK about — a deleted one, or the ``nexus_lineage`` placeholder
+        # manager.py substitutes for None — so reconciling there resurrects
+        # deleted graphs and mints phantom ones.
+        self._auto_reconcile = auto_reconcile
         self._seed_file = seed_file
         self._projection_mode = projection_mode  # "in_source" or "dedicated"
         # Connection topology config (standalone / sentinel / cluster).
@@ -2863,6 +2873,11 @@ class FalkorDBProvider(GraphDataProvider):
         logical error from the query, which is the correct signal — not
         a 30-45s connect-time stall.
         """
+        # ``getattr`` on both: the introspection paths build this class
+        # without ``__init__`` (see _proj/_endpoint_label), so neither
+        # attribute is guaranteed to exist.
+        if not getattr(self, "_auto_reconcile", True):
+            return
         if getattr(self, "_reconcile_started", False):
             return
         self._reconcile_started = True

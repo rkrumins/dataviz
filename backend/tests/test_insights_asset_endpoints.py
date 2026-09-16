@@ -40,12 +40,14 @@ class _Session:
         return self._row
 
 
-def _wire_safe_enqueue(monkeypatch, *, claim_held: bool = False) -> list[tuple[str, str]]:
+def _wire_safe_enqueue(
+    monkeypatch, *, claim_held: bool = False, enqueue_returns: str | None = "1-1",
+) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
 
     async def fake_safe(provider_id, asset_name, **_kw):
         calls.append((provider_id, asset_name))
-        return "1-1"
+        return enqueue_returns
 
     async def fake_claim_exists(_scope_key, **_kw):
         return claim_held
@@ -356,3 +358,104 @@ async def test_refresh_survives_redis_down_without_503(monkeypatch) -> None:
     assert isinstance(res, dict)
     assert res["jobs_queued"] == 0     # degraded: nothing queued, but no 503
     assert res["list_job_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_deduped_enqueue_on_a_cold_cache_is_computing_not_unavailable(
+    monkeypatch,
+) -> None:
+    """``enqueue_discovery_job_safe`` returns None for TWO reasons: Redis is
+    down, and a job for this scope is ALREADY CLAIMED. Only the first is
+    ``unavailable``.
+
+    Reading the second as unavailable stopped the UI polling dead on exactly
+    the case where work was in flight — a provider whose inventory has never
+    been cached and whose discovery job is already running. assetListState
+    maps 'unavailable' to a terminal empty state and assetListIsBuilding
+    returns false, so nothing re-fetched and a newly created graph was never
+    seen without a reload."""
+    _wire_safe_enqueue(monkeypatch, claim_held=True, enqueue_returns=None)
+
+    env = await insights._build_response(
+        session=_Session(None), provider_id="p1", asset_name="",
+    )
+
+    assert env["meta"]["status"] == "computing"
+    assert env["meta"]["refreshing"] is True
+    # No job id to poll — the claim belongs to the job already running.
+    assert env["meta"]["job_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_redis_down_on_a_cold_cache_is_still_unavailable(monkeypatch) -> None:
+    """The other half of the same branch: nothing is claimed and nothing
+    could be queued, so the honest answer is still ``unavailable``. A
+    spinner here would never stop."""
+    _wire_safe_enqueue(monkeypatch, claim_held=False, enqueue_returns=None)
+
+    env = await insights._build_response(
+        session=_Session(None), provider_id="p1", asset_name="",
+    )
+
+    assert env["meta"]["status"] == "unavailable"
+    assert env["meta"]["refreshing"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_graph_is_not_refreshed_back_into_existence(
+    monkeypatch,
+) -> None:
+    """A cached name the inventory no longer lists is a graph the user
+    DELETED. Nothing prunes per-asset rows, so they accumulate forever — and
+    every job queued for one re-touched the graph key. Refresh must fan out
+    over what the provider HAS, not over what it once had."""
+    forced: list[str] = []
+
+    async def fake_force(provider_id, asset_name=""):
+        forced.append(asset_name)
+        return "1-1"
+
+    monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_force", fake_force)
+
+    async def no_check(_session, _provider_id):
+        return None
+
+    monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
+
+    # g2 was deleted on the provider; its stats row is still here.
+    res = await insights.refresh_all_assets(
+        provider_id="p1", body=None,
+        session=_TwoReadSession(listed=["g1", "g3"], cached=["g1", "g2"]),
+    )
+
+    assert "g2" not in forced
+    assert sorted(n for n in forced if n) == ["g1", "g3"]
+    assert res["jobs_queued"] == 2
+
+
+@pytest.mark.asyncio
+async def test_without_an_inventory_the_cached_rows_are_all_we_know(
+    monkeypatch,
+) -> None:
+    """An EMPTY sentinel means "never listed", not "the provider has
+    nothing" — so the filter must not fire and strand every asset."""
+    forced: list[str] = []
+
+    async def fake_force(provider_id, asset_name=""):
+        forced.append(asset_name)
+        return "1-1"
+
+    monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_force", fake_force)
+
+    async def no_check(_session, _provider_id):
+        return None
+
+    monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
+
+    res = await insights.refresh_all_assets(
+        provider_id="p1", body=None,
+        session=_TwoReadSession(listed=None, cached=["g1", "g2"]),
+    )
+
+    assert sorted(n for n in forced if n) == ["g1", "g2"]
+    assert res["jobs_queued"] == 2

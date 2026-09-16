@@ -796,6 +796,21 @@ export function RegistryAssets() {
         : ''
     const [selected, setSelected] = useState<Set<string>>(new Set())
 
+    // `selected` is user state that outlives the list. After a refresh lands
+    // an inventory without a graph that was queued, the dead name must stop
+    // counting toward the "Queued" chip and must not be registrable — the
+    // catalog row it would create is exactly what _detect_registry_drift
+    // later reports as drift.
+    //
+    // Intersect only when the list is AUTHORITATIVE: a computing/unavailable
+    // envelope renders `assets` as [], which means "unknown", not "all gone".
+    const effectiveSelected = useMemo(() => {
+        if (listState !== 'ready') return selected
+        const live = new Set(assets)
+        return new Set(Array.from(selected).filter(a => live.has(a)))
+    }, [selected, assets, listState])
+
+
     // Filters
     const [searchQuery, setSearchQuery] = useState('')
     const [statusFilter, setStatusFilter] = useState<'all' | 'selected' | 'registered' | 'unregistered'>('all')
@@ -877,10 +892,10 @@ export function RegistryAssets() {
     // Open onboarding wizard with selected assets (no API calls yet — registration
     // happens inside the wizard on final submit so cancelling is safe).
     const handleRegister = () => {
-        if (!selectedProviderId || selected.size === 0) return
+        if (!selectedProviderId || effectiveSelected.size === 0) return
         // Build placeholder catalog items for the wizard to use.
         // Real catalog items are created by the wizard's submit handler.
-        const placeholders: CatalogItemResponse[] = Array.from(selected).map(assetId => ({
+        const placeholders: CatalogItemResponse[] = Array.from(effectiveSelected).map(assetId => ({
             id: `pending_${assetId}`,
             providerId: selectedProviderId,
             sourceIdentifier: assetId,
@@ -1142,6 +1157,15 @@ export function RegistryAssets() {
         setPage(0)
     }, [selectedProviderId, searchQuery, statusFilter, sortBy, sortDir, pageSize])
 
+    // Keep `page` in range when the LIST ITSELF shrinks — a refresh that
+    // drops deleted graphs can leave `page` past the end. Rendering already
+    // uses `clampedPage`, so nothing on screen moves; without this the stale
+    // out-of-range index survives and silently re-applies once the list
+    // grows again, and the raw-`page` updaters swallow the next click.
+    useEffect(() => {
+        if (page > pageCount - 1) setPage(pageCount - 1)
+    }, [page, pageCount])
+
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
     // A provider that's still loading its dataset is reachable, not broken —
     // show a calm amber "warming up" affordance instead of a red "unreachable"
@@ -1186,6 +1210,19 @@ export function RegistryAssets() {
                     : "Couldn't queue a refresh right now — showing the latest available data.",
             )
         }
+        // Re-fetch the LIST now, not after the stats loop below.
+        //
+        // The POST set the sentinel's dedup claim synchronously, so the list
+        // endpoint already answers meta.refreshing:true — which arms the 5s
+        // assetListIsBuilding poll. Waiting for the stats loop to drain
+        // before asking meant the list stayed knowingly stale for as long
+        // as that loop ran (routinely 30-90s), showing neither the graph
+        // just created nor the disappearance of one just deleted, even
+        // though the backend had the new inventory within a second.
+        // Outside the try/catch on purpose: a failed POST costs one
+        // harmless GET and still picks up any inventory a sweep landed.
+        queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, providerId] })
+
         // Mark every per-row asset-stats query under this provider stale
         // WITHOUT a simultaneous refetch burst (``refetchType: 'none'``).
         // The bounded poll loop below is the single controlled fetch
@@ -1383,7 +1420,7 @@ export function RegistryAssets() {
                                 <div className="flex gap-1 p-1 bg-black/5 dark:bg-white/5 rounded-xl border border-glass-border">
                                     {[
                                         { id: 'all', label: `All (${assets.length})` },
-                                        { id: 'selected', label: `Queued (${selected.size})` },
+                                        { id: 'selected', label: `Queued (${effectiveSelected.size})` },
                                         { id: 'registered', label: `Active (${registeredCount})` },
                                         { id: 'unregistered', label: `Available (${assets.length - registeredCount})` },
                                     ].map(f => (
@@ -1674,18 +1711,18 @@ export function RegistryAssets() {
                         {/* Footer action bar */}
                         <div className="shrink-0 mt-4 pt-4 border-t border-glass-border flex items-center justify-between gap-4">
                             <div className="text-sm text-ink-muted">
-                                {selected.size > 0 ? (
-                                    <><span className="font-bold text-ink">{selected.size}</span> queued to register</>
+                                {effectiveSelected.size > 0 ? (
+                                    <><span className="font-bold text-ink">{effectiveSelected.size}</span> queued to register</>
                                 ) : (
                                     <><span className="font-bold text-emerald-500">{registeredCount}</span> active in catalog</>
                                 )}
                             </div>
                             <button
                                 onClick={handleRegister}
-                                disabled={assetsLoading || selected.size === 0}
+                                disabled={assetsLoading || effectiveSelected.size === 0}
                                 className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black tracking-wide bg-indigo-500 text-white hover:bg-indigo-600 shadow-md transition-colors duration-150 active:scale-95 disabled:opacity-50 disabled:active:scale-100 disabled:shadow-none"
                             >
-                                <Zap className="w-4 h-4" /> Onboard Sources ({selected.size})
+                                <Zap className="w-4 h-4" /> Onboard Sources ({effectiveSelected.size})
                             </button>
                         </div>
                     </>

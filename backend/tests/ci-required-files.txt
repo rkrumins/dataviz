@@ -38,6 +38,7 @@ tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
@@ -57,6 +58,7 @@ tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_index_ddl_once.py
+tests/test_insights_asset_endpoints.py
 tests/test_job_list_overlay.py
 tests/test_job_reaping.py
 tests/test_label_cache_warmup.py

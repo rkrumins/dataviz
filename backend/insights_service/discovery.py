@@ -90,6 +90,15 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
         extra_config=(
             json.loads(prov_row.extra_config) if prov_row.extra_config else None
         ),
+        # Discovery is a READ PROBE, and its graph_name is a placeholder,
+        # not a target: for list-all it is None (which manager.py turns into
+        # the literal "nexus_lineage"), and for a per-asset job it is a
+        # cached name that may name a graph the user has since DELETED.
+        # The connect-time reconcile issues CREATE INDEX, and a write to a
+        # missing graph key CREATES it — so leaving it on mints a phantom
+        # "nexus_lineage" data source and resurrects every deleted graph
+        # that still has a cache row, on every refresh, forever.
+        auto_reconcile=False,
     )
 
     start_ts = asyncio.get_event_loop().time()
