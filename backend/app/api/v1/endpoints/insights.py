@@ -412,12 +412,15 @@ async def refresh_all_assets(
     """Force-refresh a provider's asset list + a scoped set of assets.
 
     Always enqueues the list-all sentinel (the only way to discover
-    new/removed assets). Per-asset fan-out is scoped to
-    ``body.asset_names`` when provided (intersected with cached rows so
-    arbitrary names can't seed stub cache entries), else every cached
-    row. Capped at ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200)
-    and enqueued concurrently so the POST returns in one Redis
-    round-trip's time, not N.
+    new/removed assets). Per-asset fan-out covers every asset the
+    provider currently LISTS, unioned with the assets that have a stats
+    cache row — listed first, so a newly discovered graph is never pushed
+    past the cap by a stale row for one that has since been deleted.
+    ``body.asset_names`` narrows that set when given (intersected, so
+    arbitrary names still can't seed stub cache entries). Capped at
+    ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200) and enqueued
+    concurrently so the POST returns in one Redis round-trip's time,
+    not N.
     """
     import asyncio
 
@@ -425,11 +428,33 @@ async def refresh_all_assets(
 
     await _ensure_provider_exists(session, provider_id)
 
-    # Pull every cached asset_name for this provider, capped. The
-    # empty-string row is the list-all sentinel, not an asset — exclude it
-    # in the WHERE clause (as ``list_assets`` does) rather than after the
-    # LIMIT, or it spends one of the N slots and ``truncated`` can never
-    # be true.
+    # What the provider currently LISTS, from the sentinel's payload (the
+    # empty-string row is the inventory, not an asset — ``list_assets``
+    # reads the same row). This is what makes a NEWLY DISCOVERED graph
+    # refreshable: the fan-out used to be built from per-asset cache rows
+    # alone, and a graph that had only just appeared in the list had none —
+    # so "Refresh all N sources" silently skipped exactly the source the
+    # user clicked Refresh to see, on that click and every later one, until
+    # something else happened to give it a row.
+    sentinel = await session.execute(
+        select(AssetDiscoveryCacheORM.payload).where(
+            AssetDiscoveryCacheORM.provider_id == provider_id,
+            AssetDiscoveryCacheORM.asset_name == "",
+        )
+    )
+    raw = sentinel.scalars().first()
+    try:
+        inventory = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        inventory = {}
+    listed = [
+        a for a in (inventory.get("assets") or [])
+        if isinstance(a, str) and a
+    ][: resilience.INSIGHTS_MAX_PROVIDER_REFRESH]
+
+    # Assets that already have a stats row. Capped, and the sentinel is
+    # excluded in the WHERE clause (as ``list_assets`` does) rather than
+    # after the LIMIT, or it spends one of the N slots.
     rows = await session.execute(
         select(AssetDiscoveryCacheORM.asset_name)
         .where(
@@ -440,12 +465,17 @@ async def refresh_all_assets(
     )
     cached_names = [row[0] for row in rows.all()]
 
+    # Listed first: the cap must prefer assets the provider actually has
+    # over stale rows for ones it no longer does. dict.fromkeys dedupes
+    # while keeping that order.
+    known = list(dict.fromkeys([*listed, *cached_names]))
+
     requested = body.asset_names if body is not None else None
     if requested is not None:
         wanted = set(requested)
-        asset_names = [n for n in cached_names if n in wanted]
+        asset_names = [n for n in known if n in wanted]
     else:
-        asset_names = cached_names
+        asset_names = known
     asset_names = asset_names[: resilience.INSIGHTS_MAX_PROVIDER_REFRESH]
 
     # Bound the fan-out: enqueues are cheap Redis hops, but the endpoint

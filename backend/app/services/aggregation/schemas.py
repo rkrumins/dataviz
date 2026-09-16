@@ -1668,7 +1668,12 @@ class GraphStoreLimitsPatch(BaseModel):
         False, alias="applyToAllNodes",
         description="Cluster mode: set the same limits on every primary, not only the node named.",
     )
-    actor: Optional[str] = Field(None, max_length=255)
+    # No CR/LF: this goes verbatim into the audit line "graph store limits
+    # on X set by ACTOR" (graph_store_limits.py:368). The web route
+    # overwrites it with the authenticated admin, but the control plane's
+    # copy of the route takes the body as given, so a newline there forges
+    # a second log entry. Bounded at the boundary, so every caller is covered.
+    actor: Optional[str] = Field(None, max_length=255, pattern=r"^[^\r\n]*$")
 
     @model_validator(mode="after")
     def _at_least_one_limit(self) -> "GraphStoreLimitsPatch":

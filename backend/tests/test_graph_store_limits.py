@@ -488,6 +488,51 @@ def test_the_web_route_maps_refusals_to_422_and_unknown_nodes_to_404(monkeypatch
     assert exc.value.status_code == 404
 
 
+def test_the_control_plane_route_calls_apply_with_the_signature_it_has(monkeypatch):
+    """The control plane exposes its OWN copy of this route, and it passed a
+    registry the function does not take — every PATCH against it raised
+    ``TypeError: takes 3 positional arguments but 4 were given``, which the
+    route's two excepts do not catch, so it surfaced as a 500.
+
+    The web-route tests above could not catch it: they monkeypatch
+    ``apply_graph_store_limits`` away, so they only ever pin the WEB call
+    site. This stub carries the real signature, so a call site that does not
+    match it fails here."""
+    from backend.app.services.aggregation import controlplane as cp
+
+    real = inspect.signature(gsl.apply_graph_store_limits)
+    assert list(real.parameters) == ["session", "endpoint", "patch"]
+
+    seen = {}
+
+    async def applied(session, endpoint, patch):
+        seen.update(endpoint=endpoint)
+        return "done"
+
+    monkeypatch.setattr(gsl, "apply_graph_store_limits", applied)
+    out = asyncio.run(cp.set_graph_store_limits(
+        "10.0.0.1:6379", _patch(timeoutMaxMs=300_000),
+        svc=types.SimpleNamespace(_registry=object()), session=None,
+    ))
+    assert out == "done"
+    assert seen == {"endpoint": "10.0.0.1:6379"}
+
+
+def test_the_actor_cannot_forge_a_second_audit_line(monkeypatch):
+    """``actor`` is written verbatim into the audit line "graph store limits
+    on X set by ACTOR". The web route replaces it with the authenticated
+    admin, but the control plane's copy of the route takes the body as given
+    — so a CR/LF in it would append a fabricated entry to the log this
+    endpoint exists to write. Refused at the schema, which both routes share."""
+    for forged in ("admin-1\ngraph store limits on n9 set by root", "a\rb"):
+        with pytest.raises(ValidationError):
+            _patch(timeoutMaxMs=300_000, actor=forged)
+
+    # Ordinary actors are untouched, and omitting it stays valid.
+    assert _patch(timeoutMaxMs=300_000, actor="admin-1").actor == "admin-1"
+    assert _patch(timeoutMaxMs=300_000).actor is None
+
+
 def test_the_capacity_routes_are_served_in_process_in_every_mode(monkeypatch):
     """They read the topology snapshot the web tier builds for itself, so
     forwarding to the control plane would only add a hop and a second cache

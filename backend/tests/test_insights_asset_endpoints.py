@@ -147,6 +147,49 @@ async def test_user_discovery_rides_hot_stream(monkeypatch) -> None:
     assert DISCOVERY_STREAM.lane == "sweep"
 
 
+
+class _TwoReadSession:
+    """``refresh_all_assets`` reads twice: the inventory sentinel's payload,
+    then the capped per-asset names. ``listed`` is what the provider
+    currently has; ``cached`` is what has a stats row."""
+
+    def __init__(self, listed=None, cached=()):
+        self.listed = listed
+        self.cached = list(cached)
+        self.statements: list[str] = []
+        self._n = 0
+
+    async def execute(self, stmt):
+        self.statements.append(str(stmt))
+        self._n += 1
+        if self._n == 1:
+            payload = (
+                json.dumps({"assets": list(self.listed)})
+                if self.listed is not None else None
+            )
+            return _ScalarResult(payload)
+        return _NameRows(self.cached)
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self._value
+
+
+class _NameRows:
+    def __init__(self, names):
+        self._names = names
+
+    def all(self):
+        return [(n,) for n in self._names]
+
+
 @pytest.mark.asyncio
 async def test_refresh_scopes_fanout_to_requested_assets(monkeypatch) -> None:
     forced: list[str] = []
@@ -162,21 +205,14 @@ async def test_refresh_scopes_fanout_to_requested_assets(monkeypatch) -> None:
 
     monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
 
-    class _Rows:
-        def all(self):
-            return [("g1",), ("g2",), ("g3",)]
-
-    class _S:
-        async def execute(self, _stmt):
-            return _Rows()
-
-    body = insights.ProviderRefreshRequest(asset_names=["g2", "not_cached"])
+    body = insights.ProviderRefreshRequest(asset_names=["g2", "not_a_real_asset"])
     res = await insights.refresh_all_assets(
-        provider_id="p1", body=body, session=_S(),
+        provider_id="p1", body=body,
+        session=_TwoReadSession(listed=["g1", "g2", "g3"], cached=["g1", "g2", "g3"]),
     )
 
     # List sentinel always runs (discovers new/removed assets); the
-    # per-asset fan-out is requested ∩ cached only — arbitrary names
+    # per-asset fan-out is requested ∩ known only — arbitrary names
     # can't seed stub cache rows, and nothing beyond the view refreshes.
     assert forced == ["", "g2"]
     assert res["jobs_queued"] == 1     # assets only; the sentinel is not a source
@@ -184,7 +220,8 @@ async def test_refresh_scopes_fanout_to_requested_assets(monkeypatch) -> None:
     # Legacy no-body call keeps refresh-everything behavior.
     forced.clear()
     res = await insights.refresh_all_assets(
-        provider_id="p1", body=None, session=_S(),
+        provider_id="p1", body=None,
+        session=_TwoReadSession(listed=["g1", "g2", "g3"], cached=["g1", "g2", "g3"]),
     )
     assert forced == ["", "g1", "g2", "g3"]
     assert res["jobs_queued"] == 3
@@ -201,7 +238,10 @@ async def test_the_list_sentinel_is_not_a_data_source(monkeypatch) -> None:
     It must also not spend a slot of the LIMIT: filtered after the query,
     a provider at the cap returns cap-1 assets and ``truncated`` can never
     be true."""
+    forced: list[str] = []
+
     async def fake_force(provider_id, asset_name=""):
+        forced.append(asset_name)
         return "1-1"
 
     monkeypatch.setattr(enqueue_mod, "enqueue_discovery_job_force", fake_force)
@@ -211,28 +251,27 @@ async def test_the_list_sentinel_is_not_a_data_source(monkeypatch) -> None:
 
     monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
 
-    seen: list[str] = []
-
-    class _Rows:
-        def all(self):
-            return [("g1",), ("g2",)]
-
-    class _S:
-        async def execute(self, stmt):
-            seen.append(str(stmt))
-            return _Rows()
-
+    # g3 is on the provider but has no stats row yet — the just-discovered
+    # case, and the whole point: a refresh must cover it.
+    session = _TwoReadSession(listed=["g1", "g2", "g3"], cached=["g1", "g2"])
     res = await insights.refresh_all_assets(
-        provider_id="p1", body=None, session=_S(),
+        provider_id="p1", body=None, session=session,
     )
 
-    # Two assets — not three, even though the sentinel job really ran.
-    assert res["jobs_queued"] == 2
-    assert res["list_job_id"] == "1-1"     # still enqueued, still reported
+    # THREE assets: the newly listed g3 is refreshed even though nothing has
+    # ever cached it. Before this, the fan-out was built from cache rows
+    # alone and g3 was skipped on every click.
+    assert sorted(n for n in forced if n) == ["g1", "g2", "g3"]
+    assert res["jobs_queued"] == 3
+    assert res["list_job_id"] == "1-1"     # sentinel enqueued, still reported
 
-    # ... and the database never hands the sentinel back in the first
-    # place, so it cannot consume one of the capped rows.
-    assert "asset_name != " in seen[0]
+    # ... and it is not counted as a source: three assets, not four.
+    assert "" in forced
+
+    # The names read excludes the sentinel in SQL, so it cannot spend one of
+    # the capped slots; the inventory comes from its own single-row read.
+    assert 'asset_name != ' in session.statements[1]
+    assert 'asset_name = ' in session.statements[0]
 
 
 @pytest.mark.asyncio
@@ -262,17 +301,12 @@ async def test_refresh_bounds_enqueue_concurrency(monkeypatch) -> None:
 
     monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
 
-    names = [(f"g{i}",) for i in range(10)]
+    names = [f"g{i}" for i in range(10)]
 
-    class _Rows:
-        def all(self):
-            return names
-
-    class _S:
-        async def execute(self, _stmt):
-            return _Rows()
-
-    res = await insights.refresh_all_assets(provider_id="p1", body=None, session=_S())
+    res = await insights.refresh_all_assets(
+        provider_id="p1", body=None,
+        session=_TwoReadSession(listed=names, cached=names),
+    )
 
     assert res["jobs_queued"] == 10        # 10 assets (the sentinel is not one)
     assert peak <= 3                       # never exceeds the cap
@@ -315,15 +349,10 @@ async def test_refresh_survives_redis_down_without_503(monkeypatch) -> None:
 
     monkeypatch.setattr(insights, "_ensure_provider_exists", no_check)
 
-    class _Rows:
-        def all(self):
-            return [("g1",), ("g2",)]
-
-    class _S:
-        async def execute(self, _stmt):
-            return _Rows()
-
-    res = await insights.refresh_all_assets(provider_id="p1", body=None, session=_S())
+    res = await insights.refresh_all_assets(
+        provider_id="p1", body=None,
+        session=_TwoReadSession(listed=["g1", "g2"], cached=["g1", "g2"]),
+    )
     assert isinstance(res, dict)
     assert res["jobs_queued"] == 0     # degraded: nothing queued, but no 503
     assert res["list_job_id"] is None

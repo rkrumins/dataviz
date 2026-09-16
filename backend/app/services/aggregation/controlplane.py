@@ -722,7 +722,10 @@ async def set_graph_store_limits(
         GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
     )
     try:
-        return await apply_graph_store_limits(session, svc._registry, endpoint, patch)
+        # (session, endpoint, patch) — the function resolves the node from the
+        # topology snapshot itself and takes no registry. ``svc`` stays as a
+        # dependency: _get_svc is what answers 503 while the service is starting.
+        return await apply_graph_store_limits(session, endpoint, patch)
     except GraphStoreEndpointNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except GraphStoreLimitsError as e:

@@ -168,6 +168,30 @@ not appear until the 30-second staleness lapsed with a remount or the window reg
 The list now also polls on `refreshing` — the worker's own dedup claim, released on success
 and on failure — so it follows the inventory job to its result and stops there.
 
+**Refresh skipped the very sources it had just discovered.** The per-asset fan-out was built
+from the discovery cache's per-asset rows, and a graph that had only just appeared in the
+provider's inventory has none — so "Refresh all N sources" queued nothing for it, on that
+click and every later one, until something else happened to give it a row. It now fans out
+over what the provider currently LISTS, unioned with the rows that exist, listed first so a
+new graph is never pushed past the 200 cap by a stale row for one that has since been
+deleted. An explicit `assetNames` request is still intersected against that set, so
+arbitrary names cannot seed stub cache entries.
+
+**The control plane's copy of the graph-store limits route could not be called.** It passed a
+registry argument that `apply_graph_store_limits` does not take, so every PATCH against it
+raised `TypeError: takes 3 positional arguments but 4 were given` — which neither of the
+route's two excepts catch, so it surfaced as a 500. The web tier's copy of the route was
+always correct; the endpoint tests monkeypatch the function away, so they only ever pinned
+that one. A stub carrying the real signature now pins both.
+
+### Security
+
+**A `PATCH` body could forge an entry in the audit log it writes.** `GraphStoreLimitsPatch.actor`
+is written verbatim into `graph store limits on X set by ACTOR`, and a CR or LF in it would
+append a second, fabricated line. The web route overwrites `actor` with the authenticated
+admin, but the control plane's copy of the route takes the body as given. Refused at the
+schema, which both routes share.
+
 ### Changed
 
 **The native property budget default goes from 8,000 to 50,000, and can be raised per graph
