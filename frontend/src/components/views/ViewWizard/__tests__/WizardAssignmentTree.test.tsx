@@ -270,8 +270,19 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     expect(screen.getByText(/itself won’t be placed/)).toBeInTheDocument()
 
     // Placing sends the two children and NOT the parent.
-    fireEvent.keyDown(window, { key: '1' })
-    expect(onBulkAssign).toHaveBeenCalledWith('l1', ['urn:c1', 'urn:c2'])
+    //
+    // Fired inside waitFor, and this is not belt-and-braces. The window
+    // listener is registered in an EFFECT keyed on `selectedIds`
+    // (WizardAssignmentTree.tsx:990-992), while "2 selected" above is RENDER
+    // output — so the text appearing does not yet prove that the listener
+    // closing over THAT selection is the one attached. On a loaded CI worker
+    // the previous listener, still holding the parent, caught the key and
+    // placed `urn:a`: exactly the assertion below, off by one commit. The
+    // expectation is unchanged; only the wait for the effect to land is new.
+    await waitFor(() => {
+        fireEvent.keyDown(window, { key: '1' })
+        expect(onBulkAssign).toHaveBeenLastCalledWith('l1', ['urn:c1', 'urn:c2'])
+    })
   })
 
   it('reports a child count the server actually gave (never the paging heuristic)', () => {
