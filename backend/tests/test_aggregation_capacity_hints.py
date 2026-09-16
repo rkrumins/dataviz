@@ -97,7 +97,12 @@ def test_learned_state_is_handed_over_as_observed_hints():
         observed_tuning=json.dumps({
             "scan_width": 12_500, "extract_concurrency": 1,
             "reconcile_strategy": "keys_only", "write_batch": 60,
-            "delete_chunk": 500, "observed_at": "2026-09-09T10:00:00+00:00",
+            # ``_now()``, never a literal date: the hint is only handed over
+            # while the lesson is inside AGGREGATION_LEARNED_TUNING_TTL_SECS
+            # (7 days). A hardcoded stamp made this a time bomb — it passed
+            # until wall-clock time crossed the TTL, then failed forever, on
+            # every branch at once. The sibling tests below already do this.
+            "delete_chunk": 500, "observed_at": _now(),
             "job_id": "agg_1",
         }),
     )
