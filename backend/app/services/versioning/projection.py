@@ -106,15 +106,21 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
     of what an aggregate returns, rather than a guessed empty result: a
     ``count(n)`` answers ``[[0]]``, not ``[]``, and callers index it.
     """
-    # Bounded by the cluster's failure detector, like every query the
-    # provider issues. This helper talks to the graph client directly, so
-    # the provider's own boundary clamp never sees it — and a 60s projector
-    # write against a 15s ``cluster-node-timeout`` costs the shard its
-    # master exactly as a 60s rebuild batch does. See
-    # ``cluster_query_ceiling_s`` in ``falkordb_provider``.
-    from backend.app.providers.falkordb_provider import clamp_query_budget
+    # A WRITE here is bounded by the cluster's failure detector. This helper
+    # talks to the graph client directly, so the provider's own boundary
+    # clamp never sees it — and a 60s projector write against a 15s
+    # ``cluster-node-timeout`` costs the shard its master exactly as a 60s
+    # rebuild batch does.
+    #
+    # A READ is not, for the reason set out on ``cluster_write_ceiling_s``:
+    # it takes no write lock and cannot vote its own master out, so the
+    # ceiling protects nothing it could break, while cutting reconcile's
+    # counts and the bootstrap copy's scans to the window's share would fail
+    # them on the large graphs they exist to describe.
+    from backend.app.providers.falkordb_provider import clamp_write_budget
 
-    budget_ms = int(1000 * clamp_query_budget(timeout_ms / 1000.0))
+    asked_s = timeout_ms / 1000.0
+    budget_ms = int(1000 * (asked_s if read_only else clamp_write_budget(asked_s)))
 
     async def _send(read: bool):
         call = (getattr(client, "ro_query", None) if read else None) or client.query

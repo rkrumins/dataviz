@@ -256,7 +256,7 @@ _REPLICA_ABSENCE_GRACE_S = 300
 
 #: Mirrors the provider's share so a warning can report the WINDOW the
 #: ceiling came from rather than the ceiling twice.
-_CLUSTER_QUERY_SHARE_FOR_LOG = 0.4
+_CLUSTER_WRITE_SHARE_FOR_LOG = 0.4
 
 
 #: FalkorDB's hard ceiling on DISTINCT attribute names per graph. Attribute
@@ -473,13 +473,15 @@ def _scan_timeout_s() -> float:
 
     EXTRACT is where a rebuild spends its longest reads, and the phase the
     UI calls Compute is mostly those scans plus the accumulator's overflow
-    flushes. A scan the cluster outlives ends as ``-UNBLOCKED`` rather than
-    as a timeout the scan ladder could narrow around."""
-    from backend.app.providers.falkordb_provider import clamp_query_budget
+    flushes.
 
-    return clamp_query_budget(
-        _env_float("FALKORDB_SCAN_RANGE_TIMEOUT", 30.0, 5.0, 600.0)
-    )
+    NOT clamped by the cluster window, unlike the write budget below. A scan
+    takes no write lock and cannot vote its own master out; it can only be
+    caught by a demotion something else caused. Cutting 30s to the window's
+    share bought that much less exposure and made every large EXTRACT
+    time out first — on precisely the graphs the 30s exists for. The scan
+    ladder already narrows on a timeout, which is the bound that works."""
+    return _env_float("FALKORDB_SCAN_RANGE_TIMEOUT", 30.0, 5.0, 600.0)
 
 
 def _node_identity_expr(identity_property: Optional[str]) -> str:
@@ -537,11 +539,11 @@ def _write_timeout_s() -> float:
     600s on the reasoning that "the server clamps every query at its own
     ``TIMEOUT_MAX`` anyway" — true, and the wrong ceiling in cluster mode,
     where the binding limit is how long the other masters will wait before
-    voting this one out. ``clamp_query_budget`` puts every write budget
-    beneath that window; see ``cluster_query_ceiling_s``."""
-    from backend.app.providers.falkordb_provider import clamp_query_budget
+    voting this one out. ``clamp_write_budget`` puts every write budget
+    beneath that window; see ``cluster_write_ceiling_s``."""
+    from backend.app.providers.falkordb_provider import clamp_write_budget
 
-    return clamp_query_budget(
+    return clamp_write_budget(
         _env_float("FALKORDB_BULK_CREATE_TIMEOUT_S", 60.0, 5.0, 600.0)
     )
 
@@ -1700,17 +1702,17 @@ class AggregationPipeline:
     def _scan_timeout(self) -> float:
         """Per-query budget for scans: the live override an operator raised
         on the running job, else the ``scanTimeoutS`` knob, else env. Read
-        per query so a raise applies to the NEXT query, no restart — and
-        clamped beneath the cluster's window, which an operator cannot raise
-        past for the same reason a write cannot."""
-        from backend.app.providers.falkordb_provider import clamp_query_budget
+        per query so a raise applies to the NEXT query, no restart.
 
+        An operator's number stands here, where a write's does not: a scan
+        cannot cost the shard its master, so there is nothing for a ceiling
+        to protect that the scan ladder does not already handle."""
         live = self._live.get("scan_timeout_s")
         try:
             asked = max(5.0, min(600.0, float(live))) if live else self._scan_timeout_knob
         except (TypeError, ValueError):
             asked = self._scan_timeout_knob
-        return clamp_query_budget(asked)
+        return asked
 
     def _write_timeout(self) -> float:
         """Per-query budget for writes and deletes — same resolution as
@@ -1723,7 +1725,7 @@ class AggregationPipeline:
         run AND moves the topology under every other reader of that shard.
         A budget the cluster shortened says so once, with both numbers."""
         from backend.app.providers.falkordb_provider import (
-            clamp_query_budget, cluster_query_ceiling_s,
+            clamp_write_budget, cluster_write_ceiling_s,
         )
 
         live = self._live.get("write_timeout_s")
@@ -1731,7 +1733,7 @@ class AggregationPipeline:
             asked = max(5.0, min(600.0, float(live))) if live else self._write_timeout_knob
         except (TypeError, ValueError):
             asked = self._write_timeout_knob
-        budget = clamp_query_budget(asked)
+        budget = clamp_write_budget(asked)
         if budget < asked and not self._write_ceiling_logged:
             self._write_ceiling_logged = True
             logger.warning(
@@ -1741,7 +1743,7 @@ class AggregationPipeline:
                 "that needs longer is halved by the ladder instead of "
                 "costing this shard its master.",
                 self.p._graph_name, asked, budget,
-                cluster_query_ceiling_s() / _CLUSTER_QUERY_SHARE_FOR_LOG,
+                cluster_write_ceiling_s() / _CLUSTER_WRITE_SHARE_FOR_LOG,
             )
         return budget
 

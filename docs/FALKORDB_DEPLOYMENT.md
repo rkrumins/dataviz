@@ -561,7 +561,7 @@ How the deployed `FALKORDB_ARGS` values are derived:
   write allowed to approach it races the election and loses — the replica is
   promoted, this master is demoted mid-batch, and blocked clients return
   `-UNBLOCKED force unblock from blocking operation, instance state changed`
-  with no pod having restarted. `clamp_query_budget` holds every query beneath a
+  with no pod having restarted. `clamp_write_budget` holds every query beneath a
   share of the window at the provider's read and write boundaries, so a batch
   that needs longer is halved by the pressure ladder and a scan that needs
   longer is narrowed by the scan ladder, instead of either costing the shard its

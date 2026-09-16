@@ -1405,39 +1405,60 @@ demoted part-way through the batch, and every blocked client comes back with
 (master -> replica?)`. Nothing restarted. The topology moved under the run.
 
 So the budget is now DERIVED. `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` is the
-deployment's own `cluster-node-timeout`, and `cluster_query_ceiling_s()` is a
+deployment's own `cluster-node-timeout`, and `cluster_write_ceiling_s()` is a
 share of it, leaving the rest of the window for the rollback, the reply and the
-cluster pings that keep this node a master. `clamp_query_budget` applies it at
-the provider's two boundaries, the write one and the read one, so every query is
-bounded no matter who set the timeout: the pipeline's batches, its range scans,
-the bulk loader's writes, a `writeTimeoutS` or `scanTimeoutS` an operator raised
-on a running job. An operator cannot raise past it, because what the clamp
-protects is not this run. A query that outlives the window costs the shard its
-master, and with it every other reader of that shard.
+cluster pings that keep this node a master. `clamp_write_budget` applies it at
+the provider's WRITE boundary, so every write is bounded no matter who set the
+timeout: the pipeline's batches, the bulk loader's, the versioning projector's,
+a `writeTimeoutS` an operator raised on a running job. An operator cannot raise
+past it, because what the clamp protects is not this run. A write that outlives
+the window costs the shard its master, and with it every other reader of that
+shard.
 
-Reads are clamped by the same number, and not because of the write lock they do
-not take. `-UNBLOCKED` reaches whichever client is blocked when the role
-changes, so every second a long read is in flight is a second in which a
-demotion caused by anything else surfaces as this run's failure. This matters
-most in the phase the UI calls **Compute**, which is dominated by EXTRACT's
-range scans and by the accumulator's overflow flushes: `_extract_and_compute`
-delegates to `_rollup_base`, which flushes to the graph through the paced write
-path whenever the pair cap or the memory guard trips. Compute both reads and
-writes, which is why clamping only writes would have left it exposed.
+### Reads are NOT clamped by it, and the asymmetry is the point
+
+For one commit they were, and that was wrong. A write holds the graph's write
+lock and blocks its client, so one that approaches the window races the
+election. **A read cannot cause that at all**: FalkorDB dispatches `GRAPH.*` to
+a module thread pool and the main thread goes on answering the cluster bus, so a
+long read never stops this master replying to the others. It can only be a
+*victim* of a demotion something else caused.
+
+That is a far weaker reason, and the price of acting on it was real. Read
+budgets are not accidents — they were chosen per call site, and every one that
+matters is larger than the window's share:
+
+| Read | Budget | Why |
+|---|---|---|
+| Generic read (`FALKORDB_QUERY_TIMEOUT`) | 15 s | Aligned with the canvas read below; was 5 s, which every serious caller had to override |
+| `get_children` / `get_children_with_edges` | 15 s | Wide containers with many lineage cross-edges legitimately exceed a small graph's read |
+| `get_stats`' two full scans | 30 s | They are O(nodes)+O(edges); below this the stats refresh fails and the asset shows stale |
+| EXTRACT's range scans (`scanTimeoutS`) | 30 s | The longest reads a rebuild takes |
+| The aggregated ladder, per rung | 0.8 x the HTTP tier | Sized under `HTTP_TIMEOUT_AGGREGATION_SECS` so the provider's own answer wins the race |
+
+Cutting all of those to ~6 s turned working canvas reads into errors on exactly
+the graphs their wider budgets exist for. What bounds a read is its own budget,
+under the ASGI tier above it, under the server's `TIMEOUT_MAX` below it.
 
 The ordering that must hold, smallest first:
 
 | Budget | Where | Shipped |
 |---|---|---|
 | Write batch target | `writeBatchTargetS` | ~1 s |
-| Per-query budget, read and write | derived ceiling | a share of the node timeout |
+| Per-query WRITE budget | derived ceiling | a share of the node timeout (6 s at 15 s) |
 | Cluster failure detector | `--cluster-node-timeout` | 15 s |
+| Per-query READ budget | per call site | 15-30 s |
 | Server query limit | `TIMEOUT_MAX` | 120 s |
+| HTTP graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 60 s |
+
+Note that a read budget sits ABOVE the failure detector and that is deliberate:
+the detector is not a limit on reads. What a read must stay under is the server
+limit and the tier that is waiting for it.
 
 A batch that needs longer than the derived ceiling is aborted by the server and
-rolled back, the pressure ladder halves it, and the halves are re-issued. A scan
-that needs longer is narrowed by the scan ladder the same way. Both are ordinary
-in-run retries. Before this, either was a cluster failover.
+rolled back, the pressure ladder halves it, and the halves are re-issued — an
+ordinary in-run retry where it used to be a cluster failover. A scan that needs
+longer is narrowed by the scan ladder, as it always was.
 
 `run_stats.write_timeout_s` records the budget the run's writes actually ran
 under, which is not always the one that was configured. When the clamp binds,

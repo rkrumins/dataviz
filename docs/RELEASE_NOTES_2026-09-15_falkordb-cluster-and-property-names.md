@@ -186,39 +186,49 @@ written while the replica was away — megabytes — and a rebuild writes past t
 
 ### 2.1 Every query budget derives from the failure detector
 
-`cluster_query_ceiling_s()` returns **40% of the cluster's node timeout**, leaving the rest
+`cluster_write_ceiling_s()` returns **40% of the cluster's node timeout**, leaving the rest
 of the window for the rollback, the reply and the pings that keep the node a master. At the
 shipped 15,000 ms that is a **6-second ceiling on any single query**, with a 2-second floor.
 
-`clamp_query_budget()` applies it at the boundary, so every query is bounded whoever set the
+`clamp_write_budget()` applies it at the boundary, so every query is bounded whoever set the
 timeout: the pipeline's write batches, the bulk loader's, a `writeTimeoutS` raised on a
 running job. **An operator cannot raise past it**, because a write that outlives the window
 costs the shard its master and with it every other reader of that shard. A batch that needs
 longer is aborted by the server, halved by the pressure ladder and re-issued — an ordinary
 in-run retry where it used to be a failover.
 
-It is applied in four places, which together cover every path that reaches a shard:
+It is applied at every boundary a WRITE can reach a shard through:
 
 | Boundary | Covers |
 |---|---|
 | `FalkorDBProvider._query` | every write: pipeline batches, bulk loader, index DDL |
-| `FalkorDBProvider._read_query` | every read, including EXTRACT's range scans |
 | `FalkorDBProvider._proj_query` | the projection path |
-| `versioning/projection._q` | the projector, which talks to the client directly and so never passed the provider boundary at all |
+| `versioning/projection._q` (writes only) | the projector, which talks to the client directly and so never passed the provider boundary at all |
 
-**Reads are clamped too, and the reason is not a write lock they do not take.**
-`-UNBLOCKED` reaches whichever client is blocked when the role changes, so every second a
-long read is in flight is a second in which a demotion caused by anything else surfaces as
-this run's failure — and a long read still holds a module thread on a node whose main thread
-has to keep answering the cluster bus. The scan ladder already narrows on a timeout, so the
-clamp engages behaviour the pipeline has rather than introducing a new failure mode.
+**Reads are deliberately NOT clamped by it.** They were, briefly, and that was a mistake
+worth stating plainly: a write holds the graph's write lock and blocks its client, so one
+that approaches the window races the election — but **a read cannot cause that at all**.
+FalkorDB dispatches `GRAPH.*` to a module thread pool and the main thread goes on answering
+the cluster bus, so a long read never stops this master replying to the others. It can only
+be a *victim* of a demotion something else caused, which is a far weaker reason to act on.
 
-That also closes the Compute stage, which is the stage that was failing. Compute both reads
-and writes: `_extract_and_compute` delegates to `_rollup_base`, which calls
-`_maybe_overflow_flush`, which writes through the paced path whenever the pair cap or the
-memory guard trips. A test now pins that call chain, because the chain is what makes the
-clamp reach the phase — and an earlier version of that test asserted on the wrong function
-and passed for the wrong reason.
+The price of acting on it was not theoretical. Read budgets are chosen per call site and
+every one that matters is larger than the window's share: `get_children` is **15 s** because
+wide containers legitimately exceed a small graph's read, `get_stats` gives its two full
+scans **30 s** (below that the stats refresh fails and the asset shows stale), EXTRACT's
+range scans **30 s**, and the aggregated ladder each rung **0.8 × the HTTP tier**. Cutting
+all of them to ~6 s turned working canvas reads into errors on exactly the graphs those
+budgets exist for. What bounds a read is its own budget, under the ASGI tier above it, under
+the server's `TIMEOUT_MAX` below it.
+
+**The generic read default also goes 5 s → 15 s**, matching the canvas read. Five seconds
+was sized for small graphs and then every path that met a real one was given an exception to
+it; a default every serious caller overrides only catches the ones that did not think to.
+
+Compute is still covered, because Compute WRITES: `_extract_and_compute` delegates to
+`_rollup_base`, which calls `_maybe_overflow_flush`, which writes through the paced path
+whenever the pair cap or the memory guard trips. A test pins that call chain — and an
+earlier version of it asserted on the wrong function and passed for the wrong reason.
 
 ### 2.2 The window is read from the node, not from an env var
 
@@ -536,7 +546,8 @@ stands either way; it is cheaper to have written it than to re-derive it.
 | Value | Was | Now | Why |
 |---|---|---|---|
 | Write budget ceiling | 600 s (`TIMEOUT_MAX`) | **0.4 × cluster-node-timeout** (6 s at 15,000 ms), floor 2 s | The other masters vote a silent one out long before the server abandons a query. |
-| Read / scan budget ceiling | 600 s | **same derived ceiling** | `-UNBLOCKED` reaches a blocked reader too, and a long read holds a module thread. |
+| Generic read budget (`FALKORDB_QUERY_TIMEOUT`) | 5 s | **15 s** | Matches the canvas read; the old default was one every serious caller had to override. |
+| Read / scan budget ceiling | per call site | **per call site, unchanged** | A read cannot vote its own master out. Clamping it only broke reads whose budgets were chosen on purpose. |
 | Projector query budget | 60 s default, 170 s max | **same derived ceiling** | It writes rollup deltas and node batches on the same hot path; the provider boundary never saw it. |
 | `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` | unset everywhere (3 s fallback) | **15000**, declared in the cluster overlay and read from the node | Every failover wait, park and `Retry-After` derives from it. |
 | Standalone / sentinel | unclamped | **unclamped** | No detector to lose a race against. |

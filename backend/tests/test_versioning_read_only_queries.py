@@ -355,7 +355,7 @@ def test_the_projector_is_bounded_by_the_cluster_window(monkeypatch):
             return types.SimpleNamespace(result_set=[])
 
     asyncio.run(proj._q(_Client(), "RETURN 1", timeout_ms=600_000))
-    ceiling_ms = int(1000 * prov.cluster_query_ceiling_s())
+    ceiling_ms = int(1000 * prov.cluster_write_ceiling_s())
     assert seen["timeout_ms"] == ceiling_ms
 
 

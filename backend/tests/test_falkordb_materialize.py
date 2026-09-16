@@ -3669,27 +3669,27 @@ def test_no_cluster_window_means_no_clamp(monkeypatch):
     race against, and an unset env is not a licence to invent one: the
     configured budget stands exactly as it did."""
     _with_node_timeout(monkeypatch, 0)
-    assert mat_provider.cluster_query_ceiling_s() is None
-    assert mat_provider.clamp_query_budget(600.0) == 600.0
-    assert mat_provider.clamp_query_budget(7.5) == 7.5
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
+    assert mat_provider.clamp_write_budget(7.5) == 7.5
 
 
 def test_the_window_bounds_every_write_budget(monkeypatch):
     _with_node_timeout(monkeypatch, 15)
-    ceiling = mat_provider.cluster_query_ceiling_s()
+    ceiling = mat_provider.cluster_write_ceiling_s()
     assert 0 < ceiling < 15, "a write must END inside the window, not at it"
-    assert mat_provider.clamp_query_budget(600.0) == ceiling
-    assert mat_provider.clamp_query_budget(60.0) == ceiling
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
+    assert mat_provider.clamp_write_budget(60.0) == ceiling
     # A budget already under the ceiling is untouched.
-    assert mat_provider.clamp_query_budget(1.0) == 1.0
+    assert mat_provider.clamp_write_budget(1.0) == 1.0
 
 
 def test_a_tiny_window_still_leaves_a_usable_budget(monkeypatch):
     """The floor is not the pipeline's 5s minimum: on a 5s window a 5s write
     is exactly the failure. The ceiling wins over the floor."""
     _with_node_timeout(monkeypatch, 5)
-    assert mat_provider.cluster_query_ceiling_s() == 2.0
-    assert mat_provider.clamp_query_budget(60.0) == 2.0
+    assert mat_provider.cluster_write_ceiling_s() == 2.0
+    assert mat_provider.clamp_write_budget(60.0) == 2.0
 
 
 def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
@@ -3705,7 +3705,7 @@ def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
         progress_callback=None, intra_batch_callback=None, should_cancel=None,
     )
     pipe._live["write_timeout_s"] = 600.0
-    assert pipe._write_timeout() == mat_provider.cluster_query_ceiling_s()
+    assert pipe._write_timeout() == mat_provider.cluster_write_ceiling_s()
     # Said once per run, not once per batch.
     assert pipe._write_ceiling_logged
     pipe._write_timeout()
@@ -3719,7 +3719,7 @@ def test_the_budget_each_write_ran_under_is_on_the_record(monkeypatch):
     result = _run(_materialize(p))
     assert result["errors"] == 0
     assert result["run_stats"]["write_timeout_s"] == round(
-        mat_provider.cluster_query_ceiling_s(), 1,
+        mat_provider.cluster_write_ceiling_s(), 1,
     )
 
 
@@ -3727,21 +3727,35 @@ def test_every_provider_write_is_bounded_at_the_boundary(monkeypatch):
     """Not each caller's job. A caller that passes its own generous timeout
     — the bulk loader, a script, a future writer — is clamped too."""
     _with_node_timeout(monkeypatch, 15)
-    ceiling = mat_provider.cluster_query_ceiling_s()
-    assert mat_provider.clamp_query_budget(170.0) == ceiling
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert mat_provider.clamp_write_budget(170.0) == ceiling
     src = inspect.getsource(mat_provider.FalkorDBProvider._query)
-    assert "clamp_query_budget" in src
+    assert "clamp_write_budget" in src
     src = inspect.getsource(mat_provider.FalkorDBProvider._proj_query)
-    assert "clamp_query_budget" in src
+    assert "clamp_write_budget" in src
 
 
-def test_reads_are_bounded_by_the_same_window(monkeypatch):
-    """The phase the UI calls Compute is mostly EXTRACT's range scans plus
-    the accumulator's overflow flushes. Clamping only writes would leave the
-    scans able to outlive the cluster, and a client blocked across a role
-    change is exactly what reports -UNBLOCKED."""
+def test_a_read_is_NOT_cut_to_the_write_window(monkeypatch):
+    """Reads are bounded by their own budgets, never by the cluster window.
+
+    This was the other way round for one commit and it was wrong. A write
+    holds the graph's write lock and blocks its client, so one that
+    approaches the failure detector races the election and can cost the
+    shard its master. A READ takes no lock and cannot: FalkorDB runs GRAPH.*
+    on a module thread pool while the main thread goes on answering the
+    cluster bus, so a long read is only ever a VICTIM of a demotion
+    something else caused.
+
+    Clamping reads bought that much less exposure and cost the budgets
+    somebody chose on purpose — ``get_children`` is deliberately 15s because
+    wide containers exceed the generic 5s default, ``get_stats`` gives its
+    two full scans 30s, and EXTRACT's range scans 30s. Cutting all of them
+    to the window's share turned working canvas reads into errors on exactly
+    the graphs the wider budgets exist for."""
     _with_node_timeout(monkeypatch, 15)
-    ceiling = mat_provider.cluster_query_ceiling_s()
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert ceiling == 6.0                             # the write ceiling stands
+
     fake = _FakeFalkor()
     p = _make_provider(fake, _seed_two_chain_graph(fake))
     pipe = mat.AggregationPipeline(
@@ -3749,12 +3763,65 @@ def test_reads_are_bounded_by_the_same_window(monkeypatch):
         lineage_edge_types=["FLOWS"], last_cursor=None,
         progress_callback=None, intra_batch_callback=None, should_cancel=None,
     )
-    pipe._live["scan_timeout_s"] = 600.0
-    assert pipe._scan_timeout() == ceiling
-    # Both provider read paths funnel through one boundary, and it clamps.
-    assert "clamp_query_budget" in inspect.getsource(
+    pipe._live["scan_timeout_s"] = 120.0
+    assert pipe._scan_timeout() == 120.0              # the operator's number stands
+    pipe._live["write_timeout_s"] = 120.0
+    assert pipe._write_timeout() == ceiling           # …but a write is still cut
+
+    # The read boundary must not reach for the write ceiling at all.
+    assert "clamp_write_budget" not in inspect.getsource(
         mat_provider.FalkorDBProvider._read_query,
     )
+    assert "clamp_write_budget" in inspect.getsource(
+        mat_provider.FalkorDBProvider._query,
+    )
+
+
+def test_the_generic_read_default_matches_the_canvas_one(monkeypatch):
+    """One number for a read, not a small one plus an exception per caller.
+
+    Five seconds was sized for small graphs, and then every path that met a
+    real one was given a larger budget of its own. A default that every
+    serious caller overrides only catches the callers that did not think to,
+    and a read out of budget does not degrade — it errors at a canvas that
+    was about to draw."""
+    from backend.app.config import resilience
+
+    assert resilience.FALKORDB_QUERY_TIMEOUT_SECS == 15.0
+    assert (
+        resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        == resilience.FALKORDB_QUERY_TIMEOUT_SECS
+    )
+
+
+def test_the_deadline_ladder_still_nests_around_the_read_budget():
+    """The rule that governs all of them: every outer deadline outlasts the
+    one inside it. Raising a read budget past the tier above it would make
+    the outer layer cancel first, hand the user an opaque 504, and leave the
+    store working on a result nobody will read."""
+    from backend.app.config import resilience
+
+    assert (
+        resilience.FALKORDB_QUERY_TIMEOUT_SECS
+        < resilience.HTTP_TIMEOUT_GRAPH_SECS
+    )
+    # …and under what the server itself will accept for one query.
+    assert (
+        resilience.FALKORDB_QUERY_TIMEOUT_SECS * 1000
+        < float(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS or 0)
+    )
+
+
+def test_the_canvas_children_read_keeps_its_own_budget(monkeypatch):
+    """The regression in one number. ``get_children`` is given 15s with a
+    comment saying why; the clamp made it 6s, so a wide container that
+    legitimately takes 8s stopped returning data and started returning an
+    error."""
+    from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+
+    _with_node_timeout(monkeypatch, 15)
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS == 15.0
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS > mat_provider.cluster_write_ceiling_s()
 
 
 def test_the_overflow_flush_is_the_write_inside_compute(monkeypatch):
@@ -3790,19 +3857,19 @@ def test_a_cluster_with_no_configured_window_is_still_clamped(monkeypatch):
     old rule — unset means no clamp — ran every query unbounded on exactly
     the deployment that needed the clamp most."""
     _reset_window(monkeypatch, mode="cluster")
-    ceiling = mat_provider.cluster_query_ceiling_s()
+    ceiling = mat_provider.cluster_write_ceiling_s()
     assert ceiling is not None and 0 < ceiling < 15
-    assert mat_provider.clamp_query_budget(600.0) == ceiling
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
 
 
 def test_a_standalone_deployment_is_still_unclamped(monkeypatch):
     """Not clustered means there is genuinely no detector to outlive, and
     assuming one there would shorten budgets for no reason."""
     _reset_window(monkeypatch, mode="standalone")
-    assert mat_provider.cluster_query_ceiling_s() is None
-    assert mat_provider.clamp_query_budget(600.0) == 600.0
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
     _reset_window(monkeypatch, mode="")
-    assert mat_provider.cluster_query_ceiling_s() is None
+    assert mat_provider.cluster_write_ceiling_s() is None
 
 
 def test_what_the_node_reports_beats_the_env(monkeypatch):
@@ -3810,7 +3877,7 @@ def test_what_the_node_reports_beats_the_env(monkeypatch):
     its own configuration."""
     _reset_window(monkeypatch, env_s=15.0, mode="cluster")
     mat_provider.note_cluster_node_timeout(6.0)
-    assert mat_provider.cluster_query_ceiling_s() == 6.0 * 0.4
+    assert mat_provider.cluster_write_ceiling_s() == 6.0 * 0.4
 
 
 def test_the_smallest_reported_window_wins(monkeypatch):
@@ -3827,7 +3894,7 @@ def test_a_nonsense_report_is_ignored(monkeypatch):
     _reset_window(monkeypatch, env_s=15.0, mode="cluster")
     mat_provider.note_cluster_node_timeout(0.0)
     mat_provider.note_cluster_node_timeout(None)
-    assert mat_provider.cluster_query_ceiling_s() == 15.0 * 0.4
+    assert mat_provider.cluster_write_ceiling_s() == 15.0 * 0.4
 
 
 def test_the_provider_asks_the_node_for_its_window():

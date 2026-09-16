@@ -51,10 +51,22 @@ BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_
 
 # ── FalkorDB-specific query timeouts ────────────────────────────────
 # Read-only Cypher queries (MATCH ... RETURN).
-FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "5"))
-# get_children / get_children_with_edges per-query timeout. Larger than
-# the generic 5s read default because wide containers with many lineage
-# cross-edges legitimately exceed it; aligns with HTTP_TIMEOUT_GRAPH_SECS.
+#
+# 15s, not the 5s this used to be. Five seconds was chosen for small graphs
+# and then every read path that met a real one was given an exception to it:
+# children 15s, the stats scans 30s, the aggregated ladder its own budget.
+# A default that every serious caller has to override is not a default, it
+# is a trap for the ones that did not think to — and a read that runs out of
+# budget does not degrade, it returns an error to a canvas that was about to
+# draw. Reads cost a module thread, not the write lock, so the number that
+# bounds them is how long anyone will actually wait: still far under
+# HTTP_TIMEOUT_GRAPH_SECS (60s) above it, and under the server's own
+# TIMEOUT_MAX below it, so the deadline ladder still nests.
+FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "15"))
+# get_children / get_children_with_edges per-query timeout. Wide containers
+# with many lineage cross-edges legitimately take longer than a small graph's
+# read; now the SAME as the generic default rather than an exception to it,
+# and kept as its own knob so it can be raised independently.
 FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "15"))
 # /nodes/query — the canvas hydration hot path (assigned entities by URN, or
 # every entity of a type for an open view). The type-shaped query sorts a

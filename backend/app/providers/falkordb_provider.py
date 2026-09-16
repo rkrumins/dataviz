@@ -626,7 +626,7 @@ _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 #: rest of it for the rollback, the reply, and the pings that keep this node
 #: a master. The point is not the exact fraction; it is that the budget is
 #: DERIVED from the failure detector instead of set beside it.
-_CLUSTER_QUERY_SHARE = 0.4
+_CLUSTER_WRITE_SHARE = 0.4
 
 
 #: Redis ships ``cluster-node-timeout`` at 15000 ms and this deployment runs
@@ -660,7 +660,7 @@ def note_cluster_node_timeout(seconds: Optional[float]) -> None:
         logger.info(
             "FalkorDB cluster-node-timeout observed as %.0fs — query budgets "
             "are clamped to %.1fs.", float(seconds),
-            float(seconds) * _CLUSTER_QUERY_SHARE,
+            float(seconds) * _CLUSTER_WRITE_SHARE,
         )
 
 
@@ -673,9 +673,22 @@ def _in_cluster_mode() -> bool:
     return (os.getenv("FALKORDB_MODE") or "").strip().lower() == "cluster"
 
 
-def cluster_query_ceiling_s() -> Optional[float]:
-    """The longest one query may be allowed to run on THIS deployment, or
+def cluster_write_ceiling_s() -> Optional[float]:
+    """The longest one WRITE may be allowed to run on THIS deployment, or
     ``None`` when there is no failure detector to lose a race against.
+
+    WRITES ONLY, and the asymmetry is the point. A write holds the graph's
+    write lock and blocks its client for the duration, so one that
+    approaches the window races the election: the replica is promoted, this
+    master is demoted part-way through the batch, and every blocked client
+    gets ``-UNBLOCKED``. A READ takes no lock and cannot cause that at all —
+    FalkorDB runs GRAPH.* on a module thread pool while the main thread goes
+    on answering the cluster bus — so it is only ever a VICTIM of a demotion
+    something else caused. Bounding reads by this number bought that much
+    less exposure and cost far more: it cut ``get_children`` from the 15s it
+    is deliberately given to 6s, and turned wide-container canvas reads into
+    errors on exactly the graphs the wider budget exists for. Reads are
+    bounded by their own per-call budgets under the ASGI tier instead.
 
     Three sources, most authoritative first: what a node REPORTED about
     itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and — when
@@ -696,16 +709,19 @@ def cluster_query_ceiling_s() -> Optional[float]:
                 "FALKORDB_MODE=cluster but no cluster-node-timeout is known "
                 "(FALKORDB_CLUSTER_NODE_TIMEOUT_MS unset and no node has "
                 "answered CONFIG GET yet) — assuming %.0fs and clamping every "
-                "query budget to %.1fs. Set the env to the shards' own "
+                "WRITE budget to %.1fs. Set the env to the shards' own "
                 "--cluster-node-timeout so this is measured, not assumed.",
-                window, window * _CLUSTER_QUERY_SHARE,
+                window, window * _CLUSTER_WRITE_SHARE,
             )
-    return max(2.0, window * _CLUSTER_QUERY_SHARE)
+    return max(2.0, window * _CLUSTER_WRITE_SHARE)
 
 
-def clamp_query_budget(seconds: float) -> float:
-    """``seconds``, never longer than the cluster lets a query run."""
-    ceiling = cluster_query_ceiling_s()
+def clamp_write_budget(seconds: float) -> float:
+    """``seconds``, never longer than the cluster lets a WRITE run.
+
+    Never applied to a read — see ``cluster_write_ceiling_s``.
+    """
+    ceiling = cluster_write_ceiling_s()
     return min(seconds, ceiling) if ceiling is not None else seconds
 
 #: What a client meeting ``-NOREPLICAS`` is told to wait.
@@ -4411,11 +4427,24 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
                           op: Optional[str], *, kind: str):
-        # The single read boundary, clamped like the write one: a read takes
-        # no write lock, but it holds a module thread and leaves a client
-        # blocked, and a client blocked across a role change is exactly what
-        # reports "-UNBLOCKED". See ``cluster_query_ceiling_s``.
-        t = clamp_query_budget(t)
+        # DELIBERATELY NOT clamped by the cluster window, unlike the write
+        # boundary. A read does not CAUSE a failover: FalkorDB dispatches
+        # GRAPH.* to a module thread pool and the main thread goes on
+        # answering the cluster bus, so a long read cannot make the other
+        # masters vote this one out. It can only be CAUGHT by a demotion
+        # something else caused, which is a far weaker reason — and the
+        # price of pre-empting it was failing reads whose budgets were
+        # chosen on purpose and are larger than the window's share:
+        # get_children at 15s (wide containers legitimately exceed the
+        # generic 5s default), get_stats' two full scans at 30s, and each
+        # rung of the aggregated ladder under its own 0.8-of-tier budget.
+        # Clamping those to 6s turned working canvas reads into errors on
+        # exactly the graphs the budgets were widened for.
+        #
+        # What bounds a read is what already bounded it: the per-call budget
+        # its caller chose, under the ASGI tier above it, under the server's
+        # own TIMEOUT_MAX. See ``cluster_write_ceiling_s`` for the writes,
+        # where the lock makes the window binding.
         """One read: on a replica when the router allows it, otherwise on the
         master — and on the master once more if the replica let us down."""
         replica = None
@@ -4551,7 +4580,7 @@ class FalkorDBProvider(GraphDataProvider):
         # this provider — the pipeline's batches, the bulk loader's, an
         # operator's raised knob — is bounded by what the cluster lets a
         # master go silent for. See ``cluster_write_ceiling_s``.
-        t = clamp_query_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
+        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             return await asyncio.wait_for(
@@ -4658,7 +4687,7 @@ class FalkorDBProvider(GraphDataProvider):
         self._check_quiesce_gate()
 
         # Bounded by the cluster's failure detector, as in ``_query``.
-        t = clamp_query_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
+        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             t_start = time.monotonic()
