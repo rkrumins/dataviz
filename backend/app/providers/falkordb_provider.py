@@ -17,7 +17,7 @@ from collections import defaultdict, deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import (
-    Awaitable, Callable, Dict, Any, List, NamedTuple, Optional, Sequence, Set, Tuple,
+    Awaitable, Callable, Dict, Any, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
 )
 
 
@@ -418,6 +418,19 @@ _REPLICA_SAMPLE_S = 5.0
 #: that cannot answer this promptly is not one to hand a read to, and
 #: the master is always there to fall back on.
 _REPLICA_ASK_TIMEOUT_S = 1.0
+
+#: What a node probe returns when the node TOOK the connection and simply did
+#: not answer inside its deadline — as distinct from ``None``, which means it
+#: refused, or is not there.
+#:
+#: For a REPLICA the distinction does not arise: either way it failed to
+#: describe itself, so it is not a candidate. For the MASTER the two are
+#: OPPOSITE verdicts. A master that is merely busy is still the node holding
+#: this process's own writes, and calling it silent bypasses the settle
+#: window and sends a read-back to a replica. A master that is absent makes
+#: its replicas the only copies of the graph still standing, which is exactly
+#: when the link-and-sync requirements have to relax.
+_PROBE_TIMED_OUT = object()
 #: How many per-replica clients one provider may hold. The list comes from a
 #: node's own report, and a broken deployment must not be able to make this
 #: unbounded.
@@ -479,6 +492,21 @@ _REPLICA_SAMPLE_TIMEOUT_S = float(os.getenv("FALKORDB_REPLICA_SAMPLE_TIMEOUT_S",
 #: the cluster's own failover window, after which a promoted replica IS the
 #: master and the question has changed.
 _REPLICA_VOUCH_MAX_AGE_S = 3 * _REPLICA_SAMPLE_S
+
+
+def _vouch_is_current(vouched_at: Optional[float], now: float) -> bool:
+    """Whether a set the master last vouched for is young enough to drop the
+    link and sync requirements on.
+
+    A stamp we NEVER HAD is not a stale one. A process that meets an absent
+    master on its very first sample has no cached verdict to be old — only
+    each replica's own first-hand reading, taken just now — and refusing
+    then would take a shard's reads offline for the whole of a failover, in
+    the one case the relaxation exists to cover. What the ceiling stops is a
+    verdict being REUSED while the master it was measured against stays
+    gone.
+    """
+    return vouched_at is None or (now - vouched_at) <= _REPLICA_VOUCH_MAX_AGE_S
 
 #: The master's share of a shard's reads, in round-robin slots against one
 #: slot per in-step replica. 0 keeps every read off the master.
@@ -572,6 +600,130 @@ _CLUSTER_NODE_TIMEOUT_S = (
 #: anything, so the retry is spent before there is anything to answer it.
 _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 
+#: What share of the cluster's failure-detector window ONE query may spend.
+#:
+#: A query budget sized against the SERVER's ``TIMEOUT_MAX`` is sized against
+#: the wrong ceiling in cluster mode. The server's limit says how long it
+#: will let a query run; the cluster's ``cluster-node-timeout`` says how long
+#: the OTHER masters will wait for this one to answer before voting it out.
+#: A query allowed to run as long as that window races the election and loses
+#: about as often as it wins: the replica is promoted, this master is demoted
+#: mid-query, and every blocked client comes back with "-UNBLOCKED force
+#: unblock from blocking operation, instance state changed". No pod
+#: restarted; the topology moved under the run.
+#:
+#: READS are clamped by the same number, for a reason that is NOT the write
+#: lock they do not take. ``-UNBLOCKED`` reaches whichever client is blocked
+#: when the role changes, so every second a long read is in flight is a
+#: second in which a demotion caused by anything else surfaces as this run's
+#: failure. A long read also holds a module thread on a node whose main
+#: thread has to keep answering the cluster bus. The ladders already narrow
+#: on a timeout, so the clamp engages behaviour the pipeline has rather than
+#: introducing a new failure.
+#:
+#: So a query must END — abort, roll back, and let the node answer the
+#: cluster bus again — with the window still open. Two fifths leaves the
+#: rest of it for the rollback, the reply, and the pings that keep this node
+#: a master. The point is not the exact fraction; it is that the budget is
+#: DERIVED from the failure detector instead of set beside it.
+_CLUSTER_WRITE_SHARE = 0.4
+
+
+#: Redis ships ``cluster-node-timeout`` at 15000 ms and this deployment runs
+#: it there. Assumed — with a warning — when we know we are clustered but
+#: neither the node nor the env has told us the real number, because the
+#: alternative was silence: an unset env used to mean NO clamp at all, so a
+#: cluster whose ConfigMap predated the variable ran every query unbounded
+#: and found out during a rebuild. A safety limit that disappears when a
+#: variable is missing is not a safety limit.
+_ASSUMED_CLUSTER_NODE_TIMEOUT_S = 15.0
+
+#: The smallest ``cluster-node-timeout`` any connected node has REPORTED,
+#: read off its own ``CONFIG GET`` (see ``note_cluster_node_timeout``). The
+#: node is the authority: an env mirror can be stale, wrong, or absent, and
+#: this one cannot. Smallest, not last, because the clamp has to hold for
+#: every shard a process talks to.
+_OBSERVED_NODE_TIMEOUT_S: Optional[float] = None
+
+#: Latched so the "assuming a window" warning is said once per process
+#: rather than once per query.
+_ASSUMED_WINDOW_WARNED = False
+
+
+def note_cluster_node_timeout(seconds: Optional[float]) -> None:
+    """Record a ``cluster-node-timeout`` a node reported about itself."""
+    global _OBSERVED_NODE_TIMEOUT_S
+    if seconds is None or seconds <= 0:
+        return
+    if _OBSERVED_NODE_TIMEOUT_S is None or seconds < _OBSERVED_NODE_TIMEOUT_S:
+        _OBSERVED_NODE_TIMEOUT_S = float(seconds)
+        logger.info(
+            "FalkorDB cluster-node-timeout observed as %.0fs — query budgets "
+            "are clamped to %.1fs.", float(seconds),
+            float(seconds) * _CLUSTER_WRITE_SHARE,
+        )
+
+
+def _in_cluster_mode() -> bool:
+    """Whether this process is configured to talk to a Redis Cluster.
+
+    The fleet-wide env, not a per-provider row: this decides whether an
+    UNKNOWN window is treated as "no detector exists" or as "we have not
+    been told yet", and the safe reading of that ambiguity is fleet-level."""
+    return (os.getenv("FALKORDB_MODE") or "").strip().lower() == "cluster"
+
+
+def cluster_write_ceiling_s() -> Optional[float]:
+    """The longest one WRITE may be allowed to run on THIS deployment, or
+    ``None`` when there is no failure detector to lose a race against.
+
+    WRITES ONLY, and the asymmetry is the point. A write holds the graph's
+    write lock and blocks its client for the duration, so one that
+    approaches the window races the election: the replica is promoted, this
+    master is demoted part-way through the batch, and every blocked client
+    gets ``-UNBLOCKED``. A READ takes no lock and cannot cause that at all —
+    FalkorDB runs GRAPH.* on a module thread pool while the main thread goes
+    on answering the cluster bus — so it is only ever a VICTIM of a demotion
+    something else caused. Bounding reads by this number bought that much
+    less exposure and cost far more: it cut ``get_children`` from the 15s it
+    is deliberately given to 6s, and turned wide-container canvas reads into
+    errors on exactly the graphs the wider budget exists for. Reads are
+    bounded by their own per-call budgets under the ASGI tier instead.
+
+    Three sources, most authoritative first: what a node REPORTED about
+    itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and — when
+    we know we are clustered but neither has answered — an assumed window,
+    announced once. ``None`` is returned only for a standalone or sentinel
+    deployment, where the budget genuinely has no cluster to outlive."""
+    global _ASSUMED_WINDOW_WARNED
+    window = _OBSERVED_NODE_TIMEOUT_S
+    if window is None and _CLUSTER_NODE_TIMEOUT_S > 0:
+        window = _CLUSTER_NODE_TIMEOUT_S
+    if window is None:
+        if not _in_cluster_mode():
+            return None
+        window = _ASSUMED_CLUSTER_NODE_TIMEOUT_S
+        if not _ASSUMED_WINDOW_WARNED:
+            _ASSUMED_WINDOW_WARNED = True
+            logger.warning(
+                "FALKORDB_MODE=cluster but no cluster-node-timeout is known "
+                "(FALKORDB_CLUSTER_NODE_TIMEOUT_MS unset and no node has "
+                "answered CONFIG GET yet) — assuming %.0fs and clamping every "
+                "WRITE budget to %.1fs. Set the env to the shards' own "
+                "--cluster-node-timeout so this is measured, not assumed.",
+                window, window * _CLUSTER_WRITE_SHARE,
+            )
+    return max(2.0, window * _CLUSTER_WRITE_SHARE)
+
+
+def clamp_write_budget(seconds: float) -> float:
+    """``seconds``, never longer than the cluster lets a WRITE run.
+
+    Never applied to a read — see ``cluster_write_ceiling_s``.
+    """
+    ceiling = cluster_write_ceiling_s()
+    return min(seconds, ceiling) if ceiling is not None else seconds
+
 #: What a client meeting ``-NOREPLICAS`` is told to wait.
 #:
 #: A master configured with ``min-replicas-to-write`` refuses EVERY write
@@ -661,6 +813,18 @@ try:  # pragma: no cover - redis is always installed in practice
     _TRANSIENT_REDIS_EXC: tuple = (_RedisConnectionError, _RedisTimeoutError)
 except Exception:  # pragma: no cover
     _TRANSIENT_REDIS_EXC = ()
+
+# A probe that TIMED OUT, split from one that was REFUSED. Only the asyncio
+# deadline and the redis SOCKET timeout count here: a redis ``ConnectionError``
+# means the node is not there, which is the opposite verdict for a master and
+# the one that lets its replicas answer in its place.
+try:  # pragma: no cover - redis is always installed in practice
+    from redis.exceptions import TimeoutError as _RedisProbeTimeoutError
+    _PROBE_TIMEOUT_EXC: tuple = (
+        asyncio.TimeoutError, TimeoutError, _RedisProbeTimeoutError,
+    )
+except Exception:  # pragma: no cover
+    _PROBE_TIMEOUT_EXC = (asyncio.TimeoutError, TimeoutError)
 
 # BusyLoadingError (subclass of redis ConnectionError) is raised while
 # FalkorDB replays its RDB snapshot into memory on restart — a transient,
@@ -1368,6 +1532,252 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 })
 
 
+#: The platform-owned property names that live nowhere else. The rollup
+#: edge's names, the ``_AggMeta`` stamp's and the projection node's are
+#: ``falkordb_materialize._ROLLUP_ATTRIBUTE_NAMES`` /
+#: ``_META_ATTRIBUTE_NAMES`` / ``_PROJECTION_NODE_ATTRIBUTE_NAMES`` and are
+#: IMPORTED, not copied — one definition, per ``derived_artifacts``'s house
+#: rule. These four have no other home:
+#:
+#: * ``confidence`` — every edge writer SETs it (``save_custom_graph``'s edge
+#:   batch, ``create_node``'s containment edge, ``create_edge``, and the
+#:   versioning projector's ``_edge_merge_cypher``), and a read predicate
+#:   filters on it.
+#: * ``gvSeq`` / ``seq`` — the versioning projector's OWN rollup schema:
+#:   ``r.gvSeq = item.seq`` on the AGGREGATED edge and
+#:   ``MERGE (m:_GVRollupMeta {id:'meta'}) SET m.seq = $seq``
+#:   (``projection.py``). Covered by no pre-flight anywhere — the
+#:   materializer's capacity baseline checks its own nine names only.
+#: * ``purgedAt`` — the ``_AggMeta`` purge stamp.
+_PROJECTOR_ATTRIBUTE_NAMES: frozenset = frozenset({
+    "confidence", "gvSeq", "seq", "purgedAt",
+})
+
+
+class AttributeNameLimitReached(RuntimeError):
+    """The graph has no attribute ids left, found before a data write.
+
+    Terminal and operator-facing: ids are never freed, so no retry, delete or
+    lower budget changes the answer. The operator has to recreate the graph
+    (drop and re-ingest) before loading into it."""
+
+
+# A logical/control-flow signal, not a downstream failure: registered here so
+# a CircuitBreakerProxy-wrapped provider re-raises it untouched instead of
+# counting it and wrapping it as a transient ProviderUnavailable — three
+# refused ingests would otherwise open the breaker and take READS off a graph
+# that serves them perfectly. Registered at module top level, after the class,
+# which is the supported pattern (see cancel.py) and runs long before any
+# provider instance — and therefore any proxy — is constructed.
+try:
+    from backend.common.adapters.circuit import register_logical_exception
+
+    register_logical_exception(AttributeNameLimitReached)
+except Exception:  # pragma: no cover - import-time best-effort
+    logger.exception("Failed to register AttributeNameLimitReached with circuit breaker")
+
+
+async def reserve_platform_property_names(
+    run: Callable[..., Awaitable[Any]], graph_name: str, registered: Set[str],
+) -> Set[str]:
+    """Stake every property name the PLATFORM owns on the graph, BEFORE the
+    first data write. Returns the names it staked, for the caller to fold
+    into ``registered``; empty when there was nothing to do and empty when
+    the reserve failed.
+
+    These names are SCHEMA — fixed, known at compile time, and needed by
+    every rollup the graph will ever hold. A source's property keys are
+    DATA. Both draw on the same 65,534 attribute ids, first-come-first-served
+    and never freed, so a source carrying tens of thousands of keys can spend
+    the last id before the platform has written its first rollup. That is not
+    hypothetical: a ~65,000-key source filled a production graph and its
+    first aggregation run found room for none of the nine names a rollup
+    write needs.
+
+    Nothing else stakes a claim. ``ensure_indices`` would register five of
+    the rollup names as a side effect of its edge-index DDL, but it is
+    dispatched fire-and-forget so a bulk loader racing it wins, and its
+    failures are collected and swallowed by contract. The names the platform
+    needs then belong to whichever data key asked first, permanently.
+
+    MECHANISM: a name is registered by being written and is never freed, so
+    writing every platform name once and deleting the carrier reserves them
+    all for the life of the graph — the property that causes the problem is
+    the one that solves it. The carrier is a single ``:_PropReserve`` node
+    (labels and relationship types have their own id spaces, so the label
+    costs no attribute id) and no node persists. The attribute map is shared
+    between node and edge properties, so one node reserves the rollup EDGE
+    names too. The durability is the engine's, not an assumption: ids are
+    minted in ``GraphContext_FindOrAddAttribute`` (src/graph/graphcontext.c),
+    the only removal is the undo-log rollback of a failed query
+    (src/undo_log/undo_log.c), and the RDB encoder serialises ALL attribute
+    keys, so the reservation survives node deletion, restart and reload.
+
+    NO LATCH: the caller passes what the graph has registered and this
+    no-ops when that already covers the platform. Self-healing by
+    construction — a graph a full seed DROPped, or one an operator recreated
+    out of band, reads back without them and is reserved again, and a
+    transient failure here is retried on the next write rather than latched
+    away.
+
+    Two statements, not one: ``CREATE … SET … DELETE`` in a single statement
+    parses (FalkorDB's own flow suite has ``CREATE (n) SET n = {v:null}
+    DELETE n RETURN n``), so the pair is a deliberate choice for an
+    unambiguous shape on every build, not a workaround. A run that dies
+    between them leaves a stray ``:_PropReserve`` node behind, which is why
+    the label is in ``DERIVED_LABELS``.
+
+    FAILURE POLICY: only the attribute limit itself is terminal — the graph
+    is already full, so no rollup can be written or indexed on it ever
+    again. Any other failure (an unimportable materializer, a transient
+    store error) is logged at WARNING and the write proceeds: blocking every
+    ingest would be worse than the problem being solved.
+    """
+    try:
+        # Imported inside the call: the materializer imports THIS module, so
+        # the provider must not import it at module scope. Inside the try,
+        # so an ImportError takes the warn-and-proceed path like any other
+        # failure rather than blocking every ingest.
+        from backend.app.providers.falkordb_materialize import (
+            _is_attribute_limit_error,
+            _META_ATTRIBUTE_NAMES,
+            _PROJECTION_NODE_ATTRIBUTE_NAMES,
+            _ROLLUP_ATTRIBUTE_NAMES,
+        )
+    except Exception as exc:  # pragma: no cover - import-time only
+        logger.warning(
+            "reserving the platform's property names on %s failed (%s) — "
+            "continuing: the names are registered by whatever writes them "
+            "first, as before.", graph_name, exc,
+        )
+        return set()
+
+    platform = (
+        _RESERVED_NODE_KEYS | _ROLLUP_ATTRIBUTE_NAMES | _META_ATTRIBUTE_NAMES
+        | _PROJECTION_NODE_ATTRIBUTE_NAMES | _PROJECTOR_ATTRIBUTE_NAMES
+    )
+    if platform <= registered:
+        return set()
+
+    # The value is a placeholder — registering the NAME is the whole point,
+    # and the node carrying it is gone by the end of the pair.
+    names = {name: True for name in sorted(platform)}
+    try:
+        await run("CREATE (r:_PropReserve) SET r += $names", {"names": names})
+        await run("MATCH (r:_PropReserve) DELETE r", None)
+    except Exception as exc:
+        if _is_attribute_limit_error(exc):
+            raise AttributeNameLimitReached(
+                f"the graph {graph_name} has no FalkorDB attribute ids left, so "
+                f"the platform's own property names cannot be registered: every "
+                f"new key this ingest writes is stored as a value in "
+                f"propertiesRaw instead of as a property — visible in the "
+                f"Properties panel, unreachable by search, sort or predicates — "
+                f"and the store refuses every rollup write and index on this "
+                f"graph. Attribute ids are never freed — the graph's registered "
+                f"names have spent them — so no retry and no delete changes "
+                f"this: recreate the graph (drop and re-ingest the source) "
+                f"before loading into it."
+            ) from exc
+        logger.warning(
+            "reserving the platform's property names on %s failed (%s) — "
+            "continuing: the write proceeds and the names are registered by "
+            "whatever writes them first, as before.",
+            graph_name, exc,
+        )
+        return set()
+    return set(platform)
+
+
+#: How many DISTINCT property names one graph may hold as native node
+#: properties before a new name is stored as a value in ``propertiesRaw``
+#: instead. FalkorDB numbers names with a 16-bit id per graph and never
+#: frees one: a source whose nodes carry thousands of per-node metadata keys
+#: spends the graph's 65,533 ids on keys that appear once, after which no
+#: rollup can be written or indexed and the graph can only be recreated. The
+#: budget keeps the names that carry the graph native (searchable,
+#: indexable) and puts the long tail where the Properties panel still shows
+#: it and only search predicates cannot reach it. Counted against every name
+#: the graph has registered, platform names included. Applies as a graph is
+#: written, and a name already registered stays native — so raising it
+#: takes full effect only on a recreated graph.
+#:
+#: 50,000, not the 8,000 this shipped with, because
+#: :func:`reserve_platform_property_names` now stakes the platform's own
+#: names before the first data write: the budget no longer protects the
+#: platform, and its only remaining job is to stop a graph reaching the
+#: ceiling, where the store refuses every further new name — no rollup
+#: write, no index — and the graph can only be recreated. What a demoted key
+#: actually costs is searchability, not memory or the value itself: a
+#: registered name that appears on few nodes costs almost nothing, because a
+#: FalkorDB entity's attribute set is sized by the attributes PRESENT on it,
+#: not by the names the graph has registered — so a generous default is
+#: strictly safer than a tight one.
+_NATIVE_PROPERTY_BUDGET_DEFAULT = 50_000
+
+
+def _clamp_native_property_budget(raw: Any) -> int:
+    """``raw`` as a budget, clamped to 100-60,000 — the ceiling less the room
+    the platform's own names and a margin need. Anything unreadable falls
+    back to the shipped default rather than to an accidental floor."""
+    try:
+        return max(100, min(60_000, int(raw)))
+    except (TypeError, ValueError):
+        return _NATIVE_PROPERTY_BUDGET_DEFAULT
+
+
+def _native_property_budget() -> int:
+    """The fleet-wide budget: ``FALKORDB_NATIVE_PROPERTY_BUDGET``, clamped."""
+    return _clamp_native_property_budget(
+        os.getenv("FALKORDB_NATIVE_PROPERTY_BUDGET", _NATIVE_PROPERTY_BUDGET_DEFAULT)
+    )
+
+
+def _is_native_value(v: Any) -> bool:
+    """A value FalkorDB stores as a node property: a scalar, or a flat list
+    of scalars. Everything else goes to the ``propertiesRaw`` blob."""
+    if isinstance(v, bool) or isinstance(v, (str, int, float)):
+        return True
+    return isinstance(v, list) and all(
+        isinstance(x, (str, int, float, bool)) for x in v
+    )
+
+
+def _admit_native_keys(
+    props_iter: Iterable[Optional[Dict[str, Any]]], *,
+    registered: Set[str], budget: int, reserve: Iterable[str] = (),
+) -> Tuple[Set[str], List[str]]:
+    """Which user property keys one writer call writes natively.
+
+    A name the graph has already registered stays native — its id is spent,
+    and a key's storage form must never flip on a node once chosen: a native
+    value left behind under a newer blob value is what a search predicate
+    would then match. The reserve — the source's identity and name
+    properties, and the name fallbacks the read path checks — is always
+    native, because the read path reads those BEFORE it merges the blob
+    back. Every other key is admitted by how many nodes in this call carry
+    it, ties by name, until the budget is full: deterministic on re-ingest,
+    and the long tail is what gets demoted.
+
+    Returns ``(native_keys, demoted)`` — the admitted names, and the keys
+    stored as values this call, most common first.
+    """
+    counts: Dict[str, int] = {}
+    for props in props_iter:
+        for k, v in (props or {}).items():
+            if v is None or k in _RESERVED_NODE_KEYS or not _is_native_value(v):
+                continue
+            counts[k] = counts.get(k, 0) + 1
+    native: Set[str] = set(registered)
+    native.update(r for r in reserve if r)
+    ranked = sorted(
+        (k for k in counts if k not in native), key=lambda k: (-counts[k], k),
+    )
+    room = max(0, budget - len(native))
+    native.update(ranked[:room])
+    return native, ranked[room:]
+
+
 # One-time warning latch (W1.3): logged once per provider boot when we
 # encounter a pre-refactor node that still carries the ``n.properties``
 # JSON blob. The read path no longer hydrates from the blob — operators
@@ -1376,9 +1786,14 @@ _logged_legacy_blob: bool = False
 
 
 def _split_user_properties(
-    props: Optional[Dict[str, Any]],
+    props: Optional[Dict[str, Any]], native_keys: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """Split a user-supplied `properties` dict into (native_scalar, residual_json).
+
+    ``native_keys`` — when given, the names ``_admit_native_keys`` admitted
+    for this write: a scalar under any other key is stored as a value in the
+    residual instead of becoming a node property, which is how the graph's
+    attribute ids are kept for the names that carry it.
 
     Returns
     -------
@@ -1406,11 +1821,7 @@ def _split_user_properties(
         if k in _RESERVED_NODE_KEYS:
             collided.append(k)
             continue
-        if isinstance(v, bool) or isinstance(v, (str, int, float)):
-            native[k] = v
-        elif isinstance(v, list) and all(
-            isinstance(x, (str, int, float, bool)) for x in v
-        ):
+        if _is_native_value(v) and (native_keys is None or k in native_keys):
             native[k] = v
         else:
             residual[k] = v
@@ -2753,6 +3164,39 @@ class FalkorDBProvider(GraphDataProvider):
                     thread_count=reading.thread_count,
                     timeout_default_ms=reading.timeout_default_ms,
                 )
+                # The node's own failure-detector window, from the node.
+                # Every query budget is derived from this, so reading it
+                # here is what stops the clamp depending on a ConfigMap
+                # somebody has to remember. Best-effort, like the rest.
+                try:
+                    from backend.app.providers.shard_capacity import _config_get
+
+                    # The REDIS SERVER config, not the graph module's, and
+                    # the distinction is the whole probe. Handed the client
+                    # facade, ``_config_get`` reaches FalkorDB's own
+                    # ``config_get``, which sends ``GRAPH.CONFIG GET`` — a
+                    # namespace that knows nothing of ``cluster-node-timeout``
+                    # and answers "unknown configuration field", swallowed
+                    # into the DEBUG log below. The window then never came
+                    # from the node at all and the clamp ran on the env
+                    # mirror alone, which is exactly the dependency this read
+                    # exists to remove. Every other caller passes the
+                    # underlying connection; so does this one now.
+                    conn = getattr(self._db, "connection", None)
+                    if conn is None:
+                        raise RuntimeError("no redis connection to ask")
+                    pairs = await _config_get(conn, None, "cluster-node-timeout")
+                    raw = pairs.get("cluster-node-timeout")
+                    if raw is not None:
+                        note_cluster_node_timeout(float(raw) / 1000.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:              # noqa: BLE001 — advisory
+                    logger.debug(
+                        "cluster-node-timeout not readable from %s (%s) — the "
+                        "env mirror or the assumed window stays in force.",
+                        self._endpoint_label(), exc,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2816,7 +3260,8 @@ class FalkorDBProvider(GraphDataProvider):
             # are called, so the clients pinned to the old ones go with the
             # old primary rather than lingering and being vouched again.
             await self._release_pinned_replicas()
-            self._vouch_sample = {}
+            self._repl_sample = {}
+            self._repl_vouched_at = {}
 
             old_pool, old_proj_pool = self._pool, self._proj_pool
             old_db, old_proj_db = self._db, self._proj_db
@@ -3092,9 +3537,13 @@ class FalkorDBProvider(GraphDataProvider):
         qualified", and the caller treats both the same way. Callers asking
         only "is there a usable replica?" leave it off.
 
-        Never raises and never blocks on a store that is unwell: everything
-        it needs is either in the client's own slot map or in a cached
-        ``INFO replication`` reading a few seconds old.
+        Never raises, and never blocks longer than one sample deadline
+        (``_REPLICA_SAMPLE_TIMEOUT_S``) on a store that is unwell:
+        everything it needs is either in the client's own slot map or in a
+        cached ``INFO replication`` reading a few seconds old, and taking
+        that reading is bounded as a whole rather than per node. The bound
+        matters because this runs in FRONT of the read's own budget, not
+        inside it.
         """
         if not self._replica_reads_enabled():
             return None
@@ -3158,11 +3607,27 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, endpoint, type(exc).__name__, _REPLICA_PENALTY_S,
         )
 
-    async def _ask_node_role(self, node: Any) -> Optional[Dict[str, Any]]:
-        """What ``node`` says about ITSELF, or None if it will not answer.
+    async def _ask_node_role(
+        self, node: Any, *, timeout_s: Optional[float] = None,
+    ) -> Any:
+        """What ``node`` says about ITSELF.
 
-        One ``INFO replication`` addressed at the node. Never raises: an
-        unreachable candidate is simply not a candidate.
+        One ``INFO replication`` addressed at the node. Never raises, and
+        answers in three ways rather than two: the parsed reading;
+        ``_PROBE_TIMED_OUT`` when the node took the connection and did not
+        answer in time; ``None`` when it refused, was unreachable, or said
+        something unparseable. An unreachable candidate is simply not a
+        candidate, but for the MASTER those last two are different facts —
+        see ``_PROBE_TIMED_OUT``.
+
+        ``timeout_s`` is deliberately longer for the master than for a
+        replica candidate, because the two probes answer different
+        questions. A replica has to prove it is FIT to serve, and one that
+        cannot say so promptly is not one to hand a read to. The master only
+        has to prove it is THERE, and misjudging that is what costs
+        read-your-own-writes — so it gets the deadline a loaded master's p99
+        actually needs (``_REPLICA_SAMPLE_TIMEOUT_S``) rather than the one
+        sized for discarding a slow replica.
         """
         from backend.app.services.graph_store import info_parse
 
@@ -3184,8 +3649,12 @@ class FalkorDBProvider(GraphDataProvider):
                     "INFO", "replication", "persistence",
                     **({} if sender is not None else {"target_nodes": node}),
                 ),
-                timeout=_REPLICA_ASK_TIMEOUT_S,
+                timeout=(
+                    _REPLICA_ASK_TIMEOUT_S if timeout_s is None else timeout_s
+                ),
             )
+        except _PROBE_TIMEOUT_EXC:                        # busy, not gone
+            return _PROBE_TIMED_OUT
         except Exception:                                 # noqa: BLE001 — not a candidate
             return None
         try:
@@ -3258,9 +3727,12 @@ class FalkorDBProvider(GraphDataProvider):
         is never swept in by that relaxation: it IS the new master, and the
         router pins the master separately for read-your-own-writes.
         """
-        cache = getattr(self, "_vouch_sample", None)
+        cache = getattr(self, "_repl_sample", None)
         if cache is None:
-            cache = self._vouch_sample = {}
+            cache = self._repl_sample = {}
+        vouched_at = getattr(self, "_repl_vouched_at", None)
+        if vouched_at is None:
+            vouched_at = self._repl_vouched_at = {}
         now = time.monotonic()
         by_key = {f"{n.host}:{n.port}": n for n in candidates}
         cached = cache.get(graph_key)
@@ -3274,8 +3746,27 @@ class FalkorDBProvider(GraphDataProvider):
         # serving. One extra INFO per shard per window buys a fact.
         probes = [self._ask_node_role(n) for n in candidates]
         if master is not None:
-            probes.append(self._ask_node_role(master))
-        results = await asyncio.gather(*probes, return_exceptions=True)
+            probes.append(
+                self._ask_node_role(master, timeout_s=_REPLICA_SAMPLE_TIMEOUT_S)
+            )
+        # ONE deadline for the WHOLE sample, not merely one per probe inside
+        # it. ``_replica_for`` runs in FRONT of the read's own budget rather
+        # than inside it, so every millisecond spent here is added to the
+        # read — and it is spent exactly when the store is unwell. The
+        # master is allowed the longer per-probe deadline because a loaded
+        # master's ``INFO`` is slower than a replica's and misreading it is
+        # what costs read-your-own-writes; this window is what stops that
+        # generosity turning into unbounded routing latency.
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*probes, return_exceptions=True),
+                timeout=_REPLICA_SAMPLE_TIMEOUT_S,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            # Nothing described itself in time. Every probe counts as TIMED
+            # OUT rather than absent: the nodes took the connections, so
+            # this is load, and a master under load keeps its own reads.
+            results = [_PROBE_TIMED_OUT] * len(probes)
         answers = results[:len(candidates)]
         master_answer = results[len(candidates)] if master is not None else None
         # A master that is REPLAYING cannot serve either, and it is not
@@ -3289,8 +3780,16 @@ class FalkorDBProvider(GraphDataProvider):
             self._log_loading(f"{master.host}:{master.port}", master_answer)
         elif isinstance(master_answer, dict) and master is not None:
             self._clear_loading_note(f"{master.host}:{master.port}")
-        master_silent = master is not None and (
-            not isinstance(master_answer, dict) or master_loading
+        # SILENT means "not there" — never "slow". A master that took the
+        # connection and missed the deadline is BUSY, which is the routine
+        # shape under load, and it is still the only node holding this
+        # process's own writes: calling it silent bypasses the settle window
+        # and hands the read-back to a replica. Only a refusal, or an answer
+        # that says it is replaying, makes the replicas the copies standing.
+        master_answered = isinstance(master_answer, dict)
+        master_timed_out = master_answer is _PROBE_TIMED_OUT
+        master_silent = master is not None and not master_timed_out and (
+            not master_answered or master_loading
         )
 
         strict: List[str] = []
@@ -3334,7 +3833,9 @@ class FalkorDBProvider(GraphDataProvider):
 
         if strict:
             chosen = strict
-        elif master_silent and alive_replicas:
+        elif master_silent and alive_replicas and _vouch_is_current(
+            vouched_at.get(graph_key), now
+        ):
             # The master is not there. Its replicas are the only copies of
             # this graph still standing, so a stale answer beats no answer —
             # the rule the old master-side sampling kept by holding the last
@@ -3343,6 +3844,16 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             chosen = []
         cache[graph_key] = (now, chosen)
+        # Only a reading the MASTER took part in renews the vouch. The sample
+        # it MISSED is precisely the one that has to age: re-stamping on every
+        # miss is what left the relaxed set with no maximum age at all, so one
+        # master that stayed unreachable froze its shard's lag verdict for as
+        # long as it stayed gone. That verdict decays in a way the figures do
+        # not show — a detached replica goes on reporting the offsets from the
+        # moment it detached, so ``lagBytes`` stays readable and stops being
+        # true. The ceiling is the only thing that notices.
+        if master_answered:
+            vouched_at[graph_key] = now
         self._note_master_silent(graph_key, master_silent)
         return [by_key[k] for k in chosen]
 
@@ -3555,17 +4066,54 @@ class FalkorDBProvider(GraphDataProvider):
                     # for a cluster, and it is bounded by the same schedule so
                     # a node that is never coming back cannot hold the
                     # caller's whole budget.
-                    if _is_role_changed_error(exc):
+                    if _is_role_changed_error(exc) and not pinned:
+                        # A demotion is a node being REPLACED, so it gets the
+                        # same schedule a refused connection does rather than
+                        # the transient one. The transient ladder is 1.75s and
+                        # spent it back to back with no wait at all — against
+                        # a cluster that does not DECLARE a failover until
+                        # ``cluster-node-timeout`` (15s on the shipped overlay)
+                        # and then has to hold an election, all three retries
+                        # landed on the same demoted node before the promotion
+                        # any of them was waiting for had happened.
+                        escalated_role = (
+                            _REFUSED_RETRY_BACKOFFS if cluster
+                            else _SENTINEL_RETRY_BACKOFFS
+                        )
+                        if not read_only and schedule is not escalated_role:
+                            schedule = escalated_role
+                            max_retries = len(schedule)
+                        if read_only:
+                            # A READ does not get the long wait, for the same
+                            # reason it does not on a refusal — and here the
+                            # wall clock settles it either way:
+                            # ``_retry_wall_clock`` budgets a read for the
+                            # TRANSIENT window only, so an escalated ladder
+                            # would be cut short by the deadline and surface
+                            # as ``asyncio.TimeoutError``, which nothing reads
+                            # as a failover. One re-resolve, then say what it
+                            # is and let the caller decide.
+                            max_retries = min(max_retries, _READ_REFUSED_RETRIES)
                         if attempt >= max_retries:
-                            raise
+                            # Not the raw error. A caller that gets that has no
+                            # way to tell a promotion in progress from a query
+                            # that is simply wrong, and for a rebuild the
+                            # difference is everything: ``ProviderFailingOver``
+                            # parks the job and keeps its checkpoint, while an
+                            # unclassified error spends a retry — and a retry
+                            # re-runs extract and compute from zero.
+                            raise self._failing_over(exc) from exc
+                        backoff = schedule[attempt]
                         gen = self._conn_generation
                         attempt += 1
                         logger.warning(
-                            "FalkorDB %s: the node answered READONLY — it has "
-                            "been demoted; re-resolving the master and "
-                            "retrying (%d/%d).",
-                            self._graph_name, attempt, max_retries,
+                            "FalkorDB %s: the node says it is a replica now "
+                            "(%s) — re-resolving the master and retrying "
+                            "(%d/%d after %.2fs).",
+                            self._graph_name, type(exc).__name__,
+                            attempt, max_retries, backoff,
                         )
+                        await asyncio.sleep(backoff)
                         await self._rebuild_graph_client_for_failover(gen)
                         continue
                     # Transient connection drop (any mode) OR a graph handle that
@@ -3879,6 +4427,24 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
                           op: Optional[str], *, kind: str):
+        # DELIBERATELY NOT clamped by the cluster window, unlike the write
+        # boundary. A read does not CAUSE a failover: FalkorDB dispatches
+        # GRAPH.* to a module thread pool and the main thread goes on
+        # answering the cluster bus, so a long read cannot make the other
+        # masters vote this one out. It can only be CAUGHT by a demotion
+        # something else caused, which is a far weaker reason — and the
+        # price of pre-empting it was failing reads whose budgets were
+        # chosen on purpose and are larger than the window's share:
+        # get_children at 15s (wide containers legitimately exceed the
+        # generic 5s default), get_stats' two full scans at 30s, and each
+        # rung of the aggregated ladder under its own 0.8-of-tier budget.
+        # Clamping those to 6s turned working canvas reads into errors on
+        # exactly the graphs the budgets were widened for.
+        #
+        # What bounds a read is what already bounded it: the per-call budget
+        # its caller chose, under the ASGI tier above it, under the server's
+        # own TIMEOUT_MAX. See ``cluster_write_ceiling_s`` for the writes,
+        # where the lock makes the window binding.
         """One read: on a replica when the router allows it, otherwise on the
         master — and on the master once more if the replica let us down."""
         replica = None
@@ -4010,7 +4576,11 @@ class FalkorDBProvider(GraphDataProvider):
     async def _query(self, cypher: str, params: dict = None, *, timeout: float = None,
                      op: Optional[str] = None):
         """Timeout-guarded write query on the source graph."""
-        t = timeout if timeout is not None else self._WRITE_TIMEOUT
+        # Clamped at the boundary, not by each caller: EVERY write through
+        # this provider — the pipeline's batches, the bulk loader's, an
+        # operator's raised knob — is bounded by what the cluster lets a
+        # master go silent for. See ``cluster_write_ceiling_s``.
+        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             return await asyncio.wait_for(
@@ -4116,7 +4686,8 @@ class FalkorDBProvider(GraphDataProvider):
         # treats this as park-and-resume (not retry).
         self._check_quiesce_gate()
 
-        t = timeout if timeout is not None else self._WRITE_TIMEOUT
+        # Bounded by the cluster's failure detector, as in ``_query``.
+        t = clamp_write_budget(timeout if timeout is not None else self._WRITE_TIMEOUT)
 
         async def _call():
             t_start = time.monotonic()
@@ -12653,6 +13224,11 @@ class FalkorDBProvider(GraphDataProvider):
         node_count = 0
         edge_type_counts: Dict[str, Any] = {}
         edge_count = 0
+        #: Set when the graph KEY is not there. Its only job is to keep the
+        #: property-name probe below from asking a graph that does not exist,
+        #: which on a cluster costs a second empty-key verification for an
+        #: answer already known.
+        missing = False
         # The node/edge count scans are O(nodes)+O(edges) — on a million-edge
         # graph they exceed the 5s read default and the stats refresh fails
         # (then the asset shows stale). Give them a dedicated, generous
@@ -12700,12 +13276,19 @@ class FalkorDBProvider(GraphDataProvider):
             )
             entity_type_counts, node_count = {}, 0
             edge_type_counts, edge_count = {}, 0
+            # A graph key that is not there has no property names to count,
+            # and asking anyway costs a SECOND cluster empty-key verification
+            # for an answer already known.
+            missing = True
 
         result = {
             "nodeCount": node_count,
             "edgeCount": edge_count,
             "entityTypeCounts": entity_type_counts,
             "edgeTypeCounts": edge_type_counts,
+            "propertyKeyCount": (
+                None if missing else await self.property_key_count()
+            ),
         }
 
         if self._SCHEMA_CACHE_TTL > 0:
@@ -12825,11 +13408,67 @@ class FalkorDBProvider(GraphDataProvider):
             "edgeCount": edge_count,
             "entityTypeCounts": entity_type_counts,
             "edgeTypeCounts": edge_type_counts,
+            "propertyKeyCount": await self.property_key_count(),
         }
         # Same payload get_stats would have produced, so priming its cache
         # keeps the two from disagreeing for the TTL.
         await self.prime_stats_cache(result)
         return result
+
+    #: How long a property-name count is reused. The number only moves when a
+    #: writer registers a name the graph has never held, which is rare once a
+    #: source has loaded once — and every reader of THIS is a statistic, not a
+    #: decision. The budget and the rebuild pre-flight take their own fresh
+    #: readings precisely because they decide something.
+    _PROPERTY_KEY_COUNT_TTL_S = 60.0
+
+    async def property_key_count(self) -> Optional[int]:
+        """How many distinct property NAMES this graph has registered, or
+        ``None`` when the store would not say.
+
+        FalkorDB numbers property names with a 16-bit id per graph and never
+        frees one, so this is a RATCHET: it only goes up, and a graph that
+        reaches ``_ATTRIBUTE_NAME_LIMIT`` can only be recreated. Collecting
+        it as a statistic is what turns that from a surprise into a trend —
+        one production graph reached the ceiling with nothing anywhere having
+        recorded it climbing.
+
+        Counted in the ENGINE rather than enumerated here. The native budget's
+        ``_registered_property_names`` needs every name and pays for them; a
+        statistic needs only the number, and on a graph near the ceiling that
+        is one row against 65,534 strings per poll. It is also what keeps this
+        inside the cluster query ceiling that now bounds every read.
+
+        Never raises. A probe that fails leaves the figure UNKNOWN, which is
+        what the column then stores: null is not zero, and a graph nobody
+        could measure must never read as a graph carrying no properties.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_property_key_count_cache", None)
+        if (
+            cached is not None
+            and now - cached[0] < self._PROPERTY_KEY_COUNT_TTL_S
+        ):
+            return cached[1]
+        try:
+            res = await self._ro_query_tolerant(
+                "CALL db.propertyKeys() YIELD propertyKey "
+                "RETURN count(propertyKey)",
+                op="probe.property_keys",
+            )
+        except Exception as exc:                          # noqa: BLE001 — a statistic
+            logger.debug(
+                "property_key_count on %s: %s", self._graph_name, exc,
+            )
+            return None
+        rows = getattr(res, "result_set", None) or []
+        # A graph key that does not exist yields an empty result, and that is
+        # not a count of zero — there is no graph to have properties.
+        if not rows or not rows[0] or rows[0][0] is None:
+            return None
+        count = int(rows[0][0])
+        self._property_key_count_cache = (now, count)
+        return count
 
     async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:
         """Write-through prime of the ``{graph}:stats_cache`` Redis key.
@@ -13381,6 +14020,98 @@ class FalkorDBProvider(GraphDataProvider):
     # an out-of-band writer's new spelling is picked up quickly.
     _TYPE_CASING_TTL_S = 60.0
 
+    _PROPERTY_NAMES_TTL_S = 60.0
+
+    async def _registered_property_names(self, *, fresh: bool = True) -> Set[str]:
+        """Every attribute name the graph has registered — what the native
+        property budget counts against (``_admit_native_keys``). ``CALL
+        db.propertyKeys()`` enumerates the attribute map: exact, one round
+        trip, and read on the WRITE node so a name the previous batch
+        registered is already in it (a replica can lag a batch behind, and
+        a key one batch admits and the next demotes is the split state the
+        budget exists to prevent). The graph is the only counter — a copy
+        kept anywhere else drifts on every recreate. A bulk write reads it
+        fresh; ``create_node`` may reuse a reading for a short while, adding
+        the names it admits."""
+        now = time.monotonic()
+        cached = getattr(self, "_property_names_cache", None)
+        if (
+            not fresh and cached is not None
+            and now - cached[0] < self._PROPERTY_NAMES_TTL_S
+        ):
+            return cached[1]
+        res = await self._query(
+            "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey",
+        )
+        names = {
+            str(row[0]) for row in (res.result_set or []) if row and row[0] is not None
+        }
+        self._property_names_cache = (now, names)
+        return names
+
+    async def _reserve_platform_property_names(self, registered: Set[str]) -> None:
+        """Stake the platform's own property names before this instance's
+        next data write — see :func:`reserve_platform_property_names`.
+
+        Not latched. ``registered`` is the graph's own registered-name set
+        (the cached reading is authoritative enough — this only ever adds
+        names), so the reserve no-ops once the graph holds them and happens
+        again by itself after a drop, a re-create out of band, or a
+        transient failure here. The names staked are folded into the caller's
+        set, which is the cache object, so the next call sees them."""
+        registered.update(await reserve_platform_property_names(
+            lambda cypher, params: self._query(cypher, params=params),
+            self._graph_name, registered,
+        ))
+
+    def _native_property_budget(self) -> int:
+        """This graph's budget: the PROVIDER's ``nativePropertyBudget``, else
+        the fleet env.
+
+        Provider-level and not per data source, deliberately. Every name the
+        budget admits is permanent, so a budget set too low leaves that
+        graph's keys unsearchable for good — which makes it a graph-store
+        capacity decision, at the privilege level that owns the store. The
+        merge in ``ProviderManager._merge_extra_config`` drops a data
+        source's attempt to set it, the way it drops ``cacheConnection``."""
+        cached = getattr(self, "_native_budget_cached", None)
+        if cached is not None:
+            return cached
+        raw = (self._extra_config or {}).get("nativePropertyBudget")
+        if raw is None:
+            budget = _native_property_budget()
+        else:
+            budget = _clamp_native_property_budget(raw)
+            logger.info(
+                "FalkorDB %s: native property budget %d from provider config "
+                "(fleet default %d).",
+                self._graph_name, budget, _native_property_budget(),
+            )
+        self._native_budget_cached = budget
+        return budget
+
+    def _native_key_reserve(self) -> Set[str]:
+        """Names the read path reads natively BEFORE it merges the blob back
+        (``_node_from_props``): the source's identity and name properties,
+        and the name fallbacks. Always admitted."""
+        return {
+            getattr(self, "_node_identity_property", "") or "",
+            getattr(self, "_name_property", "") or "",
+            "name", "title", "label",
+        } - {""}
+
+    def _log_demoted_keys(
+        self, where: str, demoted: List[str], native: Set[str], budget: int,
+    ) -> None:
+        logger.warning(
+            "%s on %s: %d property key(s) stored as values in propertiesRaw "
+            "rather than as node properties — shown in the Properties panel, "
+            "not reachable by search predicates. The graph holds %d of the %d "
+            "native property names FALKORDB_NATIVE_PROPERTY_BUDGET allows. "
+            "Most common first: %s",
+            where, self._graph_name, len(demoted), len(native), budget, demoted[:5],
+        )
+
     async def _type_casing_maps(self) -> Tuple[Dict[str, str], Dict[str, str]]:
         """``casefold(name) → observed spelling`` for relationship types and
         labels, TTL-cached per provider instance. Newly-written spellings are
@@ -13516,13 +14247,34 @@ class FalkorDBProvider(GraphDataProvider):
         # logical type/label never fragments across case variants.
         rel_casing, label_casing = await self._type_casing_maps()
 
+        # Which user property keys this call writes natively — see
+        # ``_admit_native_keys``. The graph's registered names are read on
+        # the write node once per call.
+        native_keys: Optional[Set[str]] = None
+        if nodes:
+            # Before the first data write: the platform's names are
+            # registered by us, not by whichever source key happens to
+            # arrive first. The reading this call already takes is what
+            # decides whether the reserve is needed, and the names staked
+            # are folded into it so the budget counts them.
+            registered = await self._registered_property_names()
+            await self._reserve_platform_property_names(registered)
+            budget = self._native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                (node.properties for node in nodes),
+                registered=registered,
+                budget=budget, reserve=self._native_key_reserve(),
+            )
+            if demoted:
+                self._log_demoted_keys("save_custom_graph", demoted, native_keys, budget)
+
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
             label = self._consistent_casing(
                 _sanitize_label(str(node.entity_type)), label_casing,
             )
-            native_props, residual_blob = _split_user_properties(node.properties)
+            native_props, residual_blob = _split_user_properties(node.properties, native_keys)
             nodes_by_label[label].append({
                 "urn": node.urn,
                 "displayName": node.display_name or "",
@@ -13685,7 +14437,17 @@ class FalkorDBProvider(GraphDataProvider):
             label = self._consistent_casing(
                 _sanitize_label(str(node.entity_type)), label_casing,
             )
-            native_props, residual_blob = _split_user_properties(node.properties)
+            registered = await self._registered_property_names(fresh=False)
+            await self._reserve_platform_property_names(registered)
+            budget = self._native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                [node.properties],
+                registered=registered,
+                budget=budget, reserve=self._native_key_reserve(),
+            )
+            if demoted:
+                self._log_demoted_keys("create_node", demoted, native_keys, budget)
+            native_props, residual_blob = _split_user_properties(node.properties, native_keys)
             # Reserved fields go into the merge map alongside native user
             # props — `SET n += $p` writes them all in one pass. The native
             # user props sit at the top level of the map (they ARE the new
@@ -13720,6 +14482,9 @@ class FalkorDBProvider(GraphDataProvider):
                 f"MERGE (n:{label} {{urn: $urn}}) SET n += $p REMOVE n.properties",
                 params={"urn": node.urn, "p": params},
             )
+            cached = getattr(self, "_property_names_cache", None)
+            if cached is not None:
+                cached[1].update(native_props)    # what this write just registered
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
                 rel_type = self._consistent_casing(
@@ -13742,6 +14507,10 @@ class FalkorDBProvider(GraphDataProvider):
                     },
                 )
             return True
+        except AttributeNameLimitReached:
+            # Terminal and operator-facing: a graph with no attribute ids
+            # left is not one more failed write to log and return False for.
+            raise
         except Exception as e:
             logger.error(f"create_node failed: {e}")
             return False

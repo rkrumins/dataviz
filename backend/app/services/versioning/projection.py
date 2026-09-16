@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import func, literal, or_, select
 
@@ -43,9 +43,12 @@ from .service import GraphVersioningService, _is_edge_payload
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
+    _admit_native_keys,
     _compute_searchable_text,
+    _native_property_budget,
     _sanitize_label,
     _split_user_properties,
+    reserve_platform_property_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,13 +106,29 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
     of what an aggregate returns, rather than a guessed empty result: a
     ``count(n)`` answers ``[[0]]``, not ``[]``, and callers index it.
     """
+    # A WRITE here is bounded by the cluster's failure detector. This helper
+    # talks to the graph client directly, so the provider's own boundary
+    # clamp never sees it — and a 60s projector write against a 15s
+    # ``cluster-node-timeout`` costs the shard its master exactly as a 60s
+    # rebuild batch does.
+    #
+    # A READ is not, for the reason set out on ``cluster_write_ceiling_s``:
+    # it takes no write lock and cannot vote its own master out, so the
+    # ceiling protects nothing it could break, while cutting reconcile's
+    # counts and the bootstrap copy's scans to the window's share would fail
+    # them on the large graphs they exist to describe.
+    from backend.app.providers.falkordb_provider import clamp_write_budget
+
+    asked_s = timeout_ms / 1000.0
+    budget_ms = int(1000 * (asked_s if read_only else clamp_write_budget(asked_s)))
+
     async def _send(read: bool):
         call = (getattr(client, "ro_query", None) if read else None) or client.query
         try:
-            coro = call(cypher, params=params, timeout=timeout_ms)
+            coro = call(cypher, params=params, timeout=budget_ms)
         except TypeError:
             coro = call(cypher, params=params)
-        return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
+        return await asyncio.wait_for(coro, timeout=budget_ms / 1000 + 10)
 
     try:
         return await _send(read_only)
@@ -117,6 +136,21 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
         if not read_only or "empty key" not in str(exc).lower():
             raise
         return await _send(False)
+
+
+#: Names the read path checks natively for a node's label before it merges
+#: the blob back. The projector keys every node by ``urn`` itself, so the
+#: source's identity property needs no place here.
+_NAME_FALLBACK_KEYS = ("name", "title", "label")
+
+
+async def _registered_property_names(client) -> Set[str]:
+    """Every attribute name the graph has registered — what the native
+    property budget counts against (``_admit_native_keys``). Read on the
+    write node, so the previous pass's names are in it; a graph a full seed
+    just dropped has none."""
+    res = await _q(client, "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey")
+    return {str(r[0]) for r in (getattr(res, "result_set", None) or []) if r and r[0] is not None}
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
@@ -195,8 +229,9 @@ def _node_urn(entity_id: str, payload: Optional[dict]) -> str:
 
 
 def _node_item(entity_id: str, urn: str, payload: dict,
-               level_map: Optional[Dict[str, int]] = None) -> dict:
-    native, residual = _split_user_properties(payload.get("properties"))
+               level_map: Optional[Dict[str, int]] = None,
+               native_keys: Optional[Set[str]] = None) -> dict:
+    native, residual = _split_user_properties(payload.get("properties"), native_keys)
     dn = payload.get("displayName") or ""
     qn = payload.get("qualifiedName") or ""
     desc = payload.get("description") or ""
@@ -1468,13 +1503,47 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None) -> None:
-        # Nodes in (grouped by label), edges in (grouped by type + endpoint
-        # labels — the per-label URN indexes drive every node match), edges
-        # out, nodes out.
+        """Apply one pass: nodes in (grouped by label), edges in (grouped by
+        type + endpoint labels — the per-label URN indexes drive every node
+        match), edges out, nodes out.
+
+        This writes through its own client and never touches a provider
+        instance, so it stakes the platform's property names itself
+        (``reserve_platform_property_names``) and spends the ENV-wide
+        ``FALKORDB_NATIVE_PROPERTY_BUDGET``. The reserve is decided from the
+        registered names this pass already reads, so it costs nothing on a
+        graph that holds them and happens again by itself after a full seed
+        DROPs the graph and takes every registered name with it."""
+        # Which user property keys this pass writes natively — the same
+        # budget the provider's own writers apply, so a versioned graph and
+        # a direct-load graph spend their attribute ids the same way.
+        native_keys: Optional[Set[str]] = None
+        if node_upserts:
+            registered = await _registered_property_names(client)
+            registered |= await reserve_platform_property_names(
+                lambda cypher, params: _q(client, cypher, params=params),
+                str(getattr(client, "name", "") or "the graph"),
+                registered,
+            )
+            budget = _native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                [p.get("properties") for _, _, p in node_upserts],
+                registered=registered,
+                budget=budget, reserve=_NAME_FALLBACK_KEYS,
+            )
+            if demoted:
+                logger.warning(
+                    "projection: %d property key(s) stored as values in "
+                    "propertiesRaw rather than as node properties — shown in "
+                    "the Properties panel, not reachable by search predicates. "
+                    "The graph holds %d of the %d native property names "
+                    "FALKORDB_NATIVE_PROPERTY_BUDGET allows. Most common first: %s",
+                    len(demoted), len(native_keys), budget, demoted[:5],
+                )
         by_label: Dict[str, list] = {}
         for eid, urn, p in node_upserts:
             by_label.setdefault(_sanitize_label(p.get("entityType") or "Entity"), []).append(
-                _node_item(eid, urn, p, level_map)
+                _node_item(eid, urn, p, level_map, native_keys)
             )
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):

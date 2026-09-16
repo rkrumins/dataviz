@@ -552,6 +552,28 @@ How the deployed `FALKORDB_ARGS` values are derived:
   ConfigMap (base 180000; production-cluster overlay overrides to 120000 to match
   its shard args), and the Helm chart (`config.falkordb.serverTimeoutMaxMs`). See
   `docs/TOP_LEVEL_NODES_PERFORMANCE.md` for the incident this alignment fixes.
+- **`FALKORDB_CLUSTER_NODE_TIMEOUT_MS`** must equal the shards'
+  `--cluster-node-timeout` (15000 in this overlay). It is not only what a client
+  is told to wait during a failover: every QUERY budget in the aggregation
+  pipeline, read and write alike, is derived from it. `TIMEOUT_MAX` bounds how long the server will let
+  a query run; `cluster-node-timeout` bounds how long the other masters will wait
+  for this one before voting it out, and that is the smaller, binding number. A
+  write allowed to approach it races the election and loses — the replica is
+  promoted, this master is demoted mid-batch, and blocked clients return
+  `-UNBLOCKED force unblock from blocking operation, instance state changed`
+  with no pod having restarted. `clamp_write_budget` holds every query beneath a
+  share of the window at the provider's read and write boundaries, so a batch
+  that needs longer is halved by the pressure ladder and a scan that needs
+  longer is narrowed by the scan ladder, instead of either costing the shard its
+  master. An operator cannot raise a job's `writeTimeoutS` or `scanTimeoutS`
+  past it. Reads are included because `-UNBLOCKED` reaches whichever client is
+  blocked when the role changes, not only the one that caused it. The env is now a MIRROR, not the
+  source: each provider reads `CONFIG GET cluster-node-timeout` from the node
+  itself and prefers that, and when `FALKORDB_MODE=cluster` with neither
+  available it assumes the Redis default and says so once at WARNING rather than
+  running unclamped. Setting the env is still worth doing so the window is known
+  before the first node answers. Leave it unset on a standalone or sentinel
+  deployment, where nothing is clamped because there is no detector to outlive.
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling

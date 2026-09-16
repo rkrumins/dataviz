@@ -383,6 +383,13 @@ export interface AggregationRunStats {
   budget_rechecks?: number;
   /** The store's per-query ceiling the ladder narrowed against; null when unknown. */
   query_mem_capacity?: number | null;
+  /** Distinct property names the graph has registered, against the store's
+   *  ceiling of 65,534 per graph — how far the source's metadata long tail
+   *  has eaten into it. Absent when the probe could not answer. */
+  attribute_names?: number;
+  /** Seconds the run waited for the aggKey index to finish building before
+   *  reconciling; absent when it did not have to wait. */
+  index_wait_s?: number;
   effective_tuning?: EffectiveTuningSnapshot;
   adapted?: AdaptedRunState;
   pace?: PaceRecord;
@@ -671,6 +678,15 @@ export interface CapacitySource {
   lastCubeEstimate?: number | null;
   lastRegime?: string | null;
   lastFailureCategory?: string | null;
+  /** Distinct property names the graph had registered at its last completed
+   *  rebuild, against the graph store's ceiling of 65,534 per graph. */
+  attributeNames?: number | null;
+  /** The same figure as COLLECTED by the counts lanes, which observe every
+   *  source rather than only one that has rebuilt. Prefer this: a graph at
+   *  the ceiling can no longer rebuild, so `attributeNames` is exactly the
+   *  reading that stops arriving when it starts to matter. Null/absent means
+   *  not measured — never zero. */
+  propertyKeyCount?: number | null;
 }
 
 export interface ShardCapacity {

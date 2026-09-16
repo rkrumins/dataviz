@@ -253,6 +253,26 @@ def test_the_older_categories_are_untouched():
     assert classify_failure(None) is None
 
 
+def test_a_graph_with_no_attribute_ids_left_is_its_own_bucket():
+    """FalkorDB's refusal — raw, and wrapped in the provider's "unavailable"
+    wording — and the pipeline's own pre-flight land in one bucket, and not
+    in provider_unavailable, which the word "unavailable" would otherwise
+    claim. The only way past it is to recreate the graph, so the bucket is
+    one no Resume may be offered for."""
+    from backend.app.providers.falkordb_materialize import _attribute_limit_message
+    from backend.app.services.aggregation.service import _UNRESUMABLE_CATEGORIES
+
+    raw = (
+        "Max number of attributes exceeded, graph does not support more than "
+        "65534 unique attribute names"
+    )
+    assert classify_failure(raw) == "attribute_limit"
+    assert classify_failure(f"Provider 'x' unavailable: {raw}") == "attribute_limit"
+    assert classify_failure(_attribute_limit_message("g", 65_100)) == "attribute_limit"
+    assert classify_failure(_attribute_limit_message("g", None)) == "attribute_limit"
+    assert "attribute_limit" in _UNRESUMABLE_CATEGORIES
+
+
 def test_the_markers_read_as_english_in_the_message():
     """The marker is the first word of the sentence an operator reads, so it
     has to be prose as well as a key."""

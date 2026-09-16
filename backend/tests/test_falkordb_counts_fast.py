@@ -89,6 +89,9 @@ async def test_reproduces_get_stats_shape():
         "edgeTypeCounts": {
             "CONTAINS": 500000, "FLOWS_TO": 300000, "AGGREGATED": 50000,
         },
+        # Unknown, not zero: these doubles answer no ``db.propertyKeys()``,
+        # which is exactly what a provider that cannot be asked looks like.
+        "propertyKeyCount": None,
     }
 
 
@@ -190,6 +193,9 @@ async def test_empty_graph_returns_zeros_like_get_stats(monkeypatch):
         "edgeCount": 0,
         "entityTypeCounts": {},
         "edgeTypeCounts": {},
+        # Unknown, not zero: these doubles answer no ``db.propertyKeys()``,
+        # which is exactly what a provider that cannot be asked looks like.
+        "propertyKeyCount": None,
     }
 
 

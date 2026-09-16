@@ -29,6 +29,7 @@ from backend.common.adapters import (
 from backend.app.providers.falkordb_provider import (
     FalkorDBProvider,
     _FAILING_OVER_MEMO_S,
+    _FAILOVER_RETRY_AFTER_S,
     _pressure_kind,
     _refused_endpoint,
 )
@@ -218,7 +219,14 @@ def test_the_next_readers_are_answered_without_dialling_a_dead_node():
 
         # It expires on its own — a memo that outlived the failover would be
         # its own outage. The next read after the window dials again.
-        assert 0 < _FAILING_OVER_MEMO_S <= 5
+        #
+        # Bounded RELATIVE to what it advertises, not absolutely. Both are
+        # derived from the cluster's own ``--cluster-node-timeout``, which the
+        # production overlay sets to 15s: an absolute ``<= 5`` here asserted
+        # that no deployment may tell the client the truth about its own
+        # cluster, and would have failed the suite for any process that set
+        # FALKORDB_CLUSTER_NODE_TIMEOUT_MS to the shipped value.
+        assert 0 < _FAILING_OVER_MEMO_S <= _FAILOVER_RETRY_AFTER_S + 1.0
         p._failing_over_until = time.monotonic() - 0.01
         with pytest.raises(ProviderFailingOver):
             _run(p._run_guarded(_call, read_only=True))

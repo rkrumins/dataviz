@@ -24,6 +24,7 @@ class Obs:
     edge_max: Optional[int] = None
     node_delta: Optional[int] = None
     edge_delta: Optional[int] = None
+    property_key_count: Optional[int] = None
 
 
 def _o(source, bucket, nodes=0, edges=0, types=None, edge_types=None, **kw):
@@ -458,3 +459,79 @@ def test_the_platforms_bookkeeping_NODES_have_no_such_switch():
             include_derived_edges=flag,
         )
         assert [s["key"] for s in out["series"]] == ["Table"], flag
+
+
+# ── the property-name ceiling ────────────────────────────────────────
+
+
+def test_property_keys_draws_what_the_graph_registered():
+    out = ps.build_series(
+        [_o("a", "2026-08-01", property_key_count=1200)],
+        metric="property_keys",
+    )
+    assert [x["key"] for x in out["series"]] == ["property_keys"]
+    assert out["series"][0]["points"][0]["v"] == 1200
+
+
+def test_a_scope_reports_the_WORST_graph_not_the_sum():
+    """Every graph carries its own 65,534-name ceiling, so adding two
+    together describes nothing. Ten graphs at 6,000 names are nowhere near a
+    wall; their sum reads as 60,000 and would raise an alarm about a
+    condition that does not exist."""
+    out = ps.build_series(
+        [
+            _o("a", "2026-08-01", property_key_count=6_000),
+            _o("b", "2026-08-01", property_key_count=64_000),
+        ],
+        metric="property_keys",
+    )
+    assert out["totals"]["property_keys"] == [64_000]
+
+
+def test_a_bucket_nothing_measured_draws_no_point_rather_than_a_zero():
+    """A probe that could not answer leaves the count UNKNOWN. Drawing that
+    as zero puts the source on the floor of the one chart whose entire
+    purpose is showing how close it is to the ceiling."""
+    out = ps.build_series(
+        [
+            _o("a", "2026-08-01", property_key_count=1200),
+            _o("a", "2026-08-02"),                      # no reading
+        ],
+        metric="property_keys",
+    )
+    points = out["series"][0]["points"]
+    assert [pt["t"] for pt in points] == ["2026-08-01"]
+    assert out["totals"]["property_keys"] == [1200, None]
+
+
+def test_the_count_carries_no_confidence_band():
+    """No per-bucket extremes are stored for it, and inventing one from a
+    measure it does not describe is what the aggregated series already
+    refuses to do."""
+    out = ps.build_series(
+        [_o("a", "2026-08-01", property_key_count=1200)],
+        metric="property_keys",
+    )
+    point = out["series"][0]["points"][0]
+    assert "min" not in point and "max" not in point
+
+
+def test_the_totals_lane_is_always_present_so_a_tile_needs_no_second_request():
+    """Same contract the aggregated overlay has: computed whatever the
+    requested metric, so a panel can show the figure beside the counts."""
+    out = ps.build_series(
+        [_o("a", "2026-08-01", nodes=10, property_key_count=900)],
+        metric="nodes",
+    )
+    assert out["totals"]["property_keys"] == [900]
+
+
+def test_it_is_a_measure_not_a_breakdown():
+    """Property names are not decomposable by entity or relationship type,
+    so a breakdown implies its own measure, exactly as for aggregated."""
+    out = ps.build_series(
+        [_o("a", "2026-08-01", nodes=10, types={"Table": 10},
+            property_key_count=900)],
+        metric="property_keys", breakdown="entity_type",
+    )
+    assert out["metric"] == "nodes"

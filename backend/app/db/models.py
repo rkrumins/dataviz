@@ -1054,6 +1054,14 @@ class DataSourceStatsORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
     schema_stats = Column(Text, nullable=False, default="{}")        # JSON
     ontology_metadata = Column(Text, nullable=False, default="{}")   # JSON
     graph_schema = Column(Text, nullable=False, default="{}")        # JSON
@@ -1146,6 +1154,14 @@ class DataSourceCountSnapshotORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
     # The same digest ``data_source_stats.counts_digest`` carries, stored beside
     # the counts it describes so "did this observation differ from the last
     # one" stays answerable from this table alone.
@@ -1265,6 +1281,14 @@ class DataSourceCountRollupORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
 
     # Intra-bucket extremes, so a downsample cannot hide a dip that recovered.
     node_min = Column(Integer, nullable=True)

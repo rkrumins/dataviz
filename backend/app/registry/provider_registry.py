@@ -275,7 +275,40 @@ class ProviderRegistry:
                 "Ignoring data-source cacheConnection override (provider-level only)."
             )
             override.pop("cacheConnection", None)
+        # nativePropertyBudget decides how many of a graph's 65,534 property
+        # names user keys may claim. Every name it admits is permanent —
+        # attribute ids are never freed — so a budget set too low makes that
+        # graph's keys unsearchable for good, and one set too high lets a
+        # source fill the map and block the platform's own rollup names. That
+        # is a graph-store capacity decision, so it stays with provider
+        # config; a data source (a lower privilege, as above) may not set it.
+        if "nativePropertyBudget" in override:
+            logger.warning(
+                "Ignoring data-source nativePropertyBudget override "
+                "(provider-level only)."
+            )
+            override.pop("nativePropertyBudget", None)
         # Deep-merge the schemaMapping sub-key
+        # falkordbConnection is the PROVIDER's connection topology — host,
+        # port, mode, the cluster's startupNodes, the sentinel block, TLS and
+        # the authEnabled gate — and the provider's DECRYPTED graph
+        # credentials are handed to whatever it names
+        # (``provider_registry._create_provider_instance``:
+        # ``connection_config=_falkor_conn`` beside ``username``/``password``).
+        # A data source is a lower privilege, so letting it set this is the
+        # same exfiltration cacheConnection is guarded against one key over:
+        # point it at an attacker host and the provider dials out with the
+        # credentials, or set authEnabled false and it dials out without them.
+        # Nothing legitimately varies it per data source — every reader of it
+        # in this codebase calls it the provider's own, and a source pointing
+        # at a different store than its provider is the read-not-equal-
+        # projection drift ``resolve_falkordb_target`` exists to prevent.
+        if "falkordbConnection" in override:
+            logger.warning(
+                "Ignoring data-source falkordbConnection override "
+                "(provider-level only)."
+            )
+            override.pop("falkordbConnection", None)
         if "schemaMapping" in base and "schemaMapping" in override:
             merged_mapping = dict(base["schemaMapping"])
             merged_mapping.update(

@@ -16,6 +16,7 @@ export const FAILURE_CATEGORY_LABEL: Record<FailureCategory, string> = {
     conflict: 'Rebuild conflict',
     worker_lost: 'Worker died',
     never_dispatched: 'Never started',
+    attribute_limit: 'Out of property names',
     unknown: 'Rebuild failed',
 }
 
@@ -36,6 +37,8 @@ export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
         'The worker process running this rebuild disappeared — an evicted pod, an out-of-memory kill, a lost node. Nothing it had already written was lost, and Resume continues from the last checkpoint.',
     never_dispatched:
         'The rebuild was queued but no worker ever picked it up — either none is registered on the job bus, or the dispatch message was lost. Check that the aggregation worker is deployed and can reach Redis.',
+    attribute_limit:
+        'The graph store refused a property name the rollups need: the source’s per-node metadata keys used up the 65,534 distinct names a graph may hold, and a name the rebuild writes is not among them. Names are never freed; the graph has to be recreated.',
     unknown: "The rebuild didn't complete. Open this source for details.",
 }
 

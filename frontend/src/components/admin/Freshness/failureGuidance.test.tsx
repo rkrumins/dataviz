@@ -165,3 +165,20 @@ describe('matchesFailureFacet', () => {
         expect(matchesFailureFacet(row({ lastFailureCategory: 'timeout' }), '')).toBe(true)
     })
 })
+
+describe('attribute_limit', () => {
+    it('is a ceiling in the graph, not a store outage, and says the graph is recreated', () => {
+        // The store refused a property NAME, wrapped in the same "unavailable"
+        // wording as everything else the provider raises. Filed under
+        // provider_unavailable it offers Resume, and no resume gets past a
+        // ceiling the graph can never come back down from.
+        expect(asFailureCategory('attribute_limit')).toBe('attribute_limit')
+        expect(FAILURE_CATEGORY_LABEL.attribute_limit)
+            .not.toBe(FAILURE_CATEGORY_LABEL.provider_unavailable)
+        expect(failureBadgeWhy(row({ lastFailureCategory: 'attribute_limit' })))
+            .toMatch(/recreated/)
+        expect(matchesFailureFacet(
+            row({ lastFailureCategory: 'attribute_limit' }), 'attribute_limit',
+        )).toBe(true)
+    })
+})

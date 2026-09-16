@@ -37,8 +37,8 @@ const SNAPSHOT = {
             governedBy: 'shard', staticCap: 25_000_000, queryMemCapacity: 512 * 2 ** 20,
             reservedBytes: 1.5 * GB, reservedByJobs: 1,
             sources: [
-                { dataSourceId: 'ds-big', label: 'Warehouse', edgeCount: 30_000_000, bytesPerEdge: 900, bytesPerEdgeSource: 'calibrated', footprintBytes: 27_000_000_000, lastFailureCategory: 'write_budget', lastCubeEstimate: 90_000_000, lastRegime: 'boundary' },
-                { dataSourceId: 'ds-small', label: 'Orders', edgeCount: 50_000, bytesPerEdge: 512, bytesPerEdgeSource: 'default', footprintBytes: 25_600_000 },
+                { dataSourceId: 'ds-big', label: 'Warehouse', edgeCount: 30_000_000, bytesPerEdge: 900, bytesPerEdgeSource: 'calibrated', footprintBytes: 27_000_000_000, lastFailureCategory: 'write_budget', lastCubeEstimate: 90_000_000, lastRegime: 'boundary', attributeNames: 1_000, propertyKeyCount: 64_200 },
+                { dataSourceId: 'ds-small', label: 'Orders', edgeCount: 50_000, bytesPerEdge: 512, bytesPerEdgeSource: 'default', footprintBytes: 25_600_000, attributeNames: 900 },
             ],
         },
         {
@@ -198,5 +198,24 @@ describe('GraphStoreCapacity — collapsing it', () => {
         } finally {
             getItem.mockRestore()
         }
+    })
+
+    it('shows the COLLECTED property-name count in preference to the rebuild\'s', async () => {
+        // A graph at the ceiling is one that can no longer rebuild, so the
+        // rebuild's own reading is exactly the one that stops arriving when
+        // it starts to matter. 64,200 is what the counts lanes measured;
+        // 1,000 is what the last successful rebuild saw, long ago.
+        const user = userEvent.setup()
+        wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+        await user.hover(await screen.findByRole('button', { name: 'Open Warehouse' }))
+        expect(await screen.findByText(/64,200 of 65,534 property names/)).toBeInTheDocument()
+        expect(screen.queryByText(/1,000 of 65,534/)).not.toBeInTheDocument()
+    })
+
+    it('falls back to the rebuild reading when nothing has collected one', async () => {
+        const user = userEvent.setup()
+        wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+        await user.hover(await screen.findByRole('button', { name: 'Open Orders' }))
+        expect(await screen.findByText(/900 of 65,534 property names/)).toBeInTheDocument()
     })
 })

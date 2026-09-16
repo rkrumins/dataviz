@@ -482,6 +482,7 @@ async def maybe_capture_snapshot(
     digest: str,
     previous: Optional[DataSourceStatsORM],
     policy: HistoryPolicy,
+    property_key_count: Optional[int] = None,
 ) -> Optional[DataSourceCountSnapshotORM]:
     """Record this observation if it is worth recording. Returns the row, or
     ``None`` when the observation was a no-change inside the heartbeat window.
@@ -497,6 +498,11 @@ async def maybe_capture_snapshot(
     prev_captured_at = (
         getattr(previous, "last_snapshot_at", None) if previous is not None else None
     )
+    # NOTE: ``property_key_count`` is deliberately absent from this decision.
+    # It rides on a snapshot the COUNTS justified, or on the hourly heartbeat,
+    # so a graph registering one new property name cannot manufacture a
+    # "changed" observation — and with it a change-ledger entry, a movement
+    # finding and a bell notification — out of data that did not move.
     changed = previous is None or (previous.counts_digest or "") != digest
 
     # "first" means no prior row in THIS table — which covers both a brand-new
@@ -547,6 +553,12 @@ async def maybe_capture_snapshot(
         edge_count=int(edge_count),
         entity_type_counts=json.dumps(after_entities),
         edge_type_counts=json.dumps(after_edges),
+        # Recorded as OBSERVED, and never carried forward from the last row.
+        # A probe that could not answer leaves this null, which the series
+        # reads as "no reading at this instant" — copying the previous value
+        # would invent a measurement and make a store that stopped answering
+        # look like one holding perfectly steady.
+        property_key_count=property_key_count,
         counts_digest=digest or "",
         lane=lane if lane in ("probe", "poll", "deep", "sweep", "write") else "poll",
         capture_reason=capture_reason,

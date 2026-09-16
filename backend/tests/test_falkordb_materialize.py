@@ -16,6 +16,7 @@ so we can assert the high-value correctness properties:
 """
 import asyncio
 import contextlib
+import inspect
 import re
 import time
 import types
@@ -3208,6 +3209,49 @@ def test_the_worker_passes_the_stamp_a_heartbeat():
 # every pair BOTH runs touch is neither run's computed weight — a silently
 # wrong rollup that survives until a full fresh rebuild.
 #
+def test_cancel_is_noticed_during_compute(monkeypatch):
+    """COMPUTE is the one stage that issues no graph I/O, so it reaches none
+    of the other ``_cancel_check`` sites — every one of them sits on a query.
+    Without a check of its own, Cancel was not noticed until the stage ENDED:
+    on a large cube that is fifteen minutes of the UI showing a job the
+    operator already stopped, with the clock still running."""
+    pipe = _make_pipeline()
+    pipe._nonleaf_levels = None                    # the cube path
+    pipe._parents = {}
+
+    flushes = {"n": 0}
+
+    async def _no_flush():
+        flushes["n"] += 1
+
+    monkeypatch.setattr(pipe, "_maybe_overflow_flush", _no_flush)
+    pipe._should_cancel = lambda: True
+
+    # Two thousand pairs: enough to cross the 1024-key yield boundary once.
+    base = {mat._pack(i, i + 1): 1 for i in range(2000)}
+    with pytest.raises(JobCancelled):
+        _run(pipe._rollup_base(base))
+
+    # And it stopped THERE — not after grinding through the whole map.
+    assert flushes["n"] == 1
+
+
+def test_compute_without_a_cancel_runs_to_the_end(monkeypatch):
+    """The check must not be a new way for compute to fail."""
+    pipe = _make_pipeline()
+    pipe._nonleaf_levels = None
+    pipe._parents = {}
+
+    async def _no_flush():
+        return None
+
+    monkeypatch.setattr(pipe, "_maybe_overflow_flush", _no_flush)
+    pipe._should_cancel = lambda: False
+
+    base = {mat._pack(i, i + 1): 1 for i in range(2000)}
+    _run(pipe._rollup_base(base))
+
+
 # The check rides ``_cancel_check``, which every phase and every write path
 # already calls, and raises ``MaterializationStoreUnstable`` — "the run keeps
 # its checkpoint and stops for a person", which is exactly right here: the
@@ -3265,3 +3309,721 @@ def test_a_user_cancel_still_wins_over_a_lost_lease():
     pipe._should_cancel = lambda: True
     with pytest.raises(JobCancelled):
         pipe._cancel_check()
+
+
+# ---------------------------------------------------------------------------
+# The aggKey index gate in front of RECONCILE, and the attribute-name ceiling
+#
+# Live (2026-09): a graph holding 7.8M rollup edges sat in Reconcile until the
+# master was demoted. The aggKey index was still building — FalkorDB populates
+# indexes in the background, and the old wait gave up after sixty seconds and
+# proceeded — so every keyed delete was a full pass over the cube under the
+# write lock, which the cluster's failure detector read as a dead node.
+# ---------------------------------------------------------------------------
+
+_ATTR_REFUSAL = (
+    "Max number of attributes exceeded, graph does not support more than "
+    "65534 unique attribute names"
+)
+
+
+def test_agg_index_state_reads_only_the_aggkey_row():
+    state = mat._agg_index_state
+    assert state(None) == "absent"
+    assert state([]) == "absent"
+    assert state([["Column", ["urn"], "OPERATIONAL"]]) == "absent"
+    # An AGGREGATED index that does not cover aggKey is not the one the
+    # keyed delete enters through.
+    assert state([["AGGREGATED", ["sourceLevel", "targetLevel"], "OPERATIONAL"]]) == "absent"
+    assert state([["AGGREGATED", ["aggKey"], "OPERATIONAL"]]) == "operational"
+    assert state([["AGGREGATED", ["aggKey"], {"aggKey": "UNDER CONSTRUCTION"}]]) == "building"
+    # Column order varies between builds: a cell scan, not a column read.
+    assert state([[None, "UNDER CONSTRUCTION", ["aggKey"], "AGGREGATED"]]) == "building"
+    # One row per property on some builds — only aggKey's row decides.
+    assert state([
+        ["AGGREGATED", ["sourceDepth", "targetDepth"], "UNDER CONSTRUCTION"],
+        ["AGGREGATED", ["aggKey"], "OPERATIONAL"],
+    ]) == "operational"
+
+
+def _gate_pipeline(fake, *, index_rows):
+    """A pipeline whose db.indexes() answers ``index_rows`` (a list, or a
+    callable returning one per probe) and whose every other read goes to
+    the fake."""
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    probes = {"n": 0}
+
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.indexes" in cypher:
+            probes["n"] += 1
+            rows = index_rows() if callable(index_rows) else index_rows
+            return _Result(rows)
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+    pipeline = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    return pipeline, probes
+
+
+def test_await_agg_index_ready_reports_what_it_last_saw():
+    fake = _FakeFalkor()
+    seen = {"n": 0}
+
+    def rows():
+        seen["n"] += 1
+        status = "UNDER CONSTRUCTION" if seen["n"] < 3 else "OPERATIONAL"
+        return [["AGGREGATED", ["aggKey"], status]]
+
+    pipe, _ = _gate_pipeline(fake, index_rows=rows)
+    assert _run(pipe._await_agg_index_ready(budget_s=10, interval_s=0)) == "operational"
+
+    pipe, _ = _gate_pipeline(
+        fake, index_rows=[["AGGREGATED", ["aggKey"], "UNDER CONSTRUCTION"]],
+    )
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "building"
+
+    pipe, _ = _gate_pipeline(fake, index_rows=[["Column", ["urn"], "OPERATIONAL"]])
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "absent"
+
+    pipe, _ = _gate_pipeline(fake, index_rows=[])
+
+    async def broken(cypher, params=None, **kw):
+        raise RuntimeError("no such procedure")
+
+    pipe.p._proj_ro_query = broken
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "unknown"
+
+
+def _patched_wait(monkeypatch, state):
+    """Replace the readiness wait with one that answers ``state`` at once,
+    recording the budget it was asked to wait — the gate decides the budget
+    by cube size, and that decision is what these tests pin."""
+    asked = {}
+
+    async def wait(self, *, budget_s=60.0, interval_s=2.0):
+        asked["budget_s"] = budget_s
+        return state
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_await_agg_index_ready", wait)
+    return asked
+
+
+def test_a_small_cube_reconciles_while_the_index_builds(monkeypatch):
+    """Below the gate a scan per keyed delete costs nothing worth stopping
+    for: the run proceeds, as it always did, after the sixty-second wait."""
+    asked = _patched_wait(monkeypatch, "building")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    assert asked["budget_s"] == 60.0
+
+
+def test_a_large_cube_waits_its_wall_clock_for_the_index_and_then_stops(monkeypatch):
+    """Above the gate the wait is the rest of the job's wall clock (never
+    less than one hold), and a run still waiting at the end of it stops for
+    a person — checkpoint kept, through the worker's ordinary resume path —
+    instead of writing unindexed into a master the cluster is about to
+    demote."""
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    asked = _patched_wait(monkeypatch, "building")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "still building" in msg and "db.indexes()" in msg and "1 rollup edge" in msg
+    assert float(mat._store_hold_max_s()) <= asked["budget_s"] <= float(mat._max_wall_secs())
+    assert fake.write_queries == 0
+
+
+def test_the_index_wait_is_what_is_left_of_the_wall_clock(monkeypatch):
+    fake = _FakeFalkor()
+    pipe, _ = _gate_pipeline(fake, index_rows=[])
+    pipe._tuning = {**getattr(pipe, "_tuning", {}), "max_wall_secs": 7_200}
+    pipe._started_mono = time.monotonic() - 3_600
+    assert 3_500 < pipe._index_wait_budget_s() <= 3_600
+    # Never less than one hold, however little wall clock is left.
+    pipe._started_mono = time.monotonic() - 7_100
+    assert pipe._index_wait_budget_s() == float(pipe._hold_max_s)
+
+
+def test_a_large_cube_stops_when_the_index_is_not_there(monkeypatch):
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    _patched_wait(monkeypatch, "absent")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    with pytest.raises(mat.MaterializationStoreUnstable, match="not on the graph"):
+        _run(_materialize(p))
+    assert fake.write_queries == 0
+
+
+def test_an_unanswered_index_probe_stops_nothing(monkeypatch):
+    """The probe is an optimisation's evidence, not a correctness gate: a
+    build without db.indexes() runs as it always has."""
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    _patched_wait(monkeypatch, "unknown")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+
+
+def _answer_property_keys(p, fake, names):
+    """db.propertyKeys() answers ``names`` — a count of synthetic names, or
+    an explicit iterable of them."""
+    rows = (
+        [[f"k{i}"] for i in range(names)] if isinstance(names, int)
+        else [[n] for n in names]
+    )
+
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.propertyKeys" in cypher:
+            return _Result(rows)
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+
+
+def _at_the_ceiling(*, with_rollup_names, with_meta_names=False, minus=0):
+    """A graph with no free ids: the ceiling's worth of names, of which the
+    rollup names are (or are not) some."""
+    own = set()
+    if with_rollup_names:
+        own |= mat._ROLLUP_ATTRIBUTE_NAMES
+    if with_meta_names:
+        own |= mat._META_ATTRIBUTE_NAMES
+    filler = mat._ATTRIBUTE_NAME_LIMIT - len(own) - minus
+    return [*own, *(f"k{i}" for i in range(filler))]
+
+
+def test_a_graph_that_cannot_register_the_rollup_names_is_refused():
+    """Ids are never freed, so no retry, no smaller batch and no purge of
+    the rollups changes the outcome: terminal, naming the names it needs
+    and the room it has."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=False))
+    with pytest.raises(mat.MaterializationPreconditionFailed) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "65,534" in msg and "aggKey" in msg and "room for 0" in msg
+    assert "recreate" in msg and "never freed" in msg
+    assert fake.write_queries == 0
+
+
+def test_a_graph_at_the_ceiling_that_holds_its_rollup_names_rebuilds_in_place():
+    """The operator's graph: every id spent, but the rollups it holds were
+    written by this pipeline, so every name the run writes is registered.
+    A margin would refuse it and send them to a recreate they do not need;
+    the exact check admits it and says, on the record, how little room is
+    left and that the _AggMeta stamp cannot land."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=True))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    stats = result["run_stats"]
+    assert stats["attribute_names"] == mat._ATTRIBUTE_NAME_LIMIT
+    assert stats["attribute_names_room"] == 0
+    (adv,) = [a for a in stats["advisories"] if a["kind"] == "attribute_names_exhausted"]
+    assert adv["room"] == 0
+    assert "regime" in adv["meta_names_missing"]
+    assert "_AggMeta" in adv["message"] and "rebuilt in place" in adv["message"]
+
+
+def test_a_graph_with_a_little_room_but_missing_more_names_than_it_has_is_refused():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    # Room for 3, needs 9.
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=False, minus=3))
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="room for 3"):
+        _run(_materialize(p))
+
+
+def test_dedicated_mode_also_needs_urn():
+    """The dedicated statement MERGEs the projection nodes by urn in the
+    same query as the rollup MERGE, so the refusal reaches that name."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    p._projection_mode = "dedicated"
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=True))
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="urn"):
+        _run(_materialize(p))
+
+
+def test_a_graph_under_the_ceiling_records_its_count_and_room():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, 12_000)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert result["run_stats"]["attribute_names"] == 12_000
+    assert result["run_stats"]["attribute_names_room"] == mat._ATTRIBUTE_NAME_LIMIT - 12_000
+    assert not [a for a in result["run_stats"].get("advisories", [])
+                if a["kind"] == "attribute_names_exhausted"]
+
+
+def test_the_names_the_run_writes_are_the_names_the_pre_flight_checks():
+    """The required and advisory sets are hand-kept; this pins them to the
+    Cypher the pipeline actually issues (the SET tail, the MERGE pattern
+    key, the _AggMeta stamp) and to the declared edge indexes, so neither
+    can drift from the other."""
+    import inspect
+    from backend.app.providers.index_policy import declared_edge_indexes
+
+    src = inspect.getsource(mat)
+    set_tail = set(re.findall(r"\br\.(\w+)\s*=(?!=)", src))
+    merge_keys = set(re.findall(r"\[r:AGGREGATED \{(\w+):", src))
+    assert set_tail | merge_keys == set(mat._ROLLUP_ATTRIBUTE_NAMES)
+    meta_set = set(re.findall(r"\bm\.(\w+)\s*=(?!=)", src))
+    meta_keys = set(re.findall(r"\(m:_AggMeta \{(\w+):", src))
+    assert meta_set | meta_keys == set(mat._META_ATTRIBUTE_NAMES)
+    for ix in declared_edge_indexes():
+        assert set(ix.props) <= set(mat._ROLLUP_ATTRIBUTE_NAMES), ix
+
+
+def test_the_attribute_count_is_best_effort():
+    """The fake has no db.propertyKeys(): the probe answers None, nothing is
+    recorded, and the run is the run it always was."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert "attribute_names" not in result["run_stats"]
+
+
+def test_the_store_refusing_a_rollup_name_is_terminal_not_pressure():
+    """A write the store refuses for want of an attribute id must not enter
+    the pressure ladder — halving a batch and re-issuing it forever is how a
+    deterministic refusal turns into an hour of retries."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.proj_query
+    attempts = {"n": 0}
+
+    async def refusing(cypher, params=None, **kw):
+        if "MERGE (s)-[r:AGGREGATED" in cypher:
+            attempts["n"] += 1
+            raise Exception(_ATTR_REFUSAL)
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refusing
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="never freed"):
+        _run(_materialize(p))
+    assert attempts["n"] == 1
+
+
+def test_the_store_refusing_the_index_name_is_terminal():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.proj_query
+
+    async def refusing(cypher, params=None, **kw):
+        if "CREATE INDEX" in cypher and "aggKey" in cypher:
+            raise Exception(_ATTR_REFUSAL)
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refusing
+    with pytest.raises(mat.MaterializationPreconditionFailed):
+        _run(_materialize(p))
+    assert fake.write_queries == 0
+
+
+def test_is_attribute_limit_error_walks_the_cause_chain():
+    inner = Exception(_ATTR_REFUSAL)
+    outer = RuntimeError("Provider 'x' unavailable")
+    outer.__cause__ = inner
+    assert mat._is_attribute_limit_error(outer)
+    assert not mat._is_attribute_limit_error(RuntimeError("Query timed out"))
+
+
+# ---------------------------------------------------------------------------
+# Write budgets are derived from the cluster's failure detector
+#
+# Live (2026-09): rebuild writes ran under a 60s default budget, raisable to
+# 600s, against a cluster that votes a master out after 15s of silence. The
+# budget was sized against the SERVER's TIMEOUT_MAX — the wrong ceiling in
+# cluster mode. A long batch raced the election and lost: the replica was
+# promoted, the master demoted mid-write, and every blocked client came back
+# with "-UNBLOCKED force unblock". No pod had restarted.
+# ---------------------------------------------------------------------------
+
+
+def _with_node_timeout(monkeypatch, seconds):
+    monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(seconds))
+
+
+def test_no_cluster_window_means_no_clamp(monkeypatch):
+    """A standalone or sentinel deployment has no failure detector to lose a
+    race against, and an unset env is not a licence to invent one: the
+    configured budget stands exactly as it did."""
+    _with_node_timeout(monkeypatch, 0)
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
+    assert mat_provider.clamp_write_budget(7.5) == 7.5
+
+
+def test_the_window_bounds_every_write_budget(monkeypatch):
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert 0 < ceiling < 15, "a write must END inside the window, not at it"
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
+    assert mat_provider.clamp_write_budget(60.0) == ceiling
+    # A budget already under the ceiling is untouched.
+    assert mat_provider.clamp_write_budget(1.0) == 1.0
+
+
+def test_a_tiny_window_still_leaves_a_usable_budget(monkeypatch):
+    """The floor is not the pipeline's 5s minimum: on a 5s window a 5s write
+    is exactly the failure. The ceiling wins over the floor."""
+    _with_node_timeout(monkeypatch, 5)
+    assert mat_provider.cluster_write_ceiling_s() == 2.0
+    assert mat_provider.clamp_write_budget(60.0) == 2.0
+
+
+def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
+    """The knob protects other readers of the shard, not just this run: a
+    write that outlives the window costs the shard its master. So the live
+    override is clamped, not honoured."""
+    _with_node_timeout(monkeypatch, 15)
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    pipe._live["write_timeout_s"] = 600.0
+    assert pipe._write_timeout() == mat_provider.cluster_write_ceiling_s()
+    # Said once per run, not once per batch.
+    assert pipe._write_ceiling_logged
+    pipe._write_timeout()
+    assert pipe._write_ceiling_logged
+
+
+def test_the_budget_each_write_ran_under_is_on_the_record(monkeypatch):
+    _with_node_timeout(monkeypatch, 15)
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert result["run_stats"]["write_timeout_s"] == round(
+        mat_provider.cluster_write_ceiling_s(), 1,
+    )
+
+
+def test_every_provider_write_is_bounded_at_the_boundary(monkeypatch):
+    """Not each caller's job. A caller that passes its own generous timeout
+    — the bulk loader, a script, a future writer — is clamped too."""
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert mat_provider.clamp_write_budget(170.0) == ceiling
+    src = inspect.getsource(mat_provider.FalkorDBProvider._query)
+    assert "clamp_write_budget" in src
+    src = inspect.getsource(mat_provider.FalkorDBProvider._proj_query)
+    assert "clamp_write_budget" in src
+
+
+def test_a_read_is_NOT_cut_to_the_write_window(monkeypatch):
+    """Reads are bounded by their own budgets, never by the cluster window.
+
+    This was the other way round for one commit and it was wrong. A write
+    holds the graph's write lock and blocks its client, so one that
+    approaches the failure detector races the election and can cost the
+    shard its master. A READ takes no lock and cannot: FalkorDB runs GRAPH.*
+    on a module thread pool while the main thread goes on answering the
+    cluster bus, so a long read is only ever a VICTIM of a demotion
+    something else caused.
+
+    Clamping reads bought that much less exposure and cost the budgets
+    somebody chose on purpose — ``get_children`` is deliberately 15s because
+    wide containers exceed the generic 5s default, ``get_stats`` gives its
+    two full scans 30s, and EXTRACT's range scans 30s. Cutting all of them
+    to the window's share turned working canvas reads into errors on exactly
+    the graphs the wider budgets exist for."""
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert ceiling == 6.0                             # the write ceiling stands
+
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    pipe._live["scan_timeout_s"] = 120.0
+    assert pipe._scan_timeout() == 120.0              # the operator's number stands
+    pipe._live["write_timeout_s"] = 120.0
+    assert pipe._write_timeout() == ceiling           # …but a write is still cut
+
+    # The read boundary must not reach for the write ceiling at all.
+    assert "clamp_write_budget" not in inspect.getsource(
+        mat_provider.FalkorDBProvider._read_query,
+    )
+    assert "clamp_write_budget" in inspect.getsource(
+        mat_provider.FalkorDBProvider._query,
+    )
+
+
+def test_the_generic_read_default_matches_the_canvas_one(monkeypatch):
+    """One number for a read, not a small one plus an exception per caller.
+
+    Five seconds was sized for small graphs, and then every path that met a
+    real one was given a larger budget of its own. A default that every
+    serious caller overrides only catches the callers that did not think to,
+    and a read out of budget does not degrade — it errors at a canvas that
+    was about to draw."""
+    from backend.app.config import resilience
+
+    assert resilience.FALKORDB_QUERY_TIMEOUT_SECS == 15.0
+    assert (
+        resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        == resilience.FALKORDB_QUERY_TIMEOUT_SECS
+    )
+
+
+def test_the_deadline_ladder_still_nests_around_the_read_budget():
+    """The rule that governs all of them: every outer deadline outlasts the
+    one inside it. Raising a read budget past the tier above it would make
+    the outer layer cancel first, hand the user an opaque 504, and leave the
+    store working on a result nobody will read."""
+    from backend.app.config import resilience
+
+    assert (
+        resilience.FALKORDB_QUERY_TIMEOUT_SECS
+        < resilience.HTTP_TIMEOUT_GRAPH_SECS
+    )
+    # …and under what the server itself will accept for one query.
+    assert (
+        resilience.FALKORDB_QUERY_TIMEOUT_SECS * 1000
+        < float(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS or 0)
+    )
+
+
+def test_the_canvas_children_read_keeps_its_own_budget(monkeypatch):
+    """The regression in one number. ``get_children`` is given 15s with a
+    comment saying why; the clamp made it 6s, so a wide container that
+    legitimately takes 8s stopped returning data and started returning an
+    error."""
+    from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+
+    _with_node_timeout(monkeypatch, 15)
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS == 15.0
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS > mat_provider.cluster_write_ceiling_s()
+
+
+def test_the_overflow_flush_is_the_write_inside_compute(monkeypatch):
+    """The link between a write budget and a Compute-stage failure: the
+    accumulator flushes to the graph from inside the extract/compute scan
+    loops, so those writes ran under the same unclamped budget."""
+    src = inspect.getsource(mat.AggregationPipeline._maybe_overflow_flush)
+    assert "_write_keys" in src, "the flush must still write through the paced path"
+    # The chain, pinned: Compute delegates to the roll-up, and the roll-up
+    # (and the canonical merge under it) flush. If any link breaks, the
+    # clamp stops reaching this phase and this test says so.
+    compute = inspect.getsource(mat.AggregationPipeline._extract_and_compute)
+    assert "_rollup_base" in compute
+    rollup = inspect.getsource(mat.AggregationPipeline._rollup_base)
+    assert "_maybe_overflow_flush()" in rollup, (
+        "compute writes via the overflow flush — if that stops being true, "
+        "the query clamp no longer reaches this phase"
+    )
+    merge = inspect.getsource(mat.AggregationPipeline._merge_canonical_pairs)
+    assert "_maybe_overflow_flush()" in merge
+
+
+def _reset_window(monkeypatch, *, env_s=0.0, observed=None, mode=""):
+    monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(env_s))
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", observed)
+    monkeypatch.setattr(mat_provider, "_ASSUMED_WINDOW_WARNED", False)
+    monkeypatch.setenv("FALKORDB_MODE", mode)
+
+
+def test_a_cluster_with_no_configured_window_is_still_clamped(monkeypatch):
+    """The production case that made this necessary: nine nodes running a
+    15s failure detector, and a ConfigMap that predated the variable. The
+    old rule — unset means no clamp — ran every query unbounded on exactly
+    the deployment that needed the clamp most."""
+    _reset_window(monkeypatch, mode="cluster")
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert ceiling is not None and 0 < ceiling < 15
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
+
+
+def test_a_standalone_deployment_is_still_unclamped(monkeypatch):
+    """Not clustered means there is genuinely no detector to outlive, and
+    assuming one there would shorten budgets for no reason."""
+    _reset_window(monkeypatch, mode="standalone")
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
+    _reset_window(monkeypatch, mode="")
+    assert mat_provider.cluster_write_ceiling_s() is None
+
+
+def test_what_the_node_reports_beats_the_env(monkeypatch):
+    """An env mirror can be stale or wrong; the node cannot be wrong about
+    its own configuration."""
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    mat_provider.note_cluster_node_timeout(6.0)
+    assert mat_provider.cluster_write_ceiling_s() == 6.0 * 0.4
+
+
+def test_the_smallest_reported_window_wins(monkeypatch):
+    """A process may talk to more than one cluster. The clamp has to hold
+    for the tightest of them, so the minimum is kept, not the latest."""
+    _reset_window(monkeypatch, mode="cluster")
+    mat_provider.note_cluster_node_timeout(20.0)
+    mat_provider.note_cluster_node_timeout(9.0)
+    mat_provider.note_cluster_node_timeout(30.0)
+    assert mat_provider._OBSERVED_NODE_TIMEOUT_S == 9.0
+
+
+def test_a_nonsense_report_is_ignored(monkeypatch):
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    mat_provider.note_cluster_node_timeout(0.0)
+    mat_provider.note_cluster_node_timeout(None)
+    assert mat_provider.cluster_write_ceiling_s() == 15.0 * 0.4
+
+
+def test_the_provider_asks_the_node_for_its_window():
+    """The probe lives beside the existing server-limit read, off the
+    request path. If it is removed, the clamp goes back to depending on a
+    ConfigMap somebody has to remember."""
+    src = inspect.getsource(mat_provider.FalkorDBProvider._seed_server_limits)
+    assert "cluster-node-timeout" in src
+    assert "note_cluster_node_timeout" in src
+
+
+def test_the_window_is_asked_of_the_SERVER_not_the_graph_module(monkeypatch):
+    """The probe must be handed the redis CONNECTION, never the FalkorDB
+    client facade.
+
+    ``cluster-node-timeout`` is a Redis server setting. The facade's own
+    ``config_get`` sends ``GRAPH.CONFIG GET``, the graph MODULE's namespace,
+    which has no such field and answers "unknown configuration field" — into
+    a DEBUG log. The probe then never reads anything, ``_OBSERVED_NODE_TIMEOUT_S``
+    stays None for the life of the process, and the clamp silently falls back
+    to the env mirror it exists to stop depending on. The assertion above is a
+    substring check and passes either way, which is how that shipped."""
+    import asyncio as _asyncio
+    import types as _types
+
+    seen = {}
+
+    async def _fake_config_get(conn, node, name):
+        seen["conn"] = conn
+        seen["name"] = name
+        return {name: "15000"}
+
+    async def _fake_read_shard_memory(db, **kw):
+        return _types.SimpleNamespace(
+            endpoint="10.0.0.1:6379", timeout_max_ms=None, query_mem_capacity=None,
+            thread_count=None, timeout_default_ms=None,
+        )
+
+    from backend.app.providers import shard_capacity as _sc
+    monkeypatch.setattr(_sc, "_config_get", _fake_config_get)
+    monkeypatch.setattr(_sc, "read_shard_memory", _fake_read_shard_memory)
+    # ``note_cluster_node_timeout`` writes a PROCESS-global observed window.
+    # Taking it through monkeypatch restores it at teardown, so this test
+    # cannot leave a later one clamped by a reading it never took.
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", None)
+
+    connection = object()
+    facade = _types.SimpleNamespace(connection=connection)
+
+    p = object.__new__(mat_provider.FalkorDBProvider)
+    p._server_limits_seeded = False
+    p._db = facade
+    p._conn_cfg = _types.SimpleNamespace(mode="cluster")
+    p._graph_name = "g1"
+    p._host, p._port = "10.0.0.1", 6379
+    p.note_server_limits = lambda *a, **k: None
+
+    async def _drive():
+        p._seed_server_limits()
+        await p._server_limits_task
+
+    _asyncio.run(_drive())
+
+    assert seen["name"] == "cluster-node-timeout"
+    # THE assertion: the underlying connection, not the graph-module facade.
+    assert seen["conn"] is connection
+    assert seen["conn"] is not facade
+
+
+def test_an_unreadable_cube_size_counts_as_large(monkeypatch):
+    """A regression the query clamp made reachable: counting 20M
+    relationships is itself a long query, it times out first on exactly the
+    graphs the index gate protects, and _count_aggregated used to answer 0
+    — so the gate read the cube as small and scanned without the index.
+    Unknown is not zero."""
+    _patched_wait(monkeypatch, "absent")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    orig = fake.ro_query
+
+    async def count_times_out(cypher, params=None, **kw):
+        if "count(r)" in cypher and "r:AGGREGATED" in cypher:
+            raise asyncio.TimeoutError("count(r) over a large relation")
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = count_times_out
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        _run(_materialize(p))
+    assert "unknown number of rollup edges" in str(exc.value)
+    assert fake.write_queries == 0
+
+
+def test_an_unreadable_count_still_budgets_every_cell_as_growth(monkeypatch):
+    """The write budget's reading of 'unknown' is unchanged: 0 known
+    edges means every cell is growth, which is conservative in ITS
+    direction. The two gates disagree deliberately."""
+    _patched_wait(monkeypatch, "operational")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.ro_query
+
+    async def count_times_out(cypher, params=None, **kw):
+        if "count(r)" in cypher and "r:AGGREGATED" in cypher:
+            raise asyncio.TimeoutError("count(r) over a large relation")
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = count_times_out
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    assert _run(pipe._count_aggregated()) is None
+    # The run still reports no edges_before, rather than a made-up zero.
+    assert not pipe._edges_before_read
+    assert "edges_before" not in pipe._result(0)["run_stats"]
+
+
+def test_a_real_zero_is_still_a_reading(monkeypatch):
+    """A genuinely empty cube must NOT be treated as unknown, or every
+    first build would wait out its whole wall clock for an index that has
+    nothing to build."""
+    _patched_wait(monkeypatch, "operational")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    assert _run(pipe._count_aggregated()) == 0

@@ -333,3 +333,46 @@ def test_only_the_helper_talks_to_falkordb_directly():
     # empty-key read as GRAPH.QUERY — so both names are the one seam.
     assert sorted(set(offenders)) == ["projection.py:_q", "projection.py:_send"], \
         sorted(set(offenders))
+
+
+def test_the_projector_is_bounded_by_the_cluster_window(monkeypatch):
+    """The projector talks to the graph client directly, so the provider's
+    boundary clamp never sees it. A 60s projector write against a 15s
+    cluster-node-timeout costs the shard its master exactly as a rebuild
+    batch does, so it is clamped by the same ceiling."""
+    import asyncio
+    import types
+
+    from backend.app.providers import falkordb_provider as prov
+    from backend.app.services.versioning import projection as proj
+
+    monkeypatch.setattr(prov, "_CLUSTER_NODE_TIMEOUT_S", 15.0)
+    seen = {}
+
+    class _Client:
+        async def query(self, cypher, params=None, timeout=None):
+            seen["timeout_ms"] = timeout
+            return types.SimpleNamespace(result_set=[])
+
+    asyncio.run(proj._q(_Client(), "RETURN 1", timeout_ms=600_000))
+    ceiling_ms = int(1000 * prov.cluster_write_ceiling_s())
+    assert seen["timeout_ms"] == ceiling_ms
+
+
+def test_the_projector_is_unclamped_without_a_cluster_window(monkeypatch):
+    import asyncio
+    import types
+
+    from backend.app.providers import falkordb_provider as prov
+    from backend.app.services.versioning import projection as proj
+
+    monkeypatch.setattr(prov, "_CLUSTER_NODE_TIMEOUT_S", 0.0)
+    seen = {}
+
+    class _Client:
+        async def query(self, cypher, params=None, timeout=None):
+            seen["timeout_ms"] = timeout
+            return types.SimpleNamespace(result_set=[])
+
+    asyncio.run(proj._q(_Client(), "RETURN 1", timeout_ms=60_000))
+    assert seen["timeout_ms"] == 60_000

@@ -168,6 +168,9 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
+            # Absent on a provider with no property-name concept, and None
+            # when the probe could not answer. Neither overwrites a reading.
+            property_key_count=stats.get("propertyKeyCount"),
             lane="poll",
         )
         await _stamp_poll_success(session, envelope.data_source_id)
@@ -543,6 +546,7 @@ async def probe_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
+            property_key_count=stats.get("propertyKeyCount"),
             probed=True,
             lane="probe",
         )

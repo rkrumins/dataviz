@@ -1048,6 +1048,17 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         note: 'Re-triggering before a worker is registered just queues another row that nothing will claim.',
         showClear: false, showRetry: true, primary: 'retry',
     },
+    attribute_limit: {
+        // A hard ceiling in the graph store, reached by the SOURCE: every
+        // distinct metadata key it carries became a property name, and a
+        // graph never gives one back. The rebuild refused before writing
+        // (or the store refused the first name it needed), and no retry
+        // changes the count — so no Retry, and the way out is a recreate.
+        why: 'The graph store refused a property name the rollups need. The source’s per-node metadata keys used up the 65,534 distinct names a graph may hold, and a name this rebuild writes is not among them — the technical details list which. A graph that already holds rollups has those names and rebuilds in place; this one does not.',
+        how: 'Property names are never freed, so this graph has to be recreated, and the recreate keeps the long tail out of the names: writes now hold a graph to FALKORDB_NATIVE_PROPERTY_BUDGET native property names (50,000 by default) and store the rest as values. For a version-controlled source, Data health → Rebuild drops the graph, re-seeds it from the version store under that budget and queues the rollups. For a source loaded directly, delete the graph on its shard (GRAPH.DELETE), run the loader again, then signal the change — the runbook is in docs/AGGREGATION_PIPELINE.md. The technical details below give the count the rebuild measured.',
+        note: 'Retrying or resuming reaches the same ceiling, Purge in Job history removes only the rollups, and Clear cache clears caches — none of them frees a property name.',
+        showClear: true, showRetry: false, primary: 'clear',
+    },
     unknown: {
         why: "The rebuild didn't complete.",
         how: 'Retry the rebuild. If it keeps failing, check the technical details below.',

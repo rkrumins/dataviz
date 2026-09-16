@@ -14,7 +14,7 @@ export type ProfilingMetric = 'total' | 'nodes' | 'edges'
  *  the board's measure and the key of `MEASURE_LABEL` / `METRIC_NOUN`, and
  *  `movement_board` cannot serve `aggregated` — widening it there would offer
  *  a board measure whose `else` branch quietly resolves to *total*. */
-export type SeriesMetric = ProfilingMetric | 'aggregated'
+export type SeriesMetric = ProfilingMetric | 'aggregated' | 'property_keys'
 export type ProfilingBreakdown = 'none' | 'entity_type' | 'edge_type'
 export type ProfilingGrain = 'auto' | 'raw' | 'hour' | 'day'
 export type ProfilingWindow = '24h' | '7d' | '30d' | '90d' | 'custom'
@@ -68,6 +68,15 @@ export interface SeriesPayload {
         edges: number[]
         total: number[]
         aggregated?: number[]
+        /** Registered property NAMES against the store's per-graph ceiling.
+         *  The MAXIMUM over the scope, not the sum: the ceiling applies to
+         *  each graph separately, so ten graphs at 6,000 names are nowhere
+         *  near it while their sum reads as 60,000.
+         *
+         *  `null` at a bucket means NOT MEASURED — a probe that could not
+         *  answer, or a source observed before this was collected. It is not
+         *  zero, and a reader must not draw it as one. */
+        property_keys?: (number | null)[]
     }
     /** Which altitude this is. "Nothing moved" means very different things
      *  across a deployment and across one workspace's sources. */

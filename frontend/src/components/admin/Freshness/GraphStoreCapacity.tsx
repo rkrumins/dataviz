@@ -43,7 +43,7 @@ function SourceChip({ source, onOpen }: { source: CapacitySource; onOpen: (dsId:
     return (
         <HoverTip
             label={`${source.label ?? source.dataSourceId}${source.providerName ? ` · ${source.providerName}` : ''}`}
-            detail={`${source.edgeCount.toLocaleString()} rollup edges · ~${compactBytes(source.footprintBytes)} at ${source.bytesPerEdge} B each (${source.bytesPerEdgeSource})${source.lastCubeEstimate != null ? ` · full detail would be ~${compactEdges(source.lastCubeEstimate)} edges` : ''}${refused ? ' · last rebuild would not fit' : ''}`}
+            detail={`${source.edgeCount.toLocaleString()} rollup edges · ~${compactBytes(source.footprintBytes)} at ${source.bytesPerEdge} B each (${source.bytesPerEdgeSource})${source.lastCubeEstimate != null ? ` · full detail would be ~${compactEdges(source.lastCubeEstimate)} edges` : ''}${(source.propertyKeyCount ?? source.attributeNames) != null ? ` · ${(source.propertyKeyCount ?? source.attributeNames)!.toLocaleString()} of 65,534 property names` : ''}${refused ? ' · last rebuild would not fit' : ''}`}
         >
             <button
                 type="button"
