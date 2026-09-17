@@ -40,8 +40,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 
+from .holds import HeldError, read_scope_holds, resolve_scope_hold, skip_for
 from .reconcile import Observation, Verdict, evaluate
 
 logger = logging.getLogger(__name__)
@@ -68,18 +69,64 @@ _LIVE_OBS_TIMEOUT_S = 5.0
 # not reached in time evaluate from their stored counts (named skip paths).
 _LIVE_OBS_TOTAL_BUDGET_S = 30.0
 
-# Cold-start guard, separate from the general action cap. A fresh install
-# with 200 never-aggregated sources drains at one first build per sweep
-# rather than queueing 200 full builds at once.
-_FIRST_BUILD_CAP = 1
+# Cold-start guard, separate from the general action cap.
+#
+# This was a fixed 1 per sweep, which is two problems rather than one.
+#
+# TOO SLOW, going in: 300 never-aggregated sources take ~5 hours to even be
+# QUEUED at one per 60s tick, and 1000 take most of a day.
+#
+# And TOO FAST, coming out, which is the half the fixed number hid. It is an
+# admission RATE with no feedback from drain: the only thing stopping a
+# re-queue is per source (`job_in_flight`), so queued-but-unstarted first
+# builds accumulate whenever the fleet drains slower than one per tick —
+# routine, since a first build writes the WHOLE cube rather than a delta.
+# The head of that queue then reaches AGGREGATION_PENDING_TIMEOUT_SECS and
+# is failed as NEVER_DISPATCHED ("the dispatch message was likely lost"),
+# which is not what happened, and three of those suspend the source.
+#
+# So the rule is occupancy, not rate: admit up to a target number of first
+# builds IN FLIGHT across the fleet, and admit nothing while that many are
+# already queued or running. A fleet that is not draining therefore admits
+# zero without needing to be told, and a fleet that is draining fast admits
+# more than one per tick.
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    import os
+
+    try:
+        return max(lo, min(hi, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+_FIRST_BUILD_TARGET_IN_FLIGHT = _env_int(
+    "AGGREGATION_FIRST_BUILD_TARGET_IN_FLIGHT", 2, 0, 50,
+)
+
+
+def _first_build_cap(in_flight: int, max_actions: int) -> int:
+    """How many NEW first builds this sweep may queue.
+
+    Bounded by half the pass's action budget as well as by occupancy: first
+    builds draw from the SAME `actions` allowance as drift rebuilds, so an
+    unbounded share of it would starve the freshness work the fleet is
+    actually judged on. (It is also why a cap above `max_actions` was always
+    silently ineffective.)
+
+    The concurrency is deliberately modest. The new protections make a higher
+    number SAFER, not safe: the per-node write slot fails open after
+    AGGREGATION_SLOT_WAIT_MAX_SECS and stops capping under exactly the
+    over-admission a large cap would create, and two rebuilds racing onto one
+    master can refuse each other on headroom neither is using yet — a
+    MaterializationBudgetExceeded is terminal and stamps the source for six
+    hours, so contention there loses a run rather than delaying it.
+    """
+    room = max(0, _FIRST_BUILD_TARGET_IN_FLIGHT - max(0, in_flight))
+    return max(0, min(room, max(1, int(max_actions) // 2)))
 
 # Per-pass cap on stats-poll nudges for sources whose counts are too stale
 # to trust. Best-effort; the next sweep sees fresh numbers.
 _NUDGE_CAP = 25
-
-# Floor on the SQL-side due-ness cutoff. The query is deliberately permissive
-# (it cannot know each source's override) and Python filters exactly.
-_MIN_CHECK_INTERVAL_SECS = 300
 
 _RUN_RETENTION_DAYS = 30
 
@@ -170,6 +217,19 @@ def _is_terminal_skip(verdict: Verdict) -> bool:
     return verdict.skip in _TERMINAL_SKIPS and verdict.reason is None
 
 
+def _tripwire_moved(stats, state):
+    """SQL for "the counts moved since this source's last verdict".
+
+    Used twice by the candidate query — once to SELECT the row and once to
+    sort it to the head of the window — so it is written once. The NULL guard
+    is load-bearing; see the note at the call site.
+    """
+    return (
+        stats.counts_digest.isnot(None)
+        & stats.counts_digest.is_distinct_from(state.last_seen_counts_digest)
+    )
+
+
 def _unresolved_finding_open(state) -> bool:
     """True when drift is still open and we have not yet acted on it.
 
@@ -195,6 +255,12 @@ class SweepResult:
     run_id: str
     mode: str = "auto"
     scanned: int = 0
+    #: Rows the candidate query READ, against ``scanned`` (the rows it acted
+    #: on). The two used to differ by an order of magnitude with nothing
+    #: saying so: a pass reported ``scanned=5`` having read and discarded 195
+    #: rows, and the discarded ones kept their place in the window every tick.
+    #: They now track each other; a gap that reopens is the regression.
+    rows_read: int = 0
     skipped: int = 0
     seeded: int = 0
     findings: int = 0
@@ -212,6 +278,7 @@ class SweepResult:
     def detail_json(self) -> str:
         findings = self.finding_rows[:_SCAN_CAP]
         return json.dumps({
+            "rowsRead": self.rows_read,
             "byReason": self.by_reason,
             "bySkip": self.by_skip,
             "findings": findings,
@@ -254,11 +321,11 @@ class ReconciliationSweeper:
                 result = await self.sweep()
                 if result and (result.findings or result.actions):
                     logger.info(
-                        "reconcile sweep %s: scanned=%d findings=%d actions=%d "
-                        "seeded=%d skipped=%d errors=%d",
-                        result.run_id, result.scanned, result.findings,
-                        result.actions, result.seeded, result.skipped,
-                        result.errors,
+                        "reconcile sweep %s: read=%d scanned=%d findings=%d "
+                        "actions=%d seeded=%d skipped=%d errors=%d",
+                        result.run_id, result.rows_read, result.scanned,
+                        result.findings, result.actions, result.seeded,
+                        result.skipped, result.errors,
                     )
             except asyncio.CancelledError:
                 raise
@@ -341,6 +408,7 @@ class ReconciliationSweeper:
         from .service import (
             read_global_cadence,
             reconcile_policy_from_cadence,
+            resolve_drift_auto_rebuild,
             resolve_rebuild_interval,
             resolve_reconcile_enabled,
             resolve_reconcile_interval,
@@ -397,6 +465,11 @@ class ReconciliationSweeper:
 
             cadence = await read_global_cadence(session)
             policy = reconcile_policy_from_cadence(cadence)
+            # ③ Act off is a fleet-wide stop: every finding is still recorded,
+            # nothing is acted on (tallied ``fleet_held``, like the fleet row).
+            drift_auto = resolve_drift_auto_rebuild(
+                getattr(cadence, "drift_auto_rebuild", None),
+            )
             global_enabled = getattr(cadence, "reconcile_enabled", None)
             global_interval = getattr(
                 cadence, "reconcile_check_interval_secs", None,
@@ -414,11 +487,17 @@ class ReconciliationSweeper:
                 session, data_source_ids, global_interval,
                 full_scan=full_scan,
             )
+            result.rows_read = len(states)
             if not states:
                 return actions, nudges
 
             ds_ids = [s.data_source_id for s in states]
             ctx = await self._batch_context(session, ds_ids, versioned, health)
+            # Fleet/provider holds for this candidate set: one PK read for
+            # the fleet row plus one per distinct provider, once per pass.
+            scope_holds = await read_scope_holds(
+                session, {c.get("provider_id") for c in ctx.values()},
+            )
             # Drop the lock before any live graph call. Operator modes refresh
             # counts; auto ticks evaluate against the SQL snapshot alone.
             await session.commit()
@@ -447,6 +526,21 @@ class ReconciliationSweeper:
             # Preserve the original oldest-checked-first order.
             states = [by_id[i] for i in ds_ids if i in by_id]
 
+            # How many first builds the fleet is already working on. Both
+            # facts come off the context rows the sweep has already loaded:
+            # a job queued or running, for a source that has never completed
+            # one. No extra query.
+            first_builds_in_flight = sum(
+                1 for row in ctx.values()
+                if row.get("job_in_flight") and not row.get("has_completed_job")
+            )
+            first_build_cap = _first_build_cap(first_builds_in_flight, max_actions)
+            if first_build_cap == 0 and first_builds_in_flight:
+                logger.info(
+                    "reconcile sweep: %d first build(s) already in flight — "
+                    "queueing none this pass until they drain",
+                    first_builds_in_flight,
+                )
             first_builds = 0
             for state in states:
                 ctx_row = ctx.get(state.data_source_id, {})
@@ -459,12 +553,17 @@ class ReconciliationSweeper:
                         state.rebuild_min_interval_secs,
                         cadence.rebuild_min_interval_secs,
                     ),
+                    scope_holds=scope_holds,
+                    drift_auto_rebuild=drift_auto,
                 )
-                # Per-source due-ness: the SQL cutoff is permissive because it
-                # cannot know each source's override, so the exact check is
-                # here. A not-yet-due source is left untouched (no checked_at
-                # write) and reappears on a later tick. Manual / preview and
-                # explicit ids skip this — the operator asked for a verdict.
+                # Per-source due-ness. The SQL now compares each row against
+                # its OWN interval, so this is a backstop rather than the
+                # filter it used to be — it still decides the digest and
+                # open-finding cases, which need the batched context the query
+                # does not have. A not-yet-due source is left untouched (no
+                # checked_at write) and reappears on a later tick. Manual /
+                # preview and explicit ids skip this — the operator asked for
+                # a verdict.
                 interval = resolve_reconcile_interval(
                     state.reconcile_check_interval_secs, global_interval,
                 )
@@ -526,8 +625,11 @@ class ReconciliationSweeper:
                         self._adopt(state, obs)
                     elif verdict.skip == "in_sync":
                         # A clean pass clears the breaker: whatever was wrong
-                        # is fixed, so the next real finding starts fresh.
+                        # is fixed, so the next real finding starts fresh —
+                        # including the converging-clear budget, which is only
+                        # meaningful within one unfinished rebuild sequence.
                         state.reconcile_consecutive_actions = 0
+                        state.reconcile_converging_clears = 0
                         self._adopt(state, obs)
                     elif verdict.skip == "platform_mastered":
                         # Never acted on, but keep the baseline moving with the
@@ -604,7 +706,7 @@ class ReconciliationSweeper:
 
                 first_build = verdict.reason == "never_aggregated"
                 if first_build:
-                    if first_builds >= _FIRST_BUILD_CAP:
+                    if first_builds >= first_build_cap:
                         # Same fairness stamp as the action cap above: a
                         # >200-source backlog of never-built sources drained
                         # at 1/tick must rotate through the window, not camp
@@ -752,6 +854,9 @@ class ReconciliationSweeper:
                             edge_count=edge_count,
                             entity_type_counts=json.dumps(entity),
                             edge_type_counts=json.dumps(edges),
+                            # None when the provider would not say, which is
+                            # not zero and does not overwrite a reading.
+                            property_key_count=raw.get("propertyKeyCount"),
                             lane="sweep",
                         )
                         await session.commit()
@@ -814,8 +919,8 @@ class ReconciliationSweeper:
     async def _candidates(
         self, session, data_source_ids, global_interval, *, full_scan=False,
     ):
-        """Bounded, oldest-checked-first. Explicit ids and operator
-        manual/preview passes bypass due-ness; auto ticks do not.
+        """Bounded, tripwire-first then oldest-checked-first. Explicit ids
+        and operator manual/preview passes bypass due-ness; auto ticks do not.
 
         Auto also loads sources whose COUNTS have moved since the last
         verdict — a probe or counts poll that finds real change must not wait
@@ -833,23 +938,7 @@ class ReconciliationSweeper:
                 S.last_reconcile_checked_at.asc().nullsfirst()
             ).limit(_SCAN_CAP)
         else:
-            interval = min(
-                global_interval or _MIN_CHECK_INTERVAL_SECS,
-                _MIN_CHECK_INTERVAL_SECS,
-            )
-            # A per-source override faster than the clamp above was never
-            # loaded by the timestamp clause — the exact bug the probe
-            # lane's _fastest_override exists for. One scalar MIN keeps the
-            # cutoff a SUPERSET of every override; _is_due stays the exact
-            # per-source test.
-            fastest = (await session.execute(
-                select(func.min(S.reconcile_check_interval_secs))
-            )).scalar()
-            if fastest is not None:
-                interval = min(interval, int(fastest))
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(seconds=interval)
-            ).isoformat()
+            cutoff_col = await self._due_cutoff(session, global_interval)
             stmt = (
                 select(S)
                 .outerjoin(
@@ -858,7 +947,7 @@ class ReconciliationSweeper:
                 )
                 .where(
                     (S.last_reconcile_checked_at.is_(None))
-                    | (S.last_reconcile_checked_at < cutoff)
+                    | (S.last_reconcile_checked_at < cutoff_col)
                     | (
                         # The tripwire: the counts moved since we last looked.
                         #
@@ -873,10 +962,7 @@ class ReconciliationSweeper:
                         # treats a never-written NULL as different from any
                         # stored value, which would pin the source permanently
                         # due instead of never due.
-                        DataSourceStatsORM.counts_digest.isnot(None)
-                        & DataSourceStatsORM.counts_digest.is_distinct_from(
-                            S.last_seen_counts_digest
-                        )
+                        _tripwire_moved(DataSourceStatsORM, S)
                     )
                     | (
                         # No digest yet — a source the probe has not reached,
@@ -905,10 +991,69 @@ class ReconciliationSweeper:
                         )
                     )
                 )
-                .order_by(S.last_reconcile_checked_at.asc().nullsfirst())
+                # Tripwire rows FIRST, then oldest-checked-first. A source the
+                # counts moved under was checked seconds ago, so pure
+                # oldest-first sorts the one piece of fresh evidence in the
+                # window to its tail — behind every merely-stale row — and the
+                # LIMIT truncates exactly it. The promise on that path is
+                # sub-minute detection, not "after the backlog drains".
+                .order_by(
+                    _tripwire_moved(DataSourceStatsORM, S).desc(),
+                    S.last_reconcile_checked_at.asc().nullsfirst(),
+                )
                 .limit(_SCAN_CAP)
             )
         return list((await session.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def _due_cutoff(session, global_interval):
+        """The timestamp a source must have been checked BEFORE to be due —
+        as a per-ROW expression, not one fleet-wide clamp.
+
+        The clamp this replaces compared every row against a 300s floor while
+        :meth:`_is_due` compared it against the resolved per-source interval
+        (3600s by default). At steady state that
+        matched ~92% of the fleet: those rows filled the ``_SCAN_CAP`` window,
+        were dropped by ``_is_due`` without advancing their fairness clock, and
+        filled it again next tick. Past ~218 sources the window was consumed
+        entirely by rows the pass discards, and a source made due by the counts
+        tripwire — checked seconds ago, so sorted last — waited tens of minutes
+        to be looked at.
+
+        One scalar read of the distinct intervals in play turns that into an
+        exact predicate: each row is compared against ITS OWN cadence, so the
+        query returns what ``_is_due`` accepts and a stopped source's override
+        cannot narrow anybody else's window (the bug
+        ``probe_scheduler._fastest_override`` guards against by filtering —
+        here there is no fleet-wide number left to narrow).
+        """
+        from .models import AggregationDataSourceStateORM as S
+        from .service import resolve_reconcile_interval
+
+        now = datetime.now(timezone.utc)
+
+        def _at(secs: int) -> str:
+            return (now - timedelta(seconds=max(0, secs))).isoformat()
+
+        inherited = resolve_reconcile_interval(None, global_interval)
+        overrides = sorted({
+            int(v) for (v,) in (await session.execute(
+                select(S.reconcile_check_interval_secs)
+                .where(S.reconcile_check_interval_secs.isnot(None))
+                .distinct()
+            )).all()
+        })
+        if not overrides:
+            return _at(inherited)
+        # ``else_`` is unreachable — the CASE covers every value the read
+        # above just returned, in the same transaction — and is stated
+        # because a CASE without one yields NULL, which compares to nothing
+        # and would drop a row silently rather than loudly.
+        return case(
+            {secs: _at(secs) for secs in overrides},
+            value=func.coalesce(S.reconcile_check_interval_secs, inherited),
+            else_=_at(inherited),
+        )
 
     async def _batch_context(
         self, session, ds_ids, versioned, health=None,
@@ -1097,6 +1242,7 @@ class ReconciliationSweeper:
 
     def _observe(
         self, state, ctx, policy, *, reconcile_enabled, rebuild_interval,
+        scope_holds=None, drift_auto_rebuild=None,
     ) -> Observation:
         c = ctx.get(state.data_source_id, {})
         stats_updated = c.get("stats_updated")
@@ -1162,6 +1308,10 @@ class ReconciliationSweeper:
             overlay_observable=c.get("overlay_observable", True),
             live_observed=bool(c.get("live_observed")),
             reconcile_enabled=reconcile_enabled,
+            scope_hold=resolve_scope_hold(
+                scope_holds, c.get("provider_id"),
+                drift_auto_rebuild=drift_auto_rebuild,
+            ),
         )
 
     @staticmethod
@@ -1271,6 +1421,18 @@ class ReconciliationSweeper:
                 result.actions += 1
             except asyncio.CancelledError:
                 raise
+            except HeldError as exc:
+                # trigger() refused a first build because an operator hold
+                # is in force. That is a skip the operator asked for, not a
+                # dispatch failure — count it where the cockpit's "why did
+                # the fleet produce nothing" tally will show it.
+                skip = skip_for(exc.hold)
+                result.skipped += 1
+                result.by_skip[skip] = result.by_skip.get(skip, 0) + 1
+                logger.info(
+                    "reconcile sweep: first build for %s held (%s) — skipped",
+                    action.data_source_id, exc.hold.detail,
+                )
             except Exception as exc:
                 result.errors += 1
                 logger.warning(

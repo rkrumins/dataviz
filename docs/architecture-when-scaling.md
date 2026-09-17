@@ -161,7 +161,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 - Single replica (`replicas: 1, strategy: Recreate`). No leader election needed; k8s guarantees no two pods at once via `Recreate`.
 - Roles enabled by `SYNODIC_ROLE=controlplane`:
   - `OutboxRelay` lifespan task — drains `outbox_events` → Redis Streams.
-  - `AggregationScheduler` — periodic drift detection + cron-based re-aggregation triggers.
+  - `AggregationScheduler` — the stale-marker reconciler (and, without a job-bus Redis, the stale-job watchdog). It makes no provider call: drift detection is the probe scheduler + reconcile sweeper.
   - `recover_interrupted_jobs()` — runs once at startup (rate-limited).
   - `provider_registry.start_polling()` — periodic provider health write-back.
 - Reads/writes Postgres + Redis; no inbound HTTP. K8s probe via `/internal/controlplane/health`.

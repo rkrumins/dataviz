@@ -8,6 +8,12 @@
  * whether a big graph completes at all, so picking "Conservative" instead
  * of "Performance" should change how long a rebuild takes, never whether
  * it succeeds.
+ *
+ * Capacity on the graph store is MEASURED — the rebuild reads the shard
+ * that owns the graph and budgets by its free memory — and an explicit
+ * ceiling on the job wins over that measurement. So no preset may carry
+ * one: a pinned 25M made every UI-triggered rebuild stop at 25M however
+ * much memory the operator added to the shard.
  */
 import { describe, expect, it } from 'vitest'
 import { CONFIG_PRESETS, PRESET_TIMEOUT_MINUTES } from './AggregationOverridesForm'
@@ -15,13 +21,21 @@ import { CONFIG_PRESETS, PRESET_TIMEOUT_MINUTES } from './AggregationOverridesFo
 describe('aggregation config presets', () => {
     it('gives every profile the same capacity floor', () => {
         for (const preset of CONFIG_PRESETS) {
-            // Graph-store budget: sized against ONE shard, since a graph key
-            // never spans shards. Must stay in step with the backend default
-            // in falkordb_materialize._max_materialized_edges.
-            expect(preset.tuning.maxMaterializedEdges, preset.id).toBe(25_000_000)
             // Worker RSS budget — independent of graph-store topology.
             expect(preset.tuning.maxPendingPairs, preset.id).toBe(50_000_000)
             expect(preset.timeoutMinutes, preset.id).toBe(PRESET_TIMEOUT_MINUTES)
+        }
+    })
+
+    it('leaves the graph-store budget to the shard on every profile', () => {
+        // A preset that set the ceiling would override the measured budget
+        // on every job started from the UI; the reserve and bytes-per-edge
+        // are the operator's (Defaults) or the shard's (calibrated), never
+        // a profile's.
+        for (const preset of CONFIG_PRESETS) {
+            for (const key of ['maxMaterializedEdges', 'shardReservePct', 'bytesPerEdge'] as const) {
+                expect(Object.hasOwn(preset.tuning, key), `${preset.id}.${key}`).toBe(false)
+            }
         }
     })
 
@@ -52,7 +66,20 @@ describe('aggregation config presets', () => {
             .toBeGreaterThan(byId.conservative.tuning.scanRangeWidth!)
     })
 
-    it('keeps the three profiles distinguishable, so the selector still means something', () => {
+    it('offers a Gentle profile for graphs the store keeps refusing, gentler than Conservative', () => {
+        const byId = Object.fromEntries(CONFIG_PRESETS.map(p => [p.id, p]))
+        expect(CONFIG_PRESETS[0].id).toBe('gentle')                       // first: the safe choice leads
+        expect(byId.gentle.tuning.writePacingRatio!).toBeGreaterThan(byId.conservative.tuning.writePacingRatio!)
+        expect(byId.gentle.tuning.scanRangeWidth!).toBeLessThan(byId.conservative.tuning.scanRangeWidth!)
+        expect(byId.gentle.tuning.extractConcurrency).toBe(1)
+        expect(byId.gentle.tuning.scanShrinkFloor).toBe(1)               // narrows all the way to one row
+        expect(byId.gentle.tuning.scanTimeoutS!).toBeGreaterThan(30)      // more patience per query
+        expect(byId.gentle.maxRetries).toBe(5)
+        // It says nothing about what the last run learned — the hints apply.
+        expect(Object.hasOwn(byId.gentle.tuning, 'ignoreObserved')).toBe(false)
+    })
+
+    it('keeps the profiles distinguishable, so the selector still means something', () => {
         const fingerprints = CONFIG_PRESETS.map(p => JSON.stringify([p.maxRetries, p.tuning]))
         expect(new Set(fingerprints).size).toBe(CONFIG_PRESETS.length)
     })

@@ -37,6 +37,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from enum import Enum
@@ -150,6 +151,35 @@ def _capacity_reply(exc: BaseException) -> str | None:
     return None
 
 
+def is_queue_full_reply(exc: BaseException) -> bool:
+    """True for the store's ``MAX_QUEUED_QUERIES`` refusal.
+
+    The proxy relabels this reply to ``ProviderBusy`` — but only for what
+    reaches it. Code INSIDE a provider that catches broadly (a read ladder
+    keeping the prefix it has, say) swallows the refusal first and answers
+    200 with part of the rollup. A shed is flow control, not a short
+    answer, so those call sites ask this and re-raise instead.
+    """
+    return _capacity_reply(exc) == "queue_full"
+
+
+# Client-side pool exhaustion. redis-py raises ``MaxConnectionsError`` when a
+# pool hands out its last socket, and it SUBCLASSES redis ``ConnectionError``
+# — so it landed in ``_NETWORK_EXCEPTIONS`` below and a healthy store read as
+# unreachable: three of them opened the breaker for every shard while the
+# only thing wrong was that this process asked for more sockets than its own
+# pool holds. It is the local mirror of the server's queue-full reply, and it
+# is treated the same way: shed as busy, never counted, never a reconnect
+# (rebuilding the client discards the pooled sockets that were the scarce
+# resource in the first place).
+def _pool_exhausted_exceptions() -> tuple[type[BaseException], ...]:
+    try:
+        from redis.exceptions import MaxConnectionsError as _MaxConnectionsError
+    except ImportError:  # pragma: no cover
+        return ()
+    return (_MaxConnectionsError,)
+
+
 # The caller's own deadline firing (``asyncio.wait_for`` around a Cypher
 # query) is NOT evidence that the downstream is unreachable — it is evidence
 # that ONE query was too slow for its budget. Keyed by class identity: redis's
@@ -210,6 +240,7 @@ def _default_network_exceptions() -> tuple[type[BaseException], ...]:
 
 _NETWORK_EXCEPTIONS = _default_network_exceptions()
 _QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
+_POOL_EXHAUSTED_EXCEPTIONS = _pool_exhausted_exceptions()
 
 
 # Process-wide counters, monotonic since boot, surfaced on /health/deps so a
@@ -221,6 +252,7 @@ _QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
 _STATS: dict[str, int] = {
     "deadline_timeouts_not_counted": 0,
     "queue_full_not_counted": 0,
+    "pool_exhaustion_not_counted": 0,
     "query_errors_not_counted": 0,
     "network_failures_counted": 0,
     "breaker_opens": 0,
@@ -339,6 +371,41 @@ class ProviderLoading(ProviderUnavailable):
     """
 
 
+class ProviderFailingOver(ProviderUnavailable):
+    """Flow-control signal — the node holding this graph is restarting or
+    failing over, NOT a store that is gone.
+
+    In a Redis Cluster a node that stops answering is a routine, bounded
+    event: the pod is rotated, the cluster notices after
+    ``cluster-node-timeout``, a replica is promoted and the slots move. The
+    right client behaviour is to come back in a few seconds, which is what
+    ``retry_after_seconds`` (3) says.
+
+    What used to happen instead: the refusal counted toward ``fail_max``,
+    three of them opened the breaker for its whole reset window, and every
+    user of that graph — not just the three who were unlucky — got
+    "Circuit open; will probe downstream again in ~28s" for 30 s at a
+    time, long after the promotion had finished. So this is registered as
+    a *logical* exception like :class:`ProviderLoading`: the breaker never
+    opens because a node is failing over, and it still opens for a store
+    that is genuinely unreachable.
+
+    Carries ``endpoint`` — the node that stopped answering — because the
+    breaker's own text names none, and it is the first thing an operator
+    needs.
+    """
+
+    def __init__(
+        self,
+        provider_name: str,
+        reason: str,
+        retry_after_seconds: int = 3,
+        endpoint: str | None = None,
+    ) -> None:
+        super().__init__(provider_name, reason, retry_after_seconds)
+        self.endpoint = endpoint
+
+
 class ProviderTimeout(ProviderUnavailable, TimeoutError):
     """One operation exceeded its per-operation deadline — NOT an outage.
 
@@ -374,13 +441,17 @@ class ProviderTimeout(ProviderUnavailable, TimeoutError):
 # Register at import time (before any CircuitBreakerProxy is constructed) so
 # the ``except proxy._ignored`` clause in breaker_guarded catches ProviderLoading
 # ahead of the ``except ProviderUnavailable`` counting clause — a warming
-# instance is re-raised untouched and its breaker stays closed. Same for
-# ProviderTimeout: a nested proxy must not count a slow query either.
+# instance is re-raised untouched and its breaker stays closed. The same holds
+# for every other signal that means "healthy, just not right now": a node
+# rotating (ProviderFailingOver), one slow query (ProviderTimeout) and flow
+# control (ProviderBusy) must all pass through a nested proxy uncounted.
+#
+# All four are load-bearing and were added by two different changes. Dropping
+# any one of them re-opens an outage the other change removed, which is why
+# backend/tests/test_logical_exceptions_registered.py pins the whole set.
 register_logical_exception(ProviderLoading)
+register_logical_exception(ProviderFailingOver)
 register_logical_exception(ProviderTimeout)
-# ProviderBusy is flow control by definition ("healthy but overloaded right
-# now"): a write-side quiesce raised inside a proxied provider, or the
-# queue-full relabelling below, must pass through an outer proxy uncounted.
 register_logical_exception(ProviderBusy)
 
 
@@ -671,6 +742,31 @@ class CircuitBreakerProxy:
                     provider_name=proxy._name,
                     reason=f"{name} exceeded its deadline: {exc}" if str(exc) else f"{name} exceeded its deadline",
                 ) from exc
+            except _POOL_EXHAUSTED_EXCEPTIONS as exc:
+                # OUR pool ran out of sockets. That is a fact about this
+                # process's sizing, not about the store, so it must not
+                # count: the breaker is per provider and on a cluster a
+                # provider is every shard, so counting local saturation
+                # took a healthy fleet down. Shed as busy (429 +
+                # Retry-After) — the same answer the store's own queue-full
+                # gets — and leave the client alone.
+                _STATS["pool_exhaustion_not_counted"] += 1
+                logger.warning(
+                    "Provider %s connection pool exhausted on %s: %s (breaker=%s, "
+                    "not counted; shed as busy — raise FALKORDB_POOL_SIZE)",
+                    proxy._name,
+                    name,
+                    exc,
+                    proxy._breaker.current_state,
+                )
+                # Deliberately NOT a capacity signal: the capacity listener
+                # makes the aggregation writers yield to relieve the STORE,
+                # and this says nothing about the store.
+                raise ProviderBusy(
+                    provider_name=proxy._name,
+                    reason=f"{name} deferred: this process's connection pool is full",
+                    retry_after_seconds=1,
+                ) from exc
             except _NETWORK_EXCEPTIONS as exc:
                 _STATS["network_failures_counted"] += 1
                 state_after, fails_after = await proxy._breaker._record_failure()
@@ -770,6 +866,19 @@ class CircuitBreakerProxy:
                 await proxy._breaker._record_success()
                 return result
 
+        # Signature transparency is not cosmetic. Callers introspect the
+        # method they were handed to decide what to pass it — the drift probe
+        # asks whether get_schema_stats accepts ``budget_s`` before handing
+        # down its 5s deadline — and every provider reaches them through this
+        # proxy. A bare ``(*args, **kwargs)`` closure answered "no" to every
+        # such question, so the probe silently dropped its deadline and the
+        # node kept scanning for 30s per query, three per source, every 60s:
+        # precisely the abandoned-scan load the deadline exists to prevent.
+        # ``wraps`` sets ``__wrapped__``, which ``inspect.signature`` follows.
+        breaker_guarded = functools.wraps(attr)(breaker_guarded)
+        # ...but keep the proxy visible in logs and tracebacks, which is what
+        # the explicit name was for. Renaming after ``wraps`` is safe:
+        # ``signature`` reads ``__wrapped__``, not ``__name__``.
         breaker_guarded.__name__ = f"breaker_guarded_{name}"
         breaker_guarded.__qualname__ = breaker_guarded.__name__
         return breaker_guarded

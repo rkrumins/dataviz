@@ -32,10 +32,12 @@ function policy(over: Partial<ProfilingPolicy> = {}): ProfilingPolicy {
         rawRetentionDays: 7, hourlyRetentionDays: 45, dailyRetentionDays: 400,
         maxRowsPerSource: 10000, heartbeatSecs: 900, silentAfterSecs: 21600,
         alertsEnabled: true, alertMinSeverity: 'severe', alertCooldownSecs: 21600,
+        includeDerivedEdges: true,
         defaults: {
             rawRetentionDays: 7, hourlyRetentionDays: 45, dailyRetentionDays: 400,
             maxRowsPerSource: 10000, heartbeatSecs: 900, silentAfterSecs: 21600,
             alertMinSeverity: 'severe', alertCooldownSecs: 21600,
+            includeDerivedEdges: true,
         },
         overridden: [], editable: true,
         cadences: {
@@ -143,8 +145,13 @@ describe('ProfilingSettings', () => {
             rawRetentionDays: 14, overridden: ['rawRetentionDays'],
         }))
         renderIt()
-        expect(await screen.findByText('set')).toBeInTheDocument()
-        expect(screen.getByRole('spinbutton', { name: /raw observations/i })).toHaveValue(14)
+        // The badge reads straight off `overridden`, but the value is seeded
+        // into the draft by an effect a commit later — so waiting on the badge
+        // can land in the window where the field is still blank. Wait for the
+        // settled value; the badge is then guaranteed to be on screen.
+        const field = await screen.findByRole('spinbutton', { name: /raw observations/i })
+        await waitFor(() => expect(field).toHaveValue(14))
+        expect(screen.getByText('set')).toBeInTheDocument()
     })
 
     it('sends only what changed', async () => {
@@ -274,5 +281,57 @@ describe('ProfilingSettings — alerting', () => {
         expect(await screen.findByText('On')).toBeInTheDocument()
         expect(screen.getByText('3× usual')).toBeInTheDocument()
         expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+    })
+})
+
+
+describe('ProfilingSettings — what the breakdowns show', () => {
+    beforeEach(() => {
+        getPolicy.mockReset()
+        setPolicy.mockReset()
+        setPolicy.mockResolvedValue({})
+    })
+
+    it('says the rollup is shown, and why that matters', async () => {
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+        expect(
+            await screen.findByRole('switch', { name: /rolled-up lineage/i }),
+        ).toHaveAttribute('aria-checked', 'true')
+        // The consequence of turning it off, stated before it is pressed.
+        expect(screen.getByText(/adds up to what the graph/i)).toBeInTheDocument()
+    })
+
+    it('sends only the switch when only the switch moved', async () => {
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+        await userEvent.click(
+            await screen.findByRole('switch', { name: /rolled-up lineage/i }),
+        )
+        await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
+        await waitFor(() => expect(setPolicy).toHaveBeenCalled())
+        expect(setPolicy).toHaveBeenCalledWith({ includeDerivedEdges: false })
+    })
+
+    it('is not a change until it is moved', async () => {
+        // A no-op save must not pin today's default as an override — the same
+        // trap the blank-means-inherit fields avoid. Toggling and toggling
+        // back is the same as never touching it.
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+        const sw = await screen.findByRole('switch', { name: /rolled-up lineage/i })
+        expect(screen.getByRole('button', { name: /save policy/i })).toBeDisabled()
+        await userEvent.click(sw)
+        expect(screen.getByRole('button', { name: /save policy/i })).toBeEnabled()
+        await userEvent.click(sw)
+        expect(screen.getByRole('button', { name: /save policy/i })).toBeDisabled()
+    })
+
+    it('reads the switch back as off for a deployment that hid it', async () => {
+        getPolicy.mockResolvedValue(policy({ includeDerivedEdges: false }))
+        renderIt()
+        expect(
+            await screen.findByRole('switch', { name: /rolled-up lineage/i }),
+        ).toHaveAttribute('aria-checked', 'false')
     })
 })

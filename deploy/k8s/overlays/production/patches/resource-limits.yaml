@@ -30,7 +30,7 @@ spec:
   template:
     spec:
       containers:
-        - name: controlplane
+        - name: aggregation-controlplane
           resources:
             requests:
               cpu: 250m
@@ -48,14 +48,31 @@ spec:
   template:
     spec:
       containers:
-        - name: worker
+        - name: aggregation-worker
+          # Memory is the binding constraint on a full-cube rebuild, not CPU
+          # and not any store-side timeout. The accumulator is one dict entry
+          # per DISTINCT rollup cell at roughly 100 bytes, and the cube grows
+          # as edges x depth^2 — a few million cells is normal for a deep
+          # hierarchy and costs over a gigabyte before anything else the
+          # worker holds.
+          #
+          # The memory-aware flush (AGGREGATION_FLUSH_MEM_PCT, 60%) writes the
+          # accumulator out early and keeps that bounded — but it fires only
+          # INSIDE the merge loops. The end of a run builds a second full copy
+          # of the key set to report and reconcile what it wrote, where no
+          # flush can fire, so the peak is not the flush line. At 4Gi that
+          # peak is what kills the pod, and an OOM-kill mid-run costs the
+          # whole extract and compute.
+          #
+          # The nodes are highmem; this is cheap. Raise it before forcing a
+          # full cube on a large source, not after.
           resources:
             requests:
               cpu: "1"
-              memory: 1Gi
+              memory: 2Gi
             limits:
               cpu: "4"
-              memory: 4Gi
+              memory: 12Gi
 ---
 apiVersion: apps/v1
 kind: Deployment

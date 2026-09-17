@@ -70,14 +70,30 @@ def _load_config(prefix: str, default_rate: float, default_burst: int) -> Bucket
     return BucketConfig(rate_per_sec=max(0.1, rate), burst=max(1, burst))
 
 
+#: The aggregated budget, in one place, because two other buckets are
+#: derived from it. A batched canvas request CONTAINS an aggregated read, so
+#: sizing it independently means a workspace can push aggregation at whatever
+#: rate the batched bucket allows — which is how CANVAS_BOOTSTRAP came to
+#: admit 10 rps against a bucket sized for 5. Derived, so raising one raises
+#: the other and the relationship cannot drift.
+_AGGREGATED_RATE, _AGGREGATED_BURST = 5.0, 10
+
 _CONFIGS: dict[str, BucketConfig] = {
     ENDPOINT_CHILDREN: _load_config("CHILDREN", 30.0, 60),
-    ENDPOINT_AGGREGATED: _load_config("AGGREGATED", 5.0, 10),
+    ENDPOINT_AGGREGATED: _load_config("AGGREGATED", _AGGREGATED_RATE, _AGGREGATED_BURST),
     # The batched canvas endpoints replace the per-purpose storm, so a
-    # gesture is now ~1 request; generous buckets that still cap a runaway
-    # client. Covered here so enabling FAIR_SHARE_ENABLED protects them too.
-    ENDPOINT_CANVAS_BOOTSTRAP: _load_config("CANVAS_BOOTSTRAP", 10.0, 20),
-    ENDPOINT_CANVAS_EXPAND: _load_config("CANVAS_EXPAND", 20.0, 40),
+    # gesture is now ~1 request. Covered here so enabling FAIR_SHARE_ENABLED
+    # protects them too — but NOT sized generously on that basis: one
+    # bootstrap is one aggregated read plus a roots page plus an edge query,
+    # so it can never be allowed past the aggregated rate. An expand's
+    # aggregated leg is a DELTA bounded by the new children, which is the
+    # cheaper half of the same read, so it gets twice the budget.
+    ENDPOINT_CANVAS_BOOTSTRAP: _load_config(
+        "CANVAS_BOOTSTRAP", _AGGREGATED_RATE, _AGGREGATED_BURST,
+    ),
+    ENDPOINT_CANVAS_EXPAND: _load_config(
+        "CANVAS_EXPAND", _AGGREGATED_RATE * 2, _AGGREGATED_BURST * 2,
+    ),
     # One lens click = one walk step, and each step is a bounded BFS with a
     # degree probe behind it — heavier than a children page, lighter than a
     # full aggregated trace. An endpoint absent from this table is not

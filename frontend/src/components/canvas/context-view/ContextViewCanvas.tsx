@@ -35,7 +35,9 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
+import { Link } from 'react-router-dom'
 import { usePermission, useAuthStore } from '@/store/auth'
+import { graphStoreLimitsPath } from '@/components/admin/shared/aggregationKnobs'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
@@ -228,6 +230,8 @@ import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
+import { useFailoverRetry } from '@/hooks/useFailoverRetry'
+import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
 import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import {
@@ -737,13 +741,18 @@ export function ContextViewCanvas({
     setGranularity: setLineageGranularity,
     truncated: aggregationTruncated,
     staleReason: aggregationStaleReason,
+    degradedDetail: aggregationDegradedDetail,
     error: aggregationError,
     loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
-  // when the visible container set (and so the URN key) hasn't changed.
-  const aggregatedCacheVersion = useAggregatedEdgesCacheVersion()
+  // when the visible container set (and so the URN key) hasn't changed. Scoped
+  // to this canvas's provider, so an invalidation aimed at one graph (a node
+  // holding it failing over) does not refetch every other mounted canvas's
+  // aggregated edges — the app's most expensive endpoint, and a POST, so no
+  // client cache absorbs the repeat.
+  const aggregatedCacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
@@ -3022,6 +3031,19 @@ export function ContextViewCanvas({
   // the rebuild completes so the "recomputing" banner self-clears. See
   // hooks/useSourceChangedRefresh.
   useSourceChangedRefresh(dataSourceId, aggregationStaleReason)
+  // A loss under the graph store's per-query pressure has its own banner
+  // (below) and is never an integrity reason: the projector is not behind.
+  const readPressure = aggregationStaleReason === 'query_memory' || aggregationStaleReason === 'timeout'
+    ? aggregationStaleReason : null
+  const isSystemAdmin = usePermission('system:admin')
+
+  // The graph store node holding this graph is being replaced (a pod
+  // rotation, a promotion). Unlike every other stale reason this one clears
+  // itself in seconds, so the board keeps the rollups it has, says what is
+  // happening, and asks again on its own — no Retry button, and none of the
+  // 30s "Circuit open" wall this used to be.
+  const reconnecting = aggregationStaleReason === 'failing_over'
+  useFailoverRetry(aggregationStaleReason, provider?.scopeKey)
 
   // Connections-still-catching-up: when the rollup layer answers SHORT, ask
   // readiness whether this source is actually behind, and if it is, say so on
@@ -4803,13 +4825,75 @@ export function ContextViewCanvas({
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {((aggregationTruncated && !projectionCatchUp.catchingUp) || edgesTruncated) && (
+        {((aggregationTruncated && !projectionCatchUp.catchingUp && !readPressure) || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
             <span className="font-medium">Showing the largest relationships — narrow the selection to see more.</span>
           </div>
+        )}
+        {/* Read-pressure banner — the graph store refused part of this read
+            at its per-query memory ceiling or time limit, after the read
+            narrowed its pages and batches as far as it goes. What it could
+            read is on the canvas; the fix is the selection, or the node's
+            limits, which a system administrator can adjust in place. */}
+        {readPressure && (
+          <div
+            data-canvas-interactive
+            data-testid="canvas-read-pressure-banner"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">
+              {readPressure === 'query_memory'
+                ? 'The graph store refused part of this read at its per-query memory limit'
+                : 'The graph store timed out on part of this read'}
+              {' — showing what it could read after narrowing.'}
+            </span>
+            <span>
+              {readPressure === 'query_memory'
+                ? 'Narrow the selection, or raise the per-query limit on the store.'
+                : 'Narrow the selection, or raise the query time cap on the store.'}
+            </span>
+            {isSystemAdmin && aggregationDegradedDetail?.endpoint && (
+              <Link
+                to={graphStoreLimitsPath(aggregationDegradedDetail.endpoint)}
+                data-testid="canvas-read-pressure-link"
+                className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors whitespace-nowrap"
+              >
+                Adjust graph store limits
+              </Link>
+            )}
+          </div>
+        )}
+        {/* Reconnecting banner — the node holding this graph is restarting or
+            failing over. Everything on screen is the last good answer and a
+            fresh one is already on its way. */}
+        {reconnecting && (
+          <div
+            data-canvas-interactive
+            data-testid="canvas-provider-reconnecting-banner"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">
+              Reconnecting to the graph store — the node holding this graph is restarting.
+            </span>
+            <span>Showing the last answer; retrying automatically.</span>
+          </div>
+        )}
+        {/* Served from the last-known-good copy. The header already arrives —
+            ``X-Cache-Status: stale-fallback`` into useCacheStalenessStore —
+            but nothing on the canvas subscribed to it, so a saved graph the
+            backend keeps for a DAY was drawn with no indication at all. The
+            pill says how long there has been no fresh answer; the copy is
+            careful that this is the outage's age, not the drawing's. */}
+        {!reconnecting && (
+          <StaleDataBanner
+            workspaceId={scopeWsId ?? undefined}
+            dataSourceId={dataSourceId ?? undefined}
+            subject="this canvas"
+            className="mx-4 mt-2 z-20"
+          />
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the
             canvas keeps serving the previous rollup (stale-while-revalidate)

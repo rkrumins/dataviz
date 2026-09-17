@@ -175,8 +175,13 @@ describe('email-first', () => {
         posture({ emailFirstLogin: true, providers: [ENTRA, OKTA] })
         renderLogin()
 
-        expect(await screen.findByLabelText(/^email$/i)).toBeInTheDocument()
-        expect(password()).not.toBeInTheDocument()
+        // The email field is in the DEFAULT posture too (it leads the
+        // password form), so finding it proves nothing about email-first.
+        // The password field going away is what the posture actually
+        // changes, and it only changes once the awaited login context
+        // lands — so wait on that.
+        await waitFor(() => expect(password()).not.toBeInTheDocument())
+        expect(screen.getByLabelText(/^email$/i)).toBeInTheDocument()
         expect(screen.queryByText(/Continue with Corporate Entra/)).not.toBeInTheDocument()
         expect(screen.queryByText(/Continue with Okta/)).not.toBeInTheDocument()
     })

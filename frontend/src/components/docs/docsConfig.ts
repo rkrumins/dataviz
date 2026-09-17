@@ -309,6 +309,20 @@ export const docEntries: DocEntry[] = [
     description: 'Type/ontology assignment precedence and schema mapping',
     importFn: () => import('@docs/services/ASSIGNMENTS.md?raw'),
   },
+  {
+    slug: 'feature-aggregation-reconciliation',
+    section: 'services',
+    title: 'Automatic Aggregation Reconciliation',
+    description: 'The sweep that keeps rolled-up lineage matching each source, its holds, and the runbook',
+    importFn: () => import('@docs/features/aggregation-reconciliation.md?raw'),
+  },
+  {
+    slug: 'feature-external-change-notification',
+    section: 'services',
+    title: 'External Change Notification',
+    description: 'Telling the platform an external data source changed',
+    importFn: () => import('@docs/features/external-change-notification.md?raw'),
+  },
 
   // Versioning
   {
@@ -399,6 +413,13 @@ export const docEntries: DocEntry[] = [
     title: 'FalkorDB Deployment',
     description: 'Enterprise HA cluster topology on GKE',
     importFn: () => import('@docs/FALKORDB_DEPLOYMENT.md?raw'),
+  },
+  {
+    slug: 'concurrency-tuning',
+    section: 'operations',
+    title: 'Concurrency and Timeout Tuning',
+    description: 'The eight ceilings a graph request passes, what users see when one is wrong, and the order to raise them in',
+    importFn: () => import('@docs/CONCURRENCY_TUNING.md?raw'),
   },
   {
     slug: 'falkordb-dr',

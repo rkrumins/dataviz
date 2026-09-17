@@ -460,7 +460,7 @@ def test_no_containment_types_falls_back_to_raw_synthesis():
     sentinel = [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
     seen = {}
 
-    async def fake_raw(source_urns, target_urns, lineage_edges, *, timeout=None):
+    async def fake_raw(source_urns, target_urns, lineage_edges, *, timeout=None, **kw):
         seen["args"] = (source_urns, target_urns, lineage_edges)
         return sentinel
 
@@ -1133,7 +1133,7 @@ def test_entry_result_carries_freshness_fields():
     assert result2.regime == "boundary" and result2.stamp_version == 2
 
 
-def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
+def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows(monkeypatch):
     """A timed-out :AGGREGATED batch used to be silently swallowed by
     `_run_batch`'s ``except Exception: return []`` — the merged result
     presented (and got cached upstream) as complete even though a whole
@@ -1141,6 +1141,13 @@ def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
     stale/degraded/truncated, exactly like an on-demand sub-query
     failure, WITHOUT dropping the rows the other batch did return."""
     from backend.app.providers.falkordb_provider import AggRunMeta
+
+    async def no_sleep(_s):
+        return None
+
+    # A timeout is per-query pressure now: the read narrows the page twice,
+    # retries the narrowest once (briefly), then reports the loss by name.
+    monkeypatch.setattr(_fp.asyncio, "sleep", no_sleep)
 
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
@@ -1173,7 +1180,9 @@ def test_failed_materialized_batch_degrades_result_but_keeps_successful_rows():
     ))
 
     assert result.stale is True
-    assert result.stale_reason == "degraded"
+    assert result.stale_reason == "timeout"
+    assert result.degraded_detail["kind"] == "timeout"
+    assert result.degraded_detail["narrowedPages"] == 2 and result.degraded_detail["floorRetries"] == 1
     assert result.truncated is True
     got = {
         (e.source_urn, e.target_urn): e.edge_count
@@ -1399,3 +1408,233 @@ def test_materialized_read_keeps_prefix_and_flags_when_a_page_fails(monkeypatch)
     assert result.stale is True
     assert result.stale_reason == "degraded"
     assert result.truncated is True
+
+
+# ── the read-side ladder ────────────────────────────────────────────
+#
+# The canvas reads rollups in pages and URN batches, bounded by the same
+# two per-query limits as a rebuild's scans. A refused page is halved and
+# re-read from the same keyset position, a refused batch split by URN; only
+# what is still refused at the narrowest page or batch is lost, and then the
+# result says which limit — and the node — so the canvas can say what to do.
+
+from backend.app.config import resilience as _resilience
+from backend.app.providers import falkordb_provider as _fp
+
+_LIMIT_RE = re.compile(r"LIMIT (\d+)")
+
+
+def _refusal(kind):
+    return (Exception("Query's mem consumption exceeded capacity") if kind == "memory"
+            else Exception("Query timed out"))
+
+
+def _cells(n, source="urn:a1"):
+    """n materialized cells from one source, weights distinct and descending."""
+    return [[source, f"urn:t{i}", 100 - i, ["FLOWS"]] for i in range(n)]
+
+
+def _ladder_provider(fake, levels, cells, *, refuse_above=None, refuse_resumed_at=None,
+                     kind="memory", boom=None):
+    """The materialized-cell read as a paging fake: honours the LIMIT in the
+    cypher and the keyset resume, refuses pages wider than ``refuse_above``
+    and, when ``refuse_resumed_at`` is set, every RESUMED page at or under
+    that width — the shape of a floor that still fails."""
+    p = _make_provider(fake, levels)
+    limits = []
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if params and "sourceUrns" in params:
+            if boom is not None:
+                raise boom
+            limit = int(_LIMIT_RE.search(cypher).group(1))
+            limits.append(limit)
+            resumed = "lastWeight" in params
+            if refuse_above is not None and limit > refuse_above:
+                raise _refusal(kind)
+            if refuse_resumed_at is not None and resumed and limit <= refuse_resumed_at:
+                raise _refusal(kind)
+            start = 0
+            if resumed:
+                start = next((i for i, r in enumerate(cells) if r[2] < params["lastWeight"]), len(cells))
+            return _Result([list(r) for r in cells[start:start + limit]])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+    return p, limits
+
+
+def _read(p, sources=("urn:a1",), targets=None, lineage=()):
+    return _run(p.get_aggregated_edges_between(
+        list(sources), list(targets) if targets else None, granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=list(lineage),
+    ))
+
+
+def test_a_refused_page_is_halved_at_the_same_position_and_the_read_completes(monkeypatch):
+    """The store refusing a page at its per-query ceiling is a fact about
+    the page's size: the read halves it, re-reads from the same keyset
+    position, and finishes with every row — a complete answer, no mark."""
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 1)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5), refuse_above=2)
+    result = _read(p)
+    assert [e.target_urn for e in result.aggregated_edges] == [f"urn:t{i}" for i in range(5)]
+    assert limits == [8, 4, 2, 2, 2]
+    assert result.stale is False and result.stale_reason is None
+    assert result.truncated is False and result.degraded_detail is None
+
+
+def test_a_memory_refusal_at_the_floor_keeps_the_prefix_and_names_the_ceiling(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 2)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5), refuse_above=2, refuse_resumed_at=2)
+    p.note_server_limits("10.0.0.1:6379", query_mem_capacity=512 * 2 ** 20)
+    result = _read(p)
+    assert [e.target_urn for e in result.aggregated_edges] == ["urn:t0", "urn:t1"]
+    assert limits == [8, 4, 2, 2]
+    assert result.stale and result.stale_reason == "query_memory" and result.truncated
+    assert result.degraded_detail == {
+        "kind": "query_memory", "narrowedPages": 2, "narrowedBatches": 0, "degradedBatches": 1,
+        "floorRetries": 0, "endpoint": "10.0.0.1:6379", "queryMemCapacity": 512 * 2 ** 20,
+    }
+
+
+def test_a_timeout_at_the_floor_is_retried_once_briefly_then_reported(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 2)
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(_fp.asyncio, "sleep", fake_sleep)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5), refuse_above=2, refuse_resumed_at=2, kind="timeout")
+    result = _read(p)
+    assert [e.target_urn for e in result.aggregated_edges] == ["urn:t0", "urn:t1"]
+    assert limits == [8, 4, 2, 2, 2]                      # the floor page, retried once
+    assert sleeps == [_fp._READ_FLOOR_RETRY_S]
+    assert result.stale_reason == "timeout" and result.degraded_detail["floorRetries"] == 1
+    assert result.degraded_detail["endpoint"] == "x:6379"  # no node read yet: the configured one
+
+
+def _pressure_wrapped(fake, levels, *, refuse_multi_only, materialized):
+    """A provider whose source-graph reads refuse URN batches — every
+    multi-URN batch, or every batch — with the memory refusal."""
+    p = _make_provider(fake, levels)
+    real_ro = p._ro_query
+    refused = []
+
+    async def ro_query(cypher, params=None, timeout=None, **kw):
+        key = next((k for k in ("urns", "xs", "ys", "sourceUrns")
+                    if isinstance((params or {}).get(k), list)), None)
+        if key and (len(params[key]) > 1 or not refuse_multi_only):
+            refused.append(len(params[key]))
+            raise _refusal("memory")
+        return await real_ro(cypher, params=params, timeout=timeout, **kw)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if params and "sourceUrns" in params:
+            return _Result([list(r) for r in materialized if r[0] in params["sourceUrns"]])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._ro_query = ro_query
+    p._proj_ro_query = proj_ro_query
+    return p, refused
+
+
+def test_urn_batches_split_under_pressure_and_the_answer_is_whole():
+    """Two same-label leaves share one profile batch and one raw batch;
+    refusing every multi-URN query splits them down to single URNs and the
+    answer is exactly what an unrefused read gives — with no mark."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    control, _ = _pressure_wrapped(fake, levels, refuse_multi_only=True, materialized=[])
+    control._ro_query = fake.ro_query                     # no refusals at all
+    expected = {(e.source_urn, e.target_urn): e.edge_count for e in _read(
+        control, sources=("urn:a2", "urn:b2"), targets=("urn:b2", "urn:b0"), lineage=("FLOWS",),
+    ).aggregated_edges}
+    assert expected == {("urn:a2", "urn:b2"): 2, ("urn:a2", "urn:b0"): 2}
+
+    p, refused = _pressure_wrapped(fake, levels, refuse_multi_only=True, materialized=[])
+    result = _read(p, sources=("urn:a2", "urn:b2"), targets=("urn:b2", "urn:b0"), lineage=("FLOWS",))
+    got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+    assert got == expected
+    assert refused and all(n > 1 for n in refused)
+    assert result.stale is False and result.degraded_detail is None and result.truncated is False
+
+
+def test_a_batch_refused_at_a_single_urn_is_reported_as_query_memory():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, refused = _pressure_wrapped(
+        fake, levels, refuse_multi_only=False,
+        materialized=[["urn:a2", "urn:b2", 9, ["FLOWS"]]],
+    )
+    result = _read(p, sources=("urn:a2", "urn:b2"), targets=("urn:b2", "urn:b0"), lineage=("FLOWS",))
+    got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+    assert got == {("urn:a2", "urn:b2"): 9}               # the materialized rows are kept
+    assert result.stale_reason == "query_memory" and result.truncated
+    assert result.degraded_detail["kind"] == "query_memory"
+    assert result.degraded_detail["narrowedBatches"] >= 1 and result.degraded_detail["degradedBatches"] >= 2
+    assert 1 in refused
+
+
+def test_a_structural_reason_wins_but_the_pressure_detail_rides_along(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 8)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 2)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.meta = None                                      # regime unknown → "unmaterialized"
+    p, _ = _ladder_provider(fake, levels, _cells(5), refuse_above=2, refuse_resumed_at=2)
+    result = _read(p, lineage=("FLOWS",))
+    assert result.stale_reason == "unmaterialized"
+    assert result.truncated and result.degraded_detail["kind"] == "query_memory"
+
+
+def test_a_failure_that_is_not_pressure_stays_degraded_without_detail():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, _ = _ladder_provider(fake, levels, _cells(5), boom=RuntimeError("boom"))
+    result = _read(p)
+    assert result.stale_reason == "degraded" and result.truncated
+    assert result.degraded_detail is None
+
+
+def test_the_runaway_guard_still_bounds_a_pathological_read(monkeypatch):
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_SIZE", 2)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_PAGE_FLOOR", 1)
+    monkeypatch.setattr(_resilience, "AGGREGATED_EDGE_RESULT_CAP", 3)
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p, limits = _ladder_provider(fake, levels, _cells(5))
+    result = _read(p)
+    assert len(result.aggregated_edges) == 4 and limits == [2, 2]
+    assert result.truncated and result.stale is False and result.degraded_detail is None
+
+
+def test_pressure_kind_is_one_classifier_for_both_ladders():
+    from backend.app.providers import falkordb_materialize as mat
+    for exc, kind in (
+        (Exception("Query's mem consumption exceeded capacity"), "memory"),
+        (Exception("Query timed out"), "timeout"),
+        (asyncio.TimeoutError(), "timeout"),
+        (TimeoutError("client deadline"), "timeout"),
+        (RuntimeError("boom"), None),
+    ):
+        assert _fp._pressure_kind(exc) == kind
+        assert mat._pressure_kind(exc) == kind

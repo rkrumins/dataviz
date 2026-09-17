@@ -81,8 +81,8 @@ export function BulkRetryBar({
             ? (
                 <>
                     Retry rebuild on {failedIds.length === 1 ? 'this source' : `${failedIds.length} failed sources`}?
-                    {selected.some(r => asFailureCategory(r.lastFailureCategory) === 'out_of_memory') && (
-                        <> Free graph-store memory first if these are OOM.</>
+                    {selected.some(r => ['out_of_memory', 'write_budget'].includes(asFailureCategory(r.lastFailureCategory) ?? '')) && (
+                        <> Free graph-store memory first if these are OOM or would not fit.</>
                     )}
                 </>
             )

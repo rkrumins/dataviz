@@ -212,6 +212,14 @@ async def _build_response(
 ) -> dict:
     """Cache-only read shared by both endpoints. Triggers a refresh on
     miss / stale / expired and returns the universal envelope."""
+    # Sample the liveness claim BEFORE the payload. False here then implies
+    # the worker had already released — hence already committed — so the row
+    # read below is the POST-refresh one. The reverse order can pair a
+    # pre-commit payload with a post-release ``refreshing=False``, which
+    # tells the UI the refresh is done and terminates its poll on the old
+    # list. Costs one Redis EXISTS on every read; the claim is the only
+    # signal the poll has.
+    in_flight = await _refresh_in_flight(provider_id, asset_name)
     cache_row = await _read_cache(session, provider_id, asset_name)
     health = await _provider_health(session, provider_id)
 
@@ -236,7 +244,7 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=await _refresh_in_flight(provider_id, asset_name),
+            refreshing=in_flight,
             job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
@@ -261,7 +269,7 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=await _refresh_in_flight(provider_id, asset_name),
+            refreshing=in_flight,
             job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
@@ -272,8 +280,17 @@ async def _build_response(
     # looking at this right now, so it rides the hot lane instead of
     # queueing behind the background sweep. ``status=computing`` when a
     # job is in flight, or ``unavailable`` when Redis is down.
+    #
+    # ``enqueue_discovery_job_safe`` returns None for TWO different reasons:
+    # Redis is down, and a job for this scope is already claimed. Only the
+    # first is ``unavailable``. Reading the second as unavailable stopped
+    # the UI polling dead ("Background refresh paused") on exactly the case
+    # where work was in flight — a provider with no cached inventory whose
+    # discovery job was already running. It then never self-healed without
+    # a reload, so a newly created graph was never seen.
     job_id = await enqueue_discovery_job_safe(provider_id, asset_name, priority=True)
-    status = "computing" if job_id is not None else "unavailable"
+    computing = job_id is not None or in_flight
+    status = "computing" if computing else "unavailable"
     return _build_envelope(
         payload=None,
         status=status,
@@ -282,7 +299,7 @@ async def _build_response(
         asset_name=asset_name,
         updated_at=updated_at,
         age_secs=age,
-        refreshing=job_id is not None,
+        refreshing=computing,
         job_id=job_id,
         provider_health=health,
         last_error=cache_row.last_error if cache_row else None,
@@ -333,6 +350,10 @@ async def list_assets(
                 "name": name,
                 "nodeCount": p.get("nodeCount"),
                 "edgeCount": p.get("edgeCount"),
+                # None for a row captured before this key existed, and for a
+                # store that would not answer. Never coerce to 0 — see the
+                # note on the capture side in discovery.py.
+                "propertyKeyCount": p.get("propertyKeyCount"),
                 "updatedAt": computed_at,
             })
         env["data"]["assetsDetail"] = detail
@@ -412,12 +433,16 @@ async def refresh_all_assets(
     """Force-refresh a provider's asset list + a scoped set of assets.
 
     Always enqueues the list-all sentinel (the only way to discover
-    new/removed assets). Per-asset fan-out is scoped to
-    ``body.asset_names`` when provided (intersected with cached rows so
-    arbitrary names can't seed stub cache entries), else every cached
-    row. Capped at ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200)
-    and enqueued concurrently so the POST returns in one Redis
-    round-trip's time, not N.
+    new/removed assets). Per-asset fan-out covers every asset the
+    provider currently LISTS. Assets that have only a stats cache row are
+    included ONLY when there is no inventory to judge against — a cached
+    name the inventory omits is a graph that was deleted, and nothing
+    prunes those rows.
+    ``body.asset_names`` narrows that set when given (intersected, so
+    arbitrary names still can't seed stub cache entries). Capped at
+    ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200) and enqueued
+    concurrently so the POST returns in one Redis round-trip's time,
+    not N.
     """
     import asyncio
 
@@ -425,20 +450,74 @@ async def refresh_all_assets(
 
     await _ensure_provider_exists(session, provider_id)
 
-    # Pull every cached asset_name for this provider, capped.
+    # What the provider currently LISTS, from the sentinel's payload (the
+    # empty-string row is the inventory, not an asset — ``list_assets``
+    # reads the same row). This is what makes a NEWLY DISCOVERED graph
+    # refreshable: the fan-out used to be built from per-asset cache rows
+    # alone, and a graph that had only just appeared in the list had none —
+    # so "Refresh all N sources" silently skipped exactly the source the
+    # user clicked Refresh to see, on that click and every later one, until
+    # something else happened to give it a row.
+    sentinel = await session.execute(
+        select(AssetDiscoveryCacheORM.payload).where(
+            AssetDiscoveryCacheORM.provider_id == provider_id,
+            AssetDiscoveryCacheORM.asset_name == "",
+        )
+    )
+    raw = sentinel.scalars().first()
+    try:
+        inventory = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        inventory = {}
+    # NOT capped here. The inventory is what "does this graph still exist?"
+    # is judged against below, and truncating it first makes every graph past
+    # position N look deleted: their cached rows were filtered out, and a
+    # scoped request naming one returned jobs_queued 0 — a silent no-op the
+    # UI cannot distinguish from "nothing cached yet". The fan-out is still
+    # bounded, by the single cap at the end.
+    listed = [
+        a for a in (inventory.get("assets") or [])
+        if isinstance(a, str) and a
+    ]
+
+    # Assets that already have a stats row. Capped, and the sentinel is
+    # excluded in the WHERE clause (as ``list_assets`` does) rather than
+    # after the LIMIT, or it spends one of the N slots.
     rows = await session.execute(
         select(AssetDiscoveryCacheORM.asset_name)
-        .where(AssetDiscoveryCacheORM.provider_id == provider_id)
+        .where(
+            AssetDiscoveryCacheORM.provider_id == provider_id,
+            AssetDiscoveryCacheORM.asset_name != "",
+        )
         .limit(resilience.INSIGHTS_MAX_PROVIDER_REFRESH)
     )
-    cached_names = [row[0] for row in rows.all() if row[0]]
+    cached_names = [row[0] for row in rows.all()]
+
+    # Drop cached names the inventory no longer lists — those are graphs the
+    # user DELETED. Nothing prunes per-asset rows (discovery.py's only
+    # _delete_cache fires when the PROVIDER is gone), so they accumulate
+    # forever: they inflated "Refreshing all N sources", spent cap slots and
+    # provider calls on graphs that do not exist, and — until the reconcile
+    # was turned off for discovery probes — the job each one queued
+    # RE-CREATED the deleted graph.
+    #
+    # Only filter when there IS an inventory to judge against: an empty
+    # sentinel means "never listed", not "the provider has nothing".
+    if listed:
+        listed_set = set(listed)
+        cached_names = [n for n in cached_names if n in listed_set]
+
+    # Listed first: the cap must prefer assets the provider actually has
+    # over stale rows for ones it no longer does. dict.fromkeys dedupes
+    # while keeping that order.
+    known = list(dict.fromkeys([*listed, *cached_names]))
 
     requested = body.asset_names if body is not None else None
     if requested is not None:
         wanted = set(requested)
-        asset_names = [n for n in cached_names if n in wanted]
+        asset_names = [n for n in known if n in wanted]
     else:
-        asset_names = cached_names
+        asset_names = known
     asset_names = asset_names[: resilience.INSIGHTS_MAX_PROVIDER_REFRESH]
 
     # Bound the fan-out: enqueues are cheap Redis hops, but the endpoint
@@ -456,9 +535,13 @@ async def refresh_all_assets(
     )
 
     return {
+        # Assets only. The list-all sentinel is the provider's inventory
+        # job, not a data source, and the UI renders this number verbatim
+        # as "Refreshing all N sources" — counting it made every refresh
+        # report one more source than the tab lists. Its id is still
+        # returned below for callers that track the inventory job.
         "provider_id": provider_id,
-        "jobs_queued": int(list_job_id is not None)
-        + sum(1 for j in asset_job_ids if j is not None),
+        "jobs_queued": sum(1 for j in asset_job_ids if j is not None),
         "list_job_id": list_job_id,
         "asset_job_ids": asset_job_ids,
         "truncated": len(asset_names) >= resilience.INSIGHTS_MAX_PROVIDER_REFRESH,

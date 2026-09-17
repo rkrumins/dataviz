@@ -10,12 +10,15 @@ Used by the perf plan ([../docs/audits/](../docs/audits/) / `~/.claude/plans/`) 
 loadtest/
 ├── README.md                # this file
 ├── Makefile                 # smoke-run targets — `make smoke` runs each scenario + mixed
+├── Dockerfile               # the generator as its own image (for the k8s run)
 ├── requirements.txt         # locust >= 2.27 (no backend deps)
 ├── locustfile.py            # default entry point — composes the plan's production mix
 ├── config.py                # env-driven settings (host, auth, think time)
 ├── lib/
 │   ├── auth.py              # bearer-token or cookie-login auth
 │   ├── data.py              # workspace/datasource ID discovery + pool
+│   ├── protection.py        # did the backend's own limits hold? (counter gate)
+│   ├── retry.py             # retry a shed request the way the real client does
 │   └── slo.py               # post-run SLO check (standalone script; `--smoke` flag)
 ├── runners/
 │   ├── views.py             # HttpUser wrapper around ViewsTasks (for `-f`)
@@ -268,6 +271,58 @@ Aggregate failure rate must be `< 0.1%` (no 5xx storm).
 
 Edit `DEFAULT_SLOS` in `lib/slo.py` to tighten/relax targets for a specific run.
 
+## Validate the run — did the protection hold?
+
+A passing SLO check says the system was **fast**. It does not say the system
+was **protected**, and the cheapest way to be fast is to stop enforcing the
+limits.
+
+The counter that shows it is `aggregation_slot_fail_open_total`. The
+write-admission cap is fail-open by design — when the bus is unreachable, or
+no slot frees inside the wait deadline, the caller proceeds anyway rather than
+stalling a job forever. That is the right bias, and it means the state
+immediately before a node is over-admitted looks, from outside, exactly like a
+healthy run: latency fine, failure rate fine, cap not capping. Gated on the
+CSV alone, that run passes.
+
+So bracket the run with a counter snapshot:
+
+```bash
+export SYNODIC_METRICS_URLS=http://host:8000/api/v1/metrics   # METRICS_ENABLED must be on
+.venv/bin/python -m lib.protection --before results/protection.json
+#   …the run…
+.venv/bin/python -m lib.protection --check results/protection.json
+```
+
+`make sweep` does this per tier when `SYNODIC_METRICS_URLS` is set, so a
+failure names the concurrency at which the cap stopped capping. Unset, the
+sweep runs exactly as before and prints a note saying it was gated on latency
+only.
+
+**What fails, and what is only reported** ([lib/protection.py](lib/protection.py)):
+
+| Counter | Verdict | Why |
+|---|---|---|
+| `aggregation_slot_fail_open_total` | **fails** | one fail-open is one admission that was not admitted; there is no acceptable rate |
+| `metrics_series_dropped_total` | **fails** | the registry hit its series cap, so every number here is an undercount |
+| any counter going **backwards** | **fails** | counters only rise, so the process restarted mid-run — the deltas are void and the restart is itself the finding |
+| `aggregation_governor_holds_total` | reported | the governor paused the pipeline inside its memory envelope |
+| `aggregation_slot_waits_total` | reported | waiters waited for a slot — backpressure working |
+| `aggregation_read_pressure_yields_total` | reported | the pipeline yielded to reader latency |
+| `aggregation_write_budget_refusals_total` | reported | a budget refused a batch rather than risk the shard |
+
+The bottom four are the protection *working*. A gate that goes red when the
+system defends itself is a gate somebody switches off, and then nothing
+watches the one counter that matters.
+
+**One scrape is one pod.** The registry is per-process, so a single URL is a
+claim about whichever pod the Service picked. Pass them all for a fleet-wide
+answer — the check reports how many it read, and says so when it read one:
+
+```bash
+export SYNODIC_METRICS_URLS="$(kubectl -n synodic get pods   -l app.kubernetes.io/name=viz-service   -o jsonpath='{range .items[*]}http://{.status.podIP}:8000/api/v1/metrics {end}')"
+```
+
 ## Extending
 
 To add a new endpoint scenario:
@@ -292,9 +347,30 @@ locust -f locustfile.py --worker --master-host=<master>
 
 Aggregated stats are reported on the master. The plan calls for 2000 VUs — a single 4-core load-gen box handles that comfortably.
 
+### In the cluster, across nodes
+
+`deploy/k8s/loadtest/` runs the same master/worker pair as pods, with the
+affinity rules that keep the generator off the nodes it is measuring — see
+[that directory's README](../deploy/k8s/loadtest/README.md), which is where
+the reasoning lives. Build the image from this directory's `Dockerfile`:
+
+```bash
+docker build -t synodic/loadtest:latest loadtest/
+kubectl apply -k deploy/k8s/loadtest
+kubectl -n synodic logs -f deploy/loadtest-master
+kubectl delete -k deploy/k8s/loadtest
+```
+
+The one number to keep in step: the master's `LOCUST_EXPECT_WORKERS` must
+equal the worker Deployment's `replicas`, or the run either never starts or
+starts short-handed. `backend/tests/test_loadtest_manifests.py` fails if they
+drift.
+
 ## What this harness deliberately does NOT do
 
 - **No backend imports.** This is so the same harness runs against any deployed version, including ones that diverge from the current source tree.
 - **No data seeding.** Use the backend's seed scripts (`backend/scripts/...`) or hit a staging clone of prod. Load tests should be repeatable, but the seed is the backend's responsibility.
 - **No assertions during the run.** Locust runs to completion; SLO assertions happen post-run from the CSV. Keeps the request path tight and avoids per-request overhead.
-- **No retries inside scenarios.** If the backend fails, that's the signal — we want it visible in the failure rate, not papered over.
+- **No retries for a failure.** A 4xx that is not 429, or a malformed body, gets one attempt and is recorded as a failure — that is the signal, and we want it in the failure rate rather than papered over.
+
+  Backpressure is the exception, and it is not papering over anything: a 429, or a 5xx with `Retry-After`, is retried by `lib/retry.py` because the real client retries it. Firing once and counting the shed request a failure made the harness under-measure at exactly the point that matters — at saturation the real system's offered load goes **up**, because every shed request comes back, while the harness's went **down**, because the user recorded a failure and moved on to think-time. The shedding is still the capacity signal; it is now counted as shedding (`<name>:429`) and as retry traffic (`<name>:retry`) instead of being hidden inside a failure count.

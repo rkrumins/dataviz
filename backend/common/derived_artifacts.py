@@ -36,8 +36,20 @@ from typing import Dict, Iterable, Mapping
 
 
 #: In-graph bookkeeping NODES: the projector's rollup watermark, the
-#: aggregation pipeline's run stamp, and the dedicated-projection scaffolding.
-DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection")
+#: aggregation pipeline's run stamp, the dedicated-projection scaffolding,
+#: and the writers' property-name reserve.
+#:
+#: ``_PropReserve`` is the carrier the writers create, stamp with every
+#: platform-owned property name and delete again in the next statement (see
+#: ``reserve_platform_property_names``). The NODE is therefore only ever
+#: seen when a run dies between the two statements. The LABEL is not: a
+#: FalkorDB node schema is created on first write and never removed —
+#: ``db.labels()`` walks the schema table, not the rows — so once the
+#: writers have touched a graph, ``_PropReserve`` is in its label catalogue
+#: for good, with no rows behind it. Every catalogue-driven surface has to
+#: exclude it, count or no count, and this list is what they all filter on —
+#: which is the whole reason the two incidents above happened.
+DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection", "_PropReserve")
 
 #: Derived RELATIONSHIP types — materialised rollups, not ingested lineage.
 #:
@@ -77,6 +89,25 @@ def strip_derived_counts(
     """
     drop = is_derived_edge_type if edges else is_derived_label
     return {k: v for k, v in (counts or {}).items() if not drop(k)}
+
+
+def derived_edge_total(counts: Mapping[str, int]) -> int:
+    """How much of an edge-type count map is the platform's OWN rollup.
+
+    The other side of :func:`strip_derived_counts` with ``edges=True``: that
+    one returns everything except the derived types, this one returns the sum
+    of exactly those. Same list, same case-insensitive rule, opposite halves —
+    so ``derived_edge_total(c) + sum(strip_derived_counts(c, edges=True).values())``
+    is ``sum(c.values())`` for any map.
+
+    The profiling surfaces need both: the rollup is not the customer's data
+    and must never rank among their relationship types, but its volume is a
+    real operational number and a rebuild wiping it is the event people come
+    looking for. Stripping it was only ever half an answer.
+    """
+    return sum(
+        int(v or 0) for k, v in (counts or {}).items() if is_derived_edge_type(k)
+    )
 
 
 def not_derived_clause(var: str, labels: Iterable[str] = DERIVED_LABELS) -> str:

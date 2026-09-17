@@ -17,7 +17,9 @@
  * open so the user can retry without losing their overrides.
  */
 import { useEffect, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { createPortal } from 'react-dom'
+import { resumePlan } from './resumePlan'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play, RotateCcw, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -26,6 +28,10 @@ import {
     AggregationOverridesForm,
     type AggregationOverridesValue,
 } from '../shared/AggregationOverridesForm'
+import { RetriggerFitCheck } from './RetriggerFitCheck'
+import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
+import { useSourceCapacity } from '../shared/useAggregationCapacity'
+import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 
 export interface RetriggerDialogProps {
     isOpen: boolean
@@ -43,10 +49,45 @@ export interface RetriggerDialogProps {
     /** What the server resolves for Rollup storage when the request omits it,
      *  so the form can show the mode the job would really run in. */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** When known, the dialog shows whether THIS run would fit the source's
+     *  shard before it is queued — re-decided as the form changes. */
+    dataSourceId?: string
+    /** The server's live env defaults and the stored fleet Defaults, so the
+     *  form's placeholders tell the truth. */
+    envDefaults?: EnvTuningDefaults | null
+    storedGlobal?: AggregationTuning | null
+    /** What the originating run ACTUALLY ran with, when it recorded it, so a
+     *  set of settings that were dialled in by hand and worked can be put back
+     *  in one click. Never seeded automatically — see ``overridesFromRun``. */
+    previousRun?: AggregationOverridesValue | null
+    /** Why the form opened on a profile the operator did not pick (a Gentle
+     *  retry after a per-query memory or timeout failure). */
+    presetReason?: string | null
+    /** The control that goes with the reason: after a per-query memory
+     *  failure, the way to the node's own limit (system administrators). */
+    presetAction?: 'raise-per-query-limit' | null
     /** Always shown. */
-    onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
+    /** ``opts.purgeFirst`` routes through the purge endpoint, which deletes
+     *  every rollup edge and then chains the rebuild. Off by default. */
+    onConfirmRetrigger: (
+        overrides: AggregationOverridesValue,
+        opts?: { purgeFirst?: boolean },
+    ) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
     onConfirmResume?: (overrides: AggregationOverridesValue) => Promise<void>
+}
+
+type ShardCap = { timeoutMaxMs: number | null }
+
+/** The source's own shard cap, for the per-query timeout notes in the form.
+ *  Mounted only when the dialog knows its source, so the dialog itself stays
+ *  free of query hooks (its unit tests render it without a query client). */
+function ShardCapFor({ dataSourceId, children }: {
+    dataSourceId: string
+    children: (cap: ShardCap) => ReactElement
+}) {
+    const q = useSourceCapacity(dataSourceId, true)
+    return children({ timeoutMaxMs: q.data?.shard.timeoutMaxMs ?? null })
 }
 
 export function RetriggerDialog({
@@ -56,11 +97,22 @@ export function RetriggerDialog({
     title,
     originatingJob,
     defaultFinePairs,
+    dataSourceId,
+    envDefaults,
+    storedGlobal,
+    previousRun,
+    presetReason,
+    presetAction,
     onConfirmRetrigger,
     onConfirmResume,
 }: RetriggerDialogProps) {
     const [value, setValue] = useState<AggregationOverridesValue>(initialValue)
     const [loading, setLoading] = useState<'resume' | 'retrigger' | null>(null)
+    // Off by default, deliberately: purging is destructive, it is NOT what
+    // "from scratch" has ever meant here, and on a source that is already
+    // tight for memory it makes the run need MORE room, not less (every
+    // retained cell becomes a fresh write). See the note beside it.
+    const [purgeFirst, setPurgeFirst] = useState(false)
 
     // Reset form to fresh `initialValue` each time the dialog re-opens.
     // We compare on `isOpen` (not `initialValue`) so that prop reference churn
@@ -70,6 +122,7 @@ export function RetriggerDialog({
         if (isOpen && !prevOpenRef.current) {
             setValue(initialValue)
             setLoading(null)
+            setPurgeFirst(false)   // destructive: never sticky across opens
         }
         prevOpenRef.current = isOpen
     }, [isOpen, initialValue])
@@ -90,6 +143,11 @@ export function RetriggerDialog({
         && originatingJob.lastCursor !== undefined
         && (originatingJob.status === 'failed' || originatingJob.status === 'cancelled')
         && !!onConfirmResume
+    // What resuming will actually redo. Resume saves the WRITES, not the
+    // SCAN, and without saying so an operator resuming a job that died at
+    // 80% watches the bar go to 0 and climb — correct, and indistinguishable
+    // from the resume not having worked.
+    const plan = canResume ? resumePlan(originatingJob?.lastCursor) : null
 
     const isLoading = loading !== null
 
@@ -100,7 +158,7 @@ export function RetriggerDialog({
             if (kind === 'resume' && onConfirmResume) {
                 await onConfirmResume(value)
             } else {
-                await onConfirmRetrigger(value)
+                await onConfirmRetrigger(value, { purgeFirst })
             }
             onClose()
         } catch {
@@ -150,13 +208,125 @@ export function RetriggerDialog({
                     </div>
 
                     {/* Body — scrollable form */}
-                    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
-                        <AggregationOverridesForm
-                            value={value}
-                            onChange={setValue}
-                            disabled={isLoading}
-                            defaultFinePairs={defaultFinePairs}
-                        />
+                    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
+                        {(() => {
+                            const body = (cap: ShardCap) => (
+                                <>
+                                    {presetReason && (
+                                        <div
+                                            data-testid="retrigger-preset-reason"
+                                            className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300 space-y-1"
+                                        >
+                                            <p>{presetReason}</p>
+                                            {presetAction === 'raise-per-query-limit' && dataSourceId && (
+                                                <RaisePerQueryLimitLink dataSourceId={dataSourceId} />
+                                            )}
+                                        </div>
+                                    )}
+                                    {previousRun && (
+                                        <div
+                                            data-testid="retrigger-previous-run"
+                                            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2"
+                                        >
+                                            <p className="text-[11px] text-ink-secondary leading-relaxed">
+                                                The form opens on the configured defaults, not on what
+                                                the last run used — a run that failed under bad settings
+                                                would otherwise keep failing under them.
+                                            </p>
+                                            <button
+                                                type="button"
+                                                className="shrink-0 rounded-lg border border-glass-border px-3 py-1.5 text-xs font-medium text-ink-secondary transition-colors hover:bg-canvas-sunken hover:text-ink-primary"
+                                                onClick={() => setValue(previousRun)}
+                                            >
+                                                Use the last run&rsquo;s settings
+                                            </button>
+                                        </div>
+                                    )}
+                                    {dataSourceId && (
+                                        <RetriggerFitCheck
+                                            dataSourceId={dataSourceId}
+                                            draftTuning={value.tuning}
+                                            defaultFinePairs={defaultFinePairs}
+                                        />
+                                    )}
+                                    {/* What this button actually does. "From
+                                        scratch" reads as "clear and rebuild"
+                                        and never meant that: it restarts the
+                                        PHASES at zero, it does not empty the
+                                        store. Saying so here is cheaper than
+                                        an operator inferring it from a
+                                        refusal message. */}
+                                    <div
+                                        data-testid="retrigger-explainer"
+                                        className="rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2 text-[11px] text-ink-secondary leading-relaxed space-y-1.5"
+                                    >
+                                        <p>
+                                            <span className="font-semibold text-ink-primary">Re-trigger from scratch</span>{' '}
+                                            re-runs the whole pipeline from the beginning —
+                                            it re-reads the graph and recomputes every rollup.
+                                            It does <span className="font-semibold">not</span> empty
+                                            the store first: existing rollup edges are reused where
+                                            the new result still contains them, ones it no longer
+                                            contains are deleted, and only the difference is written.
+                                        </p>
+                                        <p>
+                                            That is usually what you want. The run needs room for
+                                            the <span className="font-semibold">net</span> change
+                                            rather than for a whole fresh copy, and the source keeps
+                                            serving lineage throughout instead of going blank for
+                                            the length of the rebuild.
+                                        </p>
+                                    </div>
+
+                                    <label
+                                        data-testid="retrigger-purge-first"
+                                        className="flex gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 cursor-pointer"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={purgeFirst}
+                                            onChange={(e) => setPurgeFirst(e.target.checked)}
+                                            disabled={isLoading}
+                                            className="mt-0.5 shrink-0 accent-amber-600"
+                                        />
+                                        <span className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-200 space-y-1.5 block">
+                                            <span className="block font-semibold">
+                                                Clear all rollup edges first (purge, then rebuild)
+                                            </span>
+                                            <span className="block">
+                                                Deletes every stored rollup edge for this source,
+                                                then runs the rebuild above with the settings you
+                                                have chosen here. Use it when you suspect the stored
+                                                rollups are wrong rather than merely stale — after
+                                                an ontology change, or a containment fix that should
+                                                have changed the shape and did not.
+                                            </span>
+                                            <span className="block">
+                                                <span className="font-semibold">It needs more memory, not less.</span>{' '}
+                                                Every edge it deletes has to be written again, so the
+                                                shard must have room for the full result instead of
+                                                just the difference. And container-level lineage for
+                                                this source is empty from the purge until the rebuild
+                                                finishes.
+                                            </span>
+                                        </span>
+                                    </label>
+
+                                    <AggregationOverridesForm
+                                        value={value}
+                                        onChange={setValue}
+                                        disabled={isLoading}
+                                        defaultFinePairs={defaultFinePairs}
+                                        envDefaults={envDefaults}
+                                        storedGlobal={storedGlobal}
+                                        shardTimeoutMaxMs={cap.timeoutMaxMs}
+                                    />
+                                </>
+                            )
+                            return dataSourceId
+                                ? <ShardCapFor dataSourceId={dataSourceId}>{body}</ShardCapFor>
+                                : body({ timeoutMaxMs: null })
+                        })()}
                     </div>
 
                     {/* Footer */}
@@ -168,6 +338,12 @@ export function RetriggerDialog({
                         >
                             Cancel
                         </button>
+
+                        {canResume && plan && (
+                            <p className="mr-auto max-w-[26rem] text-[11px] text-ink-muted leading-relaxed" data-testid="resume-plan">
+                                {plan.detail}
+                            </p>
+                        )}
 
                         {canResume && (
                             <button
@@ -196,7 +372,7 @@ export function RetriggerDialog({
                             {loading === 'retrigger'
                                 ? <Loader2 className="w-4 h-4 animate-spin" />
                                 : <Play className="w-4 h-4" />}
-                            Re-trigger from scratch
+                            {purgeFirst ? 'Purge, then re-trigger' : 'Re-trigger from scratch'}
                         </button>
                     </div>
                 </motion.div>

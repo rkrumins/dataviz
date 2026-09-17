@@ -180,8 +180,9 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     db_unavailable: "The database is busy right now — too many open connections. Please try again in a moment.",
     provider_unavailable: "This provider is temporarily unavailable — it may be restarting or under load. Try again shortly.",
     out_of_memory: "The provider ran low on memory and is recovering. Give it a moment, then try again.",
-    query_memory: "A single query asked for more data than this provider allows one query to hold. The provider itself is healthy — the query needs to read less.",
+    query_memory: "A single query asked for more data than this provider allows one query to hold. The provider itself is healthy — rebuilds read in the smallest slices they can, so reaching this means one row was still too large for the per-query limit.",
     provider_loading: "This provider is still warming up — its data is loading and will appear shortly.",
+    provider_failing_over: "The graph store node holding this graph is restarting — reconnecting automatically. Nothing was lost.",
     cluster_mode_mismatch: "This server is a Redis Cluster node, but the provider is configured for standalone mode — a standalone connection sees only a fraction of the graphs. Edit the connection and set Mode to Cluster (with the cluster's startup nodes).",
 }
 
@@ -199,8 +200,15 @@ export function friendlyError(raw: string): string {
             // code field (e.g. {detail: {code: 'PROVIDER_UNAVAILABLE',
             // reason: 'dns_unresolvable'}}).
             if (typeof parsed.detail === 'object') {
-                if (typeof parsed.detail.reason === 'string') code = parsed.detail.reason
+                // ``reason`` is preferred because it USED to be the code
+                // ('dns_unresolvable'). Provider outages now put a sentence
+                // there — the technical text moved to ``technical`` — so a
+                // reason with spaces in it is prose, and the code is the
+                // field to key on.
+                const reason = parsed.detail.reason
+                if (typeof reason === 'string' && !reason.includes(' ')) code = reason
                 else if (typeof parsed.detail.code === 'string') code = parsed.detail.code
+                else if (typeof reason === 'string') code = reason
             }
         }
         // The /test endpoint returns {success: false, error: 'dns_unresolvable'}

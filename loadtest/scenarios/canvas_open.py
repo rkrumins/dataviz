@@ -19,14 +19,24 @@ to emulate a 500-entity view: five node batches and one edge scan per
 open. Two stat rows: ``canvas-open:nodes`` (per batch) and
 ``canvas-open:edges``.
 
-A 429 (the backend shedding a burst) counts as a failure here on purpose:
-the real canvas retries it in place, but under load it is the capacity
-signal this scenario exists to surface.
+A shed response (429, or a 503 with ``Retry-After``) is RETRIED here, the
+way the canvas retries it — see ``lib/retry.py``. It used to count as a
+failure, which quietly inverted the thing this scenario measures: under
+saturation the real system's offered load goes UP, because every shed
+request comes back, while the harness's went DOWN, because the user
+recorded a failure and went to think-time. That reported a ceiling below
+the real one and could not reproduce retry amplification at all.
+
+The shedding is still the capacity signal — it is just counted as
+shedding (``canvas-open:nodes:429``) and as retry traffic
+(``canvas-open:nodes:retry``) rather than hidden inside a failure count.
 """
 from __future__ import annotations
 
 from gevent.pool import Pool
 from locust import TaskSet, task
+
+from lib.retry import request_with_retries
 
 # Mirror the frontend: 100 URNs per /nodes/query, four batches in flight.
 NODE_BATCH_SIZE = 100
@@ -49,24 +59,23 @@ class CanvasOpenTasks(TaskSet):
         loaded: list[str] = []
 
         def fetch_batch(batch: list[str]) -> None:
-            with self.client.post(
-                f"/api/v1/{ws_id}/graph/nodes/query",
-                json={"query": {"urns": batch, "limit": len(batch)}},
-                name="canvas-open:nodes",
-                catch_response=True,
-            ) as resp:
-                if resp.status_code != 200:
-                    resp.failure(f"HTTP {resp.status_code}")
-                    return
+            def _collect(resp) -> bool:
                 try:
                     items = resp.json()
                 except ValueError:
-                    resp.failure("non-JSON body")
-                    return
-                resp.success()
+                    return False
                 loaded.extend(
                     it["urn"] for it in items if isinstance(it, dict) and it.get("urn")
                 )
+                return True
+
+            request_with_retries(
+                self.client, "POST",
+                f"/api/v1/{ws_id}/graph/nodes/query",
+                name="canvas-open:nodes",
+                json={"query": {"urns": batch, "limit": len(batch)}},
+                on_success=_collect,
+            )
 
         pool = Pool(HYDRATION_CONCURRENCY)
         for i in range(0, len(urns), NODE_BATCH_SIZE):
@@ -75,8 +84,9 @@ class CanvasOpenTasks(TaskSet):
 
         if not loaded:
             return
-        self.client.post(
+        request_with_retries(
+            self.client, "POST",
             f"/api/v1/{ws_id}/graph/edges/between",
-            json={"urns": loaded, "limit": EDGES_BETWEEN_LIMIT},
             name="canvas-open:edges",
+            json={"urns": loaded, "limit": EDGES_BETWEEN_LIMIT},
         )

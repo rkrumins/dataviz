@@ -26,7 +26,19 @@ import { AggregationStep } from './steps/AggregationStep'
 import { SemanticStep } from './steps/SemanticStep'
 import { SchemaReviewStep, type SchemaReviewStatusMap } from './steps/SchemaReviewStep'
 import { ReviewStep, type NavigationDestination } from './steps/ReviewStep'
-import { aggregationService, type AggregationTuning } from '@/services/aggregationService'
+import {
+    aggregationService,
+    type AggregationSettingsResponse, type AggregationTuning,
+} from '@/services/aggregationService'
+
+/** What Rollup storage a job resolves when it says nothing: the stored
+ *  fleet Default, then the environment. */
+function resolveFinePairs(s: AggregationSettingsResponse | null): 'auto' | 'true' | 'false' | undefined {
+    const stored = s?.tuning?.materializeFinePairs
+    if (stored === 'auto') return 'auto'
+    if (typeof stored === 'boolean') return stored ? 'true' : 'false'
+    return s?.envMaterializeFinePairs ?? undefined
+}
 import { PRESET_TIMEOUT_MINUTES } from '@/components/admin/shared/AggregationOverridesForm'
 import { useWizardKeyboard } from './hooks/useWizardKeyboard'
 
@@ -112,6 +124,17 @@ export function AssetOnboardingWizard({
 
     // ─── Navigation State ─────────────────────────────────────────────────────
     const [currentStep, setCurrentStep] = useState<WizardStep>('workspace')
+    // The fleet's aggregation settings, so the tuning step shows the Rollup
+    // storage the job would really run in and the deployment's own defaults
+    // (it used to assume Full detail whatever the fleet had chosen).
+    const [aggSettings, setAggSettings] = useState<AggregationSettingsResponse | null>(null)
+    useEffect(() => {
+        let cancelled = false
+        aggregationService.getAggregationSettings()
+            .then(s => { if (!cancelled) setAggSettings(s) })
+            .catch(() => { /* placeholders fall back to the shipped defaults */ })
+        return () => { cancelled = true }
+    }, [])
     const [previousSteps, setPreviousSteps] = useState<WizardStep[]>([])
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [submitError, setSubmitError] = useState<string | null>(null)
@@ -678,6 +701,9 @@ export function AssetOnboardingWizard({
                                         formData={formData}
                                         updateFormData={updateFormData}
                                         catalogItems={catalogItems}
+                                        defaultFinePairs={resolveFinePairs(aggSettings)}
+                                        envDefaults={aggSettings?.envTuningDefaults ?? null}
+                                        storedGlobal={aggSettings?.tuning ?? null}
                                     />
                                 ) : currentStep === 'semantic' ? (
                                     <SemanticStep

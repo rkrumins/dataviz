@@ -71,6 +71,16 @@ export const POLLING_INTERVALS = {
    */
   notifications: 60_000,
   /**
+   * "Your connections are still catching up" — the canvas asks the projector
+   * whether a source really is behind, and it only arms once a read came back
+   * SHORT. So this is the one poll guaranteed to be running while the graph
+   * store is already hurting, on every affected viewer at once. 60s rather
+   * than the 15s it started at: the condition it watches clears in minutes,
+   * not seconds, and a minute of notice latency on a banner that says "this
+   * clears on its own" costs the reader nothing.
+   */
+  projectionCatchUp: 60_000,
+  /**
    * Canvas auto-retry cadence while the graph provider is warming up
    * (loading its dataset) or briefly unavailable. Deliberately NOT tight:
    * a graph that's reloading takes seconds-to-minutes, so hammering every

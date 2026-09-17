@@ -19,5 +19,38 @@ data:
   # control plane's stale-job backstop starts failing wedged jobs first.
   AGGREGATION_STALL_TIMEOUT_SECS: "10800"
   AGGREGATION_JOB_MAX_WALL_SECS: "86400"
-  # Cross-pod concurrent aggregation-write budget per FalkorDB endpoint.
+  # How long a cached provider may go untouched before the reaper closes it
+  # and reclaims its pools. The 900s default is a WEB-tier number: that tier
+  # touches many sources briefly and wants the sockets back. A worker holds
+  # ONE provider for the length of a job, and the compute stage is minutes of
+  # Python with no graph I/O at all — so at 900s the reaper closed the
+  # provider underneath a running rebuild. The code no longer counts that as
+  # idle (see ProviderManager._touched_at), and this lines the bound up with
+  # the longest job the control plane expects above, so the two agree.
+  # Worker only: do NOT add this to viz-config.yaml.
+  PROVIDER_CACHE_IDLE_TTL_SECS: "7200"
+  # Cross-pod concurrent aggregation budget per FalkorDB NODE. Writes and
+  # scans are counted separately; scans get the larger number because a
+  # rebuild reads far more than it writes, and reads from the master (the
+  # pipeline reads what it has just written), so EXTRACT and RECONCILE
+  # compete with the canvas for the master's THREAD_COUNT. Keep the read
+  # limit above AGGREGATION_EXTRACT_CONCURRENCY.
+  #
+  # THE BUDGET IS A SHARE OF THREAD_COUNT, NOT A NUMBER ON ITS OWN:
+  #
+  #   FALKORDB_ENDPOINT_WRITE_SLOTS + FALKORDB_ENDPOINT_READ_SLOTS
+  #     <= THREAD_COUNT - 2   (the node's, from its FALKORDB_ARGS)
+  #
+  # The base StatefulSet runs THREAD_COUNT 8, so 2 + 4 = 6 leaves two
+  # threads. That margin is not spare capacity — it is what the rest of the
+  # pipeline needs on the SAME master: the 10s post-write settle window,
+  # index DDL, the write governor's INFO, and the probe lane's
+  # get_counts_fast. Spend it and they queue behind MAX_QUEUED_QUERIES with
+  # the canvas, which is the starvation the read slots exist to prevent
+  # ("leave threads for the readers rather than apologise to them").
+  #
+  # A topology with a different THREAD_COUNT must re-derive both numbers —
+  # the production-cluster overlay runs 6 and patches this ConfigMap. A test
+  # checks each shipped pair against its manifest's THREAD_COUNT.
   FALKORDB_ENDPOINT_WRITE_SLOTS: "2"
+  FALKORDB_ENDPOINT_READ_SLOTS: "4"

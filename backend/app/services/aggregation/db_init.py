@@ -102,6 +102,12 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS run_stats TEXT NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS worker_id TEXT NULL",
+                # Limits raised on a RUNNING job (2026-09-09), mirrored in
+                # alembic 20260909_1100_job_live_overrides: wall clock and
+                # per-query timeouts plus who raised what; the stall window
+                # itself is timeout_secs.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS live_overrides TEXT NULL",
                 # F9 (2026-07-19) — configurable rebuild cadence, mirrored in
                 # alembic 20260719_1200_agg_cadence: a per-source cooldown
                 # override on the state table and the persisted GLOBAL cadence
@@ -200,6 +206,9 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS reconcile_consecutive_actions "
                 "INTEGER NULL DEFAULT 0",
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS reconcile_converging_clears "
+                "INTEGER NULL DEFAULT 0",
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS last_finding_at TEXT NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS last_finding_reason TEXT NULL",
@@ -223,32 +232,95 @@ async def init_aggregation_db() -> None:
                 # turning it off forever.
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS paused_until TEXT NULL",
+                # Measured bytes per rolled-up edge (2026-09-07), mirrored in
+                # alembic 20260907_1000_bytes_per_edge: the write
+                # budget's calibration point for the next rebuild.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS observed_bytes_per_edge INTEGER NULL",
+                # Distinct cells stored per cell the pre-compute estimate
+                # counts (2026-09-07), mirrored in alembic
+                # 20260911_1000_cell_ratio. NULL until a complete run has
+                # measured both, and a NULL ratio may never refuse a job.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS observed_cell_ratio DOUBLE PRECISION NULL",
+                # Per-source Rollup storage override (2026-09-08), mirrored in
+                # alembic 20260908_1000_rollup_storage: 'auto' | 'true' |
+                # 'false', NULL = inherit the fleet default.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS rollup_storage TEXT NULL",
+                # What the last rebuild learned under per-query pressure
+                # (2026-09-09), mirrored in alembic 20260909_1000_observed_tuning:
+                # JSON hints the next run starts from, never widening a knob.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS observed_tuning TEXT NULL",
+                # The fingerprint the read caches were last invalidated for
+                # (2026-09-13), mirrored in alembic
+                # 20260913_1100_invalidated_fp. Stops a rebuild
+                # deferred by the cooldown from re-bumping the generation on
+                # every sweep, which capped the cache's life at the detection
+                # cadence instead of its TTL.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS invalidated_fingerprint TEXT NULL",
+                # Indexes for the three queries that run on every tick and
+                # every page (2026-09-13), mirrored in alembic
+                # 20260913_1000_job_scan_indexes. The reconciler's
+                # status-only sweep could not use ix_agg_jobs_ds_status,
+                # which leads with data_source_id, so it scanned the whole
+                # table — including run_stats — every 30 seconds.
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_active ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (status) "
+                "WHERE status IN ('pending', 'running')",
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_completed ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, completed_at)",
+                f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_updated ON "
+                f"{SCHEMA_NAME}.aggregation_jobs (data_source_id, updated_at)",
             )
-            async with engine.begin() as conn:
-                for stmt in _additive_migrations:
-                    try:
+            # ONE TRANSACTION PER STATEMENT, deliberately. These all shared
+            # a single `engine.begin()`, which made the try/except below
+            # inert on PostgreSQL: the first error aborts the transaction, so
+            # every later statement fails with InFailedSQLTransactionError
+            # and is logged the same way, and COMMIT on an aborted
+            # transaction silently ROLLS BACK — so nothing escaped the
+            # context manager and init logged success with NOT ONE statement
+            # applied, including the ones that had already succeeded. One
+            # malformed statement therefore voided all 35, on every boot,
+            # silently. Per-statement transactions cost one round trip each
+            # at start-up and make "continuing init" true.
+            applied = 0
+            for stmt in _additive_migrations:
+                try:
+                    async with engine.begin() as conn:
                         await conn.execute(text(stmt))
-                    except Exception as exc:
-                        # Don't fail init on a single migration — log
-                        # and continue. Worst case the affected feature
-                        # degrades gracefully (e.g. UI phase label
-                        # stays NULL).
-                        logger.warning(
-                            "Aggregation additive migration failed "
-                            "(continuing init): %s — %s",
-                            stmt, exc,
-                        )
+                    applied += 1
+                except Exception as exc:
+                    # Don't fail init on a single migration — log
+                    # and continue. Worst case the affected feature
+                    # degrades gracefully (e.g. UI phase label
+                    # stays NULL).
+                    logger.warning(
+                        "Aggregation additive migration failed "
+                        "(continuing init): %s — %s",
+                        stmt, exc,
+                    )
 
             if attempt > 1:
                 logger.info(
                     "Aggregation DB init succeeded on attempt %d (Postgres became reachable)",
                     attempt,
                 )
+            if applied != len(_additive_migrations):
+                logger.error(
+                    "Aggregation DB init: %d of %d additive migrations did "
+                    "NOT apply (see the warnings above). Columns the write "
+                    "path names may be missing until alembic runs.",
+                    len(_additive_migrations) - applied,
+                    len(_additive_migrations),
+                )
             logger.info(
                 "Aggregation DB init complete (%d tables in '%s' schema, "
-                "%d additive migrations applied)",
+                "%d of %d additive migrations applied)",
                 len(aggregation_tables), SCHEMA_NAME,
-                len(_additive_migrations),
+                applied, len(_additive_migrations),
             )
             return
 

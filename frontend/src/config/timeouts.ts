@@ -128,6 +128,12 @@ export const TIMEOUTS = {
   // that had already done its work).
   AGGREGATED_EDGES_MS:  readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS',  60_000, _LONG),
   EDGES_BETWEEN_MS:     readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',     60_000, _LONG),
+  // POST /canvas/bootstrap — the three calls above, composed server-side and
+  // run as two concurrent waves. It cannot be faster than the slowest of
+  // them, so it takes the largest of their budgets rather than a sum: the
+  // waves overlap, and a budget above the 60s graph HTTP tier would only
+  // mean the client outlives the tier that can explain the failure.
+  CANVAS_BOOTSTRAP_MS:  readMs('VITE_TIMEOUT_CANVAS_BOOTSTRAP_MS',  60_000, _LONG),
   // /search/advanced. The server's soft deadline is 30s but still
   // returns partial results after it — give the client headroom over
   // that so a search-as-you-type request isn't aborted before the

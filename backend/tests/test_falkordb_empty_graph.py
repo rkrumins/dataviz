@@ -89,6 +89,9 @@ async def test_get_stats_empty_graph_returns_zero(monkeypatch):
         "edgeCount": 0,
         "entityTypeCounts": {},
         "edgeTypeCounts": {},
+        # Unknown, not zero: these doubles answer no ``db.propertyKeys()``,
+        # which is exactly what a provider that cannot be asked looks like.
+        "propertyKeyCount": None,
     }
 
 

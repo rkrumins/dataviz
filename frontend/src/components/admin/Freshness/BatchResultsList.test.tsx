@@ -44,6 +44,29 @@ describe('BatchResultsList', () => {
         expect(screen.getByText(/in cooldown/)).toBeInTheDocument()
     })
 
+    it('reports a held source as skipped, never as finished or failed', () => {
+        // A provider/fleet refresh SKIPS a source whose automation is held
+        // rather than override the hold two hundred times. The summary uses
+        // exact outcome comparisons, so an uncounted 'held' would silently
+        // vanish from the tally — this pins it in, and names the control
+        // that is holding the source (a source-level Resume cannot release
+        // a provider hold).
+        const withHeld = [
+            ...results,
+            { dataSourceId: 'ds_6', name: 'Paused Source', outcome: 'held' as const, jobId: null,
+              actions: [], deferred: false, heldBy: 'provider' as const, heldKind: 'paused' as const,
+              heldUntil: '2026-09-04T09:00:00+00:00' },
+            { dataSourceId: 'ds_7', name: 'Stopped Source', outcome: 'held' as const, jobId: null,
+              actions: [], deferred: false, heldBy: 'fleet' as const, heldKind: 'stopped' as const },
+        ]
+        render(<BatchResultsList results={withHeld} />, { wrapper: MemoryRouter })
+        expect(screen.getByText(/2 held/)).toBeInTheDocument()
+        expect(screen.getByText(/1 failed/)).toBeInTheDocument()
+        expect(screen.getByText(/1 rebuild queued/)).toBeInTheDocument()
+        expect(screen.getByText('skipped — automation paused for the provider')).toBeInTheDocument()
+        expect(screen.getByText('skipped — automation stopped fleet-wide')).toBeInTheDocument()
+    })
+
     it('reads a legacy item with a job id as queued, not as no changes needed', () => {
         // Shape a batch item still sitting in Redis from before this task can
         // have: outcome + jobId, but no actions/deferred. The row must not

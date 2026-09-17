@@ -15,11 +15,34 @@
  * to sit inline near affected widgets (entity drawer, dashboard tiles)
  * rather than as a full-page banner — the resilience promise is that
  * the rest of the UI keeps working, so an unobtrusive hint is enough.
+ *
+ * IT SAYS HOW LONG, NOT "SLIGHTLY". The backend's last-known-good mirror
+ * lives for a day (``GRAPH_CACHE_LKG_TTL_S``, default 86400), so "may be
+ * slightly out of date" covered everything from a two-second blip to a
+ * twenty-four-hour outage with the same six words. What is knowable on this
+ * side of the wire is how long the provider has been unable to answer
+ * freshly, so that is what it reports — and it keeps counting while it is on
+ * screen, because a frozen duration is the same lie in a different font.
  */
+import { useEffect, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCacheStalenessStore } from '@/store/cacheStaleness'
 import { useProviderHealthStore } from '@/store/providerHealth'
+
+/** How often the elapsed figure is recomputed while the pill is up. */
+const TICK_MS = 30_000
+
+/** "12 seconds" / "4 minutes" / "3 hours" — coarse on purpose: the reader is
+ *  deciding whether to trust what is on screen, not timing anything. */
+function elapsed(sinceMs: number, now: number): string {
+  const secs = Math.max(0, Math.round((now - sinceMs) / 1000))
+  if (secs < 60) return `${secs} second${secs === 1 ? '' : 's'}`
+  const mins = Math.round(secs / 60)
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`
+  const hours = Math.round(mins / 60)
+  return `${hours} hour${hours === 1 ? '' : 's'}`
+}
 
 export interface StaleDataBannerProps {
   workspaceId?: string
@@ -41,9 +64,21 @@ export function StaleDataBanner({
   const isStale = useCacheStalenessStore((s) =>
     s.isStale(workspaceId, dataSourceId),
   )
+  const staleSince = useCacheStalenessStore((s) =>
+    s.staleSince(workspaceId, dataSourceId),
+  )
   const providerStatus = useProviderHealthStore((s) =>
     s.getStatus(workspaceId, dataSourceId),
   )
+
+  // Re-render on a slow tick so the figure counts up rather than freezing at
+  // whatever it was when the last response happened to land.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (staleSince === null) return
+    const timer = setInterval(() => setNow(Date.now()), TICK_MS)
+    return () => clearInterval(timer)
+  }, [staleSince])
 
   const providerUnreachable = providerStatus === 'unhealthy'
   if (!isStale && !providerUnreachable) return null
@@ -51,9 +86,15 @@ export function StaleDataBanner({
   // Wording priority: provider-unreachable is more actionable than a
   // bare stale-fallback (the underlying provider literally cannot serve
   // a fresh answer right now).
-  const message = providerUnreachable
-    ? `Provider is recovering — ${subject ?? 'this data'} may be slightly out of date.`
-    : `${subject ?? 'This data'} is being served from cache — provider response was slow.`
+  const age = staleSince === null ? null : elapsed(staleSince, Math.max(now, Date.now()))
+  const what = subject ?? 'this data'
+  const message = age !== null
+    // The duration is of the OUTAGE, not of the answer: the saved copy can be
+    // older still. Saying which is which is the whole point.
+    ? `Showing the last saved copy of ${what} — no fresh answer for ${age}.`
+    : providerUnreachable
+      ? `Provider is recovering — ${what} may be out of date.`
+      : `${subject ?? 'This data'} is being served from cache — provider response was slow.`
 
   return (
     <div

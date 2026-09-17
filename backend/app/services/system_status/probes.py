@@ -85,14 +85,18 @@ _DLQ_SAMPLE = 200
 # memory high" but "how many more writes fit".
 #
 # 85% warn: on the reference topology (40gb per shard, ~22GB planned — see
-# falkordb_materialize._max_materialized_edges) that leaves ~6GB, about one
-# large aggregated layer, and rebalancing means MOVING A GRAPH — an operator
-# task measured in hours, not seconds. Planned steady state is ~55%, so a
-# healthy cluster never reaches this.
-# 95% critical: a graph write allocates in bursts, and the materializer's own
-# backstop is sized at ~12.5GB per shard; the last 5% of a 40GB shard is far
-# less than one materialization's step. At 95% the NEXT publish is the one
-# that gets the OOM. (The incident instance was at 12.93G of a 12.00G cap.)
+# docs/INFRASTRUCTURE_LAUNCH_SCALE.md §7) that leaves ~6GB, about one large
+# aggregated layer, and rebalancing means MOVING A GRAPH — an operator task
+# measured in hours, not seconds. Planned steady state is ~55%, so a healthy
+# cluster never reaches this. The aggregation write budget reads this same
+# used_memory/maxmemory pair on the owning shard before it writes and keeps
+# AGGREGATION_SHARD_RESERVE_PCT (20%) free (providers/shard_capacity.py), so
+# a rebuild by itself never carries a shard past 80% — reaching 85% means
+# something other than a budgeted rebuild grew it.
+# 95% critical: a graph write allocates in bursts; the last 5% of a 40GB
+# shard is far less than one materialization's overflow wave. At 95% the NEXT
+# publish is the one that gets the OOM. (The incident instance was at 12.93G
+# of a 12.00G cap.)
 _MEMORY_WARN_PCT = 85.0
 _MEMORY_CRITICAL_PCT = 95.0
 

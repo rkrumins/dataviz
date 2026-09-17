@@ -15,12 +15,16 @@ so we can assert the high-value correctness properties:
 * deterministic v3 cursor round-trip and resume behavior.
 """
 import asyncio
+import contextlib
+import inspect
 import re
 import time
+import types
 
 import pytest
 
 from backend.app.providers import falkordb_materialize as mat
+from backend.app.providers import falkordb_provider as mat_provider
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 from backend.app.services.aggregation.cancel import JobCancelled
 
@@ -41,6 +45,7 @@ class _FakeFalkor:
         self._next_agg_rid = 0
         self._urn_ids = {}
         self.write_queries = 0
+        self.lookup_queries = 0
         self.deleted_pairs = []
         self.meta = None       # last _AggMeta stamp params
 
@@ -134,21 +139,41 @@ class _FakeFalkor:
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
     async def _agg_read(self, cypher, params):
+        if "count(r)" in cypher:
+            # The capacity baseline: how many rollups the graph holds now.
+            return _Result([[len(self.agg)]])
         if "RETURN 1 LIMIT 1" in cypher and "aggKey IS NULL" not in cypher:
             return _Result([[1]] if self.agg else [])
         if "max(ID(r))" in cypher:
             rids = [v["rid"] for v in self.agg.values()]
             return _Result([[max(rids, default=None)]])
+        if "UNWIND $keys AS k" in cypher and "RETURN k, ID(r)" in cypher:
+            # Keys-only reconcile, pass 2: comparison columns by aggKey.
+            self.lookup_queries += 1
+            wanted = set(params["keys"])
+            rows = []
+            for v in self.agg.values():
+                if v.get("aggKey") in wanted:
+                    rows.append([
+                        v["aggKey"], v["rid"], v["weight"], v["digest"],
+                        v.get("types") or [], v.get("sl"), v.get("tl"),
+                        v.get("sd"), v.get("td"),
+                    ])
+            return _Result(rows)
         if "WHERE ID(r) >= $lo AND ID(r) < $hi" in cypher:
             lo, hi = params["lo"], params["hi"]
+            keys_only = "RETURN ID(a), ID(b), ID(r), r.aggKey, r.latestUpdate" in cypher
             rows = []
             for (aid, bid), v in self.agg.items():
                 if lo <= v["rid"] < hi:
-                    rows.append([
-                        aid, bid, v["aggKey"], v["weight"], v["digest"],
-                        v["latest"], v.get("types") or [], v.get("sl"),
-                        v.get("tl"), v.get("sd"), v.get("td"),
-                    ])
+                    if keys_only:
+                        rows.append([aid, bid, v["rid"], v["aggKey"], v["latest"]])
+                    else:
+                        rows.append([
+                            aid, bid, v["aggKey"], v["weight"], v["digest"],
+                            v["latest"], v.get("types") or [], v.get("sl"),
+                            v.get("tl"), v.get("sd"), v.get("td"),
+                        ])
             return _Result(rows)
         raise AssertionError(f"unhandled agg read: {cypher}")
 
@@ -233,7 +258,7 @@ def _run(coro):
 
 
 async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None,
-                       tuning=None):
+                       tuning=None, capacity_hints_override=None, job_id=None):
     # The suite pins the BOUNDARY (depth-diagonal) mechanics — the mode
     # every graph too big for the full cube runs in. Auto/cube behavior
     # has its own dedicated tests below.
@@ -244,10 +269,12 @@ async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None
         containment_edge_types=["CONTAINS"],
         lineage_edge_types=["FLOWS"],
         last_cursor=last_cursor,
+        job_id=job_id,
         progress_callback=progress,
         intra_batch_callback=None,
         should_cancel=should_cancel,
         tuning=merged,
+        capacity_hints=capacity_hints_override,
     )
 
 
@@ -1013,6 +1040,96 @@ def test_overflow_flush_keeps_exact_weights(monkeypatch):
     assert result["aggregated_edges_affected"] == n_pairs + 1
 
 
+def _four_thousand_pairs(fake, n_pairs=4097):
+    """The overflow test's graph: n column pairs under n table pairs under
+    one domain pair, every table pair weight 1, the domain pair n."""
+    fake.add_node(1, "urn:dom_a", "domain")
+    fake.add_node(2, "urn:dom_b", "domain")
+    nid, rid = 10, 0
+    for i in range(n_pairs):
+        ta, ca, tb, cb = nid, nid + 1, nid + 2, nid + 3
+        nid += 4
+        fake.add_node(ta, f"urn:ta{i}", "table")
+        fake.add_node(ca, f"urn:ca{i}", "column")
+        fake.add_node(tb, f"urn:tb{i}", "table")
+        fake.add_node(cb, f"urn:cb{i}", "column")
+        fake.add_edge("CONTAINS", rid, 1, ta); rid += 1
+        fake.add_edge("CONTAINS", rid, ta, ca); rid += 1
+        fake.add_edge("CONTAINS", rid, 2, tb); rid += 1
+        fake.add_edge("CONTAINS", rid, tb, cb); rid += 1
+        fake.add_edge("FLOWS", rid, ca, cb); rid += 1
+    return {"domain": 0, "table": 1, "column": 2}
+
+
+def _pressured_gauge(monkeypatch, rss, limit):
+    """Every pipeline built from here on sees the worker at ``rss`` MB of a
+    ``limit`` MB cgroup limit (None = unreadable)."""
+    monkeypatch.setattr(mat.MemoryGauge, "sample", lambda self: (rss, limit))
+
+
+def test_memory_pressure_flushes_early_with_exact_weights_and_reports_it(monkeypatch):
+    """A worker at 73% of its limit with 1,000+ pairs pending flushes on
+    memory long before the pair cap (50M) — the same exact-weight
+    flush the cap triggers — and the run says how often and how high."""
+    # The env floor is 10k pairs (a smaller flush is not worth its writes);
+    # the mechanism is exercised on a 4k-pair graph by lowering the bar.
+    monkeypatch.setattr(mat, "_flush_min_pairs", lambda: 1000)
+    _pressured_gauge(monkeypatch, 3000.0, 4096.0)
+    n_pairs = 4097
+    fake = _FakeFalkor()
+    levels = _four_thousand_pairs(fake, n_pairs)
+    rollups = {"n": 0}
+    real_rollup = mat.AggregationPipeline._rollup_base
+
+    async def counting_rollup(self, base):
+        rollups["n"] += 1
+        return await real_rollup(self, base)
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_rollup_base", counting_rollup)
+    result = _run(_materialize(_make_provider(fake, levels)))
+
+    assert len(fake.agg) == n_pairs + 1
+    assert fake.agg[(1, 2)]["weight"] == n_pairs
+    assert all(edge["weight"] == 1 for key, edge in fake.agg.items() if key != (1, 2))
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["memory_flushes"] >= 1
+    assert adapted["rss_high_water_mb"] == 3000 and adapted["mem_limit_mb"] == 4096
+    # The base map rolls up on pressure too, so the extract phase never
+    # holds more than it must: more than the single end-of-extract roll-up.
+    assert rollups["n"] >= 2 and adapted["memory_rollups"] >= 1
+
+
+def test_no_memory_flush_when_the_limit_is_unknown_or_the_pairs_are_few(monkeypatch):
+    fake = _FakeFalkor()
+    levels = _four_thousand_pairs(fake)
+    # Unknown limit: fail-open — the pair cap alone bounds memory.
+    monkeypatch.setattr(mat, "_flush_min_pairs", lambda: 1000)
+    _pressured_gauge(monkeypatch, 3000.0, None)
+    result = _run(_materialize(_make_provider(fake, levels)))
+    assert "memory_flushes" not in result["run_stats"].get("adapted", {})
+    # Pressure with too few pairs to make a flush worth its writes (the
+    # env floor, 10k, is already above this graph's 4k pairs).
+    fake2 = _FakeFalkor()
+    _four_thousand_pairs(fake2)
+    monkeypatch.setattr(mat, "_flush_min_pairs", lambda: 10_000)
+    _pressured_gauge(monkeypatch, 4000.0, 4096.0)
+    result = _run(_materialize(_make_provider(fake2, levels)))
+    assert "memory_flushes" not in result["run_stats"].get("adapted", {})
+    assert len(fake2.agg) == 4097 + 1
+
+
+def test_the_flush_share_is_a_fleet_knob_resolved_like_the_others(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_FLUSH_MEM_PCT", "70")
+    values, sources = mat.resolve_effective_tuning({"flush_mem_pct": 95}, None)
+    assert values["flush_mem_pct"] == 90 and sources["flush_mem_pct"] == "job"   # clamped to the bound
+    values, sources = mat.resolve_effective_tuning(None, None)
+    assert values["flush_mem_pct"] == 70 and sources["flush_mem_pct"] == "env"
+    pipe = _make_pipeline()
+    assert pipe._flush_pct == 70
+    assert mat.env_tuning_defaults()["flush_mem_pct"] == 70
+    assert mat.env_tuning_defaults()["flush_min_pairs"] == 100_000
+
+
 def test_write_budget_counts_flushed_and_pending_as_union(monkeypatch):
     """A key flushed earlier AND re-touched since sits in both the
     flushed set and the accumulator — the budget must count it once.
@@ -1636,8 +1753,9 @@ def test_auto_mode_materializes_full_cube_within_budget():
     # fallback must never be a silent log line.
     assert result["run_stats"]["regime"] == "cube"
     assert result["run_stats"]["cube_estimate"] >= len(agg)
-    # The DEFAULT budget (no tuning override here) — sized per shard.
-    assert result["run_stats"]["materialize_budget"] == 25_000_000
+    # The DEFAULT budget (no tuning override here) — what the apply could
+    # write inside the job's wall clock, per shard.
+    assert result["run_stats"]["materialize_budget"] == mat._wall_clock_edges()
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.
@@ -1856,7 +1974,9 @@ def test_query_memory_refusal_at_floor_width_is_terminal(monkeypatch):
     assert "extract:" in msg
     assert "10000" in msg
     assert "Query's mem consumption exceeded capacity" in msg
-    assert "AGGREGATION_SCAN_SHRINK_FLOOR" in msg
+    # The descent was stopped by the floor, and the message says so — and
+    # says what to do about it (set it to 1).
+    assert "AGGREGATION_SCAN_SHRINK_FLOOR" in msg and "scanShrinkFloor" in msg
     assert "QUERY_MEM_CAPACITY" in msg
     assert "NOT retried" in msg
 
@@ -1882,6 +2002,7 @@ def test_timeout_at_floor_width_still_propagates_unchanged(monkeypatch):
     provider outage, not a payload-size fact, and must keep propagating as a
     TimeoutError so the worker's ordinary retry path handles it."""
     monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "10000")
+    monkeypatch.setenv("AGGREGATION_SCAN_TIMEOUT_RETRIES", "0")
     fake = _FakeFalkor()
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
@@ -1904,3 +2025,2005 @@ def test_clean_run_reports_no_scan_pressure():
     stats = pipe._result(10)["run_stats"]
     assert "scan_width_min" not in stats
     assert "scan_shrinks" not in stats
+    assert "adapted" not in stats
+
+
+# ── the ladder never gives up before a single row ──────────────────────
+#
+# The operator's ask: go slower, but always complete. Every per-query
+# pressure signal (memory ceiling, timeout — client deadline OR the server's
+# own refusal) is absorbed by reading less per query: serial waves first,
+# then the keys-only reconcile strategy, then narrower and narrower slices
+# down to ONE row; writes and deletes halve their batches the same way. Only
+# a single row that still exceeds the ceiling is terminal, and the message
+# names it.
+
+
+def test_first_pressure_event_drops_wave_concurrency_to_one(monkeypatch):
+    """Four concurrent scans of a store that just refused one for size get
+    nothing from three more of them: the first pressure event of a run pins
+    wave concurrency to 1, and the run says so."""
+    monkeypatch.delenv("AGGREGATION_SCAN_SHRINK_FLOOR", raising=False)
+    fake, p, ceiling = _seeded_provider_with_ceiling(fits=100_000)
+
+    result = _run(_materialize(p, tuning={
+        "scan_range_width": 200_000, "extract_concurrency": 4,
+    }))
+
+    assert ceiling.refusals >= 1
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["extract_concurrency"] == 1
+    assert adapted["scan_width_min"] == 100_000
+    assert adapted["pressure"][0]["kind"] == "memory"
+    # Containment is scanned first, so that is the scan the event names.
+    assert adapted["by_scan"]["extract:CONTAINS"]["events"] >= 1
+
+
+def test_effective_concurrency_is_pinned_by_the_first_pressure_event():
+    pipe = _make_pipeline()
+    pipe._tuning["extract_concurrency"] = 4
+    assert pipe._effective_conc() == 4
+    pipe._on_pressure("extract:FLOWS", "timeout", 0, 100, size=100)
+    assert pipe._effective_conc() == 1
+    # A later event does not "re-drop"; the cap is sticky for the run.
+    pipe._on_pressure("reconcile:AGGREGATED", "memory", 0, 100, size=100)
+    assert pipe._effective_conc() == 1
+    assert pipe._adapted_snapshot()["extract_concurrency"] == 1
+
+
+def _seed_reconcile_scenario(fake):
+    """A previous generation with every kind of drift the reconcile must
+    classify: a stale cell, a desired cell with a wrong weight, and a
+    desired cell that is already right."""
+    levels = _seed_two_chain_graph(fake)
+    fake.seed_aggregated(1, 12, weight=9, latest=1000, agg_key="urn:domain_abc|urn:table_b")  # stale
+    fake.seed_aggregated(2, 12, weight=7, latest=1000, sl=1, tl=1, sd=1, td=1)              # wrong weight
+    fake.seed_aggregated(1, 11, weight=2, latest=1000, digest="digest-1",
+                         sl=0, tl=0, sd=0, td=0)                                              # already right
+    return levels
+
+
+def test_reconcile_switches_to_keys_only_under_pressure_and_the_result_is_identical(monkeypatch):
+    """When halving the 11-column RECONCILE projection would take it under
+    the keys-only width, the scan switches strategy instead: a light key
+    pass, then an aggKey index seek for the desired keys only. The graph
+    must end up byte-identical to what the single-pass reconcile produces
+    on the same drift."""
+    monkeypatch.delenv("AGGREGATION_SCAN_SHRINK_FLOOR", raising=False)
+    monkeypatch.setenv("AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH", "100000")
+
+    plain = _FakeFalkor()
+    levels = _seed_reconcile_scenario(plain)
+    _run(_materialize(_make_provider(plain, levels), tuning={"scan_range_width": 200_000}))
+
+    pressed = _FakeFalkor()
+    levels = _seed_reconcile_scenario(pressed)
+    p = _make_provider(pressed, levels)
+    ceiling = _MemoryCeiling(pressed.ro_query, 100_000, only_aggregated=True)
+    p._ro_query = ceiling
+    p._proj_ro_query = ceiling
+    result = _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    assert ceiling.refusals >= 1
+    assert pressed.lookup_queries >= 1, "pass 2 must have run"
+    assert result["run_stats"]["adapted"]["reconcile_strategy"] == "keys_only"
+    # The switch replaced a halving: the width stayed at 200k → 100k.
+    assert result["run_stats"]["adapted"].get("scan_width_min", 100_000) >= 100_000
+    # Identical outcome: same cells, same weights, same deletions.
+    assert {k: v["weight"] for k, v in pressed.agg.items()} == {k: v["weight"] for k, v in plain.agg.items()}
+    assert set(pressed.deleted_pairs) == set(plain.deleted_pairs)
+    assert (1, 12) in pressed.deleted_pairs
+    assert pressed.agg[(2, 12)]["weight"] == 2 and pressed.agg[(1, 11)]["weight"] == 2
+    assert set(pressed.agg) == _EXPECTED_PAIRS
+
+
+def test_keys_only_reconcile_reads_comparison_columns_only_for_desired_keys():
+    """Pass 2 is bounded by the desired, not-yet-flushed keys pass 1 saw —
+    never by the stale ones, which go straight to the delete list."""
+    fake = _FakeFalkor()
+    levels = _seed_reconcile_scenario(fake)
+    p = _make_provider(fake, levels)
+    seen_keys = []
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, **kw):
+        if "UNWIND $keys AS k" in cypher:
+            seen_keys.extend(params["keys"])
+        return await orig(cypher, params, **kw)
+
+    p._ro_query = spy
+    p._proj_ro_query = spy
+    pipe = mat.AggregationPipeline(
+        p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+        last_cursor=None, progress_callback=None, intra_batch_callback=None,
+        should_cancel=None,
+        tuning={"materialize_fine_pairs": False, "scan_range_width": 200_000},
+    )
+    pipe._reconcile_strategy = "keys_only"
+    _run(pipe.run())
+    assert seen_keys, "pass 2 must have run for the desired keys"
+    # The stale mixed-level cell's key is never looked up.
+    assert "urn:domain_abc|urn:table_b" not in seen_keys
+    assert "urn:table_a|urn:table_b" in seen_keys
+
+
+def test_single_row_memory_refusal_is_terminal_and_names_the_row(monkeypatch):
+    """With the floor at its default (1), the ladder narrows to one row
+    before it concludes; the message names the scan, the ID, the ceiling,
+    and says a narrower read does not exist."""
+    monkeypatch.delenv("AGGREGATION_SCAN_SHRINK_FLOOR", raising=False)
+    _fake, p, _ceiling = _seeded_provider_with_ceiling(fits=0)
+
+    with pytest.raises(mat.MaterializationQueryMemoryExceeded) as exc:
+        _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    msg = str(exc.value)
+    assert "extract:" in msg and "[0, 1)" in msg
+    assert "SINGLE row" in msg and "QUERY_MEM_CAPACITY" in msg
+    assert "dropped read concurrency to 1" in msg
+    assert "NOT retried" in msg
+    from backend.app.services.aggregation.service import classify_failure
+    assert classify_failure(msg) == "query_memory"
+
+
+def test_write_pressure_halves_the_merge_batch_and_every_edge_still_lands(monkeypatch):
+    """A MERGE batch the store refuses (timeout here) is re-issued as two
+    halves, down to one row, and the run completes with every edge written
+    exactly once at the right weight — and reports the batch it needed.
+
+    Writes are batched per LABEL PAIR, so a third chain (table_c under
+    domain_abc, col_c → col_b) makes the table→table batch two rows wide."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    fake.add_node(21, "urn:table_c", "table")
+    fake.add_node(22, "urn:col_c", "column")
+    fake.add_edge("CONTAINS", 4, 1, 21)
+    fake.add_edge("CONTAINS", 5, 21, 22)
+    fake.add_edge("FLOWS", 12, 22, 13)
+    p = _make_provider(fake, levels)
+    orig = fake.proj_query
+    refusals = []
+
+    async def refuse_wide(cypher, params=None, **kw):
+        batch = (params or {}).get("batch")
+        if batch is not None and "MERGE (s)-[r:AGGREGATED" in cypher and len(batch) > 1:
+            refusals.append(len(batch))
+            raise Exception("Query timed out")
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refuse_wide
+    result = _run(_materialize(p))
+
+    assert refusals == [2], refusals
+    assert {k: v["weight"] for k, v in fake.agg.items()} == {(2, 12): 2, (21, 12): 1, (1, 11): 3}
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["write_batch_min"] == 1 and adapted["write_shrinks"] >= 1
+    assert adapted["pressure"][0]["scan"] == "apply:merge"
+    assert result["writes"] == 3
+
+
+def test_delete_pressure_halves_the_chunk_and_every_stale_cell_still_goes(monkeypatch):
+    """The keyed delete halves under a memory refusal exactly like a write:
+    three stale cells refused as one chunk go one by one."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    for pair in ((1, 12), (2, 11), (3, 12)):
+        fake.seed_aggregated(*pair, weight=5, latest=1000)
+    p = _make_provider(fake, levels)
+    orig = fake.proj_query
+    refusals = []
+
+    async def refuse_wide(cypher, params=None, **kw):
+        keys = (params or {}).get("keys")
+        if keys is not None and "DELETE r" in cypher and len(keys) > 1:
+            refusals.append(len(keys))
+            raise Exception("Query's mem consumption exceeded capacity")
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refuse_wide
+    result = _run(_materialize(p))
+
+    assert refusals == [3, 2] or refusals == [3, 2, 2], refusals
+    assert {(1, 12), (2, 11), (3, 12)} <= set(fake.deleted_pairs)
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["delete_chunk_min"] == 1
+    assert result["deletes"] == 3
+
+
+def test_single_row_write_memory_refusal_is_terminal_with_write_guidance():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    async def refuse_all(cypher, params=None, **kw):
+        if (params or {}).get("batch") is not None and "MERGE (s)-[r:AGGREGATED" in cypher:
+            raise Exception("Query's mem consumption exceeded capacity")
+        return await fake.proj_query(cypher, params, **kw)
+
+    p._proj_query = refuse_all
+    with pytest.raises(mat.MaterializationQueryMemoryExceeded) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "write query apply:merge" in msg and "1 rows" in msg
+    assert "NOT retried" in msg
+
+
+# ── learn and remember: hints seed the ladder, never widen it ──────────
+
+
+class _WidthSpy:
+    """Records every ID-range scan width the pipeline issues."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.widths = []
+
+    async def __call__(self, cypher, params=None, **kw):
+        params = params or {}
+        if params.get("lo") is not None and params.get("hi") is not None:
+            self.widths.append(params["hi"] - params["lo"])
+        return await self._inner(cypher, params, **kw)
+
+
+def _spied_provider():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    spy = _WidthSpy(fake.ro_query)
+    p._ro_query = spy
+    p._proj_ro_query = spy
+    return fake, p, spy
+
+
+def test_hints_start_the_scans_at_what_the_last_run_needed():
+    fake, p, spy = _spied_provider()
+    result = _run(_materialize(
+        p, tuning={"scan_range_width": 200_000},
+        capacity_hints_override={"scan_width_observed": 50_000, "extract_concurrency_observed": 1},
+    ))
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    assert spy.widths and spy.widths[0] == 50_000, spy.widths
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["from_last_run"] == {"scan_width": 50_000}   # conc hint == knob → not stricter
+    # A run that hit no pressure of its own reports none — and so teaches
+    # nothing (the worker's _learned_from clears the lesson).
+    assert "pressure" not in adapted and "scan_width_min" not in adapted
+
+
+def test_a_stricter_knob_beats_a_looser_hint_and_ignore_observed_starts_from_the_knob():
+    _fake, p, spy = _spied_provider()
+    _run(_materialize(
+        p, tuning={"scan_range_width": 20_000},
+        capacity_hints_override={"scan_width_observed": 50_000},
+    ))
+    assert spy.widths[0] == 20_000                     # the hint would have widened it
+
+    _fake, p, spy = _spied_provider()
+    result = _run(_materialize(
+        p, tuning={"scan_range_width": 200_000, "ignore_observed": True},
+        capacity_hints_override={"scan_width_observed": 50_000, "reconcile_strategy_observed": "keys_only"},
+    ))
+    assert spy.widths[0] == 200_000
+    assert "adapted" not in result["run_stats"]
+
+
+def test_a_keys_only_hint_starts_the_reconcile_in_keys_only():
+    fake = _FakeFalkor()
+    levels = _seed_reconcile_scenario(fake)
+    p = _make_provider(fake, levels)
+    result = _run(_materialize(
+        p, tuning={"scan_range_width": 200_000},
+        capacity_hints_override={"reconcile_strategy_observed": "keys_only", "extract_concurrency_observed": 1},
+    ))
+    assert fake.lookup_queries >= 1
+    assert result["run_stats"]["adapted"]["reconcile_strategy"] == "keys_only"
+    assert result["run_stats"]["adapted"]["from_last_run"]["reconcile_strategy"] == "keys_only"
+    assert (1, 12) in fake.deleted_pairs and fake.agg[(2, 12)]["weight"] == 2
+
+
+def test_run_stats_always_carry_the_query_ceiling_when_the_shard_says(monkeypatch):
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    async def shard_with_cap(db, *, mode, graph_key, timeout, **kw):
+        return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured",
+                            None, 512 * 2**20)
+
+    monkeypatch.setattr(mat, "read_shard_memory", shard_with_cap)
+    result = _run(_materialize(p))
+    assert result["run_stats"]["query_mem_capacity"] == 512 * 2**20
+    assert result["run_stats"]["write_budget"]["shard"]["query_mem_capacity"] == 512 * 2**20
+
+    async def shard_without_cap(db, *, mode, graph_key, timeout, **kw):
+        return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured")
+
+    monkeypatch.setattr(mat, "read_shard_memory", shard_without_cap)
+    result = _run(_materialize(_make_provider(_FakeFalkor(), levels)))
+    assert result["run_stats"]["query_mem_capacity"] is None
+    assert "query_mem_capacity" not in result["run_stats"]["write_budget"]["shard"]
+
+
+def test_the_budget_read_teaches_the_provider_its_nodes_cap(monkeypatch):
+    """A cap raised at runtime reaches the clamp on the next rebuild: the
+    budget's reading carries TIMEOUT_MAX and the thread count, and from
+    then on the provider clamps to the node instead of the env mirror."""
+    from backend.app.config import resilience
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    assert p._db_timeout_ms(600) == 180_000
+
+    async def shard_with_limits(db, *, mode, graph_key, timeout, **kw):
+        return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured",
+                            None, 512 * 2**20, 300_000, 30_000, 4)
+
+    monkeypatch.setattr(mat, "read_shard_memory", shard_with_limits)
+    _run(_materialize(p))
+    assert p._server_timeout_cap_ms() == 300_000 and p._db_timeout_ms(600) == 300_000
+    assert p.server_query_mem_capacity() == 512 * 2**20
+    assert p.server_limits_for("10.0.0.1:6379")["thread_count"] == 4
+
+
+# ── the per-run record: what it ran with, where each value came from ───
+
+
+def test_effective_tuning_resolves_exactly_as_the_knob_readers_do(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_SCAN_RANGE_WIDTH", "150000")
+    tuning = {"scan_range_width": 9_000_000, "write_pacing_ratio": "2.5", "materialize_fine_pairs": "auto",
+              "delete_chunk": "nope", "max_materialized_edges": 1_000_000, "scan_shrink_floor": 500_000}
+    hints = {"bytes_per_edge_observed": 640}
+    values, sources = mat.resolve_effective_tuning(tuning, hints, bulk_timeout_default=45.0)
+    p = _make_provider(_FakeFalkor(), {"domain": 0})
+    p._bulk_create_timeout_s = 45.0
+    pipe = mat.AggregationPipeline(
+        p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+        tuning=tuning, capacity_hints=hints,
+    )
+    assert values["scan_range_width"] == pipe._knob_int("scan_range_width", mat._scan_range_width, 10_000, 5_000_000) == 5_000_000
+    assert values["write_pacing_ratio"] == pipe._pacing_ratio == 2.5
+    assert values["delete_chunk"] == 10_000 and sources["delete_chunk"] == "env"     # unparsable → env
+    assert values["materialize_fine_pairs"] == "auto" and sources["materialize_fine_pairs"] == "job"
+    assert values["max_materialized_edges"] == 1_000_000 and sources["max_materialized_edges"] == "job"
+    assert values["bytes_per_edge"] == 640 and sources["bytes_per_edge"] == "hint"
+    assert values["scan_shrink_floor"] == 500_000 and values["write_timeout_s"] == 45.0
+    assert values["scan_timeout_s"] == 30.0 and sources["scan_timeout_s"] == "env"
+    assert pipe._effective == values and pipe._effective_sources == sources
+
+    values, sources = mat.resolve_effective_tuning(None, None)
+    assert values["scan_range_width"] == 150_000 and sources["scan_range_width"] == "env"
+    assert values["max_materialized_edges"] is None and values["bytes_per_edge"] == 512
+    assert values["ignore_observed"] is False and sources["ignore_observed"] == "env"
+
+
+def test_checkpoints_carry_the_snapshot_and_the_adaptation_and_the_result_keeps_both():
+    seen = []
+
+    async def progress(*args, **kw):
+        seen.append(kw.get("stats"))
+
+    fake, p, ceiling = _seeded_provider_with_ceiling(fits=100_000)
+    result = _run(_materialize(p, progress=progress, tuning={"scan_range_width": 200_000}))
+    assert ceiling.refusals >= 1
+    stats = [s for s in seen if s]
+    assert stats and all("effective_tuning" in s for s in stats)
+    assert stats[0]["effective_tuning"]["scan_range_width"] == 200_000
+    assert stats[0]["effective_tuning"]["sources"]["scan_range_width"] == "job"
+    assert any(s.get("adapted", {}).get("scan_width_min") == 100_000 for s in stats)
+    eff = result["run_stats"]["effective_tuning"]
+    assert eff["scan_range_width"] == 200_000 and eff["sources"]["materialize_fine_pairs"] == "job"
+    assert result["run_stats"]["adapted"]["scan_width_min"] == 100_000
+
+
+def test_every_checkpoint_carries_what_the_graph_already_stored():
+    """The reconcile breaker compares this number across consecutive FAILED
+    runs to tell a rebuild too large for one wall clock (the stored cube
+    grows every attempt) from one that writes the same cells and dies. So it
+    has to survive a run the watchdog kills, which means every checkpoint and
+    not the result — a killed run never reaches the result.
+
+    The FIRST checkpoint fires before any graph work, deliberately (a
+    parseable cursor before an early crash), so it has nothing to stamp — and
+    stamping a 0 placeholder there would read as "the graph stored nothing"
+    and clear the breaker for a source that never started."""
+    seen = []
+
+    async def progress(*args, **kw):
+        seen.append(kw.get("stats") or {})
+
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    _run(_materialize(p, progress=progress))
+
+    assert seen, "no checkpoints at all"
+    assert "edges_before" not in seen[0], (
+        "the pre-graph-work checkpoint stamped a placeholder as a reading"
+    )
+    stamped = [s["edges_before"] for s in seen if "edges_before" in s]
+    assert stamped, "no checkpoint carried the stored rollup count"
+    # One run reads it once: the baseline cannot move under a single run.
+    assert len(set(stamped)) == 1 and all(isinstance(v, int) for v in stamped)
+
+
+# ── per-query budgets raised on a running job ──────────────────────────
+
+
+def test_a_raised_scan_timeout_applies_to_the_next_query_without_a_restart():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    budgets = []
+    live = {}
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kw):
+        if (params or {}).get("lo") is not None:
+            budgets.append(timeout)
+            # An operator raises the budget while the run is in flight.
+            live["scan_timeout_s"] = 240
+        return await orig(cypher, params, **kw)
+
+    p._ro_query = spy
+    p._proj_ro_query = spy
+    _run(mat.materialize_aggregated_edges(
+        p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+        tuning={"materialize_fine_pairs": False, "scan_timeout_s": 45}, live_limits=live,
+    ))
+    assert budgets[0] == 45.0 and budgets[-1] == 240.0, budgets
+
+    pipe = _make_pipeline()
+    assert pipe._write_timeout() == 60.0                    # the provider's bulk timeout
+    pipe._live["write_timeout_s"] = "nope"
+    assert pipe._write_timeout() == 60.0                    # garbage is ignored
+    pipe._live["write_timeout_s"] = 5_000
+    assert pipe._write_timeout() == 600.0                   # clamped to the knob's bound
+
+
+# ── pure ladder primitives ─────────────────────────────────────────────
+
+
+def test_pressure_kind_tells_the_three_signals_apart():
+    """Two kinds a query can absorb by asking for less, and one it cannot.
+
+    A node that is not answering does not care how small the next query is
+    — the run waits for it and carries on from its checkpoint — so it is a
+    kind of its own rather than the "None, re-raise" it used to be, which
+    is what made a restarted shard a terminal failure."""
+    assert mat._pressure_kind(asyncio.TimeoutError()) == "timeout"
+    assert mat._pressure_kind(TimeoutError()) == "timeout"
+    assert mat._pressure_kind(Exception("Query timed out")) == "timeout"
+    assert mat._pressure_kind(Exception("Query's execution time exceeded the limit")) == "timeout"
+    assert mat._pressure_kind(Exception("Query's mem consumption exceeded capacity")) == "memory"
+    assert mat._pressure_kind(
+        ConnectionError("Error 111 connecting to 10.0.0.3:6379. Connection refused.")
+    ) == "connection"
+    assert mat._pressure_kind(ConnectionRefusedError()) == "connection"
+    # The store answering with its own out-of-memory refusal is neither: the
+    # instance is up and saying no, and shrinking the query does not help.
+    assert mat._pressure_kind(Exception("OOM command not allowed when used memory > 'maxmemory'.")) is None
+
+
+def test_sticky_cap_halves_toward_the_floor_and_regrows_after_eight_successes():
+    cap = mat._StickyCap(1)
+    assert cap.apply(500) == 500                      # no cap in force
+    assert cap.shrink(500) == 250
+    assert cap.apply(500) == 250 and cap.minimum == 250 and cap.shrinks == 1
+    assert cap.shrink(2) == 1                          # floor
+    assert cap.at_floor(1) and not cap.at_floor(2)
+    for _ in range(8):
+        cap.note_success()
+    assert cap.value == 2                              # doubled once
+    assert cap.minimum == 1                            # the high-water mark stays
+
+
+def test_next_scan_width_never_regrows_straight_into_a_failed_width():
+    # Not enough successes yet → unchanged.
+    assert mat._next_scan_width(1_000, 200_000, 4_000, streak=7) == 1_000
+    # Eight successes → double, but 2,000 → 4,000 would hit the failed width.
+    assert mat._next_scan_width(2_000, 200_000, 4_000, streak=8) == 2_000
+    # After a long streak the ladder probes past it once.
+    assert mat._next_scan_width(2_000, 200_000, 4_000, streak=64) == 4_000
+    # No failure recorded for this scan → plain doubling, back to the knob.
+    assert mat._next_scan_width(2_000, 200_000, None, streak=8) == 4_000
+    assert mat._next_scan_width(100_000, 200_000, None, streak=8) is None
+    assert mat._next_scan_width(None, 200_000, None, streak=8) is None
+
+
+def test_backoff_grows_and_caps(monkeypatch):
+    monkeypatch.setattr(mat.random, "uniform", lambda a, b: 0.0)
+    assert [mat._backoff_s(n) for n in range(6)] == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+
+# ── the write budget reads the shard ─────────────────────────────────
+#
+# Everything above ran on the STATIC rule: ``_make_provider`` never connects,
+# so the shard reading is "unavailable" and the count cap governs exactly as
+# it did before the pipeline could measure. These pin the measured path.
+
+from backend.app.providers.shard_capacity import ShardMemory as _ShardMemory
+
+
+class _ShardFake:
+    """A shard whose ``used`` follows what the fake graph stores — the way a
+    real one does — so a re-read after a write sees that write."""
+
+    def __init__(self, fake, *, base_used, maxmemory, bpe=512):
+        self.fake, self.base, self.maxmemory, self.bpe = fake, base_used, maxmemory, bpe
+        self.reads = 0
+
+    async def __call__(self, db, *, mode, graph_key, timeout, **kw):
+        self.reads += 1
+        used = self.base + len(self.fake.agg) * self.bpe
+        return _ShardMemory("10.0.0.1:6379", used, self.maxmemory, "noeviction", 0.0, "measured")
+
+
+def test_a_measured_shard_with_room_passes_a_result_the_static_cap_refused(monkeypatch):
+    """The operator's case: more memory on the shard must change the answer.
+    The static cap says 4 edges; the shard says 40GB; the cube is 8+ cells."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    monkeypatch.setattr(mat, "_max_materialized_edges", lambda: 4)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    shard = _ShardFake(fake, base_used=10 * 2 ** 30, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    assert result["errors"] == 0 and fake.agg
+    wb = result["run_stats"]["write_budget"]
+    assert wb["governed_by"] == "shard" and wb["shard"]["endpoint"] == "10.0.0.1:6379"
+    assert wb["bytes_per_edge_source"] == "default" and wb["reserve_pct"] == 20
+    assert result["run_stats"]["materialize_budget"] == wb["allowed_growth_edges"]
+    # Baseline, the estimate, the pre-apply check, the calibration: read
+    # fresh every time, never cached.
+    assert shard.reads >= 4
+
+
+def test_a_forced_cube_the_shard_cannot_take_is_refused_before_any_write(monkeypatch):
+    """Forced Full detail used to compute, write waves, and fail mid-apply.
+    Now the estimate runs first, and a cube that cannot land is refused with
+    the shard's numbers — and nothing reaches the graph."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    # Room for two edges at 512 B; the cube estimate is 8+.
+    shard = _ShardFake(fake, base_used=40 * 2 ** 30 - 2 * 512, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(
+            p, capacity_hints_override={"cell_ratio_observed": 1.0},
+            tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+
+    msg = str(exc.value)
+    assert msg.startswith("write budget:")
+    assert "upper-bound estimate" in msg and "short by" in msg and "10.0.0.1:6379" in msg
+    assert fake.agg == {}
+
+
+def test_an_uncalibrated_over_budget_estimate_does_not_refuse(monkeypatch):
+    """The bug from production, as a test.
+
+    The pre-compute estimate counts cells PRODUCED — for every raw lineage
+    edge, the product of its endpoints' ancestor-chain lengths. The graph
+    stores cells DISTINCT, because the write MERGEs on aggKey and many raw
+    edges collapse onto one cell. On a graph that aggregates 50:1 the estimate
+    is fifty times the truth, so refusing on it refused graphs for aggregating
+    WELL — a 700k-node graph estimated at 30M cells and failed in seconds.
+
+    An upper bound supports exactly one inference: if it FITS, the real thing
+    fits. "It does not fit" says nothing. So without a measured ratio for this
+    source the run proceeds, and the EXACT post-compute check — which is still
+    there, and still refuses before a single write reaches the shard — is what
+    decides.
+
+    Same graph and same shard as the refusal test above; the only difference
+    is that this source has never been measured.
+    """
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    shard = _ShardFake(fake, base_used=40 * 2 ** 30 - 2 * 512, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    # No cell_ratio_observed anywhere: this source has never completed a run.
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, tuning={
+            "materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+
+    # It still refuses — but on the EXACT count, after compute, not on the
+    # estimate. That distinction is the whole fix: the numbers in the message
+    # are ones that were measured rather than multiplied.
+    assert "upper-bound estimate" not in str(exc.value)
+    assert fake.agg == {}
+
+
+def test_a_run_reports_the_bound_the_correction_and_the_truth(monkeypatch):
+    """Nothing compared the estimate to the outcome before, which is how an
+    overshoot of fifty times stayed invisible. All three numbers ride on the
+    run so the estimator can be held to account."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory",
+                        _ShardFake(fake, base_used=0, maxmemory=40 * 2 ** 30))
+    result = _run(_materialize(_make_provider(fake, levels), tuning={
+        "materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+
+    stats = result["run_stats"]
+    assert stats["cube_estimate_upper"] >= stats["cells_exact"] > 0, (
+        "the bound must actually bound")
+    assert 0 < stats["cell_ratio_observed"] <= 1.0
+    # And what it learned reproduces what it saw.
+    assert round(stats["cube_estimate_upper"] * stats["cell_ratio_observed"]) == \
+        pytest.approx(stats["cells_exact"], rel=0.02)
+
+
+class _Ledger:
+    """A stand-in admission controller with only the reservation ledger:
+    records every call; what OTHER rebuilds hold is set by the test."""
+
+    def __init__(self, others=(0, 0)):
+        self.others = others
+        self.calls = []
+
+    async def acquire_graph_lease(self, provider, owner=""):
+        return None
+
+    async def release_graph_lease(self, lease):
+        pass
+
+    def write_slot(self, provider, *, node=None):
+        return contextlib.nullcontext()
+
+    async def reserved_by_others(self, endpoint, job_id):
+        self.calls.append(("others", endpoint, job_id))
+        return self.others
+
+    async def reserve(self, endpoint, job_id, nbytes):
+        self.calls.append(("reserve", endpoint, job_id, nbytes))
+        return types.SimpleNamespace(endpoint=endpoint, job_id=job_id, bytes=nbytes)
+
+    async def update(self, reservation, nbytes):
+        self.calls.append(("update", reservation.endpoint, reservation.job_id, nbytes))
+        reservation.bytes = nbytes
+
+    async def release(self, reservation):
+        self.calls.append(("release", reservation.endpoint, reservation.job_id))
+
+
+def test_a_rebuild_holds_its_growth_in_the_nodes_ledger_until_it_is_done(monkeypatch):
+    """The budget asks what other rebuilds hold on the node, and once a check
+    passes the run enters its own still-to-land bytes — the growth at bytes
+    per edge — under its job id, releasing them when it is done."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    ledger = _Ledger()
+    p._admission_controller = ledger
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": True}, job_id="job-1"))
+
+    assert result["errors"] == 0 and fake.agg
+    assert ("others", "10.0.0.1:6379", "job-1") in ledger.calls
+    reserves = [c for c in ledger.calls if c[0] == "reserve"]
+    assert reserves == [("reserve", "10.0.0.1:6379", "job-1", len(fake.agg) * 512)]   # every cell was new
+    assert ledger.calls[-1] == ("release", "10.0.0.1:6379", "job-1")
+    assert [c for c in ledger.calls if c[0] == "release"] == [ledger.calls[-1]]
+    wb = result["run_stats"]["write_budget"]
+    assert (wb["reserved_bytes"], wb["reserved_by_jobs"]) == (0, 0)
+
+
+def test_another_rebuilds_hold_on_the_node_counts_as_used_memory(monkeypatch):
+    """Room for 100 edges, of which another rebuild holds 99: the cube's 8+
+    cells are refused with the hold named, nothing is written, and nothing
+    is entered in the ledger for a run that never passed a check."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=40 * 2 ** 30 - 100 * 512, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    ledger = _Ledger(others=(99 * 512, 1))
+    p._admission_controller = ledger
+
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}, job_id="job-2"))
+
+    msg = str(exc.value)
+    assert "49.5 KiB held by 1 other rebuild still writing" in msg and "short by" in msg
+    assert fake.agg == {}
+    assert not any(c[0] in ("reserve", "update", "release") for c in ledger.calls)
+
+
+def test_the_cube_ceiling_is_a_fleet_knob_read_over_the_env(monkeypatch):
+    """The same 18-cell graph: the env ceiling (10) alone keeps Auto on the
+    depth-diagonal; a Defaults value (the 10,000 floor) on the job lets the
+    cube through — and the run's record says where the ceiling came from."""
+    monkeypatch.setattr(mat, "_max_cube_edges", lambda: 10)
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    result = _run(_materialize(_make_provider(fake, levels), tuning={"materialize_fine_pairs": "auto"}))
+    assert result["run_stats"]["regime"] == "boundary" and result["run_stats"]["cube_estimate"] == 18
+    assert result["run_stats"]["effective_tuning"]["max_cube_edges"] == 10
+    assert result["run_stats"]["effective_tuning"]["sources"]["max_cube_edges"] == "env"
+
+    fake2 = _FakeFalkor()
+    levels2 = _seed_self_nesting_graph(fake2, depth=3)
+    result = _run(_materialize(_make_provider(fake2, levels2), tuning={
+        "materialize_fine_pairs": "auto", "max_cube_edges": 10_000,
+    }))
+    assert result["run_stats"]["regime"] == "cube"
+    assert result["run_stats"]["effective_tuning"]["max_cube_edges"] == 10_000
+    assert result["run_stats"]["effective_tuning"]["sources"]["max_cube_edges"] == "job"
+
+
+def test_the_cube_ceiling_and_margin_resolve_like_every_other_knob(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_MAX_CUBE_EDGES", "4000000")
+    monkeypatch.setenv("AGGREGATION_ESTIMATE_MARGIN_PCT", "30")
+    values, sources = mat.resolve_effective_tuning({"max_cube_edges": 20_000, "estimate_margin_pct": 150}, None)
+    assert (values["max_cube_edges"], sources["max_cube_edges"]) == (20_000, "job")
+    assert (values["estimate_margin_pct"], sources["estimate_margin_pct"]) == (100, "job")   # clamped
+    values, sources = mat.resolve_effective_tuning(None, None)
+    assert (values["max_cube_edges"], sources["max_cube_edges"]) == (4_000_000, "env")
+    assert (values["estimate_margin_pct"], sources["estimate_margin_pct"]) == (30, "env")
+    env = mat.env_tuning_defaults()
+    assert env["max_cube_edges"] == 4_000_000 and env["estimate_margin_pct"] == 30
+
+
+def test_the_estimate_margin_is_a_fleet_knob_a_forced_cube_is_checked_with(monkeypatch):
+    """The two-chain graph estimates 18 cells and stores 8. Room for 15:
+    the default 25% margin lets the estimate through and the exact count
+    lands; a margin of 0 on the job refuses the same cube up front."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    for margin, expect_ok in ((None, True), (0, False)):
+        fake = _FakeFalkor()
+        levels = _seed_two_chain_graph(fake)
+        monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=40 * 2 ** 30 - 15 * 512, maxmemory=40 * 2 ** 30))
+        tuning = {"materialize_fine_pairs": True, "shard_reserve_pct": 0}
+        if margin is not None:
+            tuning["estimate_margin_pct"] = margin
+        if expect_ok:
+            result = _run(_materialize(_make_provider(fake, levels), capacity_hints_override={"cell_ratio_observed": 1.0}, tuning=tuning))
+            assert result["run_stats"]["cube_estimate"] == 18 and len(fake.agg) == 8
+            assert result["run_stats"]["effective_tuning"]["estimate_margin_pct"] == 25
+        else:
+            with pytest.raises(mat.MaterializationBudgetExceeded, match="0% margin"):
+                _run(_materialize(_make_provider(fake, levels), capacity_hints_override={"cell_ratio_observed": 1.0}, tuning=tuning))
+            assert fake.agg == {}
+
+
+def test_auto_never_picks_a_cube_the_shard_would_refuse(monkeypatch):
+    """Auto's own ceiling is generous here; the SHARD is what says no. The
+    depth-diagonal still fits, so the run degrades instead of failing."""
+    fake0 = _FakeFalkor()
+    levels0 = _seed_self_nesting_graph(fake0, depth=3)
+    _run(_materialize(_make_provider(fake0, levels0), tuning={"materialize_fine_pairs": False}))
+    boundary_cells = len(fake0.agg)
+    assert 0 < boundary_cells < 18            # the cube estimate is 18 cells
+
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    shard = _ShardFake(fake, base_used=40 * 2 ** 30 - boundary_cells * 512, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, capacity_hints_override={"cell_ratio_observed": 1.0}, tuning={
+        "materialize_fine_pairs": "auto", "shard_reserve_pct": 0,
+        "max_materialized_edges": 50_000_000,
+    }))
+    assert result["errors"] == 0
+    assert result["run_stats"]["regime"] == "boundary"
+    assert result["run_stats"]["cube_estimate"] == 18
+
+
+def test_an_explicit_ceiling_still_caps_a_shard_with_room(monkeypatch):
+    """The operator's ceiling is an OPTIONAL cap on the total, layered over
+    the shard's answer — and the refusal points at the ceiling, not the shard."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    with pytest.raises(mat.MaterializationBudgetExceeded, match="maxMaterializedEdges=10,000") as exc:
+        # 10,000 is the schema floor; the cube is 8+ cells but a ceiling of
+        # 10,000 still passes it — so pin the ceiling below by monkeypatching
+        # the clamp floor is not the point. Use the pipeline's own resolver.
+        pipe = mat.AggregationPipeline(
+            p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+            last_cursor=None, progress_callback=None, intra_batch_callback=None,
+            should_cancel=None, tuning={"materialize_fine_pairs": True, "max_materialized_edges": 10_000},
+        )
+        pipe._edges_before = 0
+        pipe._flushed = set()
+        pipe._acc = {k: None for k in range(10_001)}
+        _run(pipe._check_write_budget())
+    assert "clear the ceiling" in str(exc.value)
+
+
+def test_a_fresh_run_records_what_it_measured_and_a_resumed_run_says_why_not(monkeypatch):
+    monkeypatch.setattr(mat, "calibrate_bytes_per_edge", lambda **kw: 777)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    result = _run(_materialize(_make_provider(fake, levels)))
+    assert result["run_stats"]["bytes_per_edge_observed"] == 777
+    assert result["run_stats"]["calibration"] == "measured"
+
+    # A resumed run's starting point is gone — no calibration, and it says so.
+    fake2 = _FakeFalkor()
+    levels2 = _seed_two_chain_graph(fake2)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake2, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    monkeypatch.setattr(mat, "parse_cursor", lambda cursor: (1, mat.PHASE_AGGREGATE, 0))
+    result2 = _run(_materialize(_make_provider(fake2, levels2), last_cursor="v3:resume"))
+    assert result2["run_stats"]["calibration"] == "skipped_resume"
+    assert "bytes_per_edge_observed" not in result2["run_stats"]
+
+
+def test_an_unmeasurable_shard_cannot_calibrate_and_says_so():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    result = _run(_materialize(_make_provider(fake, levels)))     # no client → unavailable
+    assert result["run_stats"]["calibration"] == "skipped_unmeasured"
+    assert result["run_stats"]["write_budget"]["governed_by"] == "static"
+
+
+def test_the_workers_calibrated_figure_beats_the_default_and_tuning_beats_both(monkeypatch):
+    def run_with(hints, tuning):
+        fake = _FakeFalkor()
+        levels = _seed_two_chain_graph(fake)
+        monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+        r = _run(mat.materialize_aggregated_edges(
+            _make_provider(fake, levels),
+            containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+            last_cursor=None, progress_callback=None, intra_batch_callback=None,
+            should_cancel=None, tuning={"materialize_fine_pairs": False, **tuning},
+            capacity_hints=hints,
+        ))
+        wb = r["run_stats"]["write_budget"]
+        return wb["bytes_per_edge"], wb["bytes_per_edge_source"]
+
+    assert run_with({}, {}) == (512, "default")
+    assert run_with({"bytes_per_edge_observed": 900}, {}) == (900, "calibrated")
+    assert run_with({"bytes_per_edge_observed": 900}, {"bytes_per_edge": 1024}) == (1024, "tuning")
+
+
+# ── mid-apply recheck ───────────────────────────────────────────────────
+
+
+class _FillingShard(_ShardFake):
+    """A shard another graph is filling while this apply lands: it reads
+    roomy until anything of ours has landed, then full."""
+
+    async def __call__(self, db, *, mode, graph_key, timeout, **kw):
+        m = await super().__call__(db, mode=mode, graph_key=graph_key, timeout=timeout)
+        if self.fake.agg:
+            return _ShardMemory(m.endpoint, self.maxmemory, self.maxmemory, m.policy, 0.0, "measured")
+        return m
+
+
+def _small_apply_chunks(monkeypatch, size=2):
+    """The apply-chunk knob floors at 1,000 — far more than a fixture graph
+    holds — so the recheck's between-chunks path needs chunks of two."""
+    orig = mat.AggregationPipeline._knob_int
+
+    def knob(self, name, env_default, lo, hi):
+        return size if name == "apply_chunk" else orig(self, name, env_default, lo, hi)
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_knob_int", knob)
+
+
+def test_a_shard_that_fills_mid_apply_is_refused_loudly_after_a_checkpoint(monkeypatch):
+    """The post-compute check answered at one instant. When the shard fills
+    while the apply is landing, the recheck refuses with the numbers — after
+    the chunk's checkpoint, so a person can resume from the cursor once
+    memory is freed — instead of the write that fills the shard failing
+    every graph on it."""
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1)
+    _small_apply_chunks(monkeypatch)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _FillingShard(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    cursors = []
+
+    async def progress(processed, total, cursor, created, phase, *, progress_pct=None, stats=None):
+        cursors.append((cursor, phase))
+
+    # The full cube (8+ cells) so APPLY spans several chunks of two; the
+    # boundary result of this fixture is two cells, one chunk, no recheck.
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, progress=progress, tuning={"materialize_fine_pairs": True}))
+
+    msg = str(exc.value)
+    assert msg.startswith("write budget:") and "mid-apply recheck" in msg
+    assert "new edges still to write" in msg and "10.0.0.1:6379" in msg
+    assert len(fake.agg) == 2                       # the first chunk landed, the rest did not
+    last_cursor, last_phase = cursors[-1]
+    assert last_phase == "applying"
+    assert mat.parse_cursor(last_cursor)[1] == mat.PHASE_APPLY
+
+
+def test_a_roomy_shard_is_rechecked_and_the_run_says_so(monkeypatch):
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1)
+    _small_apply_chunks(monkeypatch)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    assert result["errors"] == 0 and len(fake.agg) > 2
+    assert result["run_stats"]["budget_rechecks"] >= 1
+    # A run that never needed a recheck carries no key (the ladder's convention).
+    fake2 = _FakeFalkor()
+    levels2 = _seed_two_chain_graph(fake2)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake2, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1_000_000)
+    assert "budget_rechecks" not in _run(_materialize(_make_provider(fake2, levels2)))["run_stats"]
+
+
+def test_the_recheck_charges_only_what_is_still_to_land(monkeypatch):
+    """The fresh reading already contains every chunk that landed; the
+    growth owed is the first-touch keys not yet written, shrinking by the
+    chunk each time."""
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1)
+    _small_apply_chunks(monkeypatch)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    charged = []
+    orig = mat.AggregationPipeline._check_write_budget
+
+    async def spy(self, *, wave=None, growth_edges=None, note=None):
+        if growth_edges is not None:
+            charged.append(growth_edges)
+        return await orig(self, wave=wave, growth_edges=growth_edges, note=note)
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_check_write_budget", spy)
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    n = len(fake.agg)
+    assert n > 2
+    assert charged == list(range(n - 2, 0, -2))
+
+
+# ── the identity stamp is paced and admitted like every other write ──────
+#
+# For a source not keyed by `urn` this is a write pass over the WHOLE node ID
+# space, on every run — the heaviest single thing the rebuild does — and it
+# used to go out flat out, holding no slot, consulting nothing, in a preamble
+# that ran before the admission controller was even attached. That is the
+# shape of the incident this pipeline was rebuilt to prevent, in the one place
+# nothing was watching.
+#
+# The contract these pin, in both directions: what it WRITES is unchanged
+# (same query, same params, same 50k width, same per-batch tolerance, same
+# return), and what it COSTS the node is now bounded.
+
+
+def _stamp_provider(monkeypatch, *, max_id=120_000, ratio=None):
+    if ratio is not None:
+        monkeypatch.setattr(mat_provider, "_IDENTITY_STAMP_PACING_RATIO", ratio)
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    sent = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[max_id]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        sent.append((cypher, dict(params or {})))
+        r = _Result()
+        r.properties_set = 1
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    return p, sent
+
+
+class _StampSlots:
+    """An admission controller that records every write slot taken, and how
+    many were held at once."""
+
+    def __init__(self):
+        self.nodes = []
+        self.held = 0
+        self.at_once = 0
+
+    def write_slot(self, provider, *, node=None):
+        self.nodes.append(node)
+        outer = self
+
+        class _Slot:
+            async def __aenter__(self_):
+                outer.held += 1
+                outer.at_once = max(outer.at_once, outer.held)
+                return self_
+
+            async def __aexit__(self_, *exc):
+                outer.held -= 1
+                return False
+
+        return _Slot()
+
+
+def test_every_stamp_chunk_takes_a_write_slot(monkeypatch):
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    slots = _StampSlots()
+    p.set_admission_controller(slots)
+
+    assert _run(p.stamp_identity_urns()) == 3        # ceil(120001 / 50000)
+    assert len(sent) == 3
+    assert len(slots.nodes) == 3                     # one slot per chunk…
+    assert slots.at_once == 1                        # …never two at once
+    assert slots.held == 0                           # …and all released
+
+
+def test_the_chunking_and_the_query_are_unchanged(monkeypatch):
+    """The gate is around the query, not instead of it. A caller that changed
+    the slices would silently skip nodes, which is the one failure here that
+    is invisible until a lineage edge fails to attach months later."""
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    p.set_admission_controller(_StampSlots())
+    _run(p.stamp_identity_urns())
+
+    assert [(q[1]["lo"], q[1]["hi"]) for q in sent] == [
+        (0, 50_000), (50_000, 100_000), (100_000, 150_000),
+    ]
+    for cypher, params in sent:
+        assert "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi" in cypher
+        assert params["ident"] == "id" and params["nameProp"] == "name"
+
+
+def test_a_provider_with_no_controller_stamps_exactly_as_before(monkeypatch):
+    """Onboarding, a test, any caller that never attached one."""
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    assert p._admission_controller is None
+    assert _run(p.stamp_identity_urns()) == 3
+    assert len(sent) == 3
+
+
+def test_the_pass_heartbeats_so_it_cannot_be_reaped_mid_stamp(monkeypatch):
+    """Nothing between a job flipping to running and the pipeline's first
+    checkpoint touches ``last_checkpoint_at``, and the stuck-job reconciler
+    reads 300s without one as a dead worker. A pass that now paces itself has
+    to say it is alive, or pacing turns a healthy job into a failed one on
+    exactly the large graphs the pacing protects."""
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    beats = []
+
+    async def _beat(done, total):
+        beats.append((done, total))
+
+    _run(p.stamp_identity_urns(on_batch=_beat))
+    assert len(beats) == 3                           # one per chunk
+    assert beats[-1] == (120_001, 120_001)           # ends at 100%
+    assert [b[0] for b in beats] == sorted(b[0] for b in beats)   # monotonic
+
+
+def test_a_heartbeat_that_raises_never_fails_the_stamp(monkeypatch):
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+
+    async def _bad(done, total):
+        raise RuntimeError("the session went away")
+
+    assert _run(p.stamp_identity_urns(on_batch=_bad)) == 3
+    assert len(sent) == 3
+
+
+def test_the_gap_after_a_chunk_is_a_share_of_what_the_chunk_took(monkeypatch):
+    slept = []
+
+    async def _sleep(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(mat_provider.asyncio, "sleep", _sleep)
+    # A clock that advances 1s across each chunk.
+    ticks = iter([float(i) for i in range(0, 200)])
+    monkeypatch.setattr(mat_provider.time, "monotonic", lambda: next(ticks))
+
+    p, _ = _stamp_provider(monkeypatch, ratio=0.5)
+    _run(p.stamp_identity_urns())
+    assert slept and all(s > 0 for s in slept)
+    assert max(slept) <= mat_provider._IDENTITY_STAMP_PAUSE_MAX_S
+
+
+def test_pacing_off_restores_the_old_flat_out_timing(monkeypatch):
+    slept = []
+
+    async def _sleep(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(mat_provider.asyncio, "sleep", _sleep)
+    p, sent = _stamp_provider(monkeypatch, ratio=0.0)
+    _run(p.stamp_identity_urns())
+    assert slept == []                               # not one pause
+    assert len(sent) == 3                            # same work
+
+
+def test_the_worker_attaches_admission_before_the_preamble_runs():
+    """Ordering is the whole fix. The stamp and the ~131 index statements
+    consult ``_admission_controller``; if the worker still attached it after
+    them, both would take no slot and the gate above would be decoration.
+
+    Pinned structurally rather than by behaviour because the failure is
+    silent: everything still works, it just works unbounded, which is how
+    this got missed the first time."""
+    import inspect
+
+    from backend.app.services.aggregation.worker import AggregationWorker
+
+    src = inspect.getsource(AggregationWorker.run)
+    attach = src.index("set_admission_controller")
+    stamp = src.index("stamp_identity_urns")
+    indices = src.index("ensure_indices")
+    assert attach < indices < stamp, (
+        "the admission controller must be attached BEFORE ensure_indices and "
+        "the identity stamp — they are the heaviest unpaced work the run does"
+    )
+
+
+def test_the_worker_passes_the_stamp_a_heartbeat():
+    """Without it, pacing the stamp makes the stuck-job reconciler reap a
+    healthy job on exactly the large graphs the pacing exists to protect."""
+    import inspect
+
+    from backend.app.services.aggregation.worker import AggregationWorker
+
+    src = inspect.getsource(AggregationWorker.run)
+    assert "stamp_identity_urns(\n                                on_batch=" in src
+    assert "job.last_checkpoint_at = _now()" in src
+    assert "except TypeError:" in src, (
+        "a provider that predates the keyword must still be called the old way"
+    )
+
+
+# ── a lost write lease stops the run, it does not just stop renewing ────
+#
+# The per-graph write lease is the only thing standing between two rebuilds
+# and one master. Losing it used to stop the background renewal task and
+# nothing else: the pipeline captured the lease once at the top of ``run``
+# and touched it again only to release it in ``finally``, so it kept
+# MERGEing while a second run held the lease and MERGEd the same pairs.
+#
+# ``_write_items`` sets ``r.weight = item.w`` on a first touch and
+# ``coalesce(r.weight, 0) + item.w`` on a repeat, so the stored weight of
+# every pair BOTH runs touch is neither run's computed weight — a silently
+# wrong rollup that survives until a full fresh rebuild.
+#
+def test_cancel_is_noticed_during_compute(monkeypatch):
+    """COMPUTE is the one stage that issues no graph I/O, so it reaches none
+    of the other ``_cancel_check`` sites — every one of them sits on a query.
+    Without a check of its own, Cancel was not noticed until the stage ENDED:
+    on a large cube that is fifteen minutes of the UI showing a job the
+    operator already stopped, with the clock still running."""
+    pipe = _make_pipeline()
+    pipe._nonleaf_levels = None                    # the cube path
+    pipe._parents = {}
+
+    flushes = {"n": 0}
+
+    async def _no_flush():
+        flushes["n"] += 1
+
+    monkeypatch.setattr(pipe, "_maybe_overflow_flush", _no_flush)
+    pipe._should_cancel = lambda: True
+
+    # Two thousand pairs: enough to cross the 1024-key yield boundary once.
+    base = {mat._pack(i, i + 1): 1 for i in range(2000)}
+    with pytest.raises(JobCancelled):
+        _run(pipe._rollup_base(base))
+
+    # And it stopped THERE — not after grinding through the whole map.
+    assert flushes["n"] == 1
+
+
+def test_compute_without_a_cancel_runs_to_the_end(monkeypatch):
+    """The check must not be a new way for compute to fail."""
+    pipe = _make_pipeline()
+    pipe._nonleaf_levels = None
+    pipe._parents = {}
+
+    async def _no_flush():
+        return None
+
+    monkeypatch.setattr(pipe, "_maybe_overflow_flush", _no_flush)
+    pipe._should_cancel = lambda: False
+
+    base = {mat._pack(i, i + 1): 1 for i in range(2000)}
+    _run(pipe._rollup_base(base))
+
+
+# The check rides ``_cancel_check``, which every phase and every write path
+# already calls, and raises ``MaterializationStoreUnstable`` — "the run keeps
+# its checkpoint and stops for a person", which is exactly right here: the
+# progress is good, the graph just is not ours to write any more.
+
+
+def _lost_lease():
+    from backend.app.services.aggregation.admission import GraphLease
+
+    lease = GraphLease("agg:graphwrite:n:g", "tok")
+    lease.mark_lost("holder changed, or the lease expired")
+    return lease
+
+
+def test_a_lost_lease_stops_the_pipeline_at_its_next_checkpoint():
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        pipe._cancel_check()
+    assert "lease" in str(exc.value).lower()
+
+
+def test_a_lost_lease_keeps_the_checkpoint_and_asks_for_a_person():
+    """``MaterializationStoreUnstable`` subclasses
+    ``MaterializationStoreUnreachable`` -> ``ConnectionError``, which is the
+    worker's resumable path — the run keeps every byte of progress."""
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    with pytest.raises(ConnectionError):
+        pipe._cancel_check()
+
+
+def test_a_held_lease_does_not_stop_the_pipeline():
+    from backend.app.services.aggregation.admission import GraphLease
+
+    pipe = _make_pipeline()
+    pipe._lease = GraphLease("agg:graphwrite:n:g", "tok")
+    pipe._cancel_check()            # must not raise
+
+
+def test_no_lease_at_all_does_not_stop_the_pipeline():
+    """Admission is optional — ``acquire_graph_lease`` returns None when the
+    bus is down (fail open), and a run with no lease is the behaviour that
+    existed before any of this."""
+    pipe = _make_pipeline()
+    assert getattr(pipe, "_lease", None) is None
+    pipe._cancel_check()            # must not raise
+
+
+def test_a_user_cancel_still_wins_over_a_lost_lease():
+    """A person pressing Cancel gets ``JobCancelled``, not a store error —
+    the status an operator reads must name what actually happened."""
+    pipe = _make_pipeline()
+    pipe._lease = _lost_lease()
+    pipe._should_cancel = lambda: True
+    with pytest.raises(JobCancelled):
+        pipe._cancel_check()
+
+
+# ---------------------------------------------------------------------------
+# The aggKey index gate in front of RECONCILE, and the attribute-name ceiling
+#
+# Live (2026-09): a graph holding 7.8M rollup edges sat in Reconcile until the
+# master was demoted. The aggKey index was still building — FalkorDB populates
+# indexes in the background, and the old wait gave up after sixty seconds and
+# proceeded — so every keyed delete was a full pass over the cube under the
+# write lock, which the cluster's failure detector read as a dead node.
+# ---------------------------------------------------------------------------
+
+_ATTR_REFUSAL = (
+    "Max number of attributes exceeded, graph does not support more than "
+    "65534 unique attribute names"
+)
+
+
+def test_agg_index_state_reads_only_the_aggkey_row():
+    state = mat._agg_index_state
+    assert state(None) == "absent"
+    assert state([]) == "absent"
+    assert state([["Column", ["urn"], "OPERATIONAL"]]) == "absent"
+    # An AGGREGATED index that does not cover aggKey is not the one the
+    # keyed delete enters through.
+    assert state([["AGGREGATED", ["sourceLevel", "targetLevel"], "OPERATIONAL"]]) == "absent"
+    assert state([["AGGREGATED", ["aggKey"], "OPERATIONAL"]]) == "operational"
+    assert state([["AGGREGATED", ["aggKey"], {"aggKey": "UNDER CONSTRUCTION"}]]) == "building"
+    # Column order varies between builds: a cell scan, not a column read.
+    assert state([[None, "UNDER CONSTRUCTION", ["aggKey"], "AGGREGATED"]]) == "building"
+    # One row per property on some builds — only aggKey's row decides.
+    assert state([
+        ["AGGREGATED", ["sourceDepth", "targetDepth"], "UNDER CONSTRUCTION"],
+        ["AGGREGATED", ["aggKey"], "OPERATIONAL"],
+    ]) == "operational"
+
+
+def _gate_pipeline(fake, *, index_rows):
+    """A pipeline whose db.indexes() answers ``index_rows`` (a list, or a
+    callable returning one per probe) and whose every other read goes to
+    the fake."""
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    probes = {"n": 0}
+
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.indexes" in cypher:
+            probes["n"] += 1
+            rows = index_rows() if callable(index_rows) else index_rows
+            return _Result(rows)
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+    pipeline = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    return pipeline, probes
+
+
+def test_await_agg_index_ready_reports_what_it_last_saw():
+    fake = _FakeFalkor()
+    seen = {"n": 0}
+
+    def rows():
+        seen["n"] += 1
+        status = "UNDER CONSTRUCTION" if seen["n"] < 3 else "OPERATIONAL"
+        return [["AGGREGATED", ["aggKey"], status]]
+
+    pipe, _ = _gate_pipeline(fake, index_rows=rows)
+    assert _run(pipe._await_agg_index_ready(budget_s=10, interval_s=0)) == "operational"
+
+    pipe, _ = _gate_pipeline(
+        fake, index_rows=[["AGGREGATED", ["aggKey"], "UNDER CONSTRUCTION"]],
+    )
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "building"
+
+    pipe, _ = _gate_pipeline(fake, index_rows=[["Column", ["urn"], "OPERATIONAL"]])
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "absent"
+
+    pipe, _ = _gate_pipeline(fake, index_rows=[])
+
+    async def broken(cypher, params=None, **kw):
+        raise RuntimeError("no such procedure")
+
+    pipe.p._proj_ro_query = broken
+    assert _run(pipe._await_agg_index_ready(budget_s=0, interval_s=0)) == "unknown"
+
+
+def _patched_wait(monkeypatch, state):
+    """Replace the readiness wait with one that answers ``state`` at once,
+    recording the budget it was asked to wait — the gate decides the budget
+    by cube size, and that decision is what these tests pin."""
+    asked = {}
+
+    async def wait(self, *, budget_s=60.0, interval_s=2.0):
+        asked["budget_s"] = budget_s
+        return state
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_await_agg_index_ready", wait)
+    return asked
+
+
+def test_a_small_cube_reconciles_while_the_index_builds(monkeypatch):
+    """Below the gate a scan per keyed delete costs nothing worth stopping
+    for: the run proceeds, as it always did, after the sixty-second wait."""
+    asked = _patched_wait(monkeypatch, "building")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    assert asked["budget_s"] == 60.0
+
+
+def test_a_large_cube_waits_its_wall_clock_for_the_index_and_then_stops(monkeypatch):
+    """Above the gate the wait is the rest of the job's wall clock (never
+    less than one hold), and a run still waiting at the end of it stops for
+    a person — checkpoint kept, through the worker's ordinary resume path —
+    instead of writing unindexed into a master the cluster is about to
+    demote."""
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    asked = _patched_wait(monkeypatch, "building")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "still building" in msg and "db.indexes()" in msg and "1 rollup edge" in msg
+    assert float(mat._store_hold_max_s()) <= asked["budget_s"] <= float(mat._max_wall_secs())
+    assert fake.write_queries == 0
+
+
+def test_the_index_wait_is_what_is_left_of_the_wall_clock(monkeypatch):
+    fake = _FakeFalkor()
+    pipe, _ = _gate_pipeline(fake, index_rows=[])
+    pipe._tuning = {**getattr(pipe, "_tuning", {}), "max_wall_secs": 7_200}
+    pipe._started_mono = time.monotonic() - 3_600
+    assert 3_500 < pipe._index_wait_budget_s() <= 3_600
+    # Never less than one hold, however little wall clock is left.
+    pipe._started_mono = time.monotonic() - 7_100
+    assert pipe._index_wait_budget_s() == float(pipe._hold_max_s)
+
+
+def test_a_large_cube_stops_when_the_index_is_not_there(monkeypatch):
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    _patched_wait(monkeypatch, "absent")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    with pytest.raises(mat.MaterializationStoreUnstable, match="not on the graph"):
+        _run(_materialize(p))
+    assert fake.write_queries == 0
+
+
+def test_an_unanswered_index_probe_stops_nothing(monkeypatch):
+    """The probe is an optimisation's evidence, not a correctness gate: a
+    build without db.indexes() runs as it always has."""
+    monkeypatch.setattr(mat, "_INDEX_GATE_EDGES", 1)
+    _patched_wait(monkeypatch, "unknown")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+
+
+def _answer_property_keys(p, fake, names):
+    """db.propertyKeys() answers ``names`` — a count of synthetic names, or
+    an explicit iterable of them."""
+    rows = (
+        [[f"k{i}"] for i in range(names)] if isinstance(names, int)
+        else [[n] for n in names]
+    )
+
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.propertyKeys" in cypher:
+            return _Result(rows)
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+
+
+def _at_the_ceiling(*, with_rollup_names, with_meta_names=False, minus=0):
+    """A graph with no free ids: the ceiling's worth of names, of which the
+    rollup names are (or are not) some."""
+    own = set()
+    if with_rollup_names:
+        own |= mat._ROLLUP_ATTRIBUTE_NAMES
+    if with_meta_names:
+        own |= mat._META_ATTRIBUTE_NAMES
+    filler = mat._ATTRIBUTE_NAME_LIMIT - len(own) - minus
+    return [*own, *(f"k{i}" for i in range(filler))]
+
+
+def test_a_graph_that_cannot_register_the_rollup_names_is_refused():
+    """Ids are never freed, so no retry, no smaller batch and no purge of
+    the rollups changes the outcome: terminal, naming the names it needs
+    and the room it has."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=False))
+    with pytest.raises(mat.MaterializationPreconditionFailed) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "65,534" in msg and "aggKey" in msg and "room for 0" in msg
+    assert "recreate" in msg and "never freed" in msg
+    assert fake.write_queries == 0
+
+
+def test_a_graph_at_the_ceiling_that_holds_its_rollup_names_rebuilds_in_place():
+    """The operator's graph: every id spent, but the rollups it holds were
+    written by this pipeline, so every name the run writes is registered.
+    A margin would refuse it and send them to a recreate they do not need;
+    the exact check admits it and says, on the record, how little room is
+    left and that the _AggMeta stamp cannot land."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=True))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    stats = result["run_stats"]
+    assert stats["attribute_names"] == mat._ATTRIBUTE_NAME_LIMIT
+    assert stats["attribute_names_room"] == 0
+    (adv,) = [a for a in stats["advisories"] if a["kind"] == "attribute_names_exhausted"]
+    assert adv["room"] == 0
+    assert "regime" in adv["meta_names_missing"]
+    assert "_AggMeta" in adv["message"] and "rebuilt in place" in adv["message"]
+
+
+def test_a_graph_with_a_little_room_but_missing_more_names_than_it_has_is_refused():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    # Room for 3, needs 9.
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=False, minus=3))
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="room for 3"):
+        _run(_materialize(p))
+
+
+def test_dedicated_mode_also_needs_urn():
+    """The dedicated statement MERGEs the projection nodes by urn in the
+    same query as the rollup MERGE, so the refusal reaches that name."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    p._projection_mode = "dedicated"
+    _answer_property_keys(p, fake, _at_the_ceiling(with_rollup_names=True))
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="urn"):
+        _run(_materialize(p))
+
+
+def test_a_graph_under_the_ceiling_records_its_count_and_room():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    _answer_property_keys(p, fake, 12_000)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert result["run_stats"]["attribute_names"] == 12_000
+    assert result["run_stats"]["attribute_names_room"] == mat._ATTRIBUTE_NAME_LIMIT - 12_000
+    assert not [a for a in result["run_stats"].get("advisories", [])
+                if a["kind"] == "attribute_names_exhausted"]
+
+
+def test_the_names_the_run_writes_are_the_names_the_pre_flight_checks():
+    """The required and advisory sets are hand-kept; this pins them to the
+    Cypher the pipeline actually issues (the SET tail, the MERGE pattern
+    key, the _AggMeta stamp) and to the declared edge indexes, so neither
+    can drift from the other."""
+    import inspect
+    from backend.app.providers.index_policy import declared_edge_indexes
+
+    src = inspect.getsource(mat)
+    set_tail = set(re.findall(r"\br\.(\w+)\s*=(?!=)", src))
+    merge_keys = set(re.findall(r"\[r:AGGREGATED \{(\w+):", src))
+    assert set_tail | merge_keys == set(mat._ROLLUP_ATTRIBUTE_NAMES)
+    meta_set = set(re.findall(r"\bm\.(\w+)\s*=(?!=)", src))
+    meta_keys = set(re.findall(r"\(m:_AggMeta \{(\w+):", src))
+    assert meta_set | meta_keys == set(mat._META_ATTRIBUTE_NAMES)
+    for ix in declared_edge_indexes():
+        assert set(ix.props) <= set(mat._ROLLUP_ATTRIBUTE_NAMES), ix
+
+
+def test_the_attribute_count_is_best_effort():
+    """The fake has no db.propertyKeys(): the probe answers None, nothing is
+    recorded, and the run is the run it always was."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert "attribute_names" not in result["run_stats"]
+
+
+def test_the_store_refusing_a_rollup_name_is_terminal_not_pressure():
+    """A write the store refuses for want of an attribute id must not enter
+    the pressure ladder — halving a batch and re-issuing it forever is how a
+    deterministic refusal turns into an hour of retries."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.proj_query
+    attempts = {"n": 0}
+
+    async def refusing(cypher, params=None, **kw):
+        if "MERGE (s)-[r:AGGREGATED" in cypher:
+            attempts["n"] += 1
+            raise Exception(_ATTR_REFUSAL)
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refusing
+    with pytest.raises(mat.MaterializationPreconditionFailed, match="never freed"):
+        _run(_materialize(p))
+    assert attempts["n"] == 1
+
+
+def test_the_store_refusing_the_index_name_is_terminal():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.proj_query
+
+    async def refusing(cypher, params=None, **kw):
+        if "CREATE INDEX" in cypher and "aggKey" in cypher:
+            raise Exception(_ATTR_REFUSAL)
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refusing
+    with pytest.raises(mat.MaterializationPreconditionFailed):
+        _run(_materialize(p))
+    assert fake.write_queries == 0
+
+
+def test_is_attribute_limit_error_walks_the_cause_chain():
+    inner = Exception(_ATTR_REFUSAL)
+    outer = RuntimeError("Provider 'x' unavailable")
+    outer.__cause__ = inner
+    assert mat._is_attribute_limit_error(outer)
+    assert not mat._is_attribute_limit_error(RuntimeError("Query timed out"))
+
+
+# ---------------------------------------------------------------------------
+# Write budgets are derived from the cluster's failure detector
+#
+# Live (2026-09): rebuild writes ran under a 60s default budget, raisable to
+# 600s, against a cluster that votes a master out after 15s of silence. The
+# budget was sized against the SERVER's TIMEOUT_MAX — the wrong ceiling in
+# cluster mode. A long batch raced the election and lost: the replica was
+# promoted, the master demoted mid-write, and every blocked client came back
+# with "-UNBLOCKED force unblock". No pod had restarted.
+# ---------------------------------------------------------------------------
+
+
+def _with_node_timeout(monkeypatch, seconds):
+    monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(seconds))
+
+
+def test_no_cluster_window_means_no_clamp(monkeypatch):
+    """A standalone or sentinel deployment has no failure detector to lose a
+    race against, and an unset env is not a licence to invent one: the
+    configured budget stands exactly as it did."""
+    _with_node_timeout(monkeypatch, 0)
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
+    assert mat_provider.clamp_write_budget(7.5) == 7.5
+
+
+def test_the_window_bounds_every_write_budget(monkeypatch):
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert 0 < ceiling < 15, "a write must END inside the window, not at it"
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
+    assert mat_provider.clamp_write_budget(60.0) == ceiling
+    # A budget already under the ceiling is untouched.
+    assert mat_provider.clamp_write_budget(1.0) == 1.0
+
+
+def test_a_tiny_window_still_leaves_a_usable_budget(monkeypatch):
+    """The floor is not the pipeline's 5s minimum: on a 5s window a 5s write
+    is exactly the failure. The ceiling wins over the floor."""
+    _with_node_timeout(monkeypatch, 5)
+    assert mat_provider.cluster_write_ceiling_s() == 2.0
+    assert mat_provider.clamp_write_budget(60.0) == 2.0
+
+
+def test_an_operator_cannot_raise_a_write_past_the_window(monkeypatch):
+    """The knob protects other readers of the shard, not just this run: a
+    write that outlives the window costs the shard its master. So the live
+    override is clamped, not honoured."""
+    _with_node_timeout(monkeypatch, 15)
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    pipe._live["write_timeout_s"] = 600.0
+    assert pipe._write_timeout() == mat_provider.cluster_write_ceiling_s()
+    # Said once per run, not once per batch.
+    assert pipe._write_ceiling_logged
+    pipe._write_timeout()
+    assert pipe._write_ceiling_logged
+
+
+def test_the_budget_each_write_ran_under_is_on_the_record(monkeypatch):
+    _with_node_timeout(monkeypatch, 15)
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert result["run_stats"]["write_timeout_s"] == round(
+        mat_provider.cluster_write_ceiling_s(), 1,
+    )
+
+
+def test_every_provider_write_is_bounded_at_the_boundary(monkeypatch):
+    """Not each caller's job. A caller that passes its own generous timeout
+    — the bulk loader, a script, a future writer — is clamped too."""
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert mat_provider.clamp_write_budget(170.0) == ceiling
+    src = inspect.getsource(mat_provider.FalkorDBProvider._query)
+    assert "clamp_write_budget" in src
+    src = inspect.getsource(mat_provider.FalkorDBProvider._proj_query)
+    assert "clamp_write_budget" in src
+
+
+def test_a_read_is_NOT_cut_to_the_write_window(monkeypatch):
+    """Reads are bounded by their own budgets, never by the cluster window.
+
+    This was the other way round for one commit and it was wrong. A write
+    holds the graph's write lock and blocks its client, so one that
+    approaches the failure detector races the election and can cost the
+    shard its master. A READ takes no lock and cannot: FalkorDB runs GRAPH.*
+    on a module thread pool while the main thread goes on answering the
+    cluster bus, so a long read is only ever a VICTIM of a demotion
+    something else caused.
+
+    Clamping reads bought that much less exposure and cost the budgets
+    somebody chose on purpose — ``get_children`` is deliberately 15s because
+    wide containers exceed the generic 5s default, ``get_stats`` gives its
+    two full scans 30s, and EXTRACT's range scans 30s. Cutting all of them
+    to the window's share turned working canvas reads into errors on exactly
+    the graphs the wider budgets exist for."""
+    _with_node_timeout(monkeypatch, 15)
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert ceiling == 6.0                             # the write ceiling stands
+
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    pipe._live["scan_timeout_s"] = 120.0
+    assert pipe._scan_timeout() == 120.0              # the operator's number stands
+    pipe._live["write_timeout_s"] = 120.0
+    assert pipe._write_timeout() == ceiling           # …but a write is still cut
+
+    # The read boundary must not reach for the write ceiling at all.
+    assert "clamp_write_budget" not in inspect.getsource(
+        mat_provider.FalkorDBProvider._read_query,
+    )
+    assert "clamp_write_budget" in inspect.getsource(
+        mat_provider.FalkorDBProvider._query,
+    )
+
+
+def test_the_generic_read_default_matches_the_canvas_one(monkeypatch):
+    """One number for a read, not a small one plus an exception per caller.
+
+    Five seconds was sized for small graphs, and then every path that met a
+    real one was given a larger budget of its own. A default that every
+    serious caller overrides only catches the callers that did not think to,
+    and a read out of budget does not degrade — it errors at a canvas that
+    was about to draw."""
+    from backend.app.config import resilience
+
+    assert resilience.FALKORDB_QUERY_TIMEOUT_SECS == 15.0
+    assert (
+        resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        == resilience.FALKORDB_QUERY_TIMEOUT_SECS
+    )
+
+
+def test_the_deadline_ladder_still_nests_around_the_read_budget():
+    """The rule that governs all of them: every outer deadline outlasts the
+    one inside it. Raising a read budget past the tier above it would make
+    the outer layer cancel first, hand the user an opaque 504, and leave the
+    store working on a result nobody will read."""
+    from backend.app.config import resilience
+
+    assert (
+        resilience.FALKORDB_QUERY_TIMEOUT_SECS
+        < resilience.HTTP_TIMEOUT_GRAPH_SECS
+    )
+    # …and under what the server itself will accept for one query.
+    assert (
+        resilience.FALKORDB_QUERY_TIMEOUT_SECS * 1000
+        < float(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS or 0)
+    )
+
+
+def test_the_canvas_children_read_keeps_its_own_budget(monkeypatch):
+    """The regression in one number. ``get_children`` is given 15s with a
+    comment saying why; the clamp made it 6s, so a wide container that
+    legitimately takes 8s stopped returning data and started returning an
+    error."""
+    from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+
+    _with_node_timeout(monkeypatch, 15)
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS == 15.0
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS > mat_provider.cluster_write_ceiling_s()
+
+
+def test_the_overflow_flush_is_the_write_inside_compute(monkeypatch):
+    """The link between a write budget and a Compute-stage failure: the
+    accumulator flushes to the graph from inside the extract/compute scan
+    loops, so those writes ran under the same unclamped budget."""
+    src = inspect.getsource(mat.AggregationPipeline._maybe_overflow_flush)
+    assert "_write_keys" in src, "the flush must still write through the paced path"
+    # The chain, pinned: Compute delegates to the roll-up, and the roll-up
+    # (and the canonical merge under it) flush. If any link breaks, the
+    # clamp stops reaching this phase and this test says so.
+    compute = inspect.getsource(mat.AggregationPipeline._extract_and_compute)
+    assert "_rollup_base" in compute
+    rollup = inspect.getsource(mat.AggregationPipeline._rollup_base)
+    assert "_maybe_overflow_flush()" in rollup, (
+        "compute writes via the overflow flush — if that stops being true, "
+        "the query clamp no longer reaches this phase"
+    )
+    merge = inspect.getsource(mat.AggregationPipeline._merge_canonical_pairs)
+    assert "_maybe_overflow_flush()" in merge
+
+
+def _reset_window(monkeypatch, *, env_s=0.0, observed=None, mode=""):
+    monkeypatch.setattr(mat_provider, "_CLUSTER_NODE_TIMEOUT_S", float(env_s))
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", observed)
+    monkeypatch.setattr(mat_provider, "_ASSUMED_WINDOW_WARNED", False)
+    monkeypatch.setenv("FALKORDB_MODE", mode)
+
+
+def test_a_cluster_with_no_configured_window_is_still_clamped(monkeypatch):
+    """The production case that made this necessary: nine nodes running a
+    15s failure detector, and a ConfigMap that predated the variable. The
+    old rule — unset means no clamp — ran every query unbounded on exactly
+    the deployment that needed the clamp most."""
+    _reset_window(monkeypatch, mode="cluster")
+    ceiling = mat_provider.cluster_write_ceiling_s()
+    assert ceiling is not None and 0 < ceiling < 15
+    assert mat_provider.clamp_write_budget(600.0) == ceiling
+
+
+def test_a_standalone_deployment_is_still_unclamped(monkeypatch):
+    """Not clustered means there is genuinely no detector to outlive, and
+    assuming one there would shorten budgets for no reason."""
+    _reset_window(monkeypatch, mode="standalone")
+    assert mat_provider.cluster_write_ceiling_s() is None
+    assert mat_provider.clamp_write_budget(600.0) == 600.0
+    _reset_window(monkeypatch, mode="")
+    assert mat_provider.cluster_write_ceiling_s() is None
+
+
+def test_what_the_node_reports_beats_the_env(monkeypatch):
+    """An env mirror can be stale or wrong; the node cannot be wrong about
+    its own configuration."""
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    mat_provider.note_cluster_node_timeout(6.0)
+    assert mat_provider.cluster_write_ceiling_s() == 6.0 * 0.4
+
+
+def test_the_smallest_reported_window_wins(monkeypatch):
+    """A process may talk to more than one cluster. The clamp has to hold
+    for the tightest of them, so the minimum is kept, not the latest."""
+    _reset_window(monkeypatch, mode="cluster")
+    mat_provider.note_cluster_node_timeout(20.0)
+    mat_provider.note_cluster_node_timeout(9.0)
+    mat_provider.note_cluster_node_timeout(30.0)
+    assert mat_provider._OBSERVED_NODE_TIMEOUT_S == 9.0
+
+
+def test_a_nonsense_report_is_ignored(monkeypatch):
+    _reset_window(monkeypatch, env_s=15.0, mode="cluster")
+    mat_provider.note_cluster_node_timeout(0.0)
+    mat_provider.note_cluster_node_timeout(None)
+    assert mat_provider.cluster_write_ceiling_s() == 15.0 * 0.4
+
+
+def test_the_provider_asks_the_node_for_its_window():
+    """The probe lives beside the existing server-limit read, off the
+    request path. If it is removed, the clamp goes back to depending on a
+    ConfigMap somebody has to remember."""
+    src = inspect.getsource(mat_provider.FalkorDBProvider._seed_server_limits)
+    assert "cluster-node-timeout" in src
+    assert "note_cluster_node_timeout" in src
+
+
+def test_the_window_is_asked_of_the_SERVER_not_the_graph_module(monkeypatch):
+    """The probe must be handed the redis CONNECTION, never the FalkorDB
+    client facade.
+
+    ``cluster-node-timeout`` is a Redis server setting. The facade's own
+    ``config_get`` sends ``GRAPH.CONFIG GET``, the graph MODULE's namespace,
+    which has no such field and answers "unknown configuration field" — into
+    a DEBUG log. The probe then never reads anything, ``_OBSERVED_NODE_TIMEOUT_S``
+    stays None for the life of the process, and the clamp silently falls back
+    to the env mirror it exists to stop depending on. The assertion above is a
+    substring check and passes either way, which is how that shipped."""
+    import asyncio as _asyncio
+    import types as _types
+
+    seen = {}
+
+    async def _fake_config_get(conn, node, name):
+        seen["conn"] = conn
+        seen["name"] = name
+        return {name: "15000"}
+
+    async def _fake_read_shard_memory(db, **kw):
+        return _types.SimpleNamespace(
+            endpoint="10.0.0.1:6379", timeout_max_ms=None, query_mem_capacity=None,
+            thread_count=None, timeout_default_ms=None,
+        )
+
+    from backend.app.providers import shard_capacity as _sc
+    monkeypatch.setattr(_sc, "_config_get", _fake_config_get)
+    monkeypatch.setattr(_sc, "read_shard_memory", _fake_read_shard_memory)
+    # ``note_cluster_node_timeout`` writes a PROCESS-global observed window.
+    # Taking it through monkeypatch restores it at teardown, so this test
+    # cannot leave a later one clamped by a reading it never took.
+    monkeypatch.setattr(mat_provider, "_OBSERVED_NODE_TIMEOUT_S", None)
+
+    connection = object()
+    facade = _types.SimpleNamespace(connection=connection)
+
+    p = object.__new__(mat_provider.FalkorDBProvider)
+    p._server_limits_seeded = False
+    p._db = facade
+    p._conn_cfg = _types.SimpleNamespace(mode="cluster")
+    p._graph_name = "g1"
+    p._host, p._port = "10.0.0.1", 6379
+    p.note_server_limits = lambda *a, **k: None
+
+    async def _drive():
+        p._seed_server_limits()
+        await p._server_limits_task
+
+    _asyncio.run(_drive())
+
+    assert seen["name"] == "cluster-node-timeout"
+    # THE assertion: the underlying connection, not the graph-module facade.
+    assert seen["conn"] is connection
+    assert seen["conn"] is not facade
+
+
+def test_an_unreadable_cube_size_counts_as_large(monkeypatch):
+    """A regression the query clamp made reachable: counting 20M
+    relationships is itself a long query, it times out first on exactly the
+    graphs the index gate protects, and _count_aggregated used to answer 0
+    — so the gate read the cube as small and scanned without the index.
+    Unknown is not zero."""
+    _patched_wait(monkeypatch, "absent")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    fake.seed_aggregated(3, 13, weight=2)
+    orig = fake.ro_query
+
+    async def count_times_out(cypher, params=None, **kw):
+        if "count(r)" in cypher and "r:AGGREGATED" in cypher:
+            raise asyncio.TimeoutError("count(r) over a large relation")
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = count_times_out
+    with pytest.raises(mat.MaterializationStoreUnstable) as exc:
+        _run(_materialize(p))
+    assert "unknown number of rollup edges" in str(exc.value)
+    assert fake.write_queries == 0
+
+
+def test_an_unreadable_count_still_budgets_every_cell_as_growth(monkeypatch):
+    """The write budget's reading of 'unknown' is unchanged: 0 known
+    edges means every cell is growth, which is conservative in ITS
+    direction. The two gates disagree deliberately."""
+    _patched_wait(monkeypatch, "operational")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    orig = fake.ro_query
+
+    async def count_times_out(cypher, params=None, **kw):
+        if "count(r)" in cypher and "r:AGGREGATED" in cypher:
+            raise asyncio.TimeoutError("count(r) over a large relation")
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = count_times_out
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    assert _run(pipe._count_aggregated()) is None
+    # The run still reports no edges_before, rather than a made-up zero.
+    assert not pipe._edges_before_read
+    assert "edges_before" not in pipe._result(0)["run_stats"]
+
+
+def test_a_real_zero_is_still_a_reading(monkeypatch):
+    """A genuinely empty cube must NOT be treated as unknown, or every
+    first build would wait out its whole wall clock for an index that has
+    nothing to build."""
+    _patched_wait(monkeypatch, "operational")
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    pipe = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    assert _run(pipe._count_aggregated()) == 0

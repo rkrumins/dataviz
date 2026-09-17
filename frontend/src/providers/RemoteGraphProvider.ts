@@ -46,6 +46,8 @@ import type {
     EdgeMutationResult,
     TopLevelNodesQuery,
     TopLevelNodesResult,
+    CanvasBootstrapRequest,
+    CanvasBootstrapResult,
 } from './GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
 import type {
@@ -548,6 +550,20 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify({ urns, edgeTypes, limit }),
             timeoutMs: TIMEOUTS.EDGES_BETWEEN_MS,
+        })
+    }
+
+    /** One canvas open in one request — roots, the edges among that set, and
+     *  the aggregated lineage among it. The three calls this replaces fire
+     *  together and queue on the browser's six HTTP/1.1 connections, so over
+     *  real RTT what it saves is the queueing. `/canvas/` is its own circuit
+     *  breaker class, so a bootstrap failing does not trip the per-purpose
+     *  endpoints the caller falls back to. */
+    async canvasBootstrap(request: CanvasBootstrapRequest): Promise<CanvasBootstrapResult> {
+        return await this.fetch<CanvasBootstrapResult>('/canvas/bootstrap', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            timeoutMs: TIMEOUTS.CANVAS_BOOTSTRAP_MS,
         })
     }
 

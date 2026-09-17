@@ -19,15 +19,26 @@ from backend.app.providers.manager import ProviderManager
 
 
 class _FakeProvider:
-    def __init__(self, inflight: int = 0):
+    def __init__(self, inflight: int = 0, last_op: float | None = None):
         self._inflight = inflight
+        self._last_op = last_op
         self.closed = False
 
     def inflight_ops(self) -> int:
         return self._inflight
 
+    def last_op_at(self):
+        return self._last_op
+
     async def close(self) -> None:
         self.closed = True
+
+
+class _NoLastOp(_FakeProvider):
+    """A provider from before ``last_op_at`` existed, or a non-FalkorDB one.
+    The reaper must fall back to the checkout stamp rather than break."""
+
+    last_op_at = None
 
 
 def _mgr_with(entries: dict, last_used: dict) -> ProviderManager:
@@ -107,6 +118,47 @@ async def test_reaper_closes_only_the_idle_and_stale(monkeypatch):
     assert stale.closed is True and ("p", "stale") not in mgr._providers
     assert ("p", "fresh") in mgr._providers          # recently used
     assert ("p", "busy") in mgr._providers           # stale but in-flight
+
+
+@pytest.mark.asyncio
+async def test_a_long_job_is_not_idle_just_because_it_checked_out_long_ago(monkeypatch):
+    """The bug this fixture used to hide. ``_last_used`` is stamped when a
+    provider is CHECKED OUT and nowhere else, and the aggregation worker
+    checks out once per job — so a rebuild longer than the TTL read as
+    untouched since minute zero. ``inflight_ops()`` did not save it: that
+    answers "busy this instant", and the compute stage is minutes of Python
+    with no graph I/O, so a real worker sits at zero for most of a run.
+
+    The provider here is exactly that: checked out ten minutes ago, doing
+    nothing at this instant, and talking to the store five seconds ago."""
+    import time as _time
+
+    monkeypatch.setattr(resilience, "PROVIDER_CACHE_IDLE_TTL_SECS", 60.0)
+    now = _time.monotonic()
+
+    working = _FakeProvider(inflight=0, last_op=now - 5)
+    genuinely_cold = _FakeProvider(inflight=0, last_op=now - 600)
+    mgr = _mgr_with(
+        {("p", "working"): working, ("p", "cold"): genuinely_cold},
+        {("p", "working"): now - 600, ("p", "cold"): now - 600},
+    )
+
+    assert await mgr.reap_idle_providers() == 1
+    assert working.closed is False and ("p", "working") in mgr._providers
+    assert genuinely_cold.closed is True
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_the_stamp_still_reaps_on_checkout(monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(resilience, "PROVIDER_CACHE_IDLE_TTL_SECS", 60.0)
+    now = _time.monotonic()
+    old = _NoLastOp()
+    mgr = _mgr_with({("p", "old"): old}, {("p", "old"): now - 600})
+
+    assert await mgr.reap_idle_providers() == 1
+    assert old.closed is True
 
 
 @pytest.mark.asyncio
