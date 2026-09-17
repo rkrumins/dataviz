@@ -324,3 +324,26 @@ describe('JobRow advisory severity', () => {
         expect(container.querySelector('.border-red-500\\/20')).not.toBeNull()
     })
 })
+
+describe('JobRow degraded reason', () => {
+    // On the AUTO path the clock gate can pick the depth-diagonal, the run
+    // completes green holding far fewer cells than it projected, and
+    // degraded_reason is the ONLY record of which gate said no. It reached
+    // the API and was rendered by nothing — the same invisibility as the
+    // estimate, in the shape where it actually costs you data.
+    it('names the gate that chose the diagonal, on the row', () => {
+        renderRow(job({
+            runStats: {
+                writes: 400_000, deletes: 0, effective_tuning: EFFECTIVE, regime: 'boundary',
+                cube_estimate: 20_000_000,
+                degraded_reason: 'it needs ~18.5h to write and the job allows ~14.4h',
+            },
+        }))
+        expect(screen.getByText('it needs ~18.5h to write and the job allows ~14.4h')).toBeInTheDocument()
+    })
+
+    it('says nothing when the run was not degraded', () => {
+        renderRow(job({ runStats: { ...CUBE_STATS } }))
+        expect(screen.queryByText(/the job allows/)).not.toBeInTheDocument()
+    })
+})

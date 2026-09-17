@@ -373,3 +373,55 @@ def test_a_fresh_blob_still_carries_everything():
     hints = _run(_worker()._capacity_hints(_Session(state), "ds"))
     assert hints["apply_rows_per_s_observed"] == 900.0
     assert hints["scan_width_observed"] == 5_000
+
+
+class _RateSession(_Session):
+    """A session whose state row carries a previously measured apply rate."""
+
+    def __init__(self, prior_tuning: str | None):
+        super().__init__(types.SimpleNamespace(observed_tuning=prior_tuning))
+
+
+def test_a_run_that_measured_no_rate_keeps_the_last_one():
+    """The read side was fixed so a stale blob keeps its rate. The write side
+    could still throw it away: observed_tuning is overwritten in full on every
+    success (that is what CLEARS a narrowing a graph outgrew), and a run that
+    wrote nothing — a no-op reconcile, or a resume, where _calibrate returns
+    "skipped_resume" before recording one — measures no rate. Overwriting then
+    lost a good figure and sent the next cube projection back to 300 rows/s to
+    re-raise an advisory the source had already disproved.
+    """
+    from backend.app.services.aggregation.worker import _tuning_with_rate_carried
+
+    prior = json.dumps({"apply_rows_per_s": 2_400.0, "observed_at": "2026-09-17T10:00:00+00:00"})
+    merged = _run(_tuning_with_rate_carried(_RateSession(prior), "ds", {}))
+    assert merged == {"apply_rows_per_s": 2_400.0}
+
+
+def test_a_measured_rate_is_never_overwritten_by_an_older_one():
+    from backend.app.services.aggregation.worker import _tuning_with_rate_carried
+
+    prior = json.dumps({"apply_rows_per_s": 300.0})
+    merged = _run(_tuning_with_rate_carried(
+        _RateSession(prior), "ds", {"apply_rows_per_s": 2_400.0}))
+    assert merged["apply_rows_per_s"] == 2_400.0
+
+
+def test_carrying_the_rate_never_resurrects_a_pressure_lesson():
+    """The clear-on-a-clean-run contract is the whole reason the blob is
+    overwritten. Only the rate rides through."""
+    from backend.app.services.aggregation.worker import _tuning_with_rate_carried
+
+    prior = json.dumps({
+        "apply_rows_per_s": 2_400.0, "scan_width": 5_000,
+        "extract_concurrency": 1, "reconcile_strategy": "keys_only",
+    })
+    merged = _run(_tuning_with_rate_carried(_RateSession(prior), "ds", {}))
+    assert merged == {"apply_rows_per_s": 2_400.0}
+
+
+@pytest.mark.parametrize("prior", [None, "", "{}", "not json", '{"apply_rows_per_s": 0}'])
+def test_nothing_to_carry_is_not_an_error(prior):
+    from backend.app.services.aggregation.worker import _tuning_with_rate_carried
+
+    assert _run(_tuning_with_rate_carried(_RateSession(prior), "ds", {})) == {}

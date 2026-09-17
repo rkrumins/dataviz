@@ -235,6 +235,39 @@ def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     return out
 
 
+async def _tuning_with_rate_carried(
+    session: Any, data_source_id: str, learned: dict,
+) -> dict:
+    """``learned``, but never losing a measured apply rate this run had none of.
+
+    ``observed_tuning`` is deliberately overwritten in full on every success,
+    because that is what CLEARS a pressure narrowing a graph no longer needs.
+    The apply rate rides in the same blob and has the opposite requirement: a
+    run that wrote nothing (a no-op reconcile) or resumed from a checkpoint
+    (``_calibrate`` returns "skipped_resume" before recording one) measures no
+    rate, and overwriting the blob then threw away a perfectly good figure.
+    The next cube projection fell back to the shipped 300 rows/s and raised a
+    wall-clock advisory the source had already disproved — which is the same
+    defect as expiring the rate with the lessons, arriving from the write side
+    instead of the read side.
+
+    Best-effort: an unreadable row or blob leaves ``learned`` as it is.
+    """
+    if learned.get("apply_rows_per_s"):
+        return learned
+    from .models import AggregationDataSourceStateORM
+
+    try:
+        state = await session.get(AggregationDataSourceStateORM, data_source_id)
+        prior = json.loads(getattr(state, "observed_tuning", None) or "{}")
+    except Exception:
+        return learned
+    rate = prior.get("apply_rows_per_s") if isinstance(prior, dict) else None
+    if not rate:
+        return learned
+    return {**learned, "apply_rows_per_s": rate}
+
+
 #: How long a lesson learned under pressure keeps steering later runs.
 #: Long enough that a source with a genuinely hard graph keeps its narrowing
 #: across a day's rebuilds; short enough that a one-off incident does not
@@ -946,7 +979,10 @@ class AggregationWorker:
                     # run stores "{}", which clears the previous lesson
                     # (``_update_ds_state`` skips None, so a string it is).
                     observed_tuning=json.dumps(
-                        _learned_from(result.get("run_stats"), job_id=job.id)
+                        await _tuning_with_rate_carried(
+                            session, job.data_source_id,
+                            _learned_from(result.get("run_stats"), job_id=job.id),
+                        )
                     ),
                 )
                 await self._sync_workspace_ds_row(

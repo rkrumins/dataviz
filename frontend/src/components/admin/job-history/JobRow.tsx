@@ -338,6 +338,14 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     const statCellsExact = typeof rs?.cells_exact === 'number' ? rs.cells_exact : null
     const statRatioUsed = typeof rs?.cell_ratio_used === 'number' ? rs.cell_ratio_used : null
     const statRatioObserved = typeof rs?.cell_ratio_observed === 'number' ? rs.cell_ratio_observed : null
+    // Which gate said no, in the pipeline's own words ("it needs ~18.5h to
+    // write and the job allows ~14.4h"). On the AUTO path this is the only
+    // record of WHY a run completed green holding the depth-diagonal instead
+    // of the cube it projected — and it was rendered nowhere at all, which is
+    // the same invisibility as the estimate, in the shape that matters more.
+    const statDegradedReason = typeof rs?.degraded_reason === 'string' && rs.degraded_reason
+        ? rs.degraded_reason
+        : null
     const statBudget = typeof job.runStats?.materialize_budget === 'number' ? job.runStats.materialize_budget : null
     // Conformance advisories (identity / casing gaps) recorded in run_stats.
     // Advisory-only backend signal — a completed run can still carry these,
@@ -928,7 +936,16 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         }>
                                                             {statRegime === 'cube'
                                                                 ? <span className="text-emerald-400">Full detail</span>
-                                                                : <span className="text-amber-400">Diagonal {'·'} on-demand</span>}
+                                                                : (
+                                                                    <span className="text-amber-400">
+                                                                        Diagonal {'·'} on-demand
+                                                                        {statDegradedReason && (
+                                                                            <span className="block text-[10px] font-normal text-ink-muted normal-case">
+                                                                                {statDegradedReason}
+                                                                            </span>
+                                                                        )}
+                                                                    </span>
+                                                                )}
                                                         </Tip>
                                                     }
                                                 />
