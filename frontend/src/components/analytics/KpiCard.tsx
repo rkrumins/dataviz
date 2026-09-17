@@ -36,7 +36,7 @@ export interface KpiCardProps {
     trend?: number[]
     trendTone?: SparklineTone
     higherIsBetter?: boolean
-    accent?: 'indigo' | 'amber' | 'cyan' | 'pink' | 'violet' | 'emerald'
+    accent?: 'indigo' | 'amber' | 'cyan' | 'pink' | 'violet' | 'emerald' | 'rose'
     /** Key into `metricDefinitions` — adds the "what does this mean?" button. */
     metric?: MetricKey
     onClick?: () => void
@@ -50,6 +50,9 @@ const ACCENTS = {
     pink: 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20',
     violet: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
     emerald: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+    // The critical step of the status palette. Reserved for a state the
+    // reader must act on — never for "series 4".
+    rose: 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20',
 } as const
 
 export function KpiCard({

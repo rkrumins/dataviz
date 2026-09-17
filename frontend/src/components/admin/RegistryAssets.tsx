@@ -16,6 +16,7 @@ import {
     Plus, WifiOff, ArrowUpDown, ArrowUpRight, LineChart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { PropertyNameBudget, PROPERTY_NAME_CEILING, propertyNameBand } from './PropertyNameBudget'
 import {
     providerService,
     friendlyError,
@@ -450,6 +451,18 @@ function AssetRow({
                                     <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0"></span>
                                     {(stats.edgeCount ?? 0).toLocaleString()} edges
                                 </span>
+                                {stats.propertyKeyCount != null && (
+                                    <span
+                                        className="flex items-center gap-1"
+                                        title={`${stats.propertyKeyCount.toLocaleString()} of ${PROPERTY_NAME_CEILING.toLocaleString()} property names registered — names are never freed`}
+                                    >
+                                        <span className={cn(
+                                            'w-1.5 h-1.5 rounded-full shrink-0',
+                                            propertyNameBand(stats.propertyKeyCount).fill,
+                                        )} />
+                                        {stats.propertyKeyCount.toLocaleString()} property names
+                                    </span>
+                                )}
                                 {nodeTypes.length > 0 && (
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/8 text-blue-600 font-semibold border border-blue-500/15">
                                         {nodeTypes.length} entity type{nodeTypes.length !== 1 ? 's' : ''}
@@ -542,6 +555,12 @@ function AssetRow({
                                     }
                                 </div>
                             </div>
+                        )}
+
+                        {/* Property-name budget — a one-way ceiling, so it is a
+                            meter against the limit rather than another count. */}
+                        {stats && (
+                            <PropertyNameBudget total={stats.propertyKeyCount} />
                         )}
 
                         {/* Graph Connectivity score */}

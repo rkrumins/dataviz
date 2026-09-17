@@ -6,6 +6,8 @@ in what the payload says and, more importantly, what it refuses to say.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -80,11 +82,13 @@ async def _snap(
     types: dict | None = None, edge_types: dict | None = None,
     workspace: str = "ws_1", provider: str = "prov_1",
     node_delta: int | None = None, reason: str = "changed",
+    property_keys: int | None = None,
 ):
     session.add(DataSourceCountSnapshotORM(
         id=f"snp_{ds_id}_{at}", data_source_id=ds_id, captured_at=at,
         workspace_id=workspace, provider_id=provider, graph_name=f"g-{ds_id}",
         node_count=nodes, edge_count=edges,
+        property_key_count=property_keys,
         entity_type_counts=json.dumps(types or {"Table": nodes}),
         edge_type_counts=json.dumps(edge_types or {}),
         counts_digest=f"d{nodes}", lane="probe", capture_reason=reason,
@@ -1281,3 +1285,39 @@ async def test_a_settings_row_that_cannot_be_read_still_draws_a_chart(
             raise RuntimeError("settings unreadable")
 
     assert await profiling_repo.resolve_include_derived_edges(_Broken()) is True
+
+
+async def test_the_csv_puts_each_reading_on_its_own_bucket(
+    db_session: AsyncSession,
+):
+    """The writer used to index each series by POSITION, assuming one point
+    per bucket. ``property_keys`` breaks that assumption on purpose: a bucket
+    nothing measured draws no point rather than a zero
+    (profiling_series skips a None). So the Nth point was not the Nth
+    bucket — every reading after a gap was written against the wrong date,
+    and a series shorter than the window ran off the end of the list.
+
+    Here the middle capture has no property-key reading, so a positional
+    writer would slide the later value one row up."""
+    await _source(db_session, "ds_csv", workspace="ws_1")
+    await _snap(db_session, "ds_csv", _iso(3), nodes=10, property_keys=100)
+    await _snap(db_session, "ds_csv", _iso(2), nodes=10, property_keys=None)
+    await _snap(db_session, "ds_csv", _iso(1), nodes=10, property_keys=300)
+
+    resp = await profiling.export_csv(
+        scope="workspace", id="ws_1", window="7d", frm=None, to=None,
+        grain="raw", breakdown="none", metric="property_keys",
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    body = resp.body.decode()
+    rows = [r for r in csv.reader(io.StringIO(body))][1:]
+
+    # Every emitted value sits on the bucket it was measured in, and the
+    # unmeasured bucket is blank rather than 0 — the CSV analogue of the
+    # chart drawing no point there. A 0 would claim the graph had no
+    # property names at all, which is the opposite of "we did not look".
+    measured = {r[0]: r[1] for r in rows if r[1] != ""}
+    assert set(measured.values()) == {"100", "300"}, rows
+    assert any(r[1] == "" for r in rows), (
+        "the unmeasured bucket must be an empty cell, not a fabricated zero"
+    )

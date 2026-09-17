@@ -178,6 +178,17 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
                     "edgeTypeCounts": raw.get(
                         "edge_type_counts", raw.get("edgeTypeCounts", {})
                     ),
+                    # How many attribute names the graph has registered. NULL
+                    # is not zero: the provider returns None when the store
+                    # would not answer, when it is not FalkorDB, or when the
+                    # graph key is absent. A zero here would read as "this
+                    # graph has no properties", which is the opposite of the
+                    # truth for the very graphs this figure exists to warn
+                    # about. The whitelist dropped it, so the assets tab
+                    # could not render even the count.
+                    "propertyKeyCount": raw.get(
+                        "property_key_count", raw.get("propertyKeyCount")
+                    ),
                 }
     except asyncio.TimeoutError:
         duration = asyncio.get_event_loop().time() - start_ts

@@ -299,7 +299,28 @@ def source_row(
         last_failure_category=failure.get("category"),
         attribute_names=int(names) if isinstance(names, (int, float)) else None,
         property_key_count=property_key_count,
+        # Derived here rather than stored: the subtrahend is a compile-time
+        # constant, so there is nothing to migrate and nothing to keep in
+        # sync. Both stay None when the count was never measured — a split
+        # of an unknown total is not 0/0, it is unknown.
+        platform_property_names=(
+            len(_platform_names()) if property_key_count is not None else None
+        ),
+        source_property_names=(
+            max(0, property_key_count - len(_platform_names()))
+            if property_key_count is not None else None
+        ),
     )
+
+
+
+def _platform_names() -> frozenset:
+    """The platform's own reserved property names. Imported lazily — the
+    provider module is heavy and this module is imported by the fleet
+    read path."""
+    from backend.app.providers.falkordb_provider import platform_property_names
+
+    return platform_property_names()
 
 
 def full_detail_preflight(

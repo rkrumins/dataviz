@@ -1577,6 +1577,40 @@ except Exception:  # pragma: no cover - import-time best-effort
     logger.exception("Failed to register AttributeNameLimitReached with circuit breaker")
 
 
+_PLATFORM_PROPERTY_NAMES: Optional[frozenset] = None
+
+
+def platform_property_names() -> frozenset:
+    """Every property name the PLATFORM itself registers on a graph.
+
+    Memoised, and it keeps the function-scope import: the materializer
+    imports this module, so importing it at module scope would close a
+    cycle (see the note in ``reserve_platform_property_names``).
+
+    This is the cheap half of "what is eating my 65,534 attribute names?".
+    The platform's own reserve is a compile-time constant, so a
+    platform-vs-source split needs no query and no migration — subtract.
+    Returns an empty frozenset if the materializer cannot be imported,
+    which callers must read as "unknown", not "none".
+    """
+    global _PLATFORM_PROPERTY_NAMES
+    if _PLATFORM_PROPERTY_NAMES is not None:
+        return _PLATFORM_PROPERTY_NAMES
+    try:
+        from backend.app.providers.falkordb_materialize import (
+            _META_ATTRIBUTE_NAMES,
+            _PROJECTION_NODE_ATTRIBUTE_NAMES,
+            _ROLLUP_ATTRIBUTE_NAMES,
+        )
+    except Exception:  # pragma: no cover - import-time only
+        return frozenset()
+    _PLATFORM_PROPERTY_NAMES = frozenset(
+        _RESERVED_NODE_KEYS | _ROLLUP_ATTRIBUTE_NAMES | _META_ATTRIBUTE_NAMES
+        | _PROJECTION_NODE_ATTRIBUTE_NAMES | _PROJECTOR_ATTRIBUTE_NAMES
+    )
+    return _PLATFORM_PROPERTY_NAMES
+
+
 async def reserve_platform_property_names(
     run: Callable[..., Awaitable[Any]], graph_name: str, registered: Set[str],
 ) -> Set[str]:

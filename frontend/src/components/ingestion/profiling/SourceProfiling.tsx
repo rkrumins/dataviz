@@ -16,13 +16,14 @@
  */
 import { useMemo, useState } from 'react'
 import {
-    Activity, Boxes, Download, Loader2, ShieldCheck, Spline,
+    Activity, Boxes, Download, KeyRound, Loader2, ShieldCheck, Spline,
     TrendingDown, TriangleAlert,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { exact } from '@/lib/formatMetric'
 import { KpiCard } from '@/components/analytics/KpiCard'
+import { PROPERTY_NAME_CEILING, propertyNameBand } from '@/components/admin/PropertyNameBudget'
 import { profilingService } from '@/services/profilingService'
 import {
     DEFAULT_WINDOW, PROFILING_WINDOWS, type ProfilingWindowKey,
@@ -147,6 +148,13 @@ export function SourceProfiling({
         ? `of which ${exact(aggNow)} aggregated`
         : (edgeMove ? undefined : 'unchanged')
 
+    // The attribute-name ceiling. Sparse by nature — the series draws no
+    // point for a bucket it could not measure — so take the last MEASURED
+    // reading rather than `.at(-1)`, which is null whenever the most recent
+    // capture happened to miss it.
+    const propertyKeys = payload.totals.property_keys ?? []
+    const propertyKeysNow = [...propertyKeys].reverse().find((v) => v != null) ?? null
+
     const exportHref = profilingService.exportUrl({
         // The drawn measure reaches the file. Without it the export claimed
         // to be "always the drawn values" while hardcoding total.
@@ -226,6 +234,17 @@ export function SourceProfiling({
                     accent="violet"
                     sub={{ raw: 'every capture', hour: 'by hour', day: 'by day' }[payload.grain]}
                 />
+                {propertyKeysNow != null && (
+                    <KpiCard
+                        label="Property names"
+                        value={exact(propertyKeysNow)}
+                        icon={KeyRound}
+                        accent={propertyNameBand(propertyKeysNow).accent}
+                        // The ceiling is the point: the raw count says nothing
+                        // about runway, and the names are never freed.
+                        sub={`${Math.round((propertyKeysNow / PROPERTY_NAME_CEILING) * 100)}% of ${PROPERTY_NAME_CEILING.toLocaleString()}`}
+                    />
+                )}
                 <KpiCard
                     label="Largest drop"
                     value={largestDrop ? signed(largestDrop.delta) : 'None'}
@@ -255,7 +274,7 @@ export function SourceProfiling({
                     // A breakdown implies its own measure server-side, so
                     // leaving one set would silently draw relationship types
                     // instead of the overlay the user just asked for.
-                    if (next === 'aggregated') setBreakdown('none')
+                    if (next === 'aggregated' || next === 'property_keys') setBreakdown('none')
                 }}
                 onBreakdown={(next) => { setBreakdown(next); setFocusedType(null) }}
                 onView={setView}

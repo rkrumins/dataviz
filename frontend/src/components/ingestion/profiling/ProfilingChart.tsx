@@ -237,7 +237,7 @@ export function ProfilingChart({
                         control would visibly do nothing. Same rule as "As"
                         below: a control that does nothing teaches people to
                         ignore controls. */}
-                    {metric !== 'aggregated' && (
+                    {metric !== 'aggregated' && metric !== 'property_keys' && (
                         <ControlGroup
                             label="Split by" options={BREAKDOWNS}
                             value={breakdown} onChange={onBreakdown}

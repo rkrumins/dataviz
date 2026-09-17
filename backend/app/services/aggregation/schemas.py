@@ -1500,6 +1500,22 @@ class CapacitySource(BaseModel):
     #: successful rebuild cannot warn about a graph too full to rebuild.
     #: None means not measured — never zero.
     property_key_count: Optional[int] = Field(None, alias="propertyKeyCount")
+    #: How many of those names the PLATFORM registers itself — a
+    #: compile-time constant, so this costs no query and no migration. It is
+    #: the cheap half of "what is eating my 65,534 names?": everything above
+    #: it came from the source's own data.
+    platform_property_names: Optional[int] = Field(
+        None, alias="platformPropertyNames",
+    )
+    #: ``property_key_count - platform_property_names``, floored at 0. An
+    #: ESTIMATE, and it can UNDER-count: the platform's reserve is written
+    #: best-effort (it no-ops when already covered and fails soft), so a
+    #: graph that never completed a reserve has fewer platform names
+    #: registered than the constant claims. The UI must label it as an
+    #: estimate rather than an exact split.
+    source_property_names: Optional[int] = Field(
+        None, alias="sourcePropertyNames",
+    )
 
     class Config:
         populate_by_name = True

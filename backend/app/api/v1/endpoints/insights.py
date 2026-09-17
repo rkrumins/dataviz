@@ -350,6 +350,10 @@ async def list_assets(
                 "name": name,
                 "nodeCount": p.get("nodeCount"),
                 "edgeCount": p.get("edgeCount"),
+                # None for a row captured before this key existed, and for a
+                # store that would not answer. Never coerce to 0 — see the
+                # note on the capture side in discovery.py.
+                "propertyKeyCount": p.get("propertyKeyCount"),
                 "updatedAt": computed_at,
             })
         env["data"]["assetsDetail"] = detail

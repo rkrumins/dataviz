@@ -429,9 +429,17 @@ async def export_csv(
     writer = csv.writer(buffer)
     headers = ["bucket"] + [s["label"] for s in built["series"]]
     writer.writerow(headers)
-    for i, bucket in enumerate(built["buckets"]):
+    # Index each series by its OWN bucket, never by position. A series is
+    # not guaranteed one point per bucket: ``property_keys`` draws no point
+    # for a bucket it could not measure (profiling_series skips a None
+    # rather than plotting a zero), so positional indexing shifted every
+    # later value onto the wrong date — and ran off the end when the series
+    # was shorter than the window. An unmeasured bucket is an empty cell,
+    # the CSV analogue of the chart drawing no point there.
+    by_bucket = [{p["t"]: p["v"] for p in s["points"]} for s in built["series"]]
+    for bucket in built["buckets"]:
         writer.writerow(
-            [bucket] + [s["points"][i]["v"] for s in built["series"]]
+            [bucket] + [m.get(bucket, "") for m in by_bucket]
         )
 
     stem = _FILENAME_UNSAFE.sub(
