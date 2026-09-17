@@ -1460,6 +1460,11 @@ class CapacityLimits(BaseModel):
     estimate_margin_pct_source: str = Field("default", alias="estimateMarginPctSource")
     max_cube_edges_source: str = Field("default", alias="maxCubeEdgesSource")
     static_cap: int = Field(alias="staticCap")
+    #: The job wall clock the apply's share is taken from. Surfaced because
+    #: the fit check needs it: the shard holding a cube and the job finishing
+    #: it are two questions, and a preview that answers only the first
+    #: disagrees with the run it is previewing.
+    max_wall_secs: CapacityLimitValue = Field(alias="maxWallSecs")
     # Environment-only: shown, never settable.
     budget_recheck_edges: int = Field(alias="budgetRecheckEdges")
     # The graph store container's memory limit, when the deployment states
@@ -1485,6 +1490,13 @@ class CapacitySource(BaseModel):
     edge_count: int = Field(0, alias="edgeCount")
     bytes_per_edge: int = Field(alias="bytesPerEdge")
     bytes_per_edge_source: Literal["calibrated", "default"] = Field(alias="bytesPerEdgeSource")
+    #: Rows per second this source's apply lands at, and whether that is a
+    #: measurement or the shipped default. The fit check needs it: memory says
+    #: whether the shard can HOLD a cube, this says whether the job can WRITE
+    #: it inside its wall clock, and a check with only the first half can
+    #: promise a fit for a run that then raises a wall-clock advisory.
+    apply_rows_per_s: float = Field(alias="applyRowsPerS")
+    apply_rows_per_s_source: Literal["measured", "default"] = Field(alias="applyRowsPerSSource")
     footprint_bytes: int = Field(alias="footprintBytes")
     last_cube_estimate: Optional[int] = Field(None, alias="lastCubeEstimate")
     last_regime: Optional[str] = Field(None, alias="lastRegime")

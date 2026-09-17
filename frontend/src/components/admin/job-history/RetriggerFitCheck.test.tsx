@@ -83,3 +83,64 @@ describe('RetriggerFitCheck', () => {
         expect(await screen.findByTestId('fit-check')).toHaveTextContent(/unknown until a first rebuild/)
     })
 })
+
+describe('RetriggerFitCheck — the clock', () => {
+    // The check re-decided "would full detail fit" from memory and the edge
+    // ceiling ONLY. The pipeline asks a second question — can the apply land
+    // inside the job's wall clock at the rate this source writes at — and
+    // without it this dialog said "Full detail: fits." for a run the pipeline
+    // then greeted with a wall-clock advisory. A preview that disagrees with
+    // the thing it previews is worse than no preview.
+    const withClock = (rate: number, source: 'measured' | 'default', wallSecs = 86_400) => ({
+        ...DOC,
+        source: { ...DOC.source, applyRowsPerS: rate, applyRowsPerSSource: source },
+        limits: { ...DOC.limits, maxWallSecs: { value: wallSecs, source: 'default' } },
+    })
+
+    it('will not promise a fit the clock cannot keep', async () => {
+        // 10M cells at the shipped 300 rows/s is ~9.3h against the 14.4h the
+        // apply gets of a 24h job — that fits. Drop the wall clock to 8h and
+        // the apply window becomes 4.8h, which it does not.
+        getSourceCapacity.mockResolvedValue(withClock(300, 'default', 8 * 3600))
+        wrap(<RetriggerFitCheck dataSourceId="ds-1" draftTuning={{ materializeFinePairs: true }} />)
+        const box = await screen.findByTestId('fit-check')
+        expect(box).toHaveTextContent('Full detail: fits the shard, may not fit the clock.')
+        expect(box).toHaveTextContent('9.3h')
+        expect(box).toHaveTextContent('4.8h')
+    })
+
+    it('says a clock shortfall is not a refusal, because a forced cube is not refused for it', async () => {
+        getSourceCapacity.mockResolvedValue(withClock(300, 'default', 8 * 3600))
+        wrap(<RetriggerFitCheck dataSourceId="ds-1" draftTuning={{ materializeFinePairs: true }} />)
+        const box = await screen.findByTestId('fit-check')
+        expect(box).toHaveTextContent('The run is not refused and nothing is reduced')
+        // And on an unmeasured source it says why the numbers are pessimistic,
+        // rather than letting an upper bound read as a measurement.
+        expect(box).toHaveTextContent('Nothing has measured this source yet')
+    })
+
+    it('reports the clock alongside the memory verdict when both pass', async () => {
+        getSourceCapacity.mockResolvedValue(withClock(2_400, 'measured'))
+        wrap(<RetriggerFitCheck dataSourceId="ds-1" draftTuning={{ materializeFinePairs: true }} />)
+        const box = await screen.findByTestId('fit-check')
+        expect(box).toHaveTextContent('Full detail: fits.')
+        expect(box).toHaveTextContent('at the measured rate')
+    })
+
+    it('names the clock as the reason Auto would degrade', async () => {
+        getSourceCapacity.mockResolvedValue(withClock(300, 'default', 8 * 3600))
+        wrap(<RetriggerFitCheck dataSourceId="ds-1" draftTuning={{ materializeFinePairs: 'auto' }} />)
+        const box = await screen.findByTestId('fit-check')
+        expect(box).toHaveTextContent('Auto: this run is never refused.')
+        expect(box).toHaveTextContent('would fit the shard but projects to')
+    })
+
+    it('keeps the memory-only answer when the backend sends no rate', async () => {
+        // A frontend deployed ahead of the backend must not invent a clock
+        // verdict out of an absent rate.
+        wrap(<RetriggerFitCheck dataSourceId="ds-1" draftTuning={{ materializeFinePairs: true }} />)
+        const box = await screen.findByTestId('fit-check')
+        expect(box).toHaveTextContent('Full detail: fits.')
+        expect(box).not.toHaveTextContent('of apply')
+    })
+})

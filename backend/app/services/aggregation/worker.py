@@ -1455,6 +1455,22 @@ class AggregationWorker:
                 "so the narrowing is re-measured rather than inherited",
                 data_source_id, _LEARNED_TTL_SECS,
             )
+            # ...except the apply rate, which is not one of the narrowings.
+            # The expiry above exists because a pressure lesson is a RATCHET:
+            # two of those knobs never re-grow inside a run, so one bad
+            # afternoon pinned a source forever. The rate has no such
+            # property — every run that writes measures it again — and
+            # dropping it does not make the next run re-measure anything,
+            # it just makes the cube projection fall back to the shipped
+            # 300 rows/s and raise a wall-clock advisory the source has
+            # already disproved. ``_learned_from`` says as much where it
+            # collects the figure: a MEASUREMENT, not a lesson learned
+            # under pressure. The cell ratio it is projected against lives
+            # in its own column and never expires, so letting the rate go
+            # stale here is what made the two disagree.
+            rate = learned.get("apply_rows_per_s") if isinstance(learned, dict) else None
+            if rate:
+                hints["apply_rows_per_s_observed"] = rate
             return hints
         for key in _LEARNED_KEYS:
             value = learned.get(key) if isinstance(learned, dict) else None

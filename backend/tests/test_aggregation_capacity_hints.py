@@ -305,3 +305,71 @@ def test_a_stored_ratio_reaches_the_next_run_as_a_hint():
     assert _run(_worker()._capacity_hints(_Session(state), "ds")) == {
         "cell_ratio_observed": 0.1335,
     }
+
+
+def _stale_tuning(**extra) -> str:
+    """``observed_tuning`` stamped long enough ago to be past the TTL."""
+    return json.dumps({
+        "observed_at": (
+            datetime.now(timezone.utc) - timedelta(days=30)
+        ).isoformat(),
+        **extra,
+    })
+
+
+def test_the_measured_apply_rate_outlives_the_pressure_lessons():
+    """The staleness gate exists because a pressure lesson is a RATCHET: two
+    of those knobs never re-grow inside a run, so one bad afternoon pinned a
+    source to serial reads forever.
+
+    The apply rate has no such property — every run that writes measures it
+    again — and it is what the cube projection is priced from. Expiring it
+    with the narrowings sent an infrequently-rebuilt source back to the
+    shipped 300 rows/s and made it re-emit a wall-clock advisory its own last
+    run had already disproved, while the cell ratio that figure is projected
+    against never expires. The two must not disagree about whether this
+    source has been measured.
+    """
+    state = types.SimpleNamespace(
+        observed_bytes_per_edge=512,
+        observed_cell_ratio=0.07,
+        observed_tuning=_stale_tuning(
+            apply_rows_per_s=2_400.0,
+            scan_width=5_000,
+            extract_concurrency=1,
+        ),
+    )
+    hints = _run(_worker()._capacity_hints(_Session(state), "ds"))
+
+    # The narrowings are dropped, which is the whole point of the TTL.
+    assert "scan_width_observed" not in hints
+    assert "extract_concurrency_observed" not in hints
+    # The measurement is not.
+    assert hints["apply_rows_per_s_observed"] == 2_400.0
+    # And it keeps company with the ratio it is projected against.
+    assert hints["cell_ratio_observed"] == 0.07
+
+
+def test_a_stale_blob_without_a_rate_adds_nothing():
+    state = types.SimpleNamespace(
+        observed_bytes_per_edge=512,
+        observed_tuning=_stale_tuning(scan_width=5_000),
+    )
+    hints = _run(_worker()._capacity_hints(_Session(state), "ds"))
+    assert hints == {"bytes_per_edge_observed": 512}
+
+
+def test_a_fresh_blob_still_carries_everything():
+    """The TTL is about ACTING on old lessons, not about the rate — a lesson
+    inside the window is unaffected by this change."""
+    state = types.SimpleNamespace(
+        observed_bytes_per_edge=512,
+        observed_tuning=json.dumps({
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "apply_rows_per_s": 900.0,
+            "scan_width": 5_000,
+        }),
+    )
+    hints = _run(_worker()._capacity_hints(_Session(state), "ds"))
+    assert hints["apply_rows_per_s_observed"] == 900.0
+    assert hints["scan_width_observed"] == 5_000

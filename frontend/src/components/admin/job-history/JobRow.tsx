@@ -2,7 +2,7 @@ import { memo, useCallback, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
-    AlertTriangle, Server, FolderOpen, ShieldCheck, ChevronDown, Gauge,
+    AlertTriangle, Info, Server, FolderOpen, ShieldCheck, ChevronDown, Gauge,
     Copy, Check,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
@@ -330,6 +330,14 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     // over-budget fallback must never be silent.
     const statRegime = typeof job.runStats?.regime === 'string' ? job.runStats.regime : null
     const statCubeEstimate = typeof job.runStats?.cube_estimate === 'number' ? job.runStats.cube_estimate : null
+    // The estimator's own three numbers. They were recorded expressly so an
+    // overshoot could not stay invisible, and then nothing rendered them —
+    // which is why a ~14x bound looked like a missing 18M edges.
+    const rs = job.runStats as Record<string, unknown> | null | undefined
+    const statCubeUpper = typeof rs?.cube_estimate_upper === 'number' ? rs.cube_estimate_upper : null
+    const statCellsExact = typeof rs?.cells_exact === 'number' ? rs.cells_exact : null
+    const statRatioUsed = typeof rs?.cell_ratio_used === 'number' ? rs.cell_ratio_used : null
+    const statRatioObserved = typeof rs?.cell_ratio_observed === 'number' ? rs.cell_ratio_observed : null
     const statBudget = typeof job.runStats?.materialize_budget === 'number' ? job.runStats.materialize_budget : null
     // Conformance advisories (identity / casing gaps) recorded in run_stats.
     // Advisory-only backend signal — a completed run can still carry these,
@@ -337,6 +345,15 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     const advisories = (Array.isArray((job.runStats as { advisories?: unknown } | null | undefined)?.advisories)
         ? (job.runStats as unknown as { advisories: Array<{ kind: string; severity?: string; message: string }> }).advisories
         : [])
+    // A forced cube used to show only the reassuring half of the story. The
+    // bound it was checked against, and how far below it the result landed,
+    // is the thing that explains an alarming pre-write projection.
+    const cubeCompression = (statCubeUpper && statCellsExact)
+        ? statCubeUpper / statCellsExact
+        : null
+    const cubeBoundNote = (statCubeUpper && statCellsExact)
+        ? ` The up-front bound counted ~${statCubeUpper.toLocaleString()} cells produced; ${statCellsExact.toLocaleString()} distinct cells were stored, so this source aggregates about ${cubeCompression!.toFixed(0)}:1. The bound is an upper bound on cells produced, not a target.`
+        : ''
     const isNoopRun = job.status === 'completed' && statWrites === 0 && statDeletes === 0
     // Purge rows carry the post-purge mode on their tuning payload.
     const purgeStaysEmpty = job.triggerSource === 'purge'
@@ -906,12 +923,31 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     value={
                                                         <Tip label={
                                                             statRegime === 'cube'
-                                                                ? 'Every ancestor combination is materialized — all canvas granularities answer from storage.'
+                                                                ? `Every ancestor combination is materialized — all canvas granularities answer from storage.${cubeBoundNote}`
                                                                 : `Full detail would be ~${(statCubeEstimate ?? 0).toLocaleString()} edges — over the cube ceiling, or more than the ${(statBudget ?? 0).toLocaleString()} new edges the graph-store shard had room for, so only the canonical depth-diagonal is stored and finer granularities are derived on demand. Force full detail in Advanced tuning to pre-create everything; it fails loudly if the shard cannot hold it.`
                                                         }>
                                                             {statRegime === 'cube'
                                                                 ? <span className="text-emerald-400">Full detail</span>
                                                                 : <span className="text-amber-400">Diagonal {'·'} on-demand</span>}
+                                                        </Tip>
+                                                    }
+                                                />
+                                            )}
+                                            {statCubeUpper != null && statCellsExact != null && (
+                                                <StatCell
+                                                    label="Cells"
+                                                    value={
+                                                        <Tip label={`The estimator is held to account on every run: the upper bound counts cells PRODUCED (for each raw lineage edge, the product of its endpoints' ancestor-chain lengths), while the write MERGEs on aggKey so the graph stores cells DISTINCT. ${statRatioUsed != null ? `This run corrected the bound by a previously measured ratio of ${statRatioUsed.toFixed(4)}.` : 'Nothing had measured this source yet, so the bound stood uncorrected — which is why it can sit far above the result.'}${statRatioObserved != null ? ` The ratio now recorded for the next run is ${statRatioObserved.toFixed(4)}.` : ''}`}>
+                                                            <span className="tabular-nums">
+                                                                {statCellsExact.toLocaleString()}
+                                                                {/* "uncalibrated" is the whole answer to "was that
+                                                                    alarming estimate a real target?" — behind a hover
+                                                                    it is no more use than not recording it. */}
+                                                                <span className="text-ink-muted">
+                                                                    {' / ~'}{statCubeUpper.toLocaleString()}{' '}
+                                                                    {statRatioUsed == null ? 'uncalibrated bound' : 'bound'}
+                                                                </span>
+                                                            </span>
                                                         </Tip>
                                                     }
                                                 />
@@ -958,7 +994,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         {advisories.length > 0 && (
                                             <div className="space-y-1.5">
                                                 {advisories.map((adv, i) => {
+                                                    // Three severities, not two. An advisory the run went
+                                                    // on to DISPROVE (a pre-write projection the result
+                                                    // beat) is recorded as `info`, and rendering it amber
+                                                    // beside an emerald "Completed" badge was the one
+                                                    // combination an operator could not act on.
                                                     const isError = adv.severity === 'error'
+                                                    const isInfo = adv.severity === 'info'
                                                     return (
                                                         <div
                                                             key={`${adv.kind}-${i}`}
@@ -966,17 +1008,23 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                                 'flex items-start gap-2 rounded-lg px-3 py-2 border',
                                                                 isError
                                                                     ? 'bg-red-500/[0.06] border-red-500/20'
-                                                                    : 'bg-amber-500/[0.06] border-amber-500/20',
+                                                                    : isInfo
+                                                                        ? 'bg-sky-500/[0.05] border-sky-500/20'
+                                                                        : 'bg-amber-500/[0.06] border-amber-500/20',
                                                             )}
                                                         >
                                                             {isError
                                                                 ? <AlertCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
-                                                                : <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />}
+                                                                : isInfo
+                                                                    ? <Info className="w-3.5 h-3.5 text-sky-500 flex-shrink-0 mt-0.5" />
+                                                                    : <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />}
                                                             <p className={cn(
                                                                 'text-[11px] leading-relaxed',
                                                                 isError
                                                                     ? 'text-red-600/90 dark:text-red-400/90'
-                                                                    : 'text-amber-600/90 dark:text-amber-400/90',
+                                                                    : isInfo
+                                                                        ? 'text-sky-700/90 dark:text-sky-300/90'
+                                                                        : 'text-amber-600/90 dark:text-amber-400/90',
                                                             )}>
                                                                 {adv.message}
                                                             </p>

@@ -5,7 +5,7 @@
  * in the form below — the pipeline's own arithmetic, so the verdict here is
  * the verdict the run would reach.
  */
-import { CheckCircle2, HelpCircle, Loader2, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, HelpCircle, Loader2, XCircle } from 'lucide-react'
 import type { AggregationTuning } from '@/services/aggregationService'
 import { compactBytes, compactEdges, fullDetailVerdict } from '../shared/aggregationKnobs'
 import { useSourceCapacity } from '../shared/useAggregationCapacity'
@@ -39,10 +39,19 @@ export function RetriggerFitCheck({ dataSourceId, draftTuning, defaultFinePairs 
         ? draftTuning.maxMaterializedEdges
         : typeof doc.limits.maxMaterializedEdges.value === 'number' ? doc.limits.maxMaterializedEdges.value : null
 
+    // Optional on both sides: an older backend omits them, and the clock term
+    // is then skipped rather than computed from a fabricated rate.
+    const wallSecs = typeof draftTuning?.maxWallSecs === 'number'
+        ? draftTuning.maxWallSecs
+        : typeof doc.limits.maxWallSecs?.value === 'number' ? doc.limits.maxWallSecs.value : null
+    const rate = typeof doc.source.applyRowsPerS === 'number' ? doc.source.applyRowsPerS : null
+    const rateSource = doc.source.applyRowsPerSSource ?? 'default'
     const full = fullDetailVerdict({
         shard: doc.shard, limits: doc.limits, edgeCount: doc.source.edgeCount,
         estimateEdges: doc.source.lastCubeEstimate, bytesPerEdge: bpe, reservePct: reserve, ceiling,
+        applyRowsPerS: rate, maxWallSecs: wallSecs,
     })
+    const hours = (secs: number | null) => secs == null ? '—' : `${(secs / 3600).toFixed(1)}h`
 
     let Icon = HelpCircle
     let iconClass = 'text-ink-muted'
@@ -54,7 +63,11 @@ export function RetriggerFitCheck({ dataSourceId, draftTuning, defaultFinePairs 
         detail = full.verdict === 'fits'
             ? `Full detail would fit today (~${compactEdges(full.growthEdges)} new edges), so Auto would store it.`
             : full.verdict === 'short'
-                ? 'Full detail would not fit today, so Auto stores the depth-diagonal and derives finer granularities on demand.'
+                ? full.blockedBy === 'clock'
+                    // Auto weighs the clock as well, and unlike a forced cube
+                    // it DOES degrade on it — so name the reason.
+                    ? `Full detail would fit the shard but projects to ~${hours(full.applySecs)} of apply against a ~${hours(full.applyBudgetSecs)} window, so Auto stores the depth-diagonal and derives finer granularities on demand.`
+                    : 'Full detail would not fit today, so Auto stores the depth-diagonal and derives finer granularities on demand.'
                 : 'No estimate yet: Auto stores full detail only once the estimate fits both its cube ceiling and the shard.'
     } else if (mode === 'false') {
         Icon = CheckCircle2; iconClass = 'text-emerald-500'
@@ -65,7 +78,14 @@ export function RetriggerFitCheck({ dataSourceId, draftTuning, defaultFinePairs 
     } else if (full.verdict === 'fits') {
         Icon = CheckCircle2; iconClass = 'text-emerald-500'
         headline = 'Full detail: fits.'
-        detail = `~${compactEdges(full.growthEdges)} new edges need ${compactBytes(full.neededBytes)}; ${compactBytes(full.freeBytes)} is free on ${doc.shard.endpoint} after a ${reserve}% reserve (${doc.limits.estimateMarginPct}% margin on the estimate).`
+        detail = `~${compactEdges(full.growthEdges)} new edges need ${compactBytes(full.neededBytes)}; ${compactBytes(full.freeBytes)} is free on ${doc.shard.endpoint} after a ${reserve}% reserve (${doc.limits.estimateMarginPct}% margin on the estimate).${full.applySecs != null ? ` The apply projects to ~${hours(full.applySecs)} at the ${rateSource} rate, inside the ~${hours(full.applyBudgetSecs)} this job allows.` : ''}`
+    } else if (full.verdict === 'short' && full.blockedBy === 'clock') {
+        // The shard can hold it; the job may not finish it. A forced cube is
+        // not refused for this — it runs, warns, and may need more than one
+        // wall clock — so this is amber, not a red refusal.
+        Icon = AlertTriangle; iconClass = 'text-amber-500'
+        headline = 'Full detail: fits the shard, may not fit the clock.'
+        detail = `~${compactEdges(doc.source.lastCubeEstimate)} cells at the ${rateSource} rate of ${Math.round(rate ?? 0).toLocaleString()} rows/s is about ${hours(full.applySecs)} of apply, against the ~${hours(full.applyBudgetSecs)} this job's wall clock leaves for it. The run is not refused and nothing is reduced; if it does run out of clock the job fails with its checkpoint intact. ${rateSource === 'default' ? 'Nothing has measured this source yet, so this uses the shipped rate and the estimate is an upper bound — a source that aggregates well lands well under both.' : 'Raise Max wall clock, lower Write pacing ratio, or choose Auto.'}`
     } else if (full.verdict === 'short') {
         Icon = XCircle; iconClass = 'text-red-500'
         headline = full.blockedBy === 'ceiling'
