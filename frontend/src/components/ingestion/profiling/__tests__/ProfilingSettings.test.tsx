@@ -145,8 +145,13 @@ describe('ProfilingSettings', () => {
             rawRetentionDays: 14, overridden: ['rawRetentionDays'],
         }))
         renderIt()
-        expect(await screen.findByText('set')).toBeInTheDocument()
-        expect(screen.getByRole('spinbutton', { name: /raw observations/i })).toHaveValue(14)
+        // The badge reads straight off `overridden`, but the value is seeded
+        // into the draft by an effect a commit later — so waiting on the badge
+        // can land in the window where the field is still blank. Wait for the
+        // settled value; the badge is then guaranteed to be on screen.
+        const field = await screen.findByRole('spinbutton', { name: /raw observations/i })
+        await waitFor(() => expect(field).toHaveValue(14))
+        expect(screen.getByText('set')).toBeInTheDocument()
     })
 
     it('sends only what changed', async () => {
