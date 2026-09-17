@@ -560,7 +560,10 @@ describe('admin automation save', () => {
         wrap(<AutomationModal open onClose={() => {}} isAdmin summary={null} />)
 
         await openAdvanced('Check')
-        expect(await screen.findByLabelText('Allow rollups to shrink by')).toHaveValue(25)
+        // Seeded by an effect once both the policy and the settings land, so
+        // the field is on screen before it carries a value.
+        const shrink = await screen.findByLabelText('Allow rollups to shrink by')
+        await waitFor(() => expect(shrink).toHaveValue(25))
     })
 
     it('sends the shrink allowance in the policy write', async () => {

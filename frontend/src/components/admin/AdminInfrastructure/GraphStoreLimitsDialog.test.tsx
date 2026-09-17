@@ -116,7 +116,11 @@ describe('planLimits', () => {
 describe('GraphStoreLimitsDialog', () => {
     it('seeds every field from the node’s reading and says what is set now', async () => {
         renderDialog()
-        expect(await screen.findByLabelText(/query time cap/i)).toHaveValue(180)
+        // The fields exist from the moment the dialog opens; their values are
+        // seeded by an effect once the node's reading lands, a commit later.
+        // Waiting on the element alone can sample the blank commit between.
+        const timeout = await screen.findByLabelText(/query time cap/i)
+        await waitFor(() => expect(timeout).toHaveValue(180))
         expect(screen.getByLabelText(/per-query memory ceiling/i)).toHaveValue(512)
         expect(screen.getByLabelText(/concurrent queries/i)).toHaveValue(4)
         expect(screen.getByTestId('limits-now')).toHaveTextContent(/TIMEOUT_MAX 180 s · TIMEOUT_DEFAULT 30 s · QUERY_MEM_CAPACITY 512 MB · THREAD_COUNT 4 · maxmemory 6\.0 GB \(33% used\)/)
@@ -179,7 +183,8 @@ describe('GraphStoreLimitsDialog', () => {
     it('prefills the container from the deployment, else from what was remembered for this node', async () => {
         localStorage.setItem('graphStoreLimits.container.falkor:6379', '12')
         renderDialog()
-        expect(await screen.findByLabelText(/container memory limit/i)).toHaveValue(12)
+        const remembered = await screen.findByLabelText(/container memory limit/i)
+        await waitFor(() => expect(remembered).toHaveValue(12))
         expect(screen.getByText(/Remembered from your last change here/)).toBeInTheDocument()
     })
 
@@ -187,7 +192,8 @@ describe('GraphStoreLimitsDialog', () => {
         getFleetCapacity.mockResolvedValue(capacity({}, 10 * GB))
         localStorage.setItem('graphStoreLimits.container.falkor:6379', '12')
         renderDialog()
-        expect(await screen.findByLabelText(/container memory limit/i)).toHaveValue(10)
+        const fromDeployment = await screen.findByLabelText(/container memory limit/i)
+        await waitFor(() => expect(fromDeployment).toHaveValue(10))
         expect(screen.getByText(/Prefilled from the deployment/)).toBeInTheDocument()
     })
 
