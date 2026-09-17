@@ -384,6 +384,16 @@ async def _buckets_from_raw(
             func.sum(
                 case((_SNAP.capture_reason.in_(_EVENTFUL), 1), else_=0)
             ),
+            # COALESCE fodder, not a replacement reducer. The closing
+            # snapshot of a bucket often carries NO property-key reading —
+            # _persist_probe_counts cannot supply one (its input,
+            # GraphSchemaStats, has no property-key field), so every probe
+            # sweep writes a NULL — and a NULL closing row erased the whole
+            # bucket from the chart and left a blank CSV cell. Taking max
+            # OUTRIGHT would be wrong: the count resets DOWN when a graph is
+            # recreated, and max would hold the pre-drop high for a bucket.
+            # So: closing value when it exists, else the bucket's high.
+            func.max(_SNAP.property_key_count),
         )
         .where(_SNAP.captured_at >= since, _SNAP.captured_at < until)
         .group_by(_SNAP.data_source_id, bucket)
@@ -395,6 +405,11 @@ async def _buckets_from_raw(
         (r[0], r[1]): (
             int(r[2] or 0), int(r[3] or 0), int(r[4] or 0), int(r[5] or 0),
             int(r[6] or 0), int(r[7] or 0),
+            # Deliberately NOT ``int(... or 0)`` like its neighbours: None
+            # must survive as None. A zero here would draw the floor on a
+            # ceiling chart — "this graph has no property names" instead of
+            # "nothing measured it".
+            r[8],
         )
         for r in extremes
     }
@@ -422,8 +437,10 @@ async def _buckets_from_raw(
     out: List[_Bucket] = []
     for r in closing:
         key = (r.data_source_id, r.bucket)
-        n_min, n_max, e_min, e_max, obs, changed = agg.get(
-            key, (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0),
+        n_min, n_max, e_min, e_max, obs, changed, pk_max = agg.get(
+            key,
+            (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0,
+             r.property_key_count),
         )
         out.append(_Bucket(
             data_source_id=r.data_source_id,
@@ -435,7 +452,10 @@ async def _buckets_from_raw(
             edge_count=int(r.edge_count or 0),
             entity_type_counts=r.entity_type_counts or "{}",
             edge_type_counts=r.edge_type_counts or "{}",
-            property_key_count=r.property_key_count,
+            property_key_count=(
+                r.property_key_count if r.property_key_count is not None
+                else pk_max
+            ),
             node_min=n_min, node_max=n_max, edge_min=e_min, edge_max=e_max,
             observations=obs, changed_observations=changed,
         ))
@@ -458,6 +478,9 @@ async def _buckets_from_hourly(
             func.min(_ROLL.node_min), func.max(_ROLL.node_max),
             func.min(_ROLL.edge_min), func.max(_ROLL.edge_max),
             func.sum(_ROLL.observations), func.sum(_ROLL.changed_observations),
+            # Same COALESCE fodder as the raw tier: an hour whose closing
+            # rollup has no reading must not erase the day.
+            func.max(_ROLL.property_key_count),
         )
         .where(
             _ROLL.grain == "hour",
@@ -472,6 +495,7 @@ async def _buckets_from_hourly(
         (r[0], r[1]): (
             int(r[2] or 0), int(r[3] or 0), int(r[4] or 0), int(r[5] or 0),
             int(r[6] or 0), int(r[7] or 0),
+            r[8],   # None must survive as None — see the raw tier.
         )
         for r in extremes
     }
@@ -501,8 +525,10 @@ async def _buckets_from_hourly(
     out: List[_Bucket] = []
     for r in closing:
         key = (r.data_source_id, r.bucket)
-        n_min, n_max, e_min, e_max, obs, changed = agg.get(
-            key, (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0),
+        n_min, n_max, e_min, e_max, obs, changed, pk_max = agg.get(
+            key,
+            (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0,
+             r.property_key_count),
         )
         out.append(_Bucket(
             data_source_id=r.data_source_id,
@@ -514,7 +540,10 @@ async def _buckets_from_hourly(
             edge_count=int(r.edge_count or 0),
             entity_type_counts=r.entity_type_counts or "{}",
             edge_type_counts=r.edge_type_counts or "{}",
-            property_key_count=r.property_key_count,
+            property_key_count=(
+                r.property_key_count if r.property_key_count is not None
+                else pk_max
+            ),
             node_min=n_min, node_max=n_max, edge_min=e_min, edge_max=e_max,
             observations=obs, changed_observations=changed,
         ))

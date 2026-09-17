@@ -1686,10 +1686,14 @@ async def reserve_platform_property_names(
         )
         return set()
 
-    platform = (
-        _RESERVED_NODE_KEYS | _ROLLUP_ATTRIBUTE_NAMES | _META_ATTRIBUTE_NAMES
-        | _PROJECTION_NODE_ATTRIBUTE_NAMES | _PROJECTOR_ATTRIBUTE_NAMES
-    )
+    # The single definition, 80 lines above. Two copies of a five-way union
+    # that nothing pins against each other is a divergence waiting to happen:
+    # the capacity page's platform/source split and what this actually
+    # reserves would drift apart silently. The accessor can only return the
+    # empty "unknown" set when the materializer is unimportable — the same
+    # condition the import above already caught and returned on — so the
+    # subset check below can never see an empty set here.
+    platform = set(platform_property_names())
     if platform <= registered:
         return set()
 

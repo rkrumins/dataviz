@@ -469,10 +469,16 @@ async def refresh_all_assets(
         inventory = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
         inventory = {}
+    # NOT capped here. The inventory is what "does this graph still exist?"
+    # is judged against below, and truncating it first makes every graph past
+    # position N look deleted: their cached rows were filtered out, and a
+    # scoped request naming one returned jobs_queued 0 — a silent no-op the
+    # UI cannot distinguish from "nothing cached yet". The fan-out is still
+    # bounded, by the single cap at the end.
     listed = [
         a for a in (inventory.get("assets") or [])
         if isinstance(a, str) and a
-    ][: resilience.INSIGHTS_MAX_PROVIDER_REFRESH]
+    ]
 
     # Assets that already have a stats row. Capped, and the sentinel is
     # excluded in the WHERE clause (as ``list_assets`` does) rather than
