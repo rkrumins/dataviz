@@ -38,7 +38,8 @@ def read_mem_limit_mb() -> Optional[float]:
     for path in ("/sys/fs/cgroup/memory.max",
                  "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
         try:
-            raw = open(path).read().strip()
+            with open(path) as fh:
+                raw = fh.read().strip()
             if raw == "max":
                 return None
             value = int(raw)
