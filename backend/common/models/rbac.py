@@ -65,6 +65,20 @@ class GroupUpdateRequest(BaseModel):
     description: Optional[str] = None
 
 
+class GroupMemberPreview(BaseModel):
+    """The first few faces in a group, for the admin table's avatar stack.
+
+    Same reasoning as ``WorkspaceMemberSubject`` below: inline expansion so
+    the groups table can show WHO is in a group without a round-trip per
+    row. Id and name only — the stack shows faces, the drawer shows emails.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    #: The picked illustration, so the stack can draw it instead of initials.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+
+
 class GroupResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     id: str
@@ -75,6 +89,12 @@ class GroupResponse(BaseModel):
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
     member_count: int = Field(alias="memberCount")
+    #: First few members, so the admin table can draw an avatar stack
+    #: instead of a bare number. Empty on the single-group routes, which
+    #: no table renders.
+    member_preview: list[GroupMemberPreview] = Field(
+        default_factory=list, alias="memberPreview",
+    )
 
 
 class GroupMemberResponse(BaseModel):
@@ -87,6 +107,25 @@ class GroupMemberResponse(BaseModel):
     #: group mapping — the row is re-judged at every SSO login/refresh,
     #: so removing it by hand only lasts until the next one).
     source: str = "local"
+    #: Server-resolved identity, mirroring ``WorkspaceMemberSubject``. The
+    #: FE used to join these client-side against the admin-only user list,
+    #: which capped at 50 rows and 403'd outright for a delegated groups
+    #: admin (``org_admin`` holds ``system:groups:manage`` but not
+    #: ``system:admin``), leaving the member list stuck on its spinner.
+    #:
+    #: ``None`` when nothing resolves the id. The row still ships: an
+    #: orphaned membership is a real state and the admin needs to see it
+    #: to remove it. The caller must keep showing the raw id rather than
+    #: invent a name over it.
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    status: Optional[str] = None  # pending | active | suspended
+    #: Soft-deleted accounts stay in the group until somebody removes
+    #: them, so the list says so rather than showing them as current.
+    deleted: bool = False
+    #: The avatar illustration this person picked, when they picked one.
+    #: ``UserAvatar`` prefers the provider photo, then this, then initials.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
 
 
 class GroupMemberAddRequest(BaseModel):
@@ -122,6 +161,67 @@ class WorkspaceMemberResponse(BaseModel):
     # ISO-8601 UTC for an expiry. The FE renders a countdown badge.
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     subject: WorkspaceMemberSubject
+
+
+class WorkspaceAccessGrant(BaseModel):
+    """One route by which a user holds a role in the workspace.
+
+    A user can hold several: a direct binding and membership of two
+    groups that are each bound would be three grants. ``via`` is
+    ``"direct"`` for a user binding, ``"group"`` for one inherited
+    through a group; the group fields are set only in the latter case.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    role: str
+    via: str  # "direct" | "group"
+    binding_id: str = Field(alias="bindingId")
+    group_id: Optional[str] = Field(default=None, alias="groupId")
+    group_name: Optional[str] = Field(default=None, alias="groupName")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+
+
+class WorkspaceAccessUser(BaseModel):
+    """A person with effective access to the workspace, flattened across
+    their direct binding(s) and every bound group they belong to.
+
+    ``roles`` is the distinct set they effectively hold here; the
+    permissions that actually apply are the UNION of those roles'
+    grants. ``effectiveRole`` is a single label for the badge — the
+    highest-precedence built-in workspace role they hold
+    (admin > member > viewer), or their first role when they hold only
+    custom ones. It is a convenience, never the whole story: ``roles``
+    and ``grants`` carry the full picture, and the FE shows them.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    user_id: str = Field(alias="userId")
+    # Best-effort identity, same contract as everywhere else: ``None``
+    # means the id resolved to nothing (a deleted account whose row is
+    # gone) — show the raw id, never invent a name.
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+    status: Optional[str] = None
+    deleted: bool = False
+    roles: list[str] = Field(default_factory=list)
+    effective_role: str = Field(alias="effectiveRole")
+    grants: list[WorkspaceAccessGrant] = Field(default_factory=list)
+
+
+class WorkspaceAccessResponse(BaseModel):
+    """The flattened, inheritance-aware access list for a workspace.
+
+    Every distinct person who can reach the workspace — directly bound
+    or through any bound group — with the route(s) by which they got
+    there. The counts drive the header strip without the FE re-counting.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    users: list[WorkspaceAccessUser] = Field(default_factory=list)
+    total_users: int = Field(alias="totalUsers")
+    # Users with at least one binding of each kind. A user can be in
+    # BOTH (bound directly and via a group), so these need not sum to
+    # ``totalUsers``.
+    direct_users: int = Field(default=0, alias="directUsers")
+    via_group_users: int = Field(default=0, alias="viaGroupUsers")
 
 
 class WorkspaceMemberCreateRequest(BaseModel):

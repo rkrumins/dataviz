@@ -80,6 +80,39 @@ SECRET = "s" * 48
     # were such a row seeded out of band, the transport basis stands.
     ("backchannel",
      {"exchange_mode": "server", "trust_unsigned": True}, VERIFIED),
+    # tls_verify off: server mode's VERIFIED rests on the transport, and
+    # with verification off anyone on the path can be the endpoint. Only
+    # PASTED signing material survives an unverifiable channel — a JWKS
+    # does not, because the key set itself arrives over that channel.
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": "false"}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False,
+      "claims_format": "jwt", "jwks_url": "https://gw/jwks"}, UNVERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False, "claims_format": "jwt",
+      "jwt_public_key": "-----BEGIN PUBLIC KEY-----"}, VERIFIED),
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False, "claims_format": "jwt",
+      "jwt_shared_secret": "s3cr3t"}, VERIFIED),
+    # A server row with pasted material but unsigned claims verifies
+    # nothing — validation refuses saving it, and assurance fails closed.
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": False,
+      "jwt_public_key": "-----BEGIN PUBLIC KEY-----"}, UNVERIFIED),
+    # Browser mode: pasted material's trust chain uses no server-side
+    # TLS at all; a JWKS-verified row loses its key-source channel.
+    ("backchannel",
+     {"exchange_mode": "browser", "tls_verify": False,
+      "jwt_shared_secret": "s3cr3t"}, VERIFIED),
+    ("backchannel",
+     {"exchange_mode": "browser", "tls_verify": False,
+      "jwks_url": "https://gw/jwks"}, UNVERIFIED),
+    # Explicit True and absent both keep today's ratings.
+    ("backchannel",
+     {"exchange_mode": "server", "tls_verify": True}, VERIFIED),
     # The dev mock signs its envelope, but it asserts whatever a developer
     # typed into a form. That is authorship, not identity proof.
     ("custom", {}, UNVERIFIED),

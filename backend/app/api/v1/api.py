@@ -7,10 +7,12 @@ from backend.app.api.v1.capability_gate import (
 from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
+    metrics as metrics_endpoint,
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
+    graph_store,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
@@ -37,6 +39,12 @@ api_router = APIRouter()
 #   * auth.router (legacy): /signup, /forgot-password, /reset-password,
 #     /verify-invite — flows that don't issue session cookies. Will follow
 #     into the auth service in a later move.
+# Prometheus scrape, at /api/v1/metrics (this router is mounted under
+# /api/v1). Point the scrape config at that path; the route itself 404s
+# unless METRICS_ENABLED says otherwise (see the module).
+api_router.include_router(
+    metrics_endpoint.router, tags=["metrics"],
+)
 api_router.include_router(
     auth_session_router, prefix="/auth", tags=["auth"],
 )
@@ -307,6 +315,15 @@ api_router.include_router(
 api_router.include_router(
     redis_config.router, prefix="/admin/redis", tags=["admin:redis"],
     dependencies=[Depends(requires("system:admin"))],
+)
+
+# Graph store topology: /api/v1/admin/graph-store/* — every node of every
+# provider's store (masters AND replicas), the graphs on each shard, and
+# where one data source's graph lives. Gates are PER ROUTE: the fleet view
+# is system:admin, while a single graph's placement rides the Ingestion
+# read gate so a source's own page can show which node holds it.
+api_router.include_router(
+    graph_store.router, prefix="/admin/graph-store", tags=["admin:graph-store"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────

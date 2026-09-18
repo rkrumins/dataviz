@@ -16,7 +16,7 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { DriftReport, Watermark } from '@/services/versioningApiService'
@@ -50,7 +50,7 @@ function heroState(wm: Watermark | undefined): HeroState {
 }
 
 export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   // Rebuild lifecycle: 'running' once we've kicked one; terminal 'done' (fresh again after
   // observed progress) or 'failed' (idle + behind, with the recorded reason when there is one).
@@ -119,7 +119,7 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
         },
         onError: (e) => {
           const msg = (e as Error).message
-          showToast(/already running/i.test(msg) ? 'info' : 'error',
+          notify(/already running/i.test(msg) ? 'info' : 'error',
             /already running/i.test(msg) ? 'A sync check is already running.' : msg)
         },
       },
@@ -131,7 +131,7 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
     rebuild.mutate(undefined, {
       onSuccess: (res) => {
         if (res.alreadyRunning) {
-          showToast('info', 'A rebuild is already in progress.')
+          notify('info', 'A rebuild is already in progress.')
           return
         }
         // The drift snapshot is now being repaired — drop it so we never show pre-rebuild drift.
@@ -142,7 +142,7 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
         idleTicks.current = 0
         setRebuildPhase('running')
       },
-      onError: (e) => showToast('error', (e as Error).message),
+      onError: (e) => notify('error', (e as Error).message),
     })
   }
 

@@ -40,6 +40,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { ContextViewCanvas } from '@/components/canvas/context-view/ContextViewCanvas'
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
@@ -80,8 +81,8 @@ export interface TraceCanvasHarness {
   /** Click that magnifier, opening the column's inline search box. */
   openChildSearch(id: string): Promise<void>
   /** Type a query into an open child-search box AND SUBMIT it — the real
-   *  keystroke path into the canvas's `onSearchChildren`. The box keeps its
-   *  own local value and only commits on Enter/blur, so a change event alone
+   *  keystroke path into the canvas's search session. The box keeps its own
+   *  local value and only commits on Enter/blur, so a change event alone
    *  reaches nothing. Returns false if no box is open. */
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
@@ -90,6 +91,11 @@ export interface TraceCanvasHarness {
    *  view-only control must never move: direction, view depth and expansion
    *  are all re-projections of the walk the session already holds. */
   providerCalls(): number
+  /** The `granularity` every `/edges/aggregated` request carried, in order.
+   *  The aggregated fan-out is DEBOUNCED 300 ms, so a test that only calls
+   *  `settle()` (which barely advances the clock) will read an empty list —
+   *  wait past the debounce first. */
+  aggregatedGranularities(): Array<string | null>
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -202,7 +208,7 @@ function installClipboard(): void {
   })
 }
 
-function installJsdomLayout(): void {
+export function installJsdomLayout(): void {
   if (typeof globalThis.IntersectionObserver === 'undefined') {
     globalThis.IntersectionObserver = class {
       observe() {}
@@ -306,12 +312,17 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null> },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
    *  only the fine page, so the coarse cells land alone first (Part G). */
   gateFineOnly?: boolean,
+  /** Extra fields merged onto every aggregated-edge answer — `staleReason`
+   *  and friends. The canvas reads these to decide what it tells the reader
+   *  about the completeness of the wires it drew, and that decision has no
+   *  other observable. */
+  aggregatedExtra?: Record<string, unknown>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -370,6 +381,14 @@ function stubProvider(
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
     getEdges: async () => [],
+    // The aggregated fan-out the browse canvas fires for its visible
+    // containers. It answers nothing — what a test reads is the LEVEL the
+    // canvas asked for, which is the whole blast radius of the granularity
+    // it auto-selects.
+    getAggregatedEdges: async (request: { granularity?: string | null }) => {
+      calls.aggregated.push(request?.granularity ?? null)
+      return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
+    },
     computeLayerAssignments: async () => ({
       assignments,
       parentMap,
@@ -446,16 +465,26 @@ function seedBrowse(estate: TraceEstate, holds?: readonly string[]): void {
   store.clearSelection()
 }
 
-function seedView(estate: TraceEstate): void {
+/** `dataSourceId` is OPT-IN and defaults to absent, exactly as it was before
+ *  this parameter existed. Several canvas hooks (branch resolution, graph
+ *  resolve, the readiness loops) only run once the view names a data source,
+ *  so setting it unconditionally would have changed what all nine harness
+ *  modules exercise. Only a test that needs those paths asks for it. */
+function seedView(
+  estate: TraceEstate,
+  entityTypes: readonly unknown[] = [],
+  dataSourceId?: string,
+): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
     schema: {
       id: 'harness', name: 'harness', version: '1',
-      entityTypes: [], relationshipTypes: [], globalVisuals: {},
+      entityTypes, relationshipTypes: [], globalVisuals: {},
       containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
       rootEntityTypes: [], defaultViewId: 'harness-view',
       views: [{
         id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
+        ...(dataSourceId ? { dataSourceId } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
           defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
@@ -485,6 +514,17 @@ export async function renderCanvasWithTrace(
     /** The search string the canvas mounts on — `?trace=…` for a shared
      *  trace link, exactly as a recipient's browser would present it. */
     search?: string
+    /** The ontology's entity types, in place BEFORE the first render. The
+     *  canvas picks its aggregation granularity from them on mount and the
+     *  fan-out is debounced behind that, so a test that installs the schema
+     *  after this call returns can miss the round it exists to read. */
+    entityTypes?: readonly unknown[]
+    /** Extra fields on every aggregated-edge answer (e.g. `staleReason`),
+     *  so a test can put the canvas in a degraded-rollup state. */
+    aggregatedExtra?: Record<string, unknown>
+    /** Give the seeded view a data source, arming the canvas hooks that are
+     *  inert without one. Absent by default. */
+    dataSourceId?: string
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -516,7 +556,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate)
+  seedView(estate, opts.entityTypes, opts.dataSourceId)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
@@ -552,19 +592,24 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0 }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null> }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // A Router, because the header's BranchSwitcher keeps the active branch in the
+  // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
+  // and every canvas test dies before it can look at the canvas.
   render(
-    <QueryClientProvider client={queryClient}>
-      <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
-        isLoading: false, error: null, scopeKind: 'ready',
-        workspaceId: 'harness-ws', dataSourceId: null,
-        providerReady: true, providerVersion: 1,
-      } as never}>
-        <ContextViewCanvas />
-      </ProviderOverride>
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ProviderOverride value={{
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra),
+          isLoading: false, error: null, scopeKind: 'ready',
+          workspaceId: 'harness-ws', dataSourceId: null,
+          providerReady: true, providerVersion: 1,
+        } as never}>
+          <ContextViewCanvas />
+        </ProviderOverride>
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 
   // REAL TIME, for the surfaces that animate. `settle` drains microtasks and
@@ -666,7 +711,7 @@ export async function renderCanvasWithTrace(
     },
     async typeChildSearch(query: string) {
       // The column's own input, driven the way a reader drives it — no prop
-      // capture, no mock: this is the exact path to `onSearchChildren`.
+      // capture, no mock: this is the exact path into the search session.
       //
       // ENTER IS LOAD-BEARING. SearchBoxItem holds the text in local state
       // and only calls its `onChange` on Enter or blur, so a change event by
@@ -706,10 +751,10 @@ export async function renderCanvasWithTrace(
     connectPickerOpen: () =>
       [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
     missingConnections: () => {
-      // The chip reads "<n> connections outside this view" (curated) or
+      // The chip reads "<n> flows outside this view" (curated) or
       // "… not on canvas" (open). Absent entirely when the count is 0.
       const label = [...document.querySelectorAll<HTMLElement>('span')]
-        .find(el => /^connections (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
+        .find(el => /^flows (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
       const count = label?.previousElementSibling?.textContent?.trim()
       if (count === undefined) return null
       return Number(count.replace(/,/g, ''))
@@ -717,10 +762,11 @@ export async function renderCanvasWithTrace(
     async layerContextMenu() {
       // Right-click EMPTY layer space — the column's scroll area, which is
       // what carries `onLayerContextMenu` (cards handle their own).
-      // The FIRST scroller belongs to a chrome panel that marks itself
-      // interactive, and the handler deliberately bails for those; the layer
-      // columns' own scrollers are the ones that carry the menu.
-      const area = [...document.querySelectorAll<HTMLElement>('.custom-scrollbar')]
+      // Scoped to a column: the app styles several scrollers with
+      // `custom-scrollbar` — chrome panels (which mark themselves
+      // interactive, and the handler deliberately bails for those) and the
+      // canvas's own horizontal scroller, which carries no menu at all.
+      const area = [...document.querySelectorAll<HTMLElement>('[data-layer-id] .custom-scrollbar')]
         .find(el => !el.closest('[data-canvas-interactive]'))
       if (!area) throw new Error('no layer scroll area')
       await act(async () => { fireEvent.contextMenu(area) })
@@ -754,7 +800,11 @@ export async function renderCanvasWithTrace(
       const rows = [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
       const row = rows.find(r => r.textContent?.includes(label))
       if (!row) throw new Error(`no trace history entry for ${label}`)
-      const share = row.parentElement?.querySelector<HTMLButtonElement>('[data-history-share]')
+      // Not `row.parentElement`: each control in the row is wrapped by its own
+      // HoverTip anchor, so the two buttons are cousins rather than siblings.
+      // The row itself is marked, and that is what they share.
+      const share = row.closest('[data-history-row]')
+        ?.querySelector<HTMLButtonElement>('[data-history-share]')
       if (!share) throw new Error(`no share action on the ${label} entry`)
       clipboard.text = ''
       await act(async () => { fireEvent.click(share) })
@@ -830,6 +880,7 @@ export async function renderCanvasWithTrace(
       await settle()
     },
     providerCalls: () => providerCalls.traceClosure,
+    aggregatedGranularities: () => [...providerCalls.aggregated],
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })

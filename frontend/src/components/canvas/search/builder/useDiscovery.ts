@@ -11,7 +11,7 @@
 import { useEffect, useState, useMemo } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { RemoteGraphProvider, httpStatusOf } from '@/providers/RemoteGraphProvider'
 import type { SearchDiscoverResult } from '@/types/search'
 
 
@@ -22,8 +22,21 @@ export interface UseDiscoveryResult {
     /** True on the very first load only. Subsequent revalidations
      *  surface as `discovery` updates without flipping this. */
     isInitialLoading: boolean
-    /** Last error from the discover call, or null. */
+    /** Last error from the discover call, or null. Never set for a
+     *  refusal — see `unavailable`. */
     error: Error | null
+    /**
+     * Discovery is not offered to this caller — a 403.
+     *
+     * The live case is a share link: `/search/discover` samples every
+     * label in the DATA SOURCE, which is wider than the one view a
+     * capability identity was granted, so the backend refuses it. That
+     * arrives on every open and will never succeed, so it is not an
+     * `error`: there is no fault, nothing to retry and nothing the
+     * viewer can do. Surfaces read this to say nothing at all rather
+     * than to show a failure they cannot explain.
+     */
+    unavailable: boolean
     /** Union of all native property keys across every label. Useful
      *  for property-key autocomplete when the editor doesn't yet
      *  know which entity type the user is filtering by. */
@@ -58,6 +71,7 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
     const [discovery, setDiscovery] = useState<SearchDiscoverResult | null>(null)
     const [isInitialLoading, setIsInitialLoading] = useState(true)
     const [error, setError] = useState<Error | null>(null)
+    const [unavailable, setUnavailable] = useState(false)
 
     useEffect(() => {
         if (!viewId) {
@@ -80,11 +94,16 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
                 if (cancelled) return
                 setDiscovery(result)
                 setError(null)
+                setUnavailable(false)
                 setIsInitialLoading(false)
             })
             .catch((e: unknown) => {
                 if (cancelled) return
-                setError(e instanceof Error ? e : new Error(String(e)))
+                // A 403 is the backend declining, not failing. Only a real
+                // fault becomes an `error` a surface may report.
+                const refused = httpStatusOf(e) === 403
+                setUnavailable(refused)
+                setError(refused ? null : (e instanceof Error ? e : new Error(String(e))))
                 setIsInitialLoading(false)
             })
         return () => {
@@ -181,6 +200,7 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         discovery,
         isInitialLoading,
         error,
+        unavailable,
         allKeys,
         keysByEntityType,
         tagValues,

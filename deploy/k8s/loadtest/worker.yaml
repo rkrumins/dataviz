@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadtest-worker
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: loadtest-worker
+    app.kubernetes.io/component: load-generator
+    app.kubernetes.io/part-of: loadtest
+spec:
+  # Concurrency is replicas × USERS_PER_WORKER. Prefer more workers over more
+  # users per worker: past a few hundred users a worker's own event loop, not
+  # the system under test, sets the pace — and a generator that is the
+  # bottleneck reports its own ceiling as the system's.
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loadtest-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loadtest-worker
+        app.kubernetes.io/component: load-generator
+        app.kubernetes.io/part-of: loadtest
+    spec:
+      # A load test is finished when it is finished; a rolling worker mid-run
+      # would silently change the offered load.
+      terminationGracePeriodSeconds: 10
+      affinity:
+        podAntiAffinity:
+          # ONE WORKER PER NODE, required.
+          #
+          # Two workers on one node share that node's CPU and its single NIC,
+          # so the run measures the generator rather than the system. This is
+          # `required` rather than `preferred` on purpose: a silently
+          # co-scheduled pair produces a plausible WRONG number, and a
+          # plausible wrong number is worse than a pod stuck Pending with an
+          # operator asking why. If they will not schedule, the cluster does
+          # not have the nodes for the concurrency you asked for — which is
+          # itself the answer.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: loadtest-worker
+              topologyKey: kubernetes.io/hostname
+          # …and away from what we are measuring. A generator sharing a node
+          # with viz-service or FalkorDB steals the CPU whose absence it is
+          # trying to detect. `preferred`, because on a small cluster
+          # "nowhere left to schedule" is worse than a little contention —
+          # but check `get pods -o wide` before believing a small-cluster
+          # number.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values: [viz-service, falkordb, aggregation-worker]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: worker
+          # Built from loadtest/Dockerfile — see master.yaml on retagging
+          # for a registry. The two must be the same image: a master and a
+          # worker on different builds disagree about the locustfile.
+          image: synodic/loadtest:latest
+          imagePullPolicy: IfNotPresent
+          command: ["locust"]
+          args:
+            - "--worker"
+            - "--master-host=loadtest-master"
+            - "--master-port=5557"
+            - "-f"
+            - "/loadtest/locustfile.py"
+          env:
+            - name: SYNODIC_HOST
+              value: "http://viz-service:8000"
+            # Auth. Point at the same secret the rest of the namespace uses,
+            # or set SYNODIC_BEARER_TOKEN directly for a throwaway token.
+            - name: SYNODIC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: loadtest-credentials
+                  key: username
+                  optional: true
+            - name: SYNODIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: loadtest-credentials
+                  key: password
+                  optional: true
+            # The view size each simulated user opens. 20 is one node batch;
+            # 500 is the five-batch view the capacity table is written about.
+            - name: SYNODIC_URNS_PER_WORKSPACE
+              value: "500"
+            # Retry model — see loadtest/lib/retry.py. 0 restores the old
+            # fire-once behaviour for comparing against historical runs.
+            - name: LOADTEST_RETRY_MAX_ATTEMPTS
+              value: "5"
+            - name: LOADTEST_RETRY_BASE_MS
+              value: "1000"
+          resources:
+            # REQUESTS, not just limits. An unrequested generator is throttled
+            # by the kubelet under exactly the load it exists to produce, and
+            # reports the throttling as the system being slow.
+            requests:
+              cpu: "1"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop: ["ALL"]

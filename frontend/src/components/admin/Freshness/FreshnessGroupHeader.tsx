@@ -15,10 +15,12 @@
  * changes a number. "Attention" is the server-aligned marker-OR-failed set;
  * a rebuilding source is healthy in-progress, counted on its own.
  */
-import { ChevronDown, ChevronRight, Waves, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, PauseCircle, StopCircle, Unplug, Waves, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessRow, ProviderFreshnessSummary } from '@/services/freshnessService'
-import { isDrifting, isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
+import { isDrifting, isHeld, isNeverBuilt, isProjectionStalled, isRebuilding, needsAttention } from './freshnessTriage'
+import { DRIFT_SPEC } from './DriftStateBadge'
+import { holdLabel, holdTitle, type RowHold } from './holds'
 
 interface Props {
     providerId: string
@@ -31,14 +33,25 @@ interface Props {
     onToggle: () => void
     isSystemAdmin: boolean
     onRefreshProvider: (providerId: string, name: string) => void
+    /** Pause / stop / resume every source under the provider (admin). */
+    onHoldProvider?: (providerId: string, name: string) => void
     colSpan: number
 }
 
 export function FreshnessGroupHeader({
-    providerId, name, rows, summary, expanded, onToggle, isSystemAdmin, onRefreshProvider, colSpan,
+    providerId, name, rows, summary, expanded, onToggle, isSystemAdmin, onRefreshProvider,
+    onHoldProvider, colSpan,
 }: Props) {
     const total = rows.length
     const Chevron = expanded ? ChevronDown : ChevronRight
+
+    // The hold on the PROVIDER ITSELF, or the fleet's (which outranks it) —
+    // the server resolves it onto the provider summary. Per-source holds
+    // inside the group are in ``cov.held`` below, not here: the header must
+    // not claim the provider is held because one source under it is.
+    const groupHold: RowHold | null = summary?.heldBy
+        ? { scope: summary.heldBy, kind: summary.heldKind ?? 'stopped', until: summary.heldUntil ?? null }
+        : null
 
     // One resolver for every count the header shows, so collapsed and expanded
     // agree. Provider-wide summary when present, else a client count over this
@@ -53,24 +66,36 @@ export function FreshnessGroupHeader({
             notBuilt: summary.notBuilt,
             attention: summary.needsAttention,
             drifting: summary.drifting ?? rows.filter(isDrifting).length,
+            stalled: summary.projectionStalled ?? rows.filter(isProjectionStalled).length,
+            held: summary.held ?? rows.filter(isHeld).length,
         }
         : {
             total,
-            cached: rows.filter(r => r.cacheAsOf != null).length,
+            // Something warm is actually STORED — not merely "this source
+            // has been invalidated at some point", which is what the
+            // generation stamp answers and which every source that has
+            // ever been rebuilt satisfies forever.
+            cached: rows.filter(r => r.cacheBuiltAt != null).length,
             ready: rows.filter(r => r.aggregationStatus === 'ready').length,
             rebuilding: rows.filter(isRebuilding).length,
             notBuilt: rows.filter(isNeverBuilt).length,
             attention: rows.filter(needsAttention).length,
             drifting: rows.filter(isDrifting).length,
+            stalled: rows.filter(isProjectionStalled).length,
+            held: rows.filter(isHeld).length,
         }
     const coverage = cov.total > 0 ? Math.round((cov.cached / cov.total) * 100) : 0
 
     return (
         <tr className={cn(
             'border-t border-glass-border',
-            cov.attention > 0
-                ? 'bg-amber-500/[0.04]'
-                : 'bg-black/[0.02] dark:bg-white/[0.02]',
+            // Red outranks the amber attention wash: one source in this
+            // group is serving no rolled-up connections at all.
+            cov.stalled > 0
+                ? 'bg-red-500/[0.06]'
+                : cov.attention > 0
+                    ? 'bg-amber-500/[0.04]'
+                    : 'bg-black/[0.02] dark:bg-white/[0.02]',
         )}>
             <td colSpan={colSpan} className="px-2 py-1.5">
                 <div className="flex items-center gap-2">
@@ -89,20 +114,47 @@ export function FreshnessGroupHeader({
                                     {cov.ready > 0 && <> · {cov.ready} ready</>}
                                     {cov.rebuilding > 0 && <> · {cov.rebuilding} rebuilding</>}
                                     {cov.notBuilt > 0 && <> · {cov.notBuilt} not built</>}
+                                    {cov.held > 0 && <> · {cov.held} held</>}
                                 </>
                             ) : (
                                 <>
                                     {' · '}{cov.ready} ready
                                     {cov.rebuilding > 0 && <> · {cov.rebuilding} rebuilding</>}
+                                    {cov.held > 0 && <> · {cov.held} held</>}
                                     {' · '}{coverage}% cached
                                 </>
                             )}
                         </span>
+                        {/* The provider's own hold (or the fleet's). Quiet slate,
+                            icon and word: it sits beside the amber and rose
+                            counts and must not read as one more alarm — it is
+                            something an operator chose. */}
+                        {groupHold && (
+                            <span
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-slate-400"
+                                title={holdTitle(groupHold)}
+                            >
+                                {groupHold.kind === 'paused'
+                                    ? <PauseCircle className="w-3 h-3 shrink-0" />
+                                    : <StopCircle className="w-3 h-3 shrink-0" />}
+                                {holdLabel(groupHold, 'provider')}
+                            </span>
+                        )}
                         {/* Drifting is called out separately from "attention",
                             which it is also part of: a collapsed healthy-looking
                             group must not hide the one source whose rollups no
                             longer match its data. Icon + word, never colour
                             alone — this sits right beside the amber count. */}
+                        {/* Called out ahead of drifting and separately from
+                            it: these sources are serving NO rolled-up
+                            connections, and the rebuild that answers drifting
+                            does not answer this. */}
+                        {cov.stalled > 0 && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-600 dark:text-red-400">
+                                <Unplug className="w-3 h-3 shrink-0" />
+                                {cov.stalled} with {DRIFT_SPEC.projectionStalled.label.toLowerCase()}
+                            </span>
+                        )}
                         {cov.drifting > 0 && (
                             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
                                 <Waves className="w-3 h-3 shrink-0" />
@@ -146,6 +198,16 @@ export function FreshnessGroupHeader({
                             )}
                         >
                             <Zap className="w-3.5 h-3.5" /> Refresh provider…
+                        </button>
+                    )}
+                    {isSystemAdmin && providerId !== '—' && onHoldProvider && (
+                        <button
+                            type="button"
+                            onClick={() => onHoldProvider(providerId, name)}
+                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-500/10 transition-colors"
+                        >
+                            <PauseCircle className="w-3.5 h-3.5" />
+                            {groupHold?.scope === 'provider' ? 'Resume provider' : 'Pause provider…'}
                         </button>
                     )}
                 </div>

@@ -10,7 +10,7 @@
  */
 import { useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { X, FileDiff, GitPullRequest, GitCommit, PencilLine, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -21,6 +21,7 @@ import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
 import { ViewHistoryTimeline } from './ViewHistoryTimeline'
 import { DataHealthTab } from './DataHealthTab'
+import { MOTION } from '@/lib/motion'
 
 export type ViewPanelTab = 'changes' | 'prs' | 'history' | 'health'
 
@@ -100,14 +101,17 @@ export function ViewVersioningPanel({
   return createPortal(
     <>
       <Backdrop open={true} onClick={onClose} zClassName="z-[60]" className="bg-black/40" />
-      <AnimatePresence>
+      {/* Entrance-only, and no <AnimatePresence>: the panel is mounted only
+          while it is open, so its presence tree unmounted with it and the
+          `exit` never ran. A viewport-height panel sitting inside a presence
+          tree is the shape that strands a click-blocker in the body when an
+          exit is interrupted; without one there is nothing to strand. */}
       <motion.aside
         key="panel"
         className="fixed right-0 top-0 h-full w-[560px] max-w-[94vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
         initial={{ x: 560 }}
         animate={{ x: 0 }}
-        exit={{ x: 560 }}
-        transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+        transition={MOTION.modalSpring}
       >
         <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-glass-border/60">
           <div className="min-w-0">
@@ -173,7 +177,6 @@ export function ViewVersioningPanel({
           {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} />}
         </div>
       </motion.aside>
-      </AnimatePresence>
     </>,
     document.body,
   )

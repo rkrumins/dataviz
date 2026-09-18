@@ -33,6 +33,7 @@ from backend.app.db.models import (
     GroupORM, PermissionORM, RoleORM, UserORM, WorkspaceORM,
 )
 from backend.auth_service.interface import User
+from backend.common.display_name import resolve_display_name
 from backend.common.models.rbac import RBACSearchHit
 
 
@@ -83,7 +84,9 @@ async def _search_users(session: AsyncSession, q: str) -> list[RBACSearchHit]:
     )
     out: list[RBACSearchHit] = []
     for u in rows.scalars().all():
-        full = f"{u.first_name} {u.last_name}".strip() or u.email
+        full = resolve_display_name(
+            getattr(u, "display_name", None), u.first_name, u.last_name,
+        ) or u.email
         score = _score(q, u.id, u.email, full, u.first_name, u.last_name)
         if score == 0:
             continue

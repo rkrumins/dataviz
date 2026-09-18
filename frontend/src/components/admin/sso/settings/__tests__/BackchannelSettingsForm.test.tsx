@@ -635,8 +635,13 @@ describe('the avatar mapping switch', () => {
         )
     })
 
-    it('names the allowlist requirement and the ownership consequence', () => {
+    it('names both host lists and the ownership consequence', () => {
         renderForm({})
+        // External hosts have their own list; pointing operators only
+        // at the internal allowlist taught them to fix the wrong thing.
+        expect(
+            screen.getByText(/avatar image hosts/i),
+        ).toBeInTheDocument()
         expect(
             screen.getByText(/internal-hosts allowlist/i),
         ).toBeInTheDocument()

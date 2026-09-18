@@ -149,8 +149,11 @@ export function useProviderEditor(provider: IdpProvider) {
                 claimMapping: draft.claimMapping,
                 linkingPolicy: draft.linkingPolicy,
                 emailDomains: parseDomains(draft.emailDomains),
-                buttonLabel: draft.buttonLabel || null,
-                buttonIcon: draft.buttonIcon || null,
+                // Empty string, not null: the server reads null as
+                // "field not in this PATCH", so a blanked box sent as
+                // null silently kept the old value forever. '' clears.
+                buttonLabel: draft.buttonLabel ?? '',
+                buttonIcon: draft.buttonIcon ?? '',
                 priority: draft.priority,
                 enabled: draft.enabled,
             })

@@ -26,7 +26,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
-import { ToastContainer } from '@/components/ui/toast'
+import { NotificationStack } from '@/components/ui/notifications'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
@@ -177,7 +177,7 @@ export function AppLayout() {
         />
 
         <HelpPanel />
-        <ToastContainer />
+        <NotificationStack />
         <AccessDeniedModal />
 
         {/* Guided tours — experimental, gated by the toursEnabled feature flag */}

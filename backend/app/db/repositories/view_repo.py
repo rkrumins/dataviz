@@ -1170,15 +1170,19 @@ def _apply_view_filters(
         )
 
     if search:
-        pattern = f"%{search}%"
-        query = query.where(
-            ViewORM.name.ilike(pattern)
-            | ViewORM.description.ilike(pattern)
-            | WorkspaceORM.name.ilike(pattern)
-            | WorkspaceDataSourceORM.label.ilike(pattern)
-            | ViewORM.created_by.ilike(pattern)
-            | ViewORM.tags.ilike(pattern)
-        )
+        terms = search.split()
+        if terms:
+            query = query.where(and_(*[
+                (
+                    ViewORM.name.ilike(f"%{term}%")
+                    | ViewORM.description.ilike(f"%{term}%")
+                    | WorkspaceORM.name.ilike(f"%{term}%")
+                    | WorkspaceDataSourceORM.label.ilike(f"%{term}%")
+                    | ViewORM.created_by.ilike(f"%{term}%")
+                    | ViewORM.tags.ilike(f"%{term}%")
+                )
+                for term in terms
+            ]))
 
     if attention_only:
         # Views "needing attention" are those that are stale (not updated in

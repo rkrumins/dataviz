@@ -17,9 +17,9 @@ vi.mock('../../hooks/useVersioning', () => ({
   useRestorePreview: () => previewState,
 }))
 
-const showToast = vi.fn()
-vi.mock('@/components/ui/toast', () => ({
-  useToast: () => ({ showToast }),
+const notify = vi.fn()
+vi.mock('@/components/ui/notifications', () => ({
+  useAppNotifications: () => ({ notify }),
 }))
 
 import { MergeConflictError } from '@/services/versioningApiService'
@@ -82,13 +82,13 @@ describe('RevertDialog', () => {
     )
   })
 
-  it('closes and toasts on success', () => {
+  it('closes and notifies on success', () => {
     const onClose = vi.fn()
     revertMutate.mockImplementation((_vars, opts) => opts.onSuccess({ commitId: 'cmt_r' }))
     render(<RevertDialog open commit={COMMIT} wsId="ws1" graphId="g1" onClose={onClose} />)
     fireEvent.click(screen.getByRole('button', { name: /Undo change/ }))
     expect(onClose).toHaveBeenCalled()
-    expect(showToast).toHaveBeenCalledWith('success', expect.stringMatching(/undone/))
+    expect(notify).toHaveBeenCalledWith('success', expect.stringMatching(/undone/))
   })
 })
 

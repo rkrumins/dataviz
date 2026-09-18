@@ -29,14 +29,53 @@ PROVIDER_INSTANTIATION_TIMEOUT_SECS: float = float(
 BREAKER_FAIL_MAX: int = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 # Seconds the breaker stays open before allowing a single probe request.
 BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
+# What the breaker counts. Only connection-class failures (refused, reset,
+# DNS, socket timeout, cluster routing) open it. A query that merely exceeds
+# its per-operation deadline surfaces as ProviderTimeout (HTTP 504 +
+# Retry-After, code PROVIDER_TIMEOUT) and is NOT counted — a slow query is a
+# capacity signal, not evidence the provider is unreachable. Server error
+# replies (bad Cypher, per-query memory cap) are not counted either, and two
+# of them are relabelled as capacity signals: FalkorDB's "Max pending queries
+# exceeded" (MAX_QUEUED_QUERIES reached) surfaces as ProviderBusy (HTTP 429 +
+# Retry-After) and its "Query timed out" (the server killed the query at the
+# TIMEOUT sent with it) as ProviderTimeout — both retried in place by the
+# canvas, neither a 500.
+#
+# Per-provider request concurrency (ProviderManager): at most
+# PROVIDER_MAX_CONCURRENCY (8) outbound calls in flight per data source; a
+# request that finds every slot busy waits up to PROVIDER_SEMAPHORE_BUDGET_S
+# (2.0) for one before being shed with ProviderBusy (HTTP 429 + Retry-After).
+# That cap is per PROCESS; PROVIDER_FLEET_MAX_CONCURRENCY counts the same
+# admission once for the whole fleet (sized from the node's THREAD_COUNT),
+# which is the number that actually bounds what the store is asked to run.
 
 # ── FalkorDB-specific query timeouts ────────────────────────────────
 # Read-only Cypher queries (MATCH ... RETURN).
-FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "5"))
-# get_children / get_children_with_edges per-query timeout. Larger than
-# the generic 5s read default because wide containers with many lineage
-# cross-edges legitimately exceed it; aligns with HTTP_TIMEOUT_GRAPH_SECS.
+#
+# 15s, not the 5s this used to be. Five seconds was chosen for small graphs
+# and then every read path that met a real one was given an exception to it:
+# children 15s, the stats scans 30s, the aggregated ladder its own budget.
+# A default that every serious caller has to override is not a default, it
+# is a trap for the ones that did not think to — and a read that runs out of
+# budget does not degrade, it returns an error to a canvas that was about to
+# draw. Reads cost a module thread, not the write lock, so the number that
+# bounds them is how long anyone will actually wait: still far under
+# HTTP_TIMEOUT_GRAPH_SECS (60s) above it, and under the server's own
+# TIMEOUT_MAX below it, so the deadline ladder still nests.
+FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "15"))
+# get_children / get_children_with_edges per-query timeout. Wide containers
+# with many lineage cross-edges legitimately take longer than a small graph's
+# read; now the SAME as the generic default rather than an exception to it,
+# and kept as its own knob so it can be raised independently.
 FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "15"))
+# /nodes/query — the canvas hydration hot path (assigned entities by URN, or
+# every entity of a type for an open view). The type-shaped query sorts a
+# whole label before paging, which on a large graph legitimately runs past
+# the generic 5s read budget; at 5s a big view timed out on every open, and
+# the timeout was then counted as a provider failure. Sits under the
+# frontend's 30s client deadline and the 60s HTTP tier so the provider's own
+# structured timeout always surfaces first.
+FALKORDB_NODES_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_NODES_QUERY_TIMEOUT", "20"))
 # get_top_level_or_orphan_nodes per-query timeout. Larger than the generic
 # 5s read default because the structural top-level predicate scans wide
 # adjacency lists on large graphs (2-3M+ nodes legitimately need tens of
@@ -58,6 +97,27 @@ FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_EDGES_BET
 # Aggregated-edge projection reads can scan large URN sets; the generic
 # 5s read timeout kills these on graphs with hundreds of containers.
 FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGATED_READ_TIMEOUT_SECS", "30"))
+# WALL CLOCK for the whole aggregated-edge read, as opposed to the
+# per-query budget above. The read is a ladder — on per-query pressure it
+# halves the page and re-issues, twice, then takes one short floor retry —
+# and every rung used to start a FRESH 30s budget. Worst case was
+# 4 x 30s + 1s = ~121s for one request, under a 45s ASGI tier: the tier
+# killed it before it reached its floor, so the degraded partial answer the
+# ladder exists to produce was unreachable, and the abandoned queries went
+# on holding FalkorDB query threads after the client had gone.
+#
+# Sized under HTTP_TIMEOUT_AGGREGATION_SECS so the provider's own structured
+# answer always wins the race with the tier above it. Each rung gets
+# min(per-query budget, what is left of this), and the read degrades as soon
+# as too little remains to be worth spending.
+FALKORDB_AGGREGATED_READ_BUDGET_SECS: float = float(
+    os.getenv("FALKORDB_AGGREGATED_READ_BUDGET_SECS", "0")
+) or round(float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45")) * 0.8, 1)
+# Below this much remaining budget a further attempt cannot finish anything
+# useful, so the read degrades instead of starting one it cannot complete.
+FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS: float = float(
+    os.getenv("FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS", "2")
+)
 # The FalkorDB server's TIMEOUT_MAX configuration (milliseconds). The
 # server REJECTS any query whose per-query TIMEOUT parameter exceeds it
 # ("The query TIMEOUT parameter value cannot exceed the TIMEOUT_MAX
@@ -87,6 +147,12 @@ AGGREGATED_EDGE_RESULT_CAP: int = int(os.getenv("AGGREGATED_EDGE_RESULT_CAP", "1
 # per-query server work and client memory churn; total rows returned are
 # unbounded by this value (the reader loops until a short page arrives).
 AGGREGATED_EDGE_PAGE_SIZE: int = int(os.getenv("AGGREGATED_EDGE_PAGE_SIZE", "50000"))
+# The narrowest page the materialized-cell read halves down to under the
+# store's per-query pressure (its memory ceiling or its time limit) before
+# it gives up on a batch — the read-side ladder. A page at the floor that is
+# still refused is a fact the result reports (stale_reason ``query_memory``
+# / ``timeout``, with the detail) rather than something to retry.
+AGGREGATED_EDGE_PAGE_FLOOR: int = int(os.getenv("AGGREGATED_EDGE_PAGE_FLOOR", "500"))
 # Max source URNs sent to a single aggregated-edge Cypher; oversized
 # requests are split and gathered. Hard upper bound at 100k is enforced
 # by the provider with a 413 response.

@@ -35,6 +35,7 @@ from backend.app.services.view_scope import (
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
+    SEARCH_SCOPE_ENTITY_TYPES_MAX,
     GroupPredicate,
     ScopeDiagnostics,
     SearchQuery,
@@ -108,7 +109,6 @@ def _count_and_validate(query: SearchQuery) -> int:
         raise ValidationError(
             f"predicate has {leaves} leaves (max {max_leaves})"
         )
-    _reject_unbounded_text_any(query)
     _reject_unsupported_sub_aggregation(query)
     return leaves
 
@@ -172,13 +172,25 @@ def _is_unbounded_text_any(predicate) -> bool:
     return False
 
 
-def _reject_unbounded_text_any(query: SearchQuery) -> None:
+def _reject_unbounded_text_any(
+    query: SearchQuery, *, entity_types_capped: bool = False,
+) -> None:
     """Reject queries that would force a full-graph CONTAINS scan.
+
+    Runs on the RESOLVED scope — after ``_stamp_resolved_scope`` has
+    written the view's own roots and entity types into the query. A
+    plain word typed into a view that bounds something is the most
+    ordinary search there is; only a view that bounds nothing leaves
+    the scan unclamped.
 
     Bypass conditions (any one is sufficient to bound the scan):
       * ``scope.root_urns`` set — search anchors on a known subtree.
       * ``scope.entity_types`` set — candidate scan restricts to a
         bounded label list.
+      * ``scope_mode='visible'`` with a non-empty ``visible_urns`` —
+        the candidate scan is filtered to the URNs the canvas
+        rendered. (An empty list is no clamp: the compiler falls
+        back to view semantics.)
       * Predicate tree contains at least one non-text-any leaf — the
         compiler routes the bounding leaf to an indexed Cypher path
         and the text filter applies only to that pre-filtered set.
@@ -187,17 +199,35 @@ def _reject_unbounded_text_any(query: SearchQuery) -> None:
     a million-node graph hangs until the candidate cap fires. Better
     to reject up-front with a clear remediation message than to let
     the user wait 30s for a truncated result.
+
+    ``entity_types_capped`` — the caller's ``_stamp_resolved_scope``
+    call dropped the entity-type gate because the view's own ontology
+    exceeded ``SEARCH_SCOPE_ENTITY_TYPES_MAX``, not because the view
+    has no roots. When that's *why* the scope arrived unbounded, "this
+    view has no boundaries yet" is false (the view may have hundreds of
+    declared types); the message instead names the real cause.
     """
     if query.scope.root_urns:
         return
     if query.scope.entity_types:
         return
+    if query.scope.scope_mode == "visible" and query.scope.visible_urns:
+        return
     if not _is_unbounded_text_any(query.predicate):
         return
+    if entity_types_capped:
+        raise ValidationError(
+            "This view's ontology has more entity types than a "
+            "free-text search can carry, so the entity-type limit "
+            "could not be used to bound the scan. Narrow the search "
+            "with Look in: Name, or by a type, tag, or property "
+            "filter."
+        )
     raise ValidationError(
-        "Text search with target='any' must be combined with another "
-        "filter (entity type, tag, property, layer, or path) when the "
-        "view doesn't restrict scope. Add a filter to bound the scan."
+        "This view has no boundaries yet, so searching for a word on "
+        "its own would have to read the entire data source. Add "
+        "entities to the view, or narrow the search by entity type, "
+        "tag, property, layer, or path."
     )
 
 
@@ -215,6 +245,7 @@ def _empty_page(query: SearchQuery) -> SearchResultPage:
         cursor=None,
         truncated=False,
         candidate_count=0,
+        total_count=0,
         deadline_exceeded=False,
         elapsed_ms=0,
         cache_hit=False,
@@ -223,17 +254,61 @@ def _empty_page(query: SearchQuery) -> SearchResultPage:
 
 def _stamp_resolved_scope(
     query: SearchQuery, eff_scope: EffectiveViewScope,
-) -> SearchQuery:
+) -> Tuple[SearchQuery, Optional[str]]:
     """Overwrite ``query.scope`` with the server-resolved values.
 
     The compiler reads ``query.scope.root_urns`` and ``query.scope.entity_types``
     as authoritative; this function makes sure those mirror the resolver's
     output, never the client's request, before the compiler runs.
 
+    Roots are stamped in ``view`` mode only — the compiler reads them
+    nowhere else (``_collect_scope_urn_sets``), and stamping them in
+    ``visible`` / ``data_source`` mode would push a large view over the
+    root cap for a clamp that is never applied.
+
     Pydantic models are immutable-by-convention (``Config.frozen`` is not
     set, but mutating fields can confuse caches). We construct a new
     ``SearchScope`` and use ``model_copy`` to swap it in.
+
+    Returns the stamped query plus an optional diagnostics note — set
+    when the resolved entity-type allow-list itself exceeds
+    ``SearchScope.entity_types``'s cap (a view's own ontology, never a
+    client input) and had to be dropped rather than stamped.
     """
+    root_urns = None
+    if query.scope.scope_mode == "view" and eff_scope.root_urns:
+        # ``SearchScope`` raises a pydantic error above the cap, which
+        # would escape as a 500. Check first and raise the service's
+        # own caller-facing error instead.
+        cap = get_deep_search_settings().scope_root_urns_cap
+        if len(eff_scope.root_urns) > cap:
+            raise ValidationError(
+                f"This view has {len(eff_scope.root_urns)} top-level "
+                f"containers, above the search limit of {cap}. Search "
+                f"from a view with fewer top-level containers, or ask "
+                f"an administrator to raise the limit."
+            )
+        root_urns = list(eff_scope.root_urns)
+
+    entity_types = None
+    entity_types_note = None
+    if eff_scope.entity_type_allow_list:
+        sorted_types = sorted(eff_scope.entity_type_allow_list)
+        # ``SearchScope.entity_types`` caps client input; the view's own
+        # ontology is never "too big to search". Above the cap, drop the
+        # label gate entirely (the compiler's full-ontology fallback —
+        # semantically "every label") instead of raising a 500.
+        if len(sorted_types) > SEARCH_SCOPE_ENTITY_TYPES_MAX:
+            entity_types_note = (
+                f"This view's ontology has {len(sorted_types)} entity "
+                f"types, above the search field's limit of "
+                f"{SEARCH_SCOPE_ENTITY_TYPES_MAX}. The entity-type gate "
+                f"was dropped for this search — every type in the view "
+                f"is included."
+            )
+        else:
+            entity_types = sorted_types
+
     new_scope = SearchScope(
         view_id=eff_scope.view_id,
         scope_mode=query.scope.scope_mode,
@@ -241,16 +316,12 @@ def _stamp_resolved_scope(
             list(query.scope.visible_urns)
             if query.scope.visible_urns else None
         ),
-        root_urns=list(eff_scope.root_urns) if eff_scope.root_urns else None,
+        root_urns=root_urns,
         max_depth=eff_scope.max_depth,
-        entity_types=(
-            sorted(eff_scope.entity_type_allow_list)
-            if eff_scope.entity_type_allow_list
-            else None
-        ),
+        entity_types=entity_types,
         layer_assignment=query.scope.layer_assignment,
     )
-    return query.model_copy(update={"scope": new_scope})
+    return query.model_copy(update={"scope": new_scope}), entity_types_note
 
 
 class AdvancedSearchService:
@@ -306,7 +377,8 @@ class AdvancedSearchService:
 
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
-        query = _stamp_resolved_scope(query, eff_scope)
+        await self._guard_view_data_source(eff_scope)
+        query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
 
         # Security guard: if the client passed root_urns but every one
         # was dropped by the resolver (none belonged to this view), we
@@ -319,21 +391,36 @@ class AdvancedSearchService:
                 eff_scope.view_id, eff_scope.workspace_id,
                 len(eff_scope.dropped_urns),
             )
+            extra_notes = [
+                "All client-supplied root URNs were dropped — none "
+                "belonged to this view. Search short-circuited to "
+                "an empty page (security guard).",
+            ]
+            if entity_types_note:
+                extra_notes.append(entity_types_note)
             page = _empty_page(query)
             page.scope_diagnostics = self._build_scope_diagnostics(
-                eff_scope, extra_notes=[
-                    "All client-supplied root URNs were dropped — none "
-                    "belonged to this view. Search short-circuited to "
-                    "an empty page (security guard).",
-                ],
+                eff_scope, extra_notes=extra_notes,
             )
             return page, eff_scope
+
+        # Runs on the resolved scope, and below the short-circuit above:
+        # a client whose roots were all dropped has an out-of-view
+        # problem, not an unbounded-scan one, and telling them the view
+        # has no boundaries would be wrong — it has roots, just not
+        # theirs.
+        _reject_unbounded_text_any(
+            query, entity_types_capped=entity_types_note is not None,
+        )
 
         try:
             page = await self._engine.provider.deep_search(
                 query, deadline_ms=deadline_ms,
             )
-            page.scope_diagnostics = self._build_scope_diagnostics(eff_scope)
+            page.scope_diagnostics = self._build_scope_diagnostics(
+                eff_scope,
+                extra_notes=[entity_types_note] if entity_types_note else None,
+            )
             return page, eff_scope
         except CompileError as exc:
             # Cypher-compilation rejections (e.g. fulltext without index,
@@ -360,7 +447,11 @@ class AdvancedSearchService:
         """
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
-        query = _stamp_resolved_scope(query, eff_scope)
+        await self._guard_view_data_source(eff_scope)
+        query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
+        _reject_unbounded_text_any(
+            query, entity_types_capped=entity_types_note is not None,
+        )
         try:
             result = await self._engine.provider.deep_search_explain(query)
         except CompileError as exc:
@@ -407,6 +498,15 @@ class AdvancedSearchService:
         """
         provider = self._engine.provider
         notes: list[str] = list(extra_notes or [])
+
+        if getattr(provider, "is_overlay", False):
+            # A draft reads main ⊕ its delta, but searches main alone —
+            # the delta has no Cypher surface. Say so, or the user reads
+            # "no matches" as "my new table isn't there".
+            notes.append(
+                "draft-only changes are not searchable yet: results come "
+                "from the published graph",
+            )
 
         lineage: list[str] = []
         try:
@@ -458,6 +558,63 @@ class AdvancedSearchService:
             lineage_edge_types=lineage,
             containment_edge_types=containment,
             notes=notes,
+        )
+
+    async def _guard_view_data_source(
+        self, eff_scope: EffectiveViewScope,
+    ) -> None:
+        """Refuse a view whose data source isn't the one being searched.
+
+        The two halves of a search are chosen independently: the roots
+        come from ``scope.viewId``, the graph from ``?dataSourceId=``
+        (or, when that is omitted, the workspace's PRIMARY source). Send
+        a view of source A with source B and the compiler faithfully
+        runs A's root URNs against B's graph — where they match nothing.
+        The answer comes back 0 hits, HTTP 200, no note: a wrong answer
+        wearing the shape of a right one, and the hardest kind to
+        report as a bug.
+
+        The primary is resolved here rather than read off the engine
+        because the silent case is precisely the one that names no data
+        source at all — an omitted ``?dataSourceId=`` in a workspace
+        that has more than one source. Only a view that HAS a source and
+        a search whose source we can name are compared; anything less is
+        an unknown, and a guard that guesses is worse than none.
+        """
+        # Scope note: this rejects a mismatch under EVERY scope mode,
+        # including ``data_source``. That is right today — the roots
+        # still come from the view — but a future source switcher, where
+        # a view of A is deliberately pointed at B to compare the two,
+        # would be legitimate and would need this gated on scope mode.
+        view_ds = eff_scope.view_data_source_id
+        if not view_ds:
+            return
+        searched_ds = self._data_source_id
+        if not searched_ds and self._session is not None and self._workspace_id:
+            from ..db.repositories import data_source_repo
+            try:
+                primary = await data_source_repo.get_primary_data_source(
+                    self._session, self._workspace_id,
+                )
+            except Exception as exc:
+                # The search itself doesn't need this lookup — only the
+                # guard does. A repo failure must not cost the caller
+                # their results.
+                logger.warning(
+                    "search.view_ds_guard: primary lookup failed for ws=%s: %r",
+                    self._workspace_id, exc,
+                )
+                return
+            searched_ds = primary.id if primary is not None else None
+        if not searched_ds or searched_ds == view_ds:
+            return
+        logger.info(
+            "search.view_ds_mismatch view=%s view_ds=%s searched_ds=%s ws=%s",
+            eff_scope.view_id, view_ds, searched_ds, eff_scope.workspace_id,
+        )
+        raise ValidationError(
+            "This view belongs to a different data source than the one "
+            "being searched."
         )
 
     async def _resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:

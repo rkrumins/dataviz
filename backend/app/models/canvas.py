@@ -21,7 +21,7 @@ non-canvas consumers (drawers, admin, search).
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,7 @@ from backend.common.models.graph import (
     AggregatedEdgeResult,
     ChildrenWithEdgesResult,
     GraphEdge,
+    NodeQuery,
     TopLevelNodesResult,
 )
 
@@ -45,6 +46,9 @@ class CanvasFreshness(BaseModel):
     regime: Optional[str] = None
     last_materialized_at: Optional[str] = Field(None, alias="lastMaterializedAt")
     materialization_triggered: bool = Field(False, alias="materializationTriggered")
+    # Why part of the read was lost under the store's per-query pressure
+    # (``staleReason`` query_memory / timeout), when it was.
+    degraded_detail: Optional[Dict[str, Any]] = Field(None, alias="degradedDetail")
 
     class Config:
         populate_by_name = True
@@ -60,6 +64,7 @@ class CanvasFreshness(BaseModel):
             regime=getattr(agg, "regime", None),
             lastMaterializedAt=getattr(agg, "last_materialized_at", None),
             materializationTriggered=bool(getattr(agg, "materialization_triggered", False)),
+            degradedDetail=getattr(agg, "degraded_detail", None),
         )
 
 
@@ -71,6 +76,28 @@ class CanvasBootstrapRequest(BaseModel):
     include_aggregated: bool = Field(True, alias="includeAggregated")
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
+
+    #: The roots leg, when the caller wants the nodes it NAMES rather than
+    #: the ones the graph's shape makes top-level.
+    #:
+    #: The structural mode above is "no incoming containment edge" — a fact
+    #: about the graph. The canvas does not ask that: it loads roots with
+    #: ``provider.getNodes({entityTypes, limit, offset})``, by explicit URN
+    #: for a curated view and by entity type for an open one, INCLUDING
+    #: non-root types. Routing it through the structural query would change
+    #: which nodes the canvas paints, so the batched endpoint has to be able
+    #: to ask the question the client actually asks. Present ⇒ this wins;
+    #: absent ⇒ nothing about the existing behaviour changes.
+    root_query: Optional[NodeQuery] = Field(None, alias="rootQuery")
+
+    #: What is already on the canvas. The edges and aggregated legs are
+    #: computed over roots ∪ this, because a root page loaded into a canvas
+    #: that already holds nodes needs the edges BETWEEN the two — which is
+    #: what the client's own ``getEdgesBetween(newRoots ∪ existing)`` asks
+    #: for, and what one request has to preserve to replace three.
+    visible_urns: List[str] = Field(
+        default_factory=list, alias="visibleUrns", max_length=5000,
+    )
 
     class Config:
         populate_by_name = True

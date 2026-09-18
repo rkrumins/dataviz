@@ -13,12 +13,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Database, Eraser,
-    RefreshCw, Radar, RotateCcw, X,
+    RefreshCw, Radar, RotateCcw, Unplug, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { usePermission } from '@/store/auth'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DurationField, formatDuration } from '@/components/ui/DurationField'
@@ -29,22 +29,28 @@ import {
     FRESHNESS_KEYS,
     useReconcileNow, useRefreshSource, useSetFreshnessSettings, useSourceFreshness,
 } from './useFreshness'
-import { checkNowToast } from './reconcileHealth'
+import { checkNowMessage } from './reconcileHealth'
 import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, ReconcileWhy, reconcileEvidenceRows } from './reconcileEvidence'
 import {
     CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECT_PRESETS,
-    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, hintIdFor,
+    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS,
 } from './automationCopy'
 import { SettingRow, StageRow } from './StageRow'
+import { SnoozeRow } from './SnoozeRow'
+import { SourceCapacityBlock } from './SourceCapacityBlock'
+import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
+import { graphStoreNodeFromReason } from './failureGuidance'
 import { useActiveJobs } from './useActiveJobs'
-import { AggStatusPill, FreshnessBadges, MasteryTag, timeUntil } from './FreshnessRow'
-import { isPlatformMastered } from './freshnessTriage'
+import { AggStatusPill, FreshnessBadges, MasteryTag } from './FreshnessRow'
+import { overrideWarning, rowHold, timeUntil, type RowHold } from './holds'
+import { isPlatformMastered, isProjectionStalled } from './freshnessTriage'
 import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
-    FailureCategory, FreshnessDoc, FreshnessSettingsPatch, RefreshEventSummary,
+    FailureCategory, FreshnessDoc, FreshnessSettingsPatch, RefreshEventSummary, RollupStorage,
 } from '@/services/freshnessService'
+import { MOTION } from '@/lib/motion'
 
 function shortFp(fp?: string | null): string {
     if (!fp) return '—'
@@ -99,18 +105,6 @@ const QUIET_BTN = 'inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[
     + 'transition-colors motion-reduce:transition-none disabled:opacity-50 outline-none '
     + 'focus-visible:ring-2 focus-visible:ring-indigo-500/50'
 
-const SELECT_BOX = 'h-7 px-2 rounded-lg border border-glass-border bg-canvas text-[12px] text-ink '
-    + 'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-50'
-
-/** How long an operator can hold this source's rebuilds for. Hours and days,
- *  because a snooze is measured in "until I have looked at it", never in
- *  seconds — which is why this is a list of choices and not a DurationField. */
-const SNOOZE_CHOICES: { label: string; secs: number }[] = [
-    { label: '1 hour', secs: 3600 },
-    { label: '8 hours', secs: 8 * 3600 },
-    { label: '24 hours', secs: 24 * 3600 },
-    { label: '7 days', secs: 7 * 24 * 3600 },
-]
 
 /** The verdicts that mean the sweep found something. ``suspended`` is here
  *  too: the breaker stopped acting on the source, but the finding that got it
@@ -149,7 +143,7 @@ function CadenceEditor({
     saveLabel: string
     onSave: (secs: number | null) => void
 }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const [value, setValue] = useState<number | null>(stored ?? null)
     const label = CADENCE_LABEL[stage]
 
@@ -157,7 +151,7 @@ function CadenceEditor({
         if (value != null && (!Number.isFinite(value) || value < min || value > max)) {
             // formatDuration, not fmtInterval: this is a bound, and a floor of
             // zero reads "0s" here rather than "Off (rebuild every change)".
-            showToast('error',
+            notify('error',
                 `Choose a time between ${formatDuration(min)} and ${formatDuration(max)}.`)
             return
         }
@@ -208,7 +202,7 @@ function CadenceEditor({
  * turn detection off for the whole fleet.
  */
 function DetectSection({ doc }: { doc: FreshnessDoc }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
 
@@ -219,8 +213,8 @@ function DetectSection({ doc }: { doc: FreshnessDoc }) {
 
     const patch = (body: FreshnessSettingsPatch, ok: string) => {
         setSettings.mutate({ dsId: doc.dataSourceId, ...body }, {
-            onSuccess: () => showToast('success', ok),
-            onError: (e) => showToast('error', e.message || 'Could not update the setting.'),
+            onSuccess: () => notify('success', ok),
+            onError: (e) => notify('error', e.message || 'Could not update the setting.'),
         })
     }
 
@@ -275,69 +269,89 @@ function DetectSection({ doc }: { doc: FreshnessDoc }) {
     )
 }
 
-/**
- * The operator snooze, in ③ Act because ③ Act is what it holds.
- *
- * ``paused_until`` is read by ``reconcile._hold``, which gates only the
- * dispatch: a paused source is still probed, still evaluated, and still
- * records its finding and its evidence — it is simply not rebuilt. So the
- * words are "pause rebuilds", never "pause automation", which would claim the
- * two stages above it stop as well.
- */
-function SnoozeRow({ doc, pausedFor, pending, onPatch }: {
-    doc: FreshnessDoc
-    /** How long is left, or null when no snooze is in force. */
-    pausedFor: string | null
-    pending: boolean
-    onPatch: (body: FreshnessSettingsPatch, ok: string) => void
-}) {
-    if (pausedFor) {
-        return (
-            <SettingRow
-                label="Rebuilds are paused"
-                hint={`Until ${new Date(doc.pausedUntil as string).toLocaleString()}`}
-            >
-                <button
-                    type="button"
-                    onClick={() => onPatch({ pausedUntil: null }, 'Rebuilds resumed.')}
-                    disabled={pending}
-                    className={QUIET_BTN}
-                >
-                    <RotateCcw className="w-3.5 h-3.5" /> Resume now
-                </button>
-            </SettingRow>
-        )
+/** What ③ Act says above its ledger while a hold is in force. A source's
+ *  own stop is its toggle, which explains itself on the row below, so it
+ *  gets no banner; every other hold names where it is released. */
+function holdBanner(hold: RowHold): string | null {
+    if (hold.scope === 'source') {
+        if (hold.kind === 'stopped') return null
+        const left = timeUntil(hold.until)
+        return left
+            ? `Paused for another ${left} — nothing will be rebuilt until then.`
+            : 'Paused — nothing will be rebuilt until it is resumed.'
     }
+    const by = hold.scope === 'fleet' ? 'fleet-wide' : 'by the provider'
+    const where = hold.scope === 'fleet' ? 'Automation' : 'the provider row'
+    return `Held ${by} — nothing will be rebuilt until it is resumed from ${where}.`
+}
 
+/**
+ * The version-controlled source that is NOT serving its rolled-up connections.
+ *
+ * Its sibling block says "version control maintains this, nothing here needs
+ * to" — which is the correct thing to say right up until the projector stops
+ * keeping up, and then it is the worst thing on the page. This says what is
+ * actually wrong, how far behind it is, what the projector's own last words
+ * were, and the one thing that will NOT help: a rebuild. Nothing in the
+ * cockpit can fix this, so the honest action is a link to version control.
+ */
+function ProjectionWedge({ doc }: { doc: FreshnessDoc }) {
+    const behind = doc.projectionCommitsBehind ?? null
     return (
-        <SettingRow
-            label="Pause rebuilds for"
-            htmlFor="freshness-snooze"
-            hint="Problems are still detected, checked and shown here — only the rebuild is held, so a source can be left alone without losing sight of it."
-        >
-            <select
-                id="freshness-snooze"
-                aria-describedby={hintIdFor('freshness-snooze')}
-                disabled={pending}
-                // Always empty: this picks an action, not a stored value. What
-                // was chosen reads back as the expiry, which replaces this row.
-                value=""
-                onChange={(e) => {
-                    const choice = SNOOZE_CHOICES.find(c => String(c.secs) === e.target.value)
-                    if (!choice) return
-                    onPatch(
-                        { pausedUntil: new Date(Date.now() + choice.secs * 1000).toISOString() },
-                        `Rebuilds paused for ${choice.label}.`,
-                    )
-                }}
-                className={SELECT_BOX}
-            >
-                <option value="">Choose…</option>
-                {SNOOZE_CHOICES.map(c => (
-                    <option key={c.secs} value={c.secs}>{c.label}</option>
-                ))}
-            </select>
-        </SettingRow>
+        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/[0.06] p-2.5 space-y-1.5">
+            <p className="flex items-start gap-1.5 text-[11px] font-semibold text-red-700 dark:text-red-300">
+                <Unplug className="w-3.5 h-3.5 shrink-0 mt-px" />
+                This source is not serving its rolled-up connections.
+            </p>
+            <p className="text-[11px] text-ink-secondary leading-relaxed">
+                This graph is mastered here, but the process that keeps its
+                rolled-up connections current has fallen behind. Until it
+                catches up, reads fall back to the change history, which holds
+                no rolled-up connections — so aggregated lineage is missing
+                from views of this source right now.
+            </p>
+            {behind != null && behind > 0 && (
+                <p className="text-[11px] font-semibold text-red-700 dark:text-red-300 tabular-nums">
+                    {behind} published {behind === 1 ? 'change' : 'changes'} behind
+                </p>
+            )}
+            <p className="text-[11px] text-ink-secondary leading-relaxed">
+                Rebuilding this source will not fix it, which is why nothing is
+                queued for it. Open version control for this source and check
+                that it is publishing; this clears on its own within a minute
+                of the connections catching up.
+            </p>
+            {doc.projectionLastError && (
+                <details className="text-[11px]">
+                    <summary className="cursor-pointer text-ink-muted hover:text-ink-secondary">
+                        What it last reported
+                    </summary>
+                    <code className="mt-1 block break-all font-mono text-[10px] text-red-700 dark:text-red-300">
+                        {doc.projectionLastError}
+                    </code>
+                </details>
+            )}
+            {doc.projectionCheckedAt && (
+                <p className="text-[10px] text-ink-muted">
+                    {/* Read live on this request, unlike "Last checked" below,
+                        which is the sweep's own stamp. They will differ. */}
+                    Read{' '}
+                    <TimeStamp
+                        at={doc.projectionCheckedAt} icon={null} colorByAge={false}
+                        className="text-[10px] text-ink-muted"
+                    />
+                </p>
+            )}
+            {doc.workspaceId && (
+                <Link
+                    to={`/workspaces/${doc.workspaceId}`}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-300 hover:underline"
+                >
+                    Open version control for this source
+                    <ArrowUpRight className="w-3 h-3" />
+                </Link>
+            )}
+        </div>
     )
 }
 
@@ -349,19 +363,34 @@ function SnoozeRow({ doc, pausedFor, pending, onPatch }: {
  * section never recomputes it, and the freshness read path makes no graph call.
  */
 function CheckSection({ doc }: { doc: FreshnessDoc }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const isAdmin = usePermission('system:admin')
     const setSettings = useSetFreshnessSettings()
     const reconcileNow = useReconcileNow()
 
-    const state = (doc.driftState ?? undefined) as DriftState | undefined
-    const spec = state ? DRIFT_SPEC[state] : undefined
     // A versioned graph is mastered in Postgres with FalkorDB as a rebuildable
     // read cache, so version control maintains its rollups on every publish and
     // this section's controls would be inert. Explain that instead of offering
     // switches that do nothing.
-    const isManaged = state === 'managed'
+    //
+    // ``projectionStalled`` is the SAME graph with its projector not keeping
+    // up: the integrity meter is just as meaningless (it would still be
+    // counting the read cache), and the cadence still governs a sweep that
+    // will never act — but the reassurance is now false, so the explanatory
+    // block is swapped, not the gating.
+    //
+    // Read through the shared predicate, which consults the LIVE watermark as
+    // well as the sweep stamp: for up to a check interval after a wedge starts
+    // the stamp still says ``managed``, and this section would then render the
+    // sky "version control has this covered" reassurance over it.
+    const stalled = isProjectionStalled(doc)
+    // The badge and its one-line explanation name the verdict this section
+    // actually rendered — otherwise the drawer shows "Version controlled"
+    // above the red block that contradicts it.
+    const state = (stalled ? 'projectionStalled' : doc.driftState ?? undefined) as DriftState | undefined
+    const spec = state ? DRIFT_SPEC[state] : undefined
+    const isManaged = state === 'managed' || stalled
     // ``blocked`` is the one verdict that means this stage is genuinely not
     // running for this source — there is no ontology to judge against.
     const on = state !== 'blocked'
@@ -369,11 +398,34 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
     return (
         <StageRow stage="check" on={on} muted={doc.probeEnabled === false}>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-                <DriftStateBadge state={doc.driftState} />
+                <DriftStateBadge state={state} />
                 {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
             </div>
+            {/* The manual way back from the breaker. Before this, the count
+                only reset when a later check found the source in sync — so
+                a suspended source stayed suspended until the problem cleared
+                by itself, which is the opposite of what "waits for a person"
+                promises. */}
+            {state === 'suspended' && canManage && (
+                <button
+                    type="button"
+                    onClick={() => setSettings.mutate(
+                        { dsId: doc.dataSourceId, resetBreaker: true },
+                        {
+                            onSuccess: () => notify('success',
+                                'Automation resumed for this source — the next check starts fresh.'),
+                            onError: (e) => notify('error',
+                                e.message || 'Could not resume automation.'),
+                        },
+                    )}
+                    disabled={setSettings.isPending}
+                    className={cn(QUIET_BTN, 'mt-2')}
+                >
+                    <RotateCcw className="w-3.5 h-3.5" /> Resume automation
+                </button>
+            )}
 
-            {isManaged ? (
+            {stalled ? <ProjectionWedge doc={doc} /> : isManaged ? (
                 <div className="mt-2 rounded-lg border border-sky-500/20 bg-sky-500/[0.05] p-2.5 space-y-1.5">
                     <p className="text-[11px] text-ink-secondary leading-relaxed">
                         This graph is mastered here and stored in Postgres. FalkorDB
@@ -475,10 +527,10 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                             // settings we did not mean to touch.
                             { dsId: doc.dataSourceId, reconcileCheckIntervalSecs: secs },
                             {
-                                onSuccess: () => showToast('success', secs == null
+                                onSuccess: () => notify('success', secs == null
                                     ? 'Check frequency reset to the default.'
                                     : 'Check frequency updated.'),
-                                onError: (e) => showToast('error',
+                                onError: (e) => notify('error',
                                     e.message || 'Could not update the check frequency.'),
                             },
                         )}
@@ -490,8 +542,8 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                             onClick={() => reconcileNow.mutate(
                                 { dataSourceIds: [doc.dataSourceId] },
                                 {
-                                    onSuccess: (res) => showToast('success', checkNowToast(res)),
-                                    onError: (e) => showToast('error',
+                                    onSuccess: (res) => notify('success', checkNowMessage(res)),
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not run reconciliation.'),
                                 },
                             )}
@@ -517,12 +569,95 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
  * rebuild window sat in a box of its own above it. They are one decision, and
  * the snooze is the third face of it: a hold rather than an opt-out.
  */
+const ROLLUP_LABEL: Record<RollupStorage, string> = {
+    auto: 'Auto',
+    true: 'Full detail',
+    false: 'Diagonal',
+}
+
+/** One line on what the RESOLVED choice does to this source's rebuilds. */
+function rollupHint(resolved: RollupStorage | null | undefined, source: string | null | undefined): string {
+    const from = source === 'custom' ? 'Set on this source.'
+        : source === 'global' ? 'Inherited from the fleet Defaults.'
+            : 'Inherited from the deployment default.'
+    if (resolved === 'auto') {
+        return `${from} Full detail wherever it fits what the shard can hold; above that, the depth-diagonal is stored and finer granularities are derived on demand \u2014 slower drills on the largest graphs, but it degrades instead of failing.`
+    }
+    if (resolved === 'false') {
+        return `${from} Only the depth-diagonal is stored; finer granularities are derived at read time.`
+    }
+    return `${from} Every combination is pre-created, so no drill comes back thin. A cube the owning shard cannot take is refused before anything is written.`
+}
+
+/**
+ * Per-source Rollup storage: Inherit (labelled with what that resolves to
+ * right now) / Auto / Full detail. Writes the override through the same
+ * freshness-settings PATCH as the cadences; an explicit null clears it.
+ */
+function RollupStorageRow({ doc, editable, pending, onChange }: {
+    doc: FreshnessDoc
+    editable: boolean
+    pending: boolean
+    onChange: (value: RollupStorage | null) => void
+}) {
+    const override = doc.rollupStorageOverride ?? null
+    const inherited = doc.inheritedRollupStorage ?? doc.resolvedRollupStorage ?? 'true'
+    const options: { id: 'inherit' | 'auto' | 'true'; label: string }[] = [
+        { id: 'inherit', label: `Inherit (${ROLLUP_LABEL[inherited]})` },
+        { id: 'auto', label: 'Auto' },
+        { id: 'true', label: 'Full detail' },
+    ]
+    const selected: 'inherit' | 'auto' | 'true' = override == null ? 'inherit'
+        : override === 'auto' ? 'auto' : 'true'
+    return (
+        <SettingRow
+            label="Rollup storage"
+            hint={rollupHint(doc.resolvedRollupStorage, doc.rollupStorageSource)}
+            disabled={!editable}
+        >
+            <span
+                className="flex shrink-0 rounded-lg border border-glass-border p-0.5"
+                role="radiogroup"
+                aria-label="Rollup storage for this source"
+            >
+                {options.map(({ id, label }) => {
+                    const isSelected = selected === id
+                    return (
+                        <button
+                            key={id}
+                            type="button"
+                            role="radio"
+                            aria-checked={isSelected}
+                            disabled={!editable || pending}
+                            onClick={() => {
+                                if (isSelected) return
+                                onChange(id === 'inherit' ? null : id)
+                            }}
+                            className={cn(
+                                'rounded-md px-2.5 py-1 text-[12px] transition-colors duration-150',
+                                'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                isSelected
+                                    ? 'bg-indigo-500/10 text-ink font-medium'
+                                    : 'text-ink-muted hover:text-ink-secondary',
+                                (!editable || pending) && 'cursor-not-allowed opacity-60',
+                            )}
+                        >
+                            {label}
+                        </button>
+                    )
+                })}
+            </span>
+        </SettingRow>
+    )
+}
+
 function ActSection({ doc }: { doc: FreshnessDoc }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
 
-    const isManaged = doc.driftState === 'managed'
+    const stalled = isProjectionStalled(doc)
+    const isManaged = doc.driftState === 'managed' || stalled
     const auto = doc.autoReconcile !== false
     // The rebuild-interval override lives on the aggregation state row, which
     // only exists once a source has been built — a never-aggregated source
@@ -531,26 +666,39 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
     // control that cannot succeed.
     const neverBuilt = !doc.lastAggregatedAt
         && (doc.aggregationStatus == null || doc.aggregationStatus === 'none')
-    const pausedFor = timeUntil(doc.pausedUntil)
+    // The one hold in force, widest scope first (server-resolved). A hold
+    // at provider or fleet scope outranks anything set here.
+    const hold = rowHold(doc)
+    const inherited = hold && hold.scope !== 'source' ? hold : null
+    const banner = hold ? holdBanner(hold) : null
 
     return (
         <StageRow
             stage="act"
             on={!isManaged && auto}
+            // A managed source's ③ Act is off because version control owns its
+            // rollups, which the shared words would misdescribe; that case has
+            // its own block below.
+            whenOff={!isManaged}
             // Two ways this stage delivers less than its settings claim: the
             // stage before it is off, or a person is holding it. Both dim what
             // it delivers and neither touches its controls.
-            muted={doc.probeEnabled === false || pausedFor != null}
+            muted={doc.probeEnabled === false || hold != null}
         >
-            {pausedFor && (
+            {banner && (
                 <p className="mt-2 text-[11px] font-medium text-amber-600 dark:text-amber-400">
-                    Paused for another {pausedFor} — nothing will be rebuilt until then.
+                    {banner}
                 </p>
             )}
             {isManaged ? (
                 <p className="mt-2 text-[11px] text-ink-secondary leading-relaxed">
-                    Version control rebuilds this source's rolled-up lineage on every
-                    publish, so automation never acts on it.
+                    {stalled
+                        ? 'Version control owns this source\u2019s rolled-up lineage, so '
+                          + 'automation never acts on it — and it is deliberately not '
+                          + 'acting now: a rebuild would not restore connections the '
+                          + 'projector is not publishing.'
+                        : 'Version control rebuilds this source\u2019s rolled-up lineage on '
+                          + 'every publish, so automation never acts on it.'}
                 </p>
             ) : (
                 <div className="mt-2.5 border-t border-glass-border/50 divide-y divide-glass-border/50">
@@ -558,9 +706,6 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                         label="Rebuild this source automatically when a check finds drift"
                         htmlFor="freshness-auto-reconcile"
                         disabled={!canManage}
-                        hint={auto
-                            ? undefined
-                            : 'Off — drift is still detected and shown here, but nothing is rebuilt automatically.'}
                     >
                         <ToggleSwitch
                             id="freshness-auto-reconcile"
@@ -569,10 +714,10 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                             onChange={(next) => setSettings.mutate(
                                 { dsId: doc.dataSourceId, autoReconcileEnabled: next },
                                 {
-                                    onSuccess: () => showToast('success', next
+                                    onSuccess: () => notify('success', next
                                         ? 'Automatic reconciliation on for this source.'
                                         : 'Automatic reconciliation off for this source.'),
-                                    onError: (e) => showToast('error',
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not update the setting.'),
                                 },
                             )}
@@ -601,29 +746,59 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                             onSave={(secs) => setSettings.mutate(
                                 { dsId: doc.dataSourceId, rebuildMinIntervalSecs: secs },
                                 {
-                                    onSuccess: () => showToast('success', secs == null
+                                    onSuccess: () => notify('success', secs == null
                                         ? 'Rebuild cadence reset to the default.'
                                         : 'Rebuild cadence updated.'),
-                                    onError: (e) => showToast('error',
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not update rebuild cadence.'),
                                 },
                             )}
                         />
                     )}
 
+                    {/* Per-source Rollup storage. Upserts its state row like the
+                        snooze, so it is settable BEFORE a first build — a graph
+                        too big for the full cube is exactly the source to put on
+                        Auto before it runs. A segmented control, not a toggle:
+                        neither state is the absence of the other, and Inherit
+                        is a third, labelled with what it currently means. */}
+                    <RollupStorageRow
+                        doc={doc}
+                        editable={canManage}
+                        pending={setSettings.isPending}
+                        onChange={(value) => setSettings.mutate(
+                            { dsId: doc.dataSourceId, rollupStorage: value },
+                            {
+                                onSuccess: () => notify('success', value == null
+                                    ? 'Rollup storage now inherits the fleet default for this source.'
+                                    : value === 'auto'
+                                        ? 'Rollup storage set to Auto for this source \u2014 applies from the next rebuild.'
+                                        : 'Rollup storage set to Full detail for this source \u2014 applies from the next rebuild.'),
+                                onError: (e) => notify('error',
+                                    e.message || 'Could not update Rollup storage.'),
+                            },
+                        )}
+                    />
+
                     {/* The snooze upserts its state row, so unlike the cadence
                         above it stays available on a never-built source — which
-                        is exactly the source someone may want to hold. */}
+                        is exactly the source someone may want to hold. Under a
+                        provider or fleet hold it becomes a read-out naming the
+                        control that will actually release the source. */}
                     {canManage && (
                         <SnoozeRow
-                            doc={doc}
-                            pausedFor={pausedFor}
+                            scope="source"
+                            idPrefix="freshness-snooze"
+                            pausedUntil={doc.pausedUntil}
+                            inherited={inherited}
                             pending={setSettings.isPending}
-                            onPatch={(body, ok) => setSettings.mutate(
-                                { dsId: doc.dataSourceId, ...body },
+                            onPatch={(patch, ok) => setSettings.mutate(
+                                // A source has no stop of its own to send —
+                                // its stop is the toggle above.
+                                { dsId: doc.dataSourceId, pausedUntil: patch.pausedUntil },
                                 {
-                                    onSuccess: () => showToast('success', ok),
-                                    onError: (e) => showToast('error',
+                                    onSuccess: () => notify('success', ok),
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not update the setting.'),
                                 },
                             )}
@@ -786,19 +961,55 @@ interface CategoryGuidance {
     primary: 'clear' | 'retry'
     /** Inline caution shown under Retry when a retry is likely to fail again. */
     retryWarning?: string
+    /** Reassurance shown under Retry when the retry is safe and cheap. */
+    retryNote?: string
+    /** Overrides the Retry button's label where "Resume" is the truer word. */
+    retryLabel?: string
+    /** The way to the node's own per-query limit, for system administrators
+     *  (rendered once the source's shard is known). */
+    raiseLimitLink?: true
 }
 
 const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
+    write_budget: {
+        // Nothing broke and nothing was written: before storing rollups the
+        // rebuild measured the shard that owns this graph and found the new
+        // edges would not fit under the reserve. The error text carries the
+        // whole record — edges, bytes, the shard, what was free, the
+        // shortfall — so the technical details are the primary evidence
+        // here, and a retry is deterministic until something changes.
+        why: 'The rebuild measured the graph-store shard that owns this graph and refused before writing: the rollups would not fit in its free memory.',
+        how: "The technical details below name the shard, the memory the rollups need and the shortfall. Set Rollup storage to Auto in \u2462 Act below so this source stores the depth-diagonal instead of the full cube, or free or add memory on that shard; an administrator can also lower the shard memory reserve or correct bytes per edge in Defaults if the headroom is real, or clear an explicit edge ceiling set in tuning.",
+        showClear: true, showRetry: true, primary: 'clear',
+        retryWarning: 'will refuse the same way until the rollup setting, the shard\u2019s memory or the limits change.',
+    },
     out_of_memory: {
         why: 'The graph store ran out of memory while building aggregated lineage for this large source.',
         how: 'Free up memory in the graph store (remove unused graphs) or raise its memory limit, then retry the rebuild.',
         showClear: true, showRetry: true, primary: 'clear',
         retryWarning: 'may fail again until memory is freed.',
     },
+    query_memory: {
+        // NOT the same as out_of_memory: the store is healthy and has room —
+        // a single query wanted too many rows at once. The rebuild now
+        // narrows its scans automatically, so reaching this means it hit the
+        // narrowest slice it will go to, and the fix is to make the rebuild
+        // read less rather than to free memory.
+        why: 'One rebuild query asked the graph store for more than a single query is allowed to hold — after the rebuild had already narrowed its scans to a single row.',
+        how: "A single row of that scan is larger than the store's per-query limit (QUERY_MEM_CAPACITY): an administrator raises it under Admin → Graph store → Adjust limits, which checks the change against the container memory limit first. The Gentle profile and Auto rollup storage lighten every query before this point, but cannot shrink one row.",
+        showClear: true, showRetry: true, primary: 'clear',
+        retryWarning: 'will fail the same way until the store limit changes.',
+        raiseLimitLink: true,
+    },
     provider_unavailable: {
-        why: 'The graph store was unreachable during the rebuild.',
-        how: 'Check that the graph store is back online, then retry the rebuild.',
+        // Not a broken rebuild: a node went away under it. The run waited,
+        // and gave up holding every byte it had written — so the useful
+        // things to say are WHICH node and that this is a Resume.
+        why: 'A graph store node stopped answering during the rebuild — a shard restarting or failing over. Nothing about this source is wrong, and everything the rebuild had already written was kept.',
+        how: 'Check that the node is back (a shard that was restarted by its orchestrator comes back on its own, usually within a minute or two), then resume — the rebuild carries on from its checkpoint instead of starting over. If the node keeps restarting during rebuilds, its container was most likely killed for memory or by its health probe while replicas replayed the writes.',
         showClear: true, showRetry: true, primary: 'retry',
+        retryLabel: 'Resume rebuild',
+        retryNote: 'Resume continues from the last checkpoint — the work already done is not repeated.',
     },
     ontology: {
         why: "This data source has no ontology assigned, so its lineage can't be aggregated.",
@@ -807,14 +1018,46 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         showClear: true, showRetry: false, primary: 'clear',
     },
     timeout: {
-        why: 'The rebuild took longer than the allowed time.',
-        how: 'Retry the rebuild. If it keeps timing out, the source may be too large for the current limit.',
+        why: 'The graph store stopped answering, or the rebuild made no progress for longer than its stall window.',
+        how: 'Check the graph store, then resume the rebuild from its checkpoint. If the store is merely slow, raise the scan timeout or the stall window in tuning, or re-trigger with the Gentle profile — it narrows the scans and allows each query longer.',
         showClear: true, showRetry: true, primary: 'retry',
+        retryWarning: 'resumes from its checkpoint; if the store is still unreachable it will time out again.',
     },
     conflict: {
         why: 'Another rebuild for this source was already running.',
         how: 'Wait for the running rebuild to finish, then retry if the lineage is still out of date.',
         showClear: true, showRetry: true, primary: 'retry',
+    },
+    worker_lost: {
+        // Infrastructure, not this source. The run itself was healthy up to
+        // the moment its process vanished, everything it had written is
+        // durable, and the checkpoint is intact — so this is a Resume, and
+        // the guidance must not send anyone tuning a rebuild that was fine.
+        why: 'The worker process running this rebuild disappeared — an evicted pod, an out-of-memory kill, a lost node. Nothing about this source is wrong.',
+        how: 'Resume the rebuild: it carries on from its last checkpoint rather than starting over. If workers keep dying mid-rebuild, check the worker deployment for memory limits and evictions — a rebuild holds the run in memory while it computes.',
+        showClear: true, showRetry: true, primary: 'retry',
+        retryLabel: 'Resume rebuild',
+        retryNote: 'Resume continues from the last checkpoint — the work already done is not repeated.',
+    },
+    never_dispatched: {
+        // The row was queued and nothing ever claimed it. Retrying without
+        // fixing the bus just queues another one, so the deployment check
+        // comes first.
+        why: 'The rebuild was queued but no worker ever picked it up — either none is registered on the job bus, or the dispatch message was lost.',
+        how: 'Check that the aggregation worker service is deployed, running and able to reach REDIS_URL. Admin → Aggregation shows the live worker fleet and queue depth. Once a worker is registered, re-trigger the rebuild.',
+        note: 'Re-triggering before a worker is registered just queues another row that nothing will claim.',
+        showClear: false, showRetry: true, primary: 'retry',
+    },
+    attribute_limit: {
+        // A hard ceiling in the graph store, reached by the SOURCE: every
+        // distinct metadata key it carries became a property name, and a
+        // graph never gives one back. The rebuild refused before writing
+        // (or the store refused the first name it needed), and no retry
+        // changes the count — so no Retry, and the way out is a recreate.
+        why: 'The graph store refused a property name the rollups need. The source’s per-node metadata keys used up the 65,534 distinct names a graph may hold, and a name this rebuild writes is not among them — the technical details list which. A graph that already holds rollups has those names and rebuilds in place; this one does not.',
+        how: 'Property names are never freed, so this graph has to be recreated, and the recreate keeps the long tail out of the names: writes now hold a graph to FALKORDB_NATIVE_PROPERTY_BUDGET native property names (50,000 by default) and store the rest as values. For a version-controlled source, Data health → Rebuild drops the graph, re-seeds it from the version store under that budget and queues the rollups. For a source loaded directly, delete the graph on its shard (GRAPH.DELETE), run the loader again, then signal the change — the runbook is in docs/AGGREGATION_PIPELINE.md. The technical details below give the count the rebuild measured.',
+        note: 'Retrying or resuming reaches the same ceiling, Purge in Job history removes only the rollups, and Clear cache clears caches — none of them frees a property name.',
+        showClear: true, showRetry: false, primary: 'clear',
     },
     unknown: {
         why: "The rebuild didn't complete.",
@@ -838,6 +1081,11 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
     const category: FailureCategory = doc.lastFailureCategory ?? 'unknown'
     // ?? unknown: a future backend category we don't map yet must not throw.
     const g = GUIDANCE[category] ?? GUIDANCE.unknown
+    // The breaker's "Circuit open" text names no node; the message behind it
+    // does, and that is the one thing an operator needs to go and look at.
+    const node = category === 'provider_unavailable'
+        ? graphStoreNodeFromReason(doc.lastFailureReason)
+        : null
     const attempts = doc.retryCount != null && doc.retryCount > 1 ? doc.retryCount : null
 
     const primaryCls = 'text-white bg-indigo-600 hover:bg-indigo-700'
@@ -855,7 +1103,7 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
             key="retry" type="button" onClick={onRetry} disabled={busy}
             className={cn('inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50', g.primary === 'retry' ? primaryCls : secondaryCls)}
         >
-            <RotateCcw className="w-3.5 h-3.5" /> Retry rebuild
+            <RotateCcw className="w-3.5 h-3.5" /> {g.retryLabel ?? 'Retry rebuild'}
         </button>
     ) : null
     const buttons = g.primary === 'clear' ? [clearBtn, retryBtn] : [retryBtn, clearBtn]
@@ -877,12 +1125,19 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
 
             {/* Why */}
             <p className="text-xs text-ink-secondary leading-relaxed">{g.why}</p>
+            {node && (
+                <p className="text-xs text-ink-secondary leading-relaxed">
+                    The node that stopped answering was{' '}
+                    <span className="font-mono text-[11px] text-ink">{node}</span>.
+                </p>
+            )}
 
             {/* How */}
             <div className="space-y-1">
                 <div className="text-[10px] uppercase tracking-wide text-ink-muted">How to resolve</div>
                 <p className="text-xs text-ink-secondary leading-relaxed">{g.how}</p>
                 {g.note && <p className="text-xs text-ink-secondary leading-relaxed">{g.note}</p>}
+                {g.raiseLimitLink && <RaisePerQueryLimitLink dataSourceId={doc.dataSourceId} />}
             </div>
 
             {/* CTAs */}
@@ -896,8 +1151,11 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
                     )}
                     {g.showRetry && g.retryWarning && (
                         <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
-                            <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> Retry rebuild {g.retryWarning}
+                            <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {g.retryLabel ?? 'Retry rebuild'} {g.retryWarning}
                         </p>
+                    )}
+                    {g.showRetry && g.retryNote && (
+                        <p className="text-[11px] text-ink-muted">{g.retryNote}</p>
                     )}
                 </div>
             )}
@@ -941,7 +1199,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
     }, [probe, probing, error, doc?.liveFingerprint, qc])
 
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc?.workspaceId ?? undefined)
     const isAdmin = usePermission('system:admin')
     const refresh = useRefreshSource()
@@ -954,23 +1212,23 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const doClear = () => {
         if (!dsId) return
         refresh.mutate({ dsId, scope: 'clear' }, {
-            onSuccess: () => showToast('success', `Cache cleared for ${name}.`),
-            onError: (e) => showToast('error', e.message || 'Could not clear the cache.'),
+            onSuccess: () => notify('success', `Cache cleared for ${name}.`),
+            onError: (e) => notify('error', e.message || 'Could not clear the cache.'),
         })
     }
     const doRetry = () => {
         if (!dsId) return
         refresh.mutate({ dsId, scope: 'rollups' }, {
-            onSuccess: () => showToast('success', `Lineage rebuild queued for ${name}.`),
-            onError: (e) => showToast('error', e.message || 'Could not start the rebuild.'),
+            onSuccess: () => notify('success', `Lineage rebuild queued for ${name}.`),
+            onError: (e) => notify('error', e.message || 'Could not start the rebuild.'),
         })
         setRetryOpen(false)
     }
     const doRebuildLineage = () => {
         if (!dsId) return
         refresh.mutate({ dsId, scope: 'rollups' }, {
-            onSuccess: () => showToast('success', `Lineage rebuild queued for ${name}.`),
-            onError: (e) => showToast('error', e.message || 'Could not start the rebuild.'),
+            onSuccess: () => notify('success', `Lineage rebuild queued for ${name}.`),
+            onError: (e) => notify('error', e.message || 'Could not start the rebuild.'),
         })
     }
     const doReconcileThisSource = () => {
@@ -978,14 +1236,27 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         reconcileNow.mutate(
             { dataSourceIds: [dsId] },
             {
-                onSuccess: (res) => showToast('success', checkNowToast(res)),
-                onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
+                onSuccess: (res) => notify('success', checkNowMessage(res)),
+                onError: (e) => notify('error', e.message || 'Could not run reconciliation.'),
             },
         )
     }
-    const retryMessage = doc?.lastFailureCategory === 'out_of_memory'
+    const docHold = doc ? rowHold(doc) : null
+    // One word for the same act, on the button, the confirm and its title:
+    // after a node went away this is a Resume, not a fresh attempt.
+    const retryLabel =
+        (doc?.lastFailureCategory && GUIDANCE[doc.lastFailureCategory]?.retryLabel)
+        || 'Retry rebuild'
+    const retryMessage = (doc?.lastFailureCategory === 'provider_unavailable'
+        ? 'Resumes the aggregated-lineage rebuild for this source from its last checkpoint. If the graph store node is still away it will wait for it again.'
+        : doc?.lastFailureCategory === 'out_of_memory'
         ? 'Retries the aggregated-lineage rebuild for this source. It may fail again until memory is freed in the graph store.'
-        : 'Retries the aggregated-lineage rebuild for this source. This can take a while.'
+        : doc?.lastFailureCategory === 'write_budget'
+            ? 'Retries the aggregated-lineage rebuild for this source. It will refuse the same way until the rollup setting, the shard\u2019s memory or the limits change.'
+            : 'Retries the aggregated-lineage rebuild for this source. This can take a while.')
+        // A person may override a hold; the confirm says so, and that the
+        // hold stays — so "Retry" is never read as "and resume automation".
+        + (docHold ? ` ${overrideWarning(docHold)}` : '')
 
     const mastered = doc ? isPlatformMastered(doc) : false
 
@@ -1006,10 +1277,10 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                         role="dialog" aria-modal="true"
                         aria-label="Data source freshness"
                         initial={{ x: '100%' }} animate={{ x: 0 }}
-                        transition={{ type: 'spring', stiffness: 400, damping: 40 }}
+                        transition={MOTION.drawerSlide}
                         className="fixed right-0 top-0 z-50 h-full w-full max-w-xl overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl"
                     >
-                        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 p-4 bg-canvas/80 backdrop-blur border-b border-glass-border">
+                        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 p-4 bg-canvas border-b border-glass-border">
                             <div className="min-w-0">
                                 <h2 className="text-base font-bold text-ink truncate">
                                     {doc?.name || dsId}
@@ -1207,6 +1478,11 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                         )}
                                     </div>
 
+                                    {/* This source on its shard: what its rollups cost, what is
+                                        left under the reserve, and whether the next rebuild fits —
+                                        the reading the guidance above sends people to. */}
+                                    <SourceCapacityBlock dsId={doc.dataSourceId} />
+
                                     {/* Recent activity */}
                                     <div>
                                         <div className="flex items-center gap-1.5 text-sm font-semibold text-ink mb-2">
@@ -1232,9 +1508,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
             {/* Retry-rebuild confirm — gates the OOM "may fail again" case. */}
             <ConfirmDialog
                 open={retryOpen}
-                title="Retry rebuild"
+                title={retryLabel}
                 message={retryMessage}
-                confirmLabel="Retry rebuild"
+                confirmLabel={retryLabel}
                 confirmColor="bg-indigo-600 hover:bg-indigo-700 shadow-md"
                 confirmIcon={RotateCcw}
                 loading={refresh.isPending}

@@ -43,13 +43,34 @@ export function useProviders(): UseQueryResult<ProviderResponse[], Error> {
 }
 
 /**
+ * Is the provider's asset list being (re)built right now? Two states mean
+ * that, and BOTH are needed:
+ *  - `meta.status === 'computing'` — a cold cache with no row yet, so counts
+ *    that start at 0 fill in on their own without the user reloading.
+ *  - `meta.refreshing` — a list-all discovery job is in flight over an
+ *    EXISTING row. Refresh takes this path: the endpoint serves the previous
+ *    list verbatim as `fresh`/`stale` (insights.py:227-267), never
+ *    `computing`, so polling on `computing` alone stopped dead the moment a
+ *    provider had any cached list. The re-list after a refresh then raced the
+ *    sentinel job, usually re-fetching the same stale payload, and a
+ *    newly-created graph stayed invisible until the 30s staleTime lapsed with
+ *    a remount or the window regained focus.
+ *
+ * `refreshing` is the worker's dedup claim, released on success AND failure
+ * (and false when Redis is down), so polling on it terminates rather than
+ * spinning.
+ */
+export function assetListIsBuilding(
+    env: Envelope<AssetListPayload> | null | undefined,
+): boolean {
+    const meta = env?.meta
+    return meta?.status === 'computing' || !!meta?.refreshing
+}
+
+/**
  * Shared query options for one provider's physical-asset list. Kept in a
  * factory so the single-provider hook and the all-providers fan-out use an
  * identical key + refetch policy (React Query then dedupes them).
- *
- * `refetchInterval` polls only while the backend is still computing a cold
- * cache (`meta.status === 'computing'`) — so counts that start at 0 fill in
- * on their own without the user reloading — and stops once the list lands.
  */
 function providerAssetsQueryOptions(providerId: string) {
     return {
@@ -67,7 +88,7 @@ function providerAssetsQueryOptions(providerId: string) {
         // assets, banners, and worse, registrable rows. Transient-null
         // envelopes are handled by assetListState below instead.
         refetchInterval: (query: { state: { data?: Envelope<AssetListPayload> } }) =>
-            query.state.data?.meta?.status === 'computing' ? 5_000 : (false as const),
+            assetListIsBuilding(query.state.data) ? 5_000 : (false as const),
     }
 }
 

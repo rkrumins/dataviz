@@ -8,14 +8,14 @@
  * - Admin password reset (direct or generate token)
  * - Password reset request notifications
  */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, createElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, CheckCircle2, XCircle, Clock, Shield, AlertCircle,
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp,
     KeyRound, UserCog,
-    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign,
+    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign, Fingerprint,
 } from 'lucide-react'
 import {
     adminUserService,
@@ -35,8 +35,12 @@ import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { useAppNotifications } from '@/components/ui/notifications'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { logoFor } from '@/components/admin/sso/IdpLogos'
+import { presetById } from '@/components/admin/sso/vendorPresets'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
@@ -58,6 +62,7 @@ type ModalType =
     | { kind: 'reject'; userId: string; name: string }
     | { kind: 'role'; userId: string; name: string; currentRole: string }
     | { kind: 'suspend'; userId: string; name: string }
+    | { kind: 'systemAccount'; userId: string; name: string; makeSystem: boolean }
     | { kind: 'resetPassword'; userId: string; name: string }
     | { kind: 'invite' }
     | { kind: 'createUser' }
@@ -153,7 +158,150 @@ function SortHeader({ label, field, current, dir, onSort }: {
     )
 }
 
+// ── How an account signs in, as chips ────────────────────────────────
+//
+// Local (password), each linked IdP by name with its vendor mark, or a
+// stranded account with neither. Everything explains itself on hover —
+// last sign-in, whether SSO provisioned the account, what "Local"
+// means — so the table answers "who is SSO, and from where" without
+// opening a single row.
+
+const MAX_PROVIDER_CHIPS = 2
+const SIGNIN_CHIP =
+    'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border'
+
+function SignInMethods({ user }: { user: AdminUserResponse }) {
+    const identities = user.identities ?? []
+    const shown = identities.slice(0, MAX_PROVIDER_CHIPS)
+    const overflow = identities.slice(MAX_PROVIDER_CHIPS)
+
+    // Break-glass marker, leading the cell: the one property here that
+    // changes what the enforcement machinery does to this account.
+    const systemChip = user.isSystemAccount ? (
+        <HoverTip label="System account (break-glass): keeps password sign-in even while passwords are off, and forced sign-out sweeps skip it.">
+            <span className={cn(SIGNIN_CHIP, 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20')}>
+                <Shield className="w-3 h-3" />
+                System
+            </span>
+        </HoverTip>
+    ) : null
+
+    if (identities.length === 0) {
+        return (
+            <div className="flex items-center gap-1.5 flex-wrap">
+                {systemChip}
+                {user.hasPassword ? (
+                    <HoverTip label="Signs in with an email and password. No SSO identity is linked.">
+                        <span className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary border-glass-border')}>
+                            <KeyRound className="w-3 h-3" />
+                            Local
+                        </span>
+                    </HoverTip>
+                ) : (
+                    <HoverTip label="No usable password and no linked SSO identity — this account has no way to sign in right now. Grant a reset token, or let a connection link it on their next SSO sign-in.">
+                        <span className={cn(SIGNIN_CHIP, 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20')}>
+                            No sign-in
+                        </span>
+                    </HoverTip>
+                )}
+            </div>
+        )
+    }
+
+    return (
+        <div className="flex items-center gap-1.5 flex-wrap">
+            {systemChip}
+            {shown.map(identity => (
+                <HoverTip
+                    key={identity.providerId}
+                    label={(
+                        <span className="block space-y-0.5">
+                            <span className="block font-semibold">{identity.displayName}</span>
+                            <span className="block">{identity.slug} · {identity.kind}</span>
+                            {identity.lastLoginAt && (
+                                <span className="block">Last signed in with it {timeAgo(identity.lastLoginAt)}.</span>
+                            )}
+                            {user.signupSource === 'sso_jit' && (
+                                <span className="block">The account itself was provisioned by SSO.</span>
+                            )}
+                        </span>
+                    )}
+                >
+                    <span className={cn(SIGNIN_CHIP, 'bg-indigo-500/[0.06] text-ink-secondary border-glass-border max-w-[11rem]')}>
+                        {createElement(
+                            logoFor(presetById(identity.kind)?.id, identity.kind),
+                            { className: 'w-3 h-3 shrink-0' },
+                        )}
+                        <span className="truncate">{identity.displayName}</span>
+                    </span>
+                </HoverTip>
+            ))}
+            {overflow.length > 0 && (
+                <HoverTip label={`Also linked: ${overflow.map(i => i.displayName).join(', ')}`}>
+                    <span className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border-glass-border')}>
+                        +{overflow.length}
+                    </span>
+                </HoverTip>
+            )}
+            {user.hasPassword && (
+                <HoverTip label="Also has a password — can sign in locally too.">
+                    <span
+                        aria-label="Also has a password"
+                        className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border-glass-border px-1.5')}
+                    >
+                        <KeyRound className="w-3 h-3" />
+                    </span>
+                </HoverTip>
+            )}
+        </div>
+    )
+}
+
 // ── Main component ───────────────────────────────────────────────────
+
+
+/**
+ * A user's internal id, on the row that names them.
+ *
+ * `usr_ac3f19`-shaped identifiers appear in the audit log, in support
+ * tickets, in exports and in the URL of half the admin API — and nowhere in
+ * the user list, which is the one place an operator comes to turn one back
+ * into a person. Joining the two directions up meant guessing.
+ *
+ * Quiet by design: monospace, muted, and under the email, because it is a
+ * string to MATCH and to copy rather than to read. Clicking copies it, since
+ * every use of an id is somewhere else.
+ */
+function UserIdChip({ id }: { id: string }) {
+    const [copied, setCopied] = useState(false)
+    return (
+        <HoverTip
+            label={copied ? 'Copied' : 'Internal user ID'}
+            detail={`${id} — the identifier this account carries in the audit log, in exports and in the admin API. Click to copy.`}
+        >
+            <button
+                type="button"
+                aria-label={`Copy user ID ${id}`}
+                onClick={(e) => {
+                    e.stopPropagation()
+                    // Best effort: a denied clipboard permission must not throw
+                    // out of a table row.
+                    navigator.clipboard?.writeText(id).then(
+                        () => { setCopied(true); setTimeout(() => setCopied(false), 1200) },
+                        () => {},
+                    )
+                }}
+                className="mt-0.5 flex items-center gap-1 max-w-full rounded text-ink-muted hover:text-ink-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+                {copied
+                    ? <Check className="w-3 h-3 shrink-0 text-emerald-500" />
+                    : <Fingerprint className="w-3 h-3 shrink-0" />}
+                <span className="font-mono text-[10px] truncate">{id}</span>
+            </button>
+        </HoverTip>
+    )
+}
+
 
 export function AdminUsers() {
     // Phase 6: only super_admins can grant super_admin. Org admins
@@ -162,6 +310,7 @@ export function AdminUsers() {
     // ``PUT /admin/users/{id}/role`` (which checks ``system:admin``
     // legacy + claim) so the FE filter agrees with the BE gate.
     const canGrantSuperAdmin = usePermission('system:admin')
+    const { notify } = useAppNotifications()
     const assignableRoles = useMemo(
         () =>
             canGrantSuperAdmin
@@ -172,10 +321,33 @@ export function AdminUsers() {
 
     const [users, setUsers] = useState<AdminUserResponse[]>([])
     const [loading, setLoading] = useState(true)
+    /** The LIST failed to load — still true while it is read, so it stays on the
+     *  page. Everything that merely happened speaks through the app's one
+     *  notification stack instead. */
     const [error, setError] = useState<string | null>(null)
-    const [successMsg, setSuccessMsg] = useState<string | null>(null)
     const [filter, setFilter] = useState<StatusFilter>('all')
-    const [search, setSearch] = useState('')
+    // Seeded from `?q=`, so a person clicked in the audit log lands here with
+    // their id already in the box rather than on an unfiltered list of
+    // everybody.
+    //
+    // Read once from `window.location`, NOT through `useSearchParams`. The app
+    // mounts a `createBrowserRouter`, so the two agree — and the hook would
+    // make this component unrenderable outside a Router, which it has never
+    // needed to be and which two existing test files depend on. A mount-time
+    // read is all this is: after that the box belongs to the operator, and
+    // re-syncing it from the URL would fight their typing.
+    // `?user=<id>` is the audit log's deep link to ONE person: it seeds the
+    // search so the list behind shows them, and opens their access drawer once
+    // the list has loaded. `?q=` is the plainer "search for this" link.
+    const deepLink = useMemo(() => {
+        try {
+            const p = new URLSearchParams(window.location.search)
+            return { user: p.get('user'), q: p.get('q') }
+        } catch {
+            return { user: null, q: null }
+        }
+    }, [])
+    const [search, setSearch] = useState(() => deepLink.user ?? deepLink.q ?? '')
     const [sortField, setSortField] = useState<SortField>('createdAt')
     const [sortDir, setSortDir] = useState<SortDir>('desc')
     const [page, setPage] = useState(0)
@@ -257,6 +429,19 @@ export function AdminUsers() {
 
     useEffect(() => { fetchUsers() }, [fetchUsers])
 
+    // Open the linked person's details once, after the list arrives — the
+    // drawer needs the full user object, which only exists then. `useRef`
+    // rather than clearing the param, so a refresh does not silently drop the
+    // reader back onto a list they arrived past.
+    const deepLinkOpened = useRef(false)
+    useEffect(() => {
+        if (deepLinkOpened.current || !deepLink.user || users.length === 0) return
+        const match = users.find(u => u.id === deepLink.user)
+        if (!match) return          // a stale link, or an account since removed
+        deepLinkOpened.current = true
+        void openAccessDrawer(match)
+    }, [users, deepLink.user, openAccessDrawer])
+
     // Refresh on a permissions change (silent refresh, 60s poller, or
     // cross-tab BroadcastChannel) so a binding/role mutation made
     // elsewhere refreshes this page in place without a manual reload.
@@ -265,13 +450,6 @@ export function AdminUsers() {
         window.addEventListener('permissions:changed', onChange)
         return () => window.removeEventListener('permissions:changed', onChange)
     }, [fetchUsers])
-
-    // Auto-dismiss success message
-    useEffect(() => {
-        if (!successMsg) return
-        const t = setTimeout(() => setSuccessMsg(null), 4000)
-        return () => clearTimeout(t)
-    }, [successMsg])
 
     // ── KPI computation ──────────────────────────────────────────────
 
@@ -300,7 +478,15 @@ export function AdminUsers() {
             list = list.filter(u =>
                 u.displayName.toLowerCase().includes(q) ||
                 u.email.toLowerCase().includes(q) ||
-                u.role.toLowerCase().includes(q)
+                // The id is the whole reason someone arrives here from an
+                // audit row or a support ticket holding `usr_ac3f19`. Matching
+                // everything BUT the identifier made this list unsearchable by
+                // the one string that brought them.
+                u.id.toLowerCase().includes(q) ||
+                u.role.toLowerCase().includes(q) ||
+                (u.identities ?? []).some(i =>
+                    i.displayName.toLowerCase().includes(q) ||
+                    i.slug.toLowerCase().includes(q))
             )
         }
         list.sort((a, b) => {
@@ -326,44 +512,78 @@ export function AdminUsers() {
 
     // ── Actions ──────────────────────────────────────────────────────
 
-    const withAction = async (userId: string, fn: () => Promise<unknown>, msg?: string) => {
+    /** The account this action is about, in the words the admin sees in the table. */
+    const nameOf = (userId: string) => {
+        const u = users.find(x => x.id === userId)
+        return u?.displayName || u?.email || 'this account'
+    }
+
+    const withAction = async (
+        userId: string,
+        fn: () => Promise<unknown>,
+        msg?: string,
+        /** What to say when the server sends nothing readable — never a bare
+         *  empty string, and never a generic "action failed". */
+        failureMsg?: string,
+    ) => {
         setActionLoading(userId)
-        setError(null)
         try {
             await fn()
-            if (msg) setSuccessMsg(msg)
+            if (msg) notify('success', msg)
             await fetchUsers()
         } catch (err: any) {
-            setError(err.message)
+            notify('error', err?.message || failureMsg || `Could not complete that change to ${nameOf(userId)}.`)
         } finally {
             setActionLoading(null)
         }
     }
 
     const handleApprove = (userId: string) =>
-        withAction(userId, () => adminUserService.approveUser(userId), 'User approved successfully')
+        withAction(userId, () => adminUserService.approveUser(userId),
+            `${nameOf(userId)} is approved — they can sign in now.`,
+            `Could not approve ${nameOf(userId)}.`)
 
     const handleRejectConfirm = async () => {
         if (modal?.kind !== 'reject') return
         await withAction(modal.userId, () =>
-            adminUserService.rejectUser(modal.userId, modalInput || undefined), 'User rejected')
+            adminUserService.rejectUser(modal.userId, modalInput || undefined),
+            `${nameOf(modal.userId)} was turned down — they cannot sign in.`,
+            `Could not turn down ${nameOf(modal.userId)}.`)
         closeModal()
     }
 
     const handleSuspendConfirm = async () => {
         if (modal?.kind !== 'suspend') return
         await withAction(modal.userId, () =>
-            adminUserService.suspendUser(modal.userId), 'User suspended')
+            adminUserService.suspendUser(modal.userId),
+            `${nameOf(modal.userId)} is suspended — they are signed out and cannot sign back in.`,
+            `Could not suspend ${nameOf(modal.userId)}.`)
+        closeModal()
+    }
+
+    const handleSystemAccountConfirm = async () => {
+        if (modal?.kind !== 'systemAccount') return
+        await withAction(modal.userId, () =>
+            adminUserService.setSystemAccount(modal.userId, modal.makeSystem),
+            modal.makeSystem
+                ? `${nameOf(modal.userId)} is a system account — it keeps password sign-in under SSO enforcement.`
+                : `${nameOf(modal.userId)} is no longer a system account.`,
+            `Could not change whether ${nameOf(modal.userId)} is a system account.`)
         closeModal()
     }
 
     const handleReactivate = (userId: string) =>
-        withAction(userId, () => adminUserService.reactivateUser(userId), 'User reactivated')
+        withAction(userId, () => adminUserService.reactivateUser(userId),
+            `${nameOf(userId)} is active again — they can sign in.`,
+            `Could not reactivate ${nameOf(userId)}.`)
 
     const handleRoleChange = async () => {
         if (modal?.kind !== 'role' || !selectedRole) return
+        const roleLabel = AVAILABLE_ROLES.find(r => r.value === selectedRole)?.label ?? selectedRole
         await withAction(modal.userId, () =>
-            adminUserService.changeRole(modal.userId, selectedRole), `Role changed to ${selectedRole}`)
+            adminUserService.changeRole(modal.userId, selectedRole),
+            `${nameOf(modal.userId)} is now ${roleLabel}.`,
+            `Could not change the role for ${nameOf(modal.userId)}.`)
         closeModal()
     }
 
@@ -371,23 +591,24 @@ export function AdminUsers() {
         if (modal?.kind !== 'resetPassword') return
         if (resetMode === 'direct') {
             if (!modalInput || modalInput.length < 8) {
-                setError('Password must be at least 8 characters')
+                notify('error', 'Password must be at least 8 characters.')
                 return
             }
             await withAction(modal.userId, () =>
-                adminUserService.resetPassword(modal.userId, modalInput), 'Password has been reset')
+                adminUserService.resetPassword(modal.userId, modalInput),
+                `New password set for ${nameOf(modal.userId)}.`,
+                `Could not set a new password for ${nameOf(modal.userId)}.`)
             closeModal()
         } else {
             // Generate token
             setActionLoading(modal.userId)
-            setError(null)
             try {
                 const resp = await adminUserService.generateResetToken(modal.userId)
                 setGeneratedToken({ token: resp.resetToken, expiresAt: resp.expiresAt })
-                setSuccessMsg('Reset token generated')
+                notify('success', `Reset link created for ${nameOf(modal.userId)} — copy it before you close this.`)
                 await fetchUsers()
             } catch (err: any) {
-                setError(err.message)
+                notify('error', err?.message || `Could not create a reset link for ${nameOf(modal.userId)}.`)
             } finally {
                 setActionLoading(null)
             }
@@ -425,8 +646,9 @@ export function AdminUsers() {
         setCreateError(null)
         try {
             const resp = await adminUserService.createUser(body)
+            // No notify: the wizard shows the account it just made, on its own
+            // success screen. Saying it twice is the noise this sweep removes.
             setCreatedUser(resp)
-            setSuccessMsg(`${resp.email} added`)
             void fetchUsers()
         } catch (err: any) {
             setCreateError(err.message || 'Could not create the account')
@@ -441,11 +663,6 @@ export function AdminUsers() {
         try {
             const resp = await adminUserService.createUsersBulk(body)
             setBulkCreated(resp)
-            setSuccessMsg(
-                resp.skipped === 0
-                    ? `${resp.created} accounts added`
-                    : `${resp.created} added, ${resp.skipped} skipped`,
-            )
             void fetchUsers()
         } catch (err: any) {
             setCreateError(err.message || 'Could not create the accounts')
@@ -459,13 +676,11 @@ export function AdminUsers() {
         opts: CreateInviteOptions,
     ) => {
         setInviteLoading(true)
-        setError(null)
         try {
-            const resp = await adminUserService.createInvite(role, opts)
-            setInviteResult(resp)
-            setSuccessMsg('Invite link generated')
+            // The wizard shows the link it just created — the page adds nothing.
+            setInviteResult(await adminUserService.createInvite(role, opts))
         } catch (err: any) {
-            setError(err.message || 'Failed to create invite')
+            notify('error', err?.message || 'Could not create the invite link.')
         } finally {
             setInviteLoading(false)
         }
@@ -477,17 +692,10 @@ export function AdminUsers() {
         opts: CreateInviteOptions,
     ) => {
         setInviteLoading(true)
-        setError(null)
         try {
-            const resp = await adminUserService.createBulkInvites(emails, role, opts)
-            setBulkResult(resp)
-            setSuccessMsg(
-                resp.created === emails.length
-                    ? `${resp.created} invite links created`
-                    : `${resp.created} of ${emails.length} invite links created`,
-            )
+            setBulkResult(await adminUserService.createBulkInvites(emails, role, opts))
         } catch (err: any) {
-            setError(err.message || 'Failed to create invites')
+            notify('error', err?.message || `Could not create invite links for ${emails.length} people.`)
         } finally {
             setInviteLoading(false)
         }
@@ -534,13 +742,14 @@ export function AdminUsers() {
         const first = profileFirstName.trim()
         const last = profileLastName.trim()
         if (!first || !last) {
-            setError('First and last name are required')
+            notify('error', 'First and last name are both required.')
             return
         }
         await withAction(
             modal.userId,
             () => adminUserService.updateUser(modal.userId, { firstName: first, lastName: last }),
-            'Profile updated',
+            `Name updated to ${first} ${last}.`,
+            `Could not update the name for ${nameOf(modal.userId)}.`,
         )
         closeModal()
     }
@@ -704,25 +913,6 @@ export function AdminUsers() {
                 )}
             </AnimatePresence>
 
-            {/* Success toast */}
-            <AnimatePresence>
-                {successMsg && (
-                    <motion.div
-                        initial={{ opacity: 0, y: -8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                        transition={{ duration: 0.2 }}
-                        className="flex items-center gap-2 p-3 mb-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-sm"
-                    >
-                        <CheckCircle2 className="w-4 h-4 shrink-0" />
-                        <p className="flex-1">{successMsg}</p>
-                        <button onClick={() => setSuccessMsg(null)} className="p-1 rounded-lg hover:bg-emerald-500/10 transition-colors">
-                            <X className="w-3.5 h-3.5" />
-                        </button>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
             {/* Toolbar */}
             <div className="flex items-center gap-4 mb-6">
                 <div className="flex gap-1 bg-black/5 dark:bg-white/5 rounded-xl p-1">
@@ -750,7 +940,7 @@ export function AdminUsers() {
                 </div>
                 <div className="relative flex-1 max-w-xs ml-auto">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                    <input type="text" placeholder="Search by name, email, or role..."
+                    <input type="text" placeholder="Search by name, email, user ID, role, or provider..."
                         value={search} onChange={(e) => setSearch(e.target.value)}
                         className="input pl-9 h-9 text-sm bg-white/50 dark:bg-black/20 w-full" />
                     {search && (
@@ -762,7 +952,9 @@ export function AdminUsers() {
                 </div>
             </div>
 
-            {/* Error */}
+            {/* The list failed to load. Not a report of something that happened —
+                a description of what is on the screen, still true while it is
+                read, so it belongs here rather than in the notification stack. */}
             <AnimatePresence>
                 {error && (
                     <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
@@ -799,6 +991,7 @@ export function AdminUsers() {
                             <tr className="border-b border-glass-border">
                                 <th className="text-left px-5 py-3"><SortHeader label="User" field="name" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Status" field="status" current={sortField} dir={sortDir} onSort={handleSort} /></th>
+                                <th className="text-left px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Sign-in</span></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Role" field="role" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Joined" field="createdAt" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-right px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Actions</span></th>
@@ -857,6 +1050,16 @@ export function AdminUsers() {
                                                         <Mail className="w-3 h-3 text-ink-muted shrink-0" />
                                                         <p className="text-xs text-ink-muted truncate">{user.email}</p>
                                                     </div>
+                                                    {/* THE INTERNAL ID, ON THE FACE OF THE ROW.
+                                                        It appears in the audit log, in support
+                                                        tickets, in exports and in the URL of half
+                                                        the admin API — and nowhere in this list,
+                                                        which is the one place someone comes to
+                                                        turn `usr_ac3f19` back into a person. It
+                                                        is deliberately quiet: monospace, muted,
+                                                        below the email, because it is a thing to
+                                                        MATCH and to copy rather than to read. */}
+                                                    <UserIdChip id={user.id} />
                                                 </div>
                                             </div>
                                         </td>
@@ -871,6 +1074,12 @@ export function AdminUsers() {
                                             ) : (
                                                 <span className="text-xs text-ink-muted">{user.status}</span>
                                             )}
+                                        </td>
+
+                                        {/* Sign-in methods — local, which IdP(s), or stranded.
+                                            Plain spans: the row click (drawer) stays usable. */}
+                                        <td className="px-5 py-4">
+                                            <SignInMethods user={user} />
                                         </td>
 
                                         {/* Role with icon — shared visual map. */}
@@ -930,6 +1139,19 @@ export function AdminUsers() {
                                                             title="Change organization access"
                                                             className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50">
                                                             <UserCog className="w-4 h-4" />
+                                                        </button>
+
+                                                        {/* System account (break-glass) */}
+                                                        <button onClick={() => setModal({ kind: 'systemAccount', userId: user.id, name: user.displayName, makeSystem: !user.isSystemAccount })}
+                                                            disabled={isActing}
+                                                            title={user.isSystemAccount ? 'Unmark system account' : 'Mark as system account'}
+                                                            className={cn(
+                                                                'p-2 rounded-lg transition-colors disabled:opacity-50',
+                                                                user.isSystemAccount
+                                                                    ? 'text-sky-500 bg-sky-500/10 hover:bg-sky-500/20'
+                                                                    : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                            )}>
+                                                            <Shield className="w-4 h-4" />
                                                         </button>
 
                                                         {/* Reset password. Carries its label rather
@@ -1044,6 +1266,31 @@ export function AdminUsers() {
                                     </p>
                                     <ModalFooter onCancel={closeModal} onConfirm={handleSuspendConfirm}
                                         confirmLabel="Suspend User" confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"
+                                        loading={!!actionLoading} />
+                                </>
+                            )}
+
+                            {/* ── System account modal ── */}
+                            {modal.kind === 'systemAccount' && (
+                                <>
+                                    <ModalHeader icon={Shield} iconBg="bg-sky-500/10 border-sky-500/20" iconColor="text-sky-500"
+                                        title={modal.makeSystem ? 'Mark as System Account' : 'Unmark System Account'}
+                                        subtitle="Break-glass: out of scope for SSO enforcement" onClose={closeModal} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
+                                    <p className="text-sm text-ink-secondary mb-5">
+                                        {modal.makeSystem
+                                            ? 'A system account stays out of scope for SSO enforcement: it keeps '
+                                              + 'password sign-in even while passwords are off (the login page '
+                                              + 'reveals the form at /login?password=1), and "sign everyone out" '
+                                              + 'sweeps skip it. Reserve this for operational break-glass accounts.'
+                                            : 'This account will be treated like everyone else again: password '
+                                              + 'sign-in is refused while passwords are off, and forced sign-outs '
+                                              + 'include it.'}
+                                    </p>
+                                    <ModalFooter onCancel={closeModal} onConfirm={handleSystemAccountConfirm}
+                                        confirmLabel={modal.makeSystem ? 'Mark as system account' : 'Unmark'}
+                                        confirmIcon={Shield}
+                                        confirmClass="bg-sky-500 hover:bg-sky-600 shadow-sky-500/20"
                                         loading={!!actionLoading} />
                                 </>
                             )}

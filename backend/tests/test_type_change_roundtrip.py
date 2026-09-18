@@ -22,6 +22,7 @@ fixed here (a projector redesign/relabel strategy is a human design decision); t
 only documents the gap with a reproduction.
 """
 import asyncio
+from types import SimpleNamespace
 
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService, _graphnode_dict
@@ -77,6 +78,13 @@ class _LabelAwareFakeGraph:
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
+        # Before it writes, the projector reads the graph's registered
+        # attribute names — what the native-property budget counts against
+        # (``_registered_property_names``, projection.py:147). It is not a
+        # node upsert, and an empty answer is the truth for this in-memory
+        # fake: nothing is registered, so every key is admitted.
+        if cypher.startswith("CALL db.propertyKeys()"):
+            return SimpleNamespace(result_set=[])
         assert cypher.startswith("UNWIND $batch AS item MERGE (n:"), f"unexpected cypher: {cypher!r}"
         label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]
         for it in params["batch"]:

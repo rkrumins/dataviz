@@ -431,6 +431,27 @@ async def signup(
 ):
     from backend.app.db.repositories import invite_repo
 
+    # 0. Passwords off ⇒ password signup off. When the platform
+    # enforces SSO (``allow_local_login=false``), an account created
+    # here would hold a credential the login endpoint refuses — a dead
+    # end discovered at first sign-in. Refused for invited signups too:
+    # under enforcement an invite is redeemed by signing in through the
+    # IdP, not by choosing a password. Same error token as the login
+    # refusal so the page can say the same thing.
+    from backend.app.db.repositories import app_auth_config_repo
+    _posture = await app_auth_config_repo.get_snapshot(session)
+    if not _posture.allow_local_login:
+        logger.info("signup blocked: local login is disabled (SSO enforced)")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "local_login_disabled",
+                "message": "Password sign-up is off — this deployment uses "
+                           "single sign-on. Sign in with your identity "
+                           "provider instead.",
+            },
+        )
+
     # 1. Password strength
     _check_password_strength(body.password)
 

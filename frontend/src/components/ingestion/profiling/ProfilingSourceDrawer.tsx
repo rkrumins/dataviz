@@ -23,6 +23,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import type { BoardRow } from '@/types/profiling'
 import { SourceProfiling } from './SourceProfiling'
 import { significanceMeta } from './shared'
+import { MOTION } from '@/lib/motion'
 
 export function ProfilingSourceDrawer({
     row, onClose,
@@ -45,13 +46,13 @@ export function ProfilingSourceDrawer({
                 aria-label={`Profiling for ${row.name}`}
                 initial={{ x: '100%' }}
                 animate={{ x: 0 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 40 }}
+                transition={MOTION.drawerSlide}
                 className={cn(
                     'fixed right-0 top-0 z-50 h-full w-full max-w-3xl',
                     'overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl',
                 )}
             >
-                <header className="sticky top-0 z-10 bg-canvas/90 backdrop-blur border-b border-glass-border">
+                <header className="sticky top-0 z-10 bg-canvas border-b border-glass-border">
                     <div className="flex items-start justify-between gap-3 px-6 py-4">
                         <div className="min-w-0">
                             <h2 className="text-lg font-bold text-ink truncate">{row.name}</h2>

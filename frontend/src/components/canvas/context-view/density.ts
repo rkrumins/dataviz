@@ -83,6 +83,21 @@ export function densityRowTokens(density: CanvasDensity, isRoot: boolean): Densi
   }
 }
 
+/**
+ * What the persona's technical identity line adds to an entity row when
+ * Technical mode is on. Measured on the dev stack (`view_d0ea22f6c1c0`,
+ * spacious): a 15px line box plus its `mt-0.5`, taking child rows 65px → 82px
+ * and root rows 73px → 90px.
+ *
+ * LayerColumn's `estimateSize` has to include it. The estimate is what a row
+ * the virtualizer has never mounted contributes to `getTotalSize()` and to
+ * every `scrollToIndex` offset, so leaving it out under-reports the scroll
+ * height by 17px per unmeasured row and lands a reveal off-screen. Only rows
+ * rendered by `FlatTreeItem` carry the line — search-hit, load-more, skeleton
+ * and error rows do not.
+ */
+export const TECHNICAL_LINE_HEIGHT = 17
+
 export function densityRowHeights(density: CanvasDensity): { root: number; child: number; searchBox: number; skeleton: number; loadMore: number; failed: number } {
   const base = DENSITY_TOKENS[density]
   return {

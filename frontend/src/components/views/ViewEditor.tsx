@@ -223,8 +223,10 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
     onSave(finalView)
   }
 
+  // The full-viewport wrapper is inert; only the modal below opts back in, so
+  // nothing here can outlive an interrupted exit as a viewport-wide click-blocker.
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
       {/* Backdrop */}
       <Backdrop open={true} onClick={onClose} zClassName="" className="bg-black/50" />
 
@@ -233,7 +235,7 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}
-        className="relative w-full max-w-3xl max-h-[85vh] glass-panel rounded-2xl shadow-lg overflow-hidden flex flex-col"
+        className="pointer-events-auto relative w-full max-w-3xl max-h-[85vh] glass-panel rounded-2xl shadow-lg overflow-hidden flex flex-col"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border">

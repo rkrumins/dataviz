@@ -16,20 +16,22 @@
  */
 import { useMemo, useState } from 'react'
 import {
-    Activity, Boxes, Download, Loader2, ShieldCheck, Spline,
+    Activity, Boxes, Download, KeyRound, Loader2, ShieldCheck, Spline,
     TrendingDown, TriangleAlert,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { exact } from '@/lib/formatMetric'
 import { KpiCard } from '@/components/analytics/KpiCard'
+import { PROPERTY_NAME_CEILING, propertyNameBand } from '@/components/admin/PropertyNameBudget'
 import { profilingService } from '@/services/profilingService'
 import {
     DEFAULT_WINDOW, PROFILING_WINDOWS, type ProfilingWindowKey,
     useProfilingFindings, useProfilingObservations, useProfilingSeries,
 } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
-import type { ProfilingBreakdown, ProfilingMetric } from '@/types/profiling'
+import type { ProfilingBreakdown, SeriesMetric } from '@/types/profiling'
+import { OverlayPanel } from './OverlayPanel'
 import { ChangeLedger } from './ChangeLedger'
 import { FindingsBand } from './FindingsBand'
 import { ProfilingChart, type BreakdownView } from './ProfilingChart'
@@ -50,7 +52,7 @@ export function SourceProfiling({
 }: Props) {
     const canRead = useCanReadProfiling()
     const [window, setWindow] = useState<ProfilingWindowKey>(DEFAULT_WINDOW)
-    const [metric, setMetric] = useState<ProfilingMetric>('total')
+    const [metric, setMetric] = useState<SeriesMetric>('total')
     const [breakdown, setBreakdown] = useState<ProfilingBreakdown>('none')
     const [view, setView] = useState<BreakdownView>('stacked')
     const [focusedType, setFocusedType] = useState<string | null>(null)
@@ -132,8 +134,31 @@ export function SourceProfiling({
     const windowLabel = PROFILING_WINDOWS.find((w) => w.key === window)?.label ?? window
     const largestDrop = worstDrop(payload.buckets, nodes)
 
+    // The overlay inside the Relationships total. The tile keeps meaning what
+    // it meant — raw + rollup, the number people have been reading — and this
+    // line accounts for the gap against the relationship-type table below,
+    // which strips the rollup because it is not the customer's data.
+    //
+    // Absent on a backend that predates the measure, and omitted at zero: a
+    // source with no rollup has nothing to say here, and "of which 0" reads
+    // as a fault on the many sources that legitimately have none.
+    const aggregated = payload.totals.aggregated ?? []
+    const aggNow = aggregated.at(-1) ?? 0
+    const overlaySub = aggNow
+        ? `of which ${exact(aggNow)} aggregated`
+        : (edgeMove ? undefined : 'unchanged')
+
+    // The attribute-name ceiling. Sparse by nature — the series draws no
+    // point for a bucket it could not measure — so take the last MEASURED
+    // reading rather than `.at(-1)`, which is null whenever the most recent
+    // capture happened to miss it.
+    const propertyKeys = payload.totals.property_keys ?? []
+    const propertyKeysNow = [...propertyKeys].reverse().find((v) => v != null) ?? null
+
     const exportHref = profilingService.exportUrl({
-        scope: 'source', id: dataSourceId, window, breakdown,
+        // The drawn measure reaches the file. Without it the export claimed
+        // to be "always the drawn values" while hardcoding total.
+        scope: 'source', id: dataSourceId, window, breakdown, metric,
     })
 
     return (
@@ -200,7 +225,7 @@ export function SourceProfiling({
                     trendTone={edgeMove < 0 ? 'red' : 'emerald'}
                     changePct={edgeMove ? pctChange(edges) : null}
                     comparisonLabel={`vs ${windowLabel} ago`}
-                    sub={edgeMove ? undefined : 'unchanged'}
+                    sub={overlaySub}
                 />
                 <KpiCard
                     label="Observations"
@@ -209,6 +234,17 @@ export function SourceProfiling({
                     accent="violet"
                     sub={{ raw: 'every capture', hour: 'by hour', day: 'by day' }[payload.grain]}
                 />
+                {propertyKeysNow != null && (
+                    <KpiCard
+                        label="Property names"
+                        value={exact(propertyKeysNow)}
+                        icon={KeyRound}
+                        accent={propertyNameBand(propertyKeysNow).accent}
+                        // The ceiling is the point: the raw count says nothing
+                        // about runway, and the names are never freed.
+                        sub={`${Math.round((propertyKeysNow / PROPERTY_NAME_CEILING) * 100)}% of ${PROPERTY_NAME_CEILING.toLocaleString()}`}
+                    />
+                )}
                 <KpiCard
                     label="Largest drop"
                     value={largestDrop ? signed(largestDrop.delta) : 'None'}
@@ -221,13 +257,25 @@ export function SourceProfiling({
                 />
             </div>
 
+            {/* Between the tiles and the chart: the chart shows the overlay's
+                history, this says whether the current level is right and where
+                to act. */}
+            <OverlayPanel dataSourceId={dataSourceId} />
+
             <ProfilingChart
                 payload={payload}
                 findings={findings.data?.alerts}
                 metric={metric}
                 breakdown={breakdown}
                 view={view}
-                onMetric={(next) => { setMetric(next); setFocusedType(null) }}
+                onMetric={(next) => {
+                    setMetric(next)
+                    setFocusedType(null)
+                    // A breakdown implies its own measure server-side, so
+                    // leaving one set would silently draw relationship types
+                    // instead of the overlay the user just asked for.
+                    if (next === 'aggregated' || next === 'property_keys') setBreakdown('none')
+                }}
                 onBreakdown={(next) => { setBreakdown(next); setFocusedType(null) }}
                 onView={setView}
                 focusedType={focusedType}

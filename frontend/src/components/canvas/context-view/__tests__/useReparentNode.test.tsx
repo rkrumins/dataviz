@@ -1,14 +1,14 @@
 /**
  * useReparentNode — drag-to-reparent validation + staging:
  *   • self-drop is a no-op;
- *   • an ontology-illegal nesting is blocked with a toast (no staged change);
- *   • a valid reparent stages a containment create_edge (parent→child) + success toast;
+ *   • an ontology-illegal nesting is blocked with a notification (no staged change);
+ *   • a valid reparent stages a containment create_edge (parent→child) + success notification;
  *   • a cycle (dropping a node into its own descendant) is blocked.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const showToast = vi.fn()
+const notify = vi.fn()
 
 // Ontology: a `system` may contain a `dataset` via CONTAINS (forward parent→child).
 // `dataset` may only contain `column` (non-empty → restricted, so it canNOT contain a system).
@@ -23,7 +23,7 @@ const REL_TYPES = [
   { id: 'HOLDS', name: 'Holds', sourceTypes: ['system'], targetTypes: ['dataset'], isContainment: true },
 ]
 
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/store/schema', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/store/schema')>()
   return {
@@ -49,7 +49,7 @@ const staged = () => useStagedChangesStore.getState().changes
 
 describe('useReparentNode', () => {
   beforeEach(() => {
-    showToast.mockClear(); resetStaged()
+    notify.mockClear(); resetStaged()
     useBranchStore.setState({ currentBranchId: 'br_1' } as never)   // default: on a draft
   })
 
@@ -69,7 +69,7 @@ describe('useReparentNode', () => {
     expect((ce!.after as any).source).toBe('S')
     expect((ce!.after as any).target).toBe('D')
     expect((ce!.after as any).edgeType).toBe('CONTAINS')
-    expect(showToast).toHaveBeenCalledWith('success', expect.any(String))
+    expect(notify).toHaveBeenCalledWith('success', expect.any(String))
   })
 
   it('stages a valid nesting when the dragged node is a differently-cased (discovered graph) type', () => {
@@ -81,15 +81,15 @@ describe('useReparentNode', () => {
     result.current.reparent('D', 'S')
     const ce = staged().find((c) => c.type === 'create_edge')
     expect(ce).toBeTruthy()
-    expect(showToast).toHaveBeenCalledWith('success', expect.any(String))
+    expect(notify).toHaveBeenCalledWith('success', expect.any(String))
   })
 
-  it('blocks an ontology-illegal nesting with a toast', () => {
+  it('blocks an ontology-illegal nesting with a notification', () => {
     setCanvas([node('S', 'system'), node('D', 'dataset')])
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('S', 'D')   // a dataset can't contain a system
     expect(staged()).toHaveLength(0)
-    expect(showToast).toHaveBeenCalledWith('error', expect.stringContaining("can't contain"))
+    expect(notify).toHaveBeenCalledWith('error', expect.stringContaining("can't contain"))
   })
 
   it('blocks un-nesting (moving from an existing parent) outside a draft', () => {
@@ -101,7 +101,7 @@ describe('useReparentNode', () => {
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S')   // move D from S2 → S
     expect(staged().some((c) => c.type === 'create_edge')).toBe(false)
-    expect(showToast).toHaveBeenCalledWith('info', expect.stringContaining('draft'))
+    expect(notify).toHaveBeenCalledWith('info', expect.stringContaining('draft'))
   })
 
   it('allows un-nesting in a draft (stages delete of old + create of new)', () => {
@@ -124,7 +124,7 @@ describe('useReparentNode', () => {
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('S', 'D')
     expect(staged().some((c) => c.type === 'create_edge')).toBe(false)
-    expect(showToast).toHaveBeenCalledWith('error', expect.stringMatching(/descendant|contain/i))
+    expect(notify).toHaveBeenCalledWith('error', expect.stringMatching(/descendant|contain/i))
   })
 
   it('retypeContainment switches the relationship (delete real old + create new, same parent)', () => {

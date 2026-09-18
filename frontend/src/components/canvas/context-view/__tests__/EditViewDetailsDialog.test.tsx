@@ -5,13 +5,13 @@
  * lacks description/tags) and seeds name/description/tags. Save persists via
  * viewApiService.updateView, notifies onSaved, and closes. A save failure
  * keeps the dialog open with fields intact and surfaces the server detail as
- * an error toast; a fetch failure toasts + closes. Cancel never persists.
+ * an error notification; a fetch failure notifies + closes. Cancel never persists.
  */
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
-const showToast = vi.fn()
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+const notify = vi.fn()
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
 const getViewMock = vi.fn()
 const updateViewMock = vi.fn()
@@ -59,13 +59,13 @@ describe('EditViewDetailsDialog — fetch on open', () => {
     expect(screen.getByLabelText('Tags')).toHaveValue('finance, core')
   })
 
-  it('toasts and closes when the fetch fails', async () => {
+  it('notifies and closes when the fetch fails', async () => {
     getViewMock.mockRejectedValue(new Error('View not found'))
     const onClose = vi.fn()
 
     render(<EditViewDetailsDialog open viewId="v1" onClose={onClose} onSaved={vi.fn()} />)
 
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('error', expect.stringContaining('View not found')))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('error', expect.stringContaining('View not found')))
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
@@ -96,7 +96,7 @@ describe('EditViewDetailsDialog — save', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
   })
 
-  it('keeps the dialog open with fields intact and toasts the server detail on failure', async () => {
+  it('keeps the dialog open with fields intact and notifies the server detail on failure', async () => {
     getViewMock.mockResolvedValue(seededView)
     updateViewMock.mockRejectedValue(new Error('Forbidden — you can no longer edit this view'))
     const onSaved = vi.fn()
@@ -108,7 +108,7 @@ describe('EditViewDetailsDialog — save', () => {
     fireEvent.change(name, { target: { value: 'New name' } })
     fireEvent.click(screen.getByRole('button', { name: /save/i }))
 
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('error', expect.stringContaining('Forbidden')))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('error', expect.stringContaining('Forbidden')))
     expect(onSaved).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByLabelText('Name')).toHaveValue('New name')

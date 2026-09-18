@@ -182,6 +182,7 @@ export const PredicateBuilder: FC<PredicateBuilderProps> = ({
         getEdgeValueSamples,
         isInitialLoading: discoveryLoading,
         error: discoveryError,
+        unavailable: discoveryUnavailable,
     } = useDiscovery(viewId)
 
     const ctx: EditorContext = useMemo(() => ({
@@ -216,6 +217,7 @@ export const PredicateBuilder: FC<PredicateBuilderProps> = ({
             <DiscoveryStatusBanner
                 loading={discoveryLoading}
                 error={discoveryError}
+                unavailable={discoveryUnavailable}
                 keyCount={allKeys.length}
                 tagCount={tagValues.length}
                 edgeTypeCount={edgeTypes.length}
@@ -336,16 +338,26 @@ export const PredicateBuilder: FC<PredicateBuilderProps> = ({
  *
  * Without this banner the editors silently show empty pickers and the
  * user has no idea autocomplete is offline.
+ *
+ * The one state it says NOTHING about is `unavailable` — discovery
+ * refused to this caller (a share link; the sample spans the whole data
+ * source, not the one view they hold). Every arm above is something the
+ * reader can act on: wait, report, or type free text knowing why. A
+ * refusal is none of those. It would stand on every open, for the life
+ * of the link, over a builder that works perfectly well without
+ * autocomplete.
  */
 function DiscoveryStatusBanner({
-    loading, error, keyCount, tagCount, edgeTypeCount,
+    loading, error, unavailable, keyCount, tagCount, edgeTypeCount,
 }: {
     loading: boolean
     error: Error | null
+    unavailable: boolean
     keyCount: number
     tagCount: number
     edgeTypeCount: number
 }) {
+    if (unavailable) return null
     if (loading) {
         return (
             <div className={cn(

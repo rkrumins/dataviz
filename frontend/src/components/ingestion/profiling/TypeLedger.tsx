@@ -39,6 +39,8 @@ type TypeRow = {
     delta: number
     points: number[]
     state: 'new' | 'gone' | 'grew' | 'shrank' | 'steady'
+    /** The platform's own rolled-up lineage, not a type anyone ingested. */
+    derived?: boolean
 }
 
 export function TypeLedger({
@@ -67,11 +69,24 @@ export function TypeLedger({
                 const values = s.points.map((p) => p.v)
                 const first = values[0] ?? 0
                 const last = values.at(-1) ?? 0
-                const state: TypeRow['state'] = !first && last ? 'new'
-                    : first && !last ? 'gone'
-                        : last > first ? 'grew'
-                            : last < first ? 'shrank' : 'steady'
-                return { key: s.key, label: s.label, first, last, delta: last - first, points: values, state }
+                // gone/new are claims about the SOURCE's data: a type it had
+                // and lost, or one that appeared. Neither is ever true of the
+                // platform's own rollup — a rebuild wipes and rewrites it on
+                // a schedule nobody set, and ranking that as GONE in red at
+                // the top of the ledger is the exact noise this type was
+                // hidden for. It still reports grew/shrank, which is honest
+                // about the magnitude without inventing an incident.
+                const moved: TypeRow['state'] = last > first ? 'grew'
+                    : last < first ? 'shrank' : 'steady'
+                const state: TypeRow['state'] = s.derived ? moved
+                    : !first && last ? 'new'
+                        : first && !last ? 'gone'
+                            : moved
+                return {
+                    key: s.key, label: s.label, first, last,
+                    delta: last - first, points: values, state,
+                    derived: s.derived,
+                }
             })
         const weight = { gone: 0, new: 1, shrank: 2, grew: 3, steady: 4 }
         return built.sort((a, b) => {
@@ -182,6 +197,18 @@ export function TypeLedger({
                                                     aria-hidden
                                                 />
                                                 <span className="font-medium text-ink">{row.label}</span>
+                                                {/* Named, not coloured: someone reading
+                                                    this against their own model has to be
+                                                    able to say which row is not their
+                                                    data. */}
+                                                {row.derived && (
+                                                    <span
+                                                        className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted"
+                                                        title="Built by this platform — rolled-up lineage, not data anyone ingested"
+                                                    >
+                                                        platform
+                                                    </span>
+                                                )}
                                             </span>
                                             {(row.state === 'gone' || row.state === 'new') && (
                                                 <span className={cn(

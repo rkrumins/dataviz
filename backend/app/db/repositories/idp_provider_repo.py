@@ -312,11 +312,15 @@ async def update_provider(
         row.settings = encrypt_settings(merged)
     if claim_mapping is not None:
         row.claim_mapping = json.dumps(claim_mapping or {}, sort_keys=True)
+    # An empty (or blank) string CLEARS these two; ``None`` means "not
+    # in this PATCH". The distinction matters: the editor's clear-it
+    # affordance is blanking the field, and a null that reads as
+    # omitted made the old label immortal.
     if button_label is not None:
-        row.button_label = (button_label or None) and button_label.strip()
+        row.button_label = button_label.strip() or None
     if button_icon is not None:
         validate_button_icon(button_icon)
-        row.button_icon = (button_icon or None) and button_icon.strip()
+        row.button_icon = button_icon.strip() or None
     if email_domains is not None:
         row.email_domains = _encode_domains(email_domains)
     row.updated_at = _now()

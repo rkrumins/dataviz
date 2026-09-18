@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react'
 import { Loader2, Save, RotateCcw } from 'lucide-react'
 import { NodeIdentityField, normalizeIdentity, normalizeName } from '@/components/dataSource/NodeIdentity'
 import { workspaceService } from '@/services/workspaceService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 
 interface Props {
     wsId: string
@@ -25,7 +25,7 @@ interface Props {
 export function WorkspaceNodeIdentityDefaults({
     wsId, identityProperty, nameProperty, canEdit, onSaved,
 }: Props) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     // '' means "this workspace sets no default" — distinct from 'urn', which
     // would pin its sources to the platform default and stop them inheriting.
     const [identity, setIdentity] = useState(identityProperty ?? '')
@@ -50,9 +50,9 @@ export function WorkspaceNodeIdentityDefaults({
                 nameProperty: name.trim(),
             })
             await onSaved()
-            showToast('success', 'Workspace defaults saved')
+            notify('success', 'Workspace defaults saved')
         } catch (e) {
-            showToast('error', e instanceof Error ? e.message : 'Could not save defaults')
+            notify('error', e instanceof Error ? e.message : 'Could not save defaults')
         } finally {
             setSaving(false)
         }

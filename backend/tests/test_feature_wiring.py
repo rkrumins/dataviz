@@ -31,7 +31,16 @@ from pathlib import Path
 import pytest
 
 from backend.app.config.feature_wiring import FEATURE_WIRING
-from backend.app.db.seed_feature_registry import SEED_CATEGORIES, SEED_DEFINITIONS
+# From the module that DEFINES them, not the ORM module that re-exports them
+# for scripts' convenience. This test is pure tree-parsing — its CI job
+# (.github/workflows/alembic-guards.yml, "Every feature flag is really wired")
+# installs pytest and nothing else, deliberately, because there is no database
+# and no app to start here. Importing the re-export dragged in
+# backend.app.db.models and therefore SQLAlchemy, so the job died at collection
+# with ModuleNotFoundError and the guard has been reporting red instead of
+# guarding anything. ``seed_feature_registry`` re-exports these two unchanged
+# (its ``__all__``), so this is the same data by a route that costs nothing.
+from backend.app.config.features_seed import SEED_CATEGORIES, SEED_DEFINITIONS
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "backend" / "app"

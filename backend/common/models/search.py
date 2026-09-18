@@ -107,9 +107,12 @@ class PropertyPredicate(_Base):
     """Typed comparison against a single user-property.
 
     After the storage refactor, user properties are native FalkorDB
-    fields, so these compile to indexed ``WHERE n.<key> <op> $val`` —
-    no Python post-filter. ``between`` expects ``value`` to be a
-    two-element list ``[lo, hi]``.
+    fields, so these compile to ``WHERE n.<key> <op> $val`` — no Python
+    post-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))
+    <op> toLower($val)``) when ``value`` is a string and
+    ``case_sensitive`` is false; a non-string value (or
+    ``case_sensitive=True``) keeps the raw, indexed column comparison.
+    ``between`` expects ``value`` to be a two-element list ``[lo, hi]``.
     """
     kind: Literal["property"] = "property"
     key: str = Field(min_length=1, max_length=128)
@@ -443,6 +446,7 @@ GroupPredicate.model_rebuild()
 AggregationKind = Literal[
     "ancestorType",   # group by the closest ancestor whose type ∈ ancestor_entity_types
     "ancestorLevel",  # group by the ancestor at a given hierarchy depth from scope root
+    "ancestor",       # credit EVERY containment ancestor of every match, uncapped
     "parent",         # group by direct parent (containment edge)
     "tag",            # group by tag value
     "entityType",     # group by the hit's own entity type
@@ -474,7 +478,12 @@ class AggregationSpec(_Base):
                     "property whose values become the bucket keys "
                     "(e.g. 'layer' → one bucket per layer value).",
     )
-    max_buckets: int = Field(50, alias="maxBuckets", ge=1, le=500)
+    max_buckets: int = Field(
+        50, alias="maxBuckets", ge=1, le=20000,
+        description="Bucket ceiling. The headroom above a facet-sized "
+                    "list is for by='ancestor', which needs one bucket "
+                    "per container the canvas can collapse.",
+    )
     sample_hits_per_bucket: int = Field(
         3, alias="sampleHitsPerBucket", ge=0, le=20,
         description="Tiny preview list shown next to each bucket — for the UI's "
@@ -498,6 +507,13 @@ ResultShape = Literal["aggregates", "hits", "both", "paths"]
 
 
 ScopeMode = Literal["visible", "view", "data_source"]
+
+
+# Client-input cap on ``SearchScope.entity_types``. Raised from 32 to
+# 512 (a view's own resolved ontology allow-list can legitimately
+# exceed 32 labels — see ``_stamp_resolved_scope``, which falls back
+# to an unfiltered ``None`` rather than ever raising over this cap).
+SEARCH_SCOPE_ENTITY_TYPES_MAX = 512
 
 
 class SearchScope(_Base):
@@ -555,7 +571,7 @@ class SearchScope(_Base):
             "Optional narrowing hint. Each URN must be a descendant of "
             "(or equal to) one of the view's allowed roots; URNs that "
             "fail validation are dropped server-side. Capped at "
-            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 256). The "
+            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The "
             "cap exists to bound the Cypher IN-list size + containment "
             "expansion fanout on multi-domain views with many top-level "
             "containers."
@@ -566,7 +582,7 @@ class SearchScope(_Base):
         description="Clamped to min(client, view.maxDepth) by the resolver.",
     )
     entity_types: Optional[List[str]] = Field(
-        None, alias="entityTypes", max_length=32,
+        None, alias="entityTypes", max_length=SEARCH_SCOPE_ENTITY_TYPES_MAX,
         description=(
             "Optional. Must be ⊆ view's visibleEntityTypes; out-of-set "
             "values cause the request to be rejected with 400."
@@ -714,6 +730,12 @@ class SearchHighlight(_Base):
     field: str
     snippet: str
     score: float = 0.0
+    ranges: List[List[int]] = Field(
+        default_factory=list,
+        description="``[start, end]`` offsets within ``snippet`` (not "
+                    "within the original field) — the snippet's leading "
+                    "ellipsis is already counted.",
+    )
 
 
 class AncestorRef(_Base):
@@ -779,6 +801,13 @@ class SearchAggregateBucket(_Base):
     ancestor_entity_type: str = Field(alias="ancestorEntityType")
     ancestor_depth_from_scope_root: int = Field(alias="ancestorDepthFromScopeRoot")
     match_count: int = Field(alias="matchCount")
+    type_counts: Optional[Dict[str, int]] = Field(
+        None, alias="typeCounts",
+        description="Per-entity-type breakdown of ``match_count`` — e.g. "
+                    "``{'Column': 12, 'Table': 3}``. Populated by "
+                    "by='ancestor'; None for the kinds that don't "
+                    "compute one.",
+    )
     sample_hits: List[SearchHit] = Field(
         default_factory=list, alias="sampleHits",
     )
@@ -864,7 +893,13 @@ class SearchResultPage(_Base):
     """Provider + service response. One inner list in ``aggregates`` per
     requested AggregationSpec."""
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
-    hits: Optional[List[SearchHit]] = None
+    hits: Optional[List[SearchHit]] = Field(
+        None,
+        description="Ordered by server relevance; do not re-sort by "
+                    "`score`. Ranking runs over the whole candidate set "
+                    "before this page is sliced from it, so `score` is a "
+                    "per-hit annotation, not the key the list is in.",
+    )
     paths: Optional[List[PathHit]] = Field(
         None,
         description="Populated when the request's predicate contains a "
@@ -882,6 +917,12 @@ class SearchResultPage(_Base):
         description="Candidates that passed the predicate scan before the "
                     "scope check and aggregation/limit. Useful for showing "
                     "'searching X nodes…' captions in the FE.",
+    )
+    total_count: Optional[int] = Field(
+        None, alias="totalCount",
+        description="Exact number of matches in scope, independent of the "
+                    "candidate cap; null when the count timed out (UI "
+                    "shows N+).",
     )
     deadline_exceeded: bool = Field(False, alias="deadlineExceeded")
     elapsed_ms: int = Field(alias="elapsedMs")
@@ -968,7 +1009,7 @@ class SearchDiscoverResult(_Base):
     Used to populate every autocomplete picker in the visual builder.
     """
     labels: Dict[str, SearchDiscoverLabelInfo] = Field(default_factory=dict)
-    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).")
+    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.")
     missing_containment: bool = Field(False, alias="missingContainment", description="True when the provider has no containment edge types configured — ancestor-based queries will return empty.")
     tag_values: Dict[str, int] = Field(
         default_factory=dict,
@@ -989,6 +1030,15 @@ class SearchDiscoverResult(_Base):
             "sample plus the property keys + value samples each one "
             "carries. Powers the W2 edge-predicate editor and the "
             "edge-aware path-query value pickers."
+        ),
+    )
+    missing_searchable_text: int = Field(
+        0,
+        alias="missingSearchableText",
+        description=(
+            "Sampled nodes with no n.searchableText — run "
+            "`python -m backend.scripts.migrate_native_properties "
+            "--searchable-text`."
         ),
     )
     elapsed_ms: int = Field(0, alias="elapsedMs", description="Discovery query duration in milliseconds.")

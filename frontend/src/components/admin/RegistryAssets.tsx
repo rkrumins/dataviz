@@ -16,6 +16,7 @@ import {
     Plus, WifiOff, ArrowUpDown, ArrowUpRight, LineChart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { PropertyNameBudget, PROPERTY_NAME_CEILING, propertyNameBand } from './PropertyNameBudget'
 import {
     providerService,
     friendlyError,
@@ -37,8 +38,8 @@ import {
 import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
-import { aggregationService } from '@/services/aggregationService'
-import { useToast } from '@/components/ui/toast'
+import { aggregationService, type AggregationTuning, type EnvTuningDefaults } from '@/services/aggregationService'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
@@ -173,7 +174,7 @@ function AssetRow({
     const [refreshPending, setRefreshPending] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
     const queryClient = useQueryClient()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Lazy-load: only fetch stats once the row scrolls into view (or
     // close to it). One IntersectionObserver instance is shared across
@@ -200,7 +201,7 @@ function AssetRow({
     // force-enqueues a discovery job. Used by the per-row ⟳ icon. The
     // ``refreshPending`` state gives an immediate visual confirmation
     // (spinner + "queued" tint) before the backend's ``refreshing=true``
-    // envelope comes back on the next poll. Errors surface as a toast
+    // envelope comes back on the next poll. Errors surface as a notification
     // because a silent failure here is indistinguishable from "nothing
     // happened" — and that's what the user reported as the original UX
     // pain point.
@@ -214,25 +215,25 @@ function AssetRow({
                 queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
             })
             if (res.status === 'redis_unavailable') {
-                showToast(
+                notify(
                     'warning',
                     `Refresh queue unreachable for ${assetName} — retry shortly.`,
                 )
             } else {
-                showToast(
+                notify(
                     'success',
                     `Refresh queued for ${assetName} — chip will update when the worker completes.`,
                 )
             }
         } catch (err: any) {
-            showToast(
+            notify(
                 'error',
                 `Refresh failed for ${assetName}: ${err?.message ?? 'unknown error'}`,
             )
         } finally {
             setRefreshPending(false)
         }
-    }, [providerId, assetName, queryClient, showToast, refreshPending])
+    }, [providerId, assetName, queryClient, notify, refreshPending])
 
     // Auto-refresh when a computing/stale job completes. ``useInsightsJob``
     // polls /admin/insights/jobs/{id}; on completion we invalidate the
@@ -450,6 +451,18 @@ function AssetRow({
                                     <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0"></span>
                                     {(stats.edgeCount ?? 0).toLocaleString()} edges
                                 </span>
+                                {stats.propertyKeyCount != null && (
+                                    <span
+                                        className="flex items-center gap-1"
+                                        title={`${stats.propertyKeyCount.toLocaleString()} of ${PROPERTY_NAME_CEILING.toLocaleString()} property names registered — names are never freed`}
+                                    >
+                                        <span className={cn(
+                                            'w-1.5 h-1.5 rounded-full shrink-0',
+                                            propertyNameBand(stats.propertyKeyCount).fill,
+                                        )} />
+                                        {stats.propertyKeyCount.toLocaleString()} property names
+                                    </span>
+                                )}
                                 {nodeTypes.length > 0 && (
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/8 text-blue-600 font-semibold border border-blue-500/15">
                                         {nodeTypes.length} entity type{nodeTypes.length !== 1 ? 's' : ''}
@@ -542,6 +555,12 @@ function AssetRow({
                                     }
                                 </div>
                             </div>
+                        )}
+
+                        {/* Property-name budget — a one-way ceiling, so it is a
+                            meter against the limit rather than another count. */}
+                        {stats && (
+                            <PropertyNameBudget total={stats.propertyKeyCount} />
                         )}
 
                         {/* Graph Connectivity score */}
@@ -766,7 +785,7 @@ function UnregisterDialog({
 export function RegistryAssets() {
     const [searchParams, setSearchParams] = useSearchParams()
     const initialProvider = searchParams.get('provider')
-    const { showToast, showLoading, hideLoading } = useToast()
+    const { notify, showLoading, hideLoading } = useAppNotifications()
 
     // Providers (React Query — shared cache with the counts fan-out below).
     const { data: providers = [], isLoading: providersLoading } = useProviders()
@@ -795,6 +814,21 @@ export function RegistryAssets() {
         ? (assetsQuery.error.message || 'Failed to load assets.')
         : ''
     const [selected, setSelected] = useState<Set<string>>(new Set())
+
+    // `selected` is user state that outlives the list. After a refresh lands
+    // an inventory without a graph that was queued, the dead name must stop
+    // counting toward the "Queued" chip and must not be registrable — the
+    // catalog row it would create is exactly what _detect_registry_drift
+    // later reports as drift.
+    //
+    // Intersect only when the list is AUTHORITATIVE: a computing/unavailable
+    // envelope renders `assets` as [], which means "unknown", not "all gone".
+    const effectiveSelected = useMemo(() => {
+        if (listState !== 'ready') return selected
+        const live = new Set(assets)
+        return new Set(Array.from(selected).filter(a => live.has(a)))
+    }, [selected, assets, listState])
+
 
     // Filters
     const [searchQuery, setSearchQuery] = useState('')
@@ -837,6 +871,8 @@ export function RegistryAssets() {
         dataSources: Array<{ id: string; projectionMode?: string | null }>
         initialValue: AggregationOverridesValue
         defaultFinePairs?: 'auto' | 'true' | 'false'
+        envDefaults?: EnvTuningDefaults | null
+        storedGlobal?: AggregationTuning | null
     } | null>(null)
 
     // Eager, global per-provider counts for the sidebar badges + Catalog
@@ -875,10 +911,10 @@ export function RegistryAssets() {
     // Open onboarding wizard with selected assets (no API calls yet — registration
     // happens inside the wizard on final submit so cancelling is safe).
     const handleRegister = () => {
-        if (!selectedProviderId || selected.size === 0) return
+        if (!selectedProviderId || effectiveSelected.size === 0) return
         // Build placeholder catalog items for the wizard to use.
         // Real catalog items are created by the wizard's submit handler.
-        const placeholders: CatalogItemResponse[] = Array.from(selected).map(assetId => ({
+        const placeholders: CatalogItemResponse[] = Array.from(effectiveSelected).map(assetId => ({
             id: `pending_${assetId}`,
             providerId: selectedProviderId,
             sourceIdentifier: assetId,
@@ -963,7 +999,7 @@ export function RegistryAssets() {
             hideLoading('reaggregate')
 
             if (dataSourcesToTrigger.length === 0) {
-                showToast('warning', 'No data sources found for this catalog item. Ensure it is bound to a workspace first.')
+                notify('warning', 'No data sources found for this catalog item. Ensure it is bound to a workspace first.')
                 return
             }
 
@@ -981,12 +1017,14 @@ export function RegistryAssets() {
                     tuning: settings?.tuning ?? undefined,
                 },
                 defaultFinePairs: settings?.envMaterializeFinePairs ?? undefined,
+                envDefaults: settings?.envTuningDefaults ?? null,
+                storedGlobal: settings?.tuning ?? null,
             })
         } catch (e: any) {
             hideLoading('reaggregate')
-            showToast('error', e?.message ?? 'Failed to discover data sources')
+            notify('error', e?.message ?? 'Failed to discover data sources')
         }
-    }, [existingCatalogs, showToast, showLoading, hideLoading])
+    }, [existingCatalogs, notify, showLoading, hideLoading])
 
     /**
      * Step 2 of re-aggregate: fan-out trigger calls with the user's overrides.
@@ -1014,14 +1052,14 @@ export function RegistryAssets() {
 
             hideLoading('reaggregate')
             if (failed === 0) {
-                showToast('success', `Aggregation triggered for ${succeeded} data source(s). Switching to Job History…`)
+                notify('success', `Aggregation triggered for ${succeeded} data source(s). Switching to Job History…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else if (succeeded > 0) {
-                showToast('warning', `Triggered ${succeeded}, failed ${failed} data source(s). A job may already be active.`)
+                notify('warning', `Triggered ${succeeded}, failed ${failed} data source(s). A job may already be active.`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
-                showToast('error', firstError?.message ?? 'Failed to trigger aggregation')
+                notify('error', firstError?.message ?? 'Failed to trigger aggregation')
                 throw firstError instanceof Error ? firstError : new Error('Failed to trigger aggregation')
             }
         } catch (e: any) {
@@ -1029,7 +1067,7 @@ export function RegistryAssets() {
             // Re-throw so RetriggerDialog stays open with the user's overrides intact.
             throw e
         }
-    }, [reaggregateCtx, showToast, showLoading, hideLoading, setSearchParams])
+    }, [reaggregateCtx, notify, showLoading, hideLoading, setSearchParams])
 
     const handlePurge = useCallback(async (assetName: string, opts?: { skipReaggregate?: boolean }) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
@@ -1044,7 +1082,7 @@ export function RegistryAssets() {
 
             if (dataSources.length === 0) {
                 hideLoading('purge')
-                showToast('warning', 'No data sources found for this catalog item.')
+                notify('warning', 'No data sources found for this catalog item.')
                 return
             }
 
@@ -1062,22 +1100,22 @@ export function RegistryAssets() {
 
             hideLoading('purge')
             if (failed === 0) {
-                showToast('success', opts?.skipReaggregate
+                notify('success', opts?.skipReaggregate
                     ? `Purge queued for ${succeeded} data source(s). Aggregation will stay empty until you re-trigger it.`
                     : `Purge queued for ${succeeded} data source(s) — re-aggregation starts automatically when each purge completes. Switching to Job History to monitor…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else if (succeeded > 0) {
-                showToast('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)
+                notify('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
-                showToast('error', firstError?.message ?? 'Failed to queue purge job')
+                notify('error', firstError?.message ?? 'Failed to queue purge job')
             }
         } catch (e: any) {
             hideLoading('purge')
-            showToast('error', e?.message ?? 'Failed to purge aggregated edges')
+            notify('error', e?.message ?? 'Failed to purge aggregated edges')
         }
-    }, [existingCatalogs, showToast, showLoading, hideLoading, setSearchParams])
+    }, [existingCatalogs, notify, showLoading, hideLoading, setSearchParams])
 
     const toggleSelection = (g: string) => {
         setSelected(prev => {
@@ -1138,6 +1176,15 @@ export function RegistryAssets() {
         setPage(0)
     }, [selectedProviderId, searchQuery, statusFilter, sortBy, sortDir, pageSize])
 
+    // Keep `page` in range when the LIST ITSELF shrinks — a refresh that
+    // drops deleted graphs can leave `page` past the end. Rendering already
+    // uses `clampedPage`, so nothing on screen moves; without this the stale
+    // out-of-range index survives and silently re-applies once the list
+    // grows again, and the raw-`page` updaters swallow the next click.
+    useEffect(() => {
+        if (page > pageCount - 1) setPage(pageCount - 1)
+    }, [page, pageCount])
+
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
     // A provider that's still loading its dataset is reachable, not broken —
     // show a calm amber "warming up" affordance instead of a red "unreachable"
@@ -1156,22 +1203,45 @@ export function RegistryAssets() {
         const providerId = selectedProviderId
         try {
             const result = await providerService.refreshAllAssets(providerId)
+            // ``jobs_queued`` counts ASSETS. Two other outcomes are real and
+            // must not both render as "Refreshing all 0 sources": a provider
+            // with nothing cached yet (only the inventory job runs), and a
+            // queue that is down (nothing ran at all — ``list_job_id`` null).
             const n = result.jobs_queued
-            showToast(
-                'success',
-                `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
-            )
+            if (n === 0 && !result.list_job_id) {
+                notify('warning', "Couldn't queue a refresh right now — showing the latest available data.")
+            } else if (n === 0) {
+                notify('success', 'Looking for this provider\'s data sources — figures follow as each is found.')
+            } else {
+                notify(
+                    'success',
+                    `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
+                )
+            }
         } catch (err: any) {
             // err.message is already run through friendlyError at the
             // service boundary, so this reads as human copy (e.g. "The
             // database is busy right now…") rather than raw JSON.
-            showToast(
+            notify(
                 'warning',
                 err?.message
                     ? `${err.message} Showing the latest available data.`
                     : "Couldn't queue a refresh right now — showing the latest available data.",
             )
         }
+        // Re-fetch the LIST now, not after the stats loop below.
+        //
+        // The POST set the sentinel's dedup claim synchronously, so the list
+        // endpoint already answers meta.refreshing:true — which arms the 5s
+        // assetListIsBuilding poll. Waiting for the stats loop to drain
+        // before asking meant the list stayed knowingly stale for as long
+        // as that loop ran (routinely 30-90s), showing neither the graph
+        // just created nor the disappearance of one just deleted, even
+        // though the backend had the new inventory within a second.
+        // Outside the try/catch on purpose: a failed POST costs one
+        // harmless GET and still picks up any inventory a sweep landed.
+        queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, providerId] })
+
         // Mark every per-row asset-stats query under this provider stale
         // WITHOUT a simultaneous refetch burst (``refetchType: 'none'``).
         // The bounded poll loop below is the single controlled fetch
@@ -1234,7 +1304,7 @@ export function RegistryAssets() {
         // throughout (React Query keeps prior data during the refetch).
         queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, providerId] })
         queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, providerId] })
-    }, [selectedProviderId, pagedAssets, queryClient, showToast])
+    }, [selectedProviderId, pagedAssets, queryClient, notify])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (
@@ -1369,7 +1439,7 @@ export function RegistryAssets() {
                                 <div className="flex gap-1 p-1 bg-black/5 dark:bg-white/5 rounded-xl border border-glass-border">
                                     {[
                                         { id: 'all', label: `All (${assets.length})` },
-                                        { id: 'selected', label: `Queued (${selected.size})` },
+                                        { id: 'selected', label: `Queued (${effectiveSelected.size})` },
                                         { id: 'registered', label: `Active (${registeredCount})` },
                                         { id: 'unregistered', label: `Available (${assets.length - registeredCount})` },
                                     ].map(f => (
@@ -1660,18 +1730,18 @@ export function RegistryAssets() {
                         {/* Footer action bar */}
                         <div className="shrink-0 mt-4 pt-4 border-t border-glass-border flex items-center justify-between gap-4">
                             <div className="text-sm text-ink-muted">
-                                {selected.size > 0 ? (
-                                    <><span className="font-bold text-ink">{selected.size}</span> queued to register</>
+                                {effectiveSelected.size > 0 ? (
+                                    <><span className="font-bold text-ink">{effectiveSelected.size}</span> queued to register</>
                                 ) : (
                                     <><span className="font-bold text-emerald-500">{registeredCount}</span> active in catalog</>
                                 )}
                             </div>
                             <button
                                 onClick={handleRegister}
-                                disabled={assetsLoading || selected.size === 0}
+                                disabled={assetsLoading || effectiveSelected.size === 0}
                                 className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-black tracking-wide bg-indigo-500 text-white hover:bg-indigo-600 shadow-md transition-colors duration-150 active:scale-95 disabled:opacity-50 disabled:active:scale-100 disabled:shadow-none"
                             >
-                                <Zap className="w-4 h-4" /> Onboard Sources ({selected.size})
+                                <Zap className="w-4 h-4" /> Onboard Sources ({effectiveSelected.size})
                             </button>
                         </div>
                     </>
@@ -1715,6 +1785,11 @@ export function RegistryAssets() {
                     timeoutMinutes: PRESET_TIMEOUT_MINUTES,
                 }}
                 defaultFinePairs={reaggregateCtx?.defaultFinePairs}
+                envDefaults={reaggregateCtx?.envDefaults}
+                storedGlobal={reaggregateCtx?.storedGlobal ?? null}
+                // One source → one shard to check; an asset spanning several
+                // has no single fit to report.
+                dataSourceId={reaggregateCtx?.dataSources.length === 1 ? reaggregateCtx.dataSources[0].id : undefined}
                 onConfirmRetrigger={handleConfirmReaggregate}
             />
 

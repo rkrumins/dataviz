@@ -69,7 +69,12 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
 
       for (const [key, entry] of Object.entries(data.providers)) {
         newMap.set(key, {
-          status: entry.status === 'healthy' ? 'healthy' : 'unhealthy',
+          // 'unknown' (registered, never probed) is NOT unhealthy: reading
+          // it as such flipped a fresh provider red and, once its first
+          // probe landed, fired a spurious unhealthy→healthy "recovery".
+          status: entry.status === 'healthy' ? 'healthy'
+            : entry.status === 'unknown' ? 'unknown'
+            : 'unhealthy',
           error: entry.error,
           lastChecked: now,
         })

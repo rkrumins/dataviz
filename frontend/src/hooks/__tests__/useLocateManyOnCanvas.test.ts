@@ -6,7 +6,7 @@
  *     invisible to a plain DOM query forever — this pins that the
  *     virtualizer-aware pulse (`scrollHitIntoView`) is what actually
  *     brings it into the DOM, not luck.
- *   • the all-fail and some-fail cases now surface a toast instead of
+ *   • the all-fail and some-fail cases now surface a notification instead of
  *     resolving silently, with an honest revealed/requested count.
  *
  * `getElementById`/`scrollHitIntoView` are faked as a tiny "virtualized
@@ -36,14 +36,14 @@ describe('useLocateManyOnCanvas — off-window targets (T24 F5)', () => {
     const revealAndFocus = vi.fn().mockResolvedValue(undefined)
     const scrollHitIntoView = vi.fn((id: string) => materialized.add(id))
     const getElementById = vi.fn((id: string) => (materialized.has(id) ? fakeElement() : null))
-    const showToast = vi.fn()
+    const notify = vi.fn()
 
     const { result } = renderHook(() => useLocateManyOnCanvas({
       revealAndFocus,
       scrollHitIntoView,
       getElementById,
       getScrollContainer: () => null,
-      showToast,
+      notify,
       settleMs: 0,
     }))
 
@@ -57,18 +57,18 @@ describe('useLocateManyOnCanvas — off-window targets (T24 F5)', () => {
     // ...and a plain DOM query alone (never called before the pulse)
     // would have found nothing — the pulse is what changed that.
     expect(outcome).toEqual({ revealed: 1, requested: 1 })
-    expect(showToast).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
   })
 
   it('ancestors are expanded for EVERY target, including ones that never end up located', async () => {
     const revealAndFocus = vi.fn().mockResolvedValue(undefined)
-    const showToast = vi.fn()
+    const notify = vi.fn()
     const { result } = renderHook(() => useLocateManyOnCanvas({
       revealAndFocus,
       scrollHitIntoView: vi.fn(),
       getElementById: () => null,   // nothing ever materializes
       getScrollContainer: () => null,
-      showToast,
+      notify,
       settleMs: 0,
     }))
 
@@ -84,14 +84,14 @@ describe('useLocateManyOnCanvas — off-window targets (T24 F5)', () => {
 })
 
 describe('useLocateManyOnCanvas — feedback instead of silence (T24 F5)', () => {
-  it('zero locatable targets shows an error toast with the honest count', async () => {
-    const showToast = vi.fn()
+  it('zero locatable targets shows an error notification with the honest count', async () => {
+    const notify = vi.fn()
     const { result } = renderHook(() => useLocateManyOnCanvas({
       revealAndFocus: vi.fn().mockResolvedValue(undefined),
       scrollHitIntoView: vi.fn(),
       getElementById: () => null,
       getScrollContainer: () => null,
-      showToast,
+      notify,
       settleMs: 0,
     }))
 
@@ -99,19 +99,19 @@ describe('useLocateManyOnCanvas — feedback instead of silence (T24 F5)', () =>
     await act(async () => { outcome = await result.current(['x', 'y', 'z']) })
 
     expect(outcome).toEqual({ revealed: 0, requested: 3 })
-    expect(showToast).toHaveBeenCalledTimes(1)
-    expect(showToast).toHaveBeenCalledWith('error', expect.stringContaining('3'))
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith('error', expect.stringContaining('3'))
   })
 
-  it('a partial reveal shows a warning toast naming both counts, not just failing silently', async () => {
+  it('a partial reveal shows a warning notification naming both counts, not just failing silently', async () => {
     const materialized = new Set(['found-1', 'found-2'])   // 'missing' never lands
-    const showToast = vi.fn()
+    const notify = vi.fn()
     const { result } = renderHook(() => useLocateManyOnCanvas({
       revealAndFocus: vi.fn().mockResolvedValue(undefined),
       scrollHitIntoView: vi.fn(),
       getElementById: (id) => (materialized.has(id) ? fakeElement() : null),
       getScrollContainer: () => null,
-      showToast,
+      notify,
       settleMs: 0,
     }))
 
@@ -119,38 +119,38 @@ describe('useLocateManyOnCanvas — feedback instead of silence (T24 F5)', () =>
     await act(async () => { outcome = await result.current(['found-1', 'found-2', 'missing']) })
 
     expect(outcome).toEqual({ revealed: 2, requested: 3 })
-    expect(showToast).toHaveBeenCalledTimes(1)
-    const [type, message] = showToast.mock.calls[0]!
+    expect(notify).toHaveBeenCalledTimes(1)
+    const [type, message] = notify.mock.calls[0]!
     expect(type).toBe('warning')
     expect(message).toContain('2')
     expect(message).toContain('3')
   })
 
-  it('a full reveal shows no toast at all — feedback is for failure, not for success', async () => {
+  it('a full reveal shows no notification at all — feedback is for failure, not for success', async () => {
     const materialized = new Set(['a', 'b'])
-    const showToast = vi.fn()
+    const notify = vi.fn()
     const { result } = renderHook(() => useLocateManyOnCanvas({
       revealAndFocus: vi.fn().mockResolvedValue(undefined),
       scrollHitIntoView: vi.fn(),
       getElementById: (id) => (materialized.has(id) ? fakeElement() : null),
       getScrollContainer: () => null,
-      showToast,
+      notify,
       settleMs: 0,
     }))
 
     await act(async () => { await result.current(['a', 'b']) })
-    expect(showToast).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
   })
 
-  it('an empty request is a no-op — no reveal calls, no toast', async () => {
+  it('an empty request is a no-op — no reveal calls, no notification', async () => {
     const revealAndFocus = vi.fn()
-    const showToast = vi.fn()
+    const notify = vi.fn()
     const { result } = renderHook(() => useLocateManyOnCanvas({
       revealAndFocus,
       scrollHitIntoView: vi.fn(),
       getElementById: () => null,
       getScrollContainer: () => null,
-      showToast,
+      notify,
       settleMs: 0,
     }))
 
@@ -158,7 +158,7 @@ describe('useLocateManyOnCanvas — feedback instead of silence (T24 F5)', () =>
     await act(async () => { outcome = await result.current([]) })
     expect(outcome).toEqual({ revealed: 0, requested: 0 })
     expect(revealAndFocus).not.toHaveBeenCalled()
-    expect(showToast).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
   })
 })
 
@@ -177,7 +177,7 @@ describe('useLocateManyOnCanvas — best-effort union centring', () => {
       scrollHitIntoView: vi.fn(),
       getElementById: (id) => (materialized.has(id) ? fakeElement() : null),
       getScrollContainer: () => container,
-      showToast: vi.fn(),
+      notify: vi.fn(),
       settleMs: 0,
     }))
 
@@ -191,7 +191,7 @@ describe('useLocateManyOnCanvas — best-effort union centring', () => {
       scrollHitIntoView: vi.fn(),
       getElementById: () => fakeElement(),
       getScrollContainer: () => null,
-      showToast: vi.fn(),
+      notify: vi.fn(),
       settleMs: 0,
     }))
     await act(async () => { await expect(result.current(['a'])).resolves.toBeDefined() })

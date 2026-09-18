@@ -32,6 +32,7 @@ async def _snap(
     nodes: int = 100, edges: int = 50, reason: str = "changed",
     types: str = '{"object": 100}', edge_types: str = '{"LINKS": 50}',
     workspace: str = "ws_1", provider: str = "prov_1",
+    property_keys: int | None = None,
 ):
     session.add(DataSourceCountSnapshotORM(
         id=f"snp_{ds_id}_{captured_at}",
@@ -42,6 +43,7 @@ async def _snap(
         graph_name="g",
         node_count=nodes,
         edge_count=edges,
+        property_key_count=property_keys,
         entity_type_counts=types,
         edge_type_counts=edge_types,
         counts_digest=f"d{nodes}:{edges}",
@@ -407,3 +409,46 @@ async def test_rollup_tiers_are_purged_on_their_own_cutoffs(
     days = await _rollups(db_session, "day")
     assert all(h.bucket_start >= "2026-07" for h in hours), "hourly trimmed at 45d"
     assert any(d.bucket_start.startswith("2026-05") for d in days), "daily kept"
+
+
+async def test_a_bucket_keeps_its_property_key_reading_when_the_closing_snapshot_missed_it(
+    db_session: AsyncSession,
+):
+    """Compaction takes the CLOSING snapshot of a bucket, and that snapshot
+    routinely carries no property-key reading: ``_persist_probe_counts``
+    cannot supply one — its input, GraphSchemaStats, has no property-key
+    field — so every probe sweep writes a NULL. A closing NULL erased the
+    whole hour from the chart (profiling_series drops a null point) and left
+    a blank cell in the CSV.
+
+    So the value COALESCEs to the bucket's high. Deliberately not ``max``
+    outright: the count resets DOWN when a graph is recreated, and max would
+    hold the pre-drop high for a bucket it no longer describes."""
+    await _snap(db_session, "ds_pk", _at(hours=3, minutes=50), property_keys=41_203)
+    await _snap(db_session, "ds_pk", _at(hours=3, minutes=10), property_keys=None)
+
+    await _compact_all(db_session, "hour")
+
+    rows = await _rollups(db_session, "hour")
+    assert len(rows) == 1
+    assert rows[0].property_key_count == 41_203, (
+        "the hour must keep the reading it actually had, not be erased by a "
+        "closing snapshot that never measured one"
+    )
+
+
+async def test_a_bucket_with_no_reading_at_all_stays_unmeasured(
+    db_session: AsyncSession,
+):
+    """The other half of the contract: COALESCE must not manufacture a value.
+    A bucket nothing measured stays NULL, so the chart draws no point rather
+    than a zero — "no property names" and "nobody looked" are opposite
+    claims, and this metric exists to warn about the second."""
+    await _snap(db_session, "ds_pk_none", _at(hours=3, minutes=50), property_keys=None)
+    await _snap(db_session, "ds_pk_none", _at(hours=3, minutes=10), property_keys=None)
+
+    await _compact_all(db_session, "hour")
+
+    rows = await _rollups(db_session, "hour")
+    assert len(rows) == 1
+    assert rows[0].property_key_count is None

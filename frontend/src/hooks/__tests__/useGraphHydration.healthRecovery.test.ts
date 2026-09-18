@@ -80,7 +80,12 @@ describe('useGraphHydration provider-health recovery wiring', () => {
   it('unhealthy→healthy re-hydrates an unavailable canvas to ready', async () => {
     let down = true
     mockProvider.getNodes.mockImplementation(async () => {
-      if (down) throw new Error('ECONNREFUSED')
+      // The backend's own breaker saying the provider is unreachable.
+      if (down) {
+        throw Object.assign(new Error('API Error 503: circuit open'), {
+          status: 503, code: 'PROVIDER_UNAVAILABLE',
+        })
+      }
       return []
     })
 

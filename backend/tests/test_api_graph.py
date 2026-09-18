@@ -557,8 +557,10 @@ async def test_trace_closure_cache_hit_deserializes_the_subclass(test_client: As
         frontierDown=[],
         seedTruncated=True,
     ).model_dump_json(by_alias=True)
-    # get_or_compute reads the generation counter first, the cache key second.
-    redis.get.side_effect = [b"7", cached]
+    # get_or_compute reads the generation counters first, the cache key second.
+    # Two counters here: trace/closure reads the :AGGREGATED layer for its
+    # coarse page, so its key carries the rollup counter as well as content.
+    redis.get.side_effect = [b"7", b"3", cached]
 
     async def _override():
         return mock_engine
@@ -617,8 +619,15 @@ async def test_trace_closure_provider_not_implemented_returns_501_through_cache_
     assert resp.json()["detail"]["code"] == "trace_closure_unsupported"
     # Reached (and raised inside) the real cache flow, not the bypass: the
     # generation/cache-lookup GET fired; no result ever reached the SET side.
+    # Count PAYLOAD writes, not every SET — the cross-process election takes
+    # out a lock on a key of its own, and that is bookkeeping about who is
+    # computing rather than anything the cache stored.
+    from backend.app.services import graph_cache as _gc
     assert redis.get.await_count >= 1
-    assert redis.set.await_count == 0
+    assert [
+        c for c in redis.set.await_args_list
+        if not str(c.args[0]).startswith(_gc._LEADER_PREFIX)
+    ] == []
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────
@@ -847,7 +856,8 @@ class _PassthroughGraphCache:
         self.count_sets: list = []
 
     async def get_or_compute(self, *, scope, endpoint, params, compute, model_cls,
-                              ttl_seconds=None, on_stale=None):
+                              ttl_seconds=None, on_stale=None,
+                              expected_compute_s=None):
         return await compute()
 
     @staticmethod

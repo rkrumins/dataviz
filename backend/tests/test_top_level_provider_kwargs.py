@@ -268,34 +268,73 @@ async def test_engine_passes_new_kwargs_to_new_provider():
 
 # ── Server TIMEOUT_MAX clamp + socket-timeout floor ──────────────────
 
-def test_db_timeout_ms_clamped_to_server_timeout_max(monkeypatch):
+from backend.app.providers.falkordb_provider import _clamp_db_timeout_ms
+
+
+def test_clamp_db_timeout_ms_cancels_server_side_first_and_never_exceeds_the_cap():
+    assert _clamp_db_timeout_ms(30, 180_000) == 29_500
+    assert _clamp_db_timeout_ms(600, 180_000) == 180_000
+    assert _clamp_db_timeout_ms(0.1, 180_000) == 500          # never below the floor
+    assert _clamp_db_timeout_ms(600, 0) == 599_500             # 0 = no cap
+
+
+def test_db_timeout_ms_uses_the_env_mirror_until_a_node_has_been_read(monkeypatch):
     """FalkorDB rejects (never runs) a query whose TIMEOUT exceeds the
     server's TIMEOUT_MAX — an over-budget caller (the collector's 600s
-    materialization) must degrade to TIMEOUT_MAX, not fail instantly."""
+    materialization) must degrade to TIMEOUT_MAX, not fail instantly. Until
+    a node has been read, the deployment's mirror is the cap."""
     monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
-    assert FalkorDBProvider._db_timeout_ms(600) == 180_000
+    p = _make_provider()
+    assert p._server_timeout_cap_ms() == 180_000
+    assert p._db_timeout_ms(600) == 180_000
     # Budgets under the cap keep the -500ms DB-cancels-first offset.
-    assert FalkorDBProvider._db_timeout_ms(30) == 29_500
-
-
-def test_db_timeout_ms_unclamped_when_cap_disabled(monkeypatch):
+    assert p._db_timeout_ms(30) == 29_500
     monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0)
-    assert FalkorDBProvider._db_timeout_ms(600) == 599_500
+    assert p._db_timeout_ms(600) == 599_500
 
 
-def test_graph_socket_timeout_floored_above_server_cap(monkeypatch):
-    """The graph-pool socket timeout must exceed the longest query the
-    server may legitimately run (TIMEOUT_MAX), or the socket recv timeout
-    kills long queries mid-flight. Per-call asyncio.wait_for budgets keep
-    hang detection tight despite the higher socket value."""
+def test_a_cap_read_from_the_node_wins_over_the_env_mirror(monkeypatch):
+    """The store's TIMEOUT_MAX can be raised at runtime from Infrastructure;
+    the clamp must follow the node, not a stale env value — and the LOWEST
+    known node governs, since the node that receives a query rejects it and
+    a dedicated projection may live on a different node."""
     monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
-    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "10")
     p = _make_provider()
-    assert p._graph_socket_timeout() == pytest.approx(195.0)
+    p.note_server_limits("10.0.0.1:6379", timeout_max_ms=300_000, query_mem_capacity=2 ** 30, thread_count=4)
+    assert p._server_timeout_cap_ms() == 300_000
+    assert p._db_timeout_ms(600) == 300_000
+    assert p.server_query_mem_capacity() == 2 ** 30
+    p.note_server_limits("10.0.0.2:6379", timeout_max_ms=120_000, query_mem_capacity=2 ** 29)
+    assert p._server_timeout_cap_ms() == 120_000
+    assert p.server_query_mem_capacity() == 2 ** 29
+    # None never overwrites a known value; an unknown endpoint is ignored.
+    p.note_server_limits("10.0.0.2:6379", timeout_max_ms=None)
+    p.note_server_limits("unknown", timeout_max_ms=1_000)
+    assert p._server_timeout_cap_ms() == 120_000
+    assert p.server_limits_for("10.0.0.1:6379") == {
+        "timeout_max_ms": 300_000, "query_mem_capacity": 2 ** 30, "thread_count": 4,
+    }
+    # A node reporting no cap (unlimited reads as None) leaves the env mirror in force.
+    q = _make_provider()
+    q.note_server_limits("10.0.0.3:6379", timeout_max_ms=None, thread_count=8)
+    assert q._server_timeout_cap_ms() == 180_000 and q.server_query_mem_capacity() is None
 
 
-def test_graph_socket_timeout_uses_configured_when_cap_disabled(monkeypatch):
+def test_graph_socket_timeout_is_floored_above_the_largest_query_the_app_may_send(monkeypatch):
+    """The graph-pool socket timeout must exceed the longest query the
+    server may legitimately run, or the socket recv timeout kills long
+    queries mid-flight. The cap can be raised at runtime up to the per-query
+    knob maximum (600 s) after the pool is built, so the floor is that
+    maximum — or a larger env cap — plus 15 s, including when the env says
+    no cap at all (a 10 s socket used to kill any query over 10 s there).
+    Per-call asyncio.wait_for budgets keep hang detection tight."""
+    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "10")
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
+    assert _make_provider()._graph_socket_timeout() == pytest.approx(615.0)
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 900_000)
+    assert _make_provider()._graph_socket_timeout() == pytest.approx(915.0)
     monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0)
-    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "10")
-    p = _make_provider()
-    assert p._graph_socket_timeout() == pytest.approx(10.0)
+    assert _make_provider()._graph_socket_timeout() == pytest.approx(615.0)
+    # A larger configured socket timeout is kept as it is.
+    monkeypatch.setenv("FALKORDB_SOCKET_TIMEOUT", "1000")
+    assert _make_provider()._graph_socket_timeout() == pytest.approx(1000.0)

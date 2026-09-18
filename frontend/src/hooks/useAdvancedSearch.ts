@@ -20,23 +20,36 @@
  * own draft: visible, editable, undoable, and compiled into the very
  * same root-URN clamp server-side. See `predicateComposition.setScopeCondition`.
  *
+ * The view's OWN roots aren't computed here either. `scope.rootUrns` is
+ * now only ever a caller-supplied narrowing (a template that targets one
+ * container): the backend resolves the view's boundary from
+ * `scope.viewId` on every request and only ever intersects a client hint
+ * with it, so sending a client-side guess could narrow the search but
+ * never widen it — and when the guess was stale or truncated it hid real
+ * matches.
+ *
  * Not stored: the raw-JSON / Explain / Discover surfaces — those live
  * in the SearchMapPanel's "Power tools" tab and share the same query
  * pipeline through `runPredicate`. The hook stays focused on
  * template-driven + visual-builder paths.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { rememberUrnLabels } from '@/lib/urnLabels'
 import { useCanvasStore } from '@/store/canvas'
-import { useReferenceModelStore } from '@/store/referenceModelStore'
-import { useSchemaStore } from '@/store/schema'
-import { DEFAULT_DRAFT_OPTIONS, useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
+import {
+    DEFAULT_DRAFT_OPTIONS,
+    useSearchStore,
+    type AncestorCountInfo,
+    type AncestorPathInfo,
+} from '@/store/searchStore'
 import type {
+    AggregationSpec,
     AncestorRef,
     Predicate,
+    SearchAggregateBucket,
     SearchQuery,
     SearchResultPage,
     SearchScope,
@@ -48,7 +61,6 @@ import {
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
-import { computeViewRootUrns } from '@/components/canvas/search/panel/useCanvasViewRoots'
 import { recordEvent } from '@/services/telemetryService'
 
 
@@ -168,6 +180,55 @@ function collectAncestorPaths(result: SearchResultPage): AncestorPathInfo[] {
 }
 
 
+// The two helpers below are the ONLY place the ancestor facet is named —
+// the seam B4b flips onto the backend's dedicated `ancestor` aggregation,
+// whose buckets count a match under EVERY ancestor, not just its parent.
+
+/** Does this facet carry per-ancestor match counts? */
+const isAncestorFacet = (spec: AggregationSpec | undefined): boolean =>
+    spec?.by === 'ancestor'
+
+/** The facet's per-entityType split of one bucket's matches. */
+const facetBreakdown = (
+    bucket: SearchAggregateBucket,
+): ReadonlyArray<[string, number]> =>
+    Object.entries(bucket.typeCounts ?? {})
+
+
+/**
+ * The server's exact per-ancestor match counts, or undefined when this
+ * query didn't ask for them (path mode, an explicit hits-only override).
+ *
+ * Buckets carry no `by`, so a facet is identified positionally:
+ * ``result.aggregates[i]`` answers ``query.options.aggregations[i]``.
+ * Undefined — not an empty list — is what makes ``setResult`` fall back
+ * to the page-derived rollup; an empty list is a real answer ("nothing
+ * has matches inside it").
+ */
+function collectAncestorCounts(
+    query: SearchQuery,
+    result: SearchResultPage,
+): AncestorCountInfo[] | undefined {
+    const specs = query.options?.aggregations
+    if (!specs || !result.aggregates) return undefined
+    let asked = false
+    const counts: AncestorCountInfo[] = []
+    result.aggregates.forEach((facet, i) => {
+        if (!isAncestorFacet(specs[i])) return
+        asked = true
+        for (const bucket of facet) {
+            const breakdown = facetBreakdown(bucket)
+            counts.push({
+                urn: bucket.ancestorUrn,
+                count: bucket.matchCount,
+                breakdown: breakdown.length > 0 ? new Map(breakdown) : undefined,
+            })
+        }
+    })
+    return asked ? counts : undefined
+}
+
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -256,20 +317,34 @@ export interface UseAdvancedSearchResult {
  *   The hook stamps `scope.viewId` onto every outgoing SearchQuery so
  *   the backend's ViewScopeResolver can enforce view boundaries. There
  *   is no global / cross-view search — every search is scoped to a view.
+ * @param options.clearOnUnmount - Whether unmounting also wipes the
+ *   published result-set. True (the default) is what the panel wants:
+ *   it owns the highlights, so closing it takes them away. A caller
+ *   whose search outlives its own mount — the header box, whose results
+ *   stay on the canvas until the query is cleared — passes false.
  */
-export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
+export function useAdvancedSearch(
+    viewId: string,
+    options?: { clearOnUnmount?: boolean },
+): UseAdvancedSearchResult {
     const provider = useGraphProvider()
     const [view, setView] = useState<PanelView>({ kind: 'idle' })
     const [runState, setRunState] = useState<RunState | null>(null)
     const abortRef = useRef<AbortController | null>(null)
 
+    // Read through a ref: the unmount effect runs once, so capturing the
+    // option in its closure would pin whatever value the first render
+    // happened to pass.
+    const clearOnUnmountRef = useRef(true)
+    clearOnUnmountRef.current = options?.clearOnUnmount !== false
+
     // Cancel any in-flight request when the hook unmounts (panel closed
     // mid-query). Otherwise the resolved promise would set state on an
-    // unmounted component. Also clear the cross-component result-set so
-    // the canvas stops highlighting matches once the panel goes away.
+    // unmounted component. Clearing the cross-component result-set — so
+    // the canvas stops highlighting matches — is the caller's choice.
     useEffect(() => () => {
         abortRef.current?.abort()
-        useSearchStore.getState().clear()
+        if (clearOnUnmountRef.current) useSearchStore.getState().clear()
     }, [])
 
     const selectTemplate = useCallback((templateId: string) => {
@@ -306,10 +381,9 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             // requires it on every request.
             const scopeMode = useSearchStore.getState().scopeMode
 
-            // Read live canvas + schema state at call time so we don't
-            // capture stale closures.
+            // Read live canvas state at call time so we don't capture
+            // stale closures.
             const canvas = useCanvasStore.getState()
-            const schema = useSchemaStore.getState().schema
 
             // Collect the visible URN set straight from the canvas
             // store. Always attach when mode='visible' so the backend
@@ -322,100 +396,16 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 ))
                 : undefined
 
-            // Compute the canvas's "view roots" — the top-level
-            // containers that define the view's boundary. Used as the
-            // scope.rootUrns hint when the user is in 'view' mode and
-            // the view's persisted rootUrns are empty (otherwise the
-            // BE skips the containment clamp entirely and returns
-            // results from outside the view — the "Legacy_Archive
-            // leaking in" bug).
-            //
-            // CLOSED-SCOPE OVERRIDE: when the view config carries
-            // explicit ``entityAssignments`` (i.e. the user dragged
-            // specific entities into layers via the Layer Studio),
-            // those URNs ARE the authoritative scope. The BE's
-            // ``scope.rootUrns`` includes the URN + all containment
-            // descendants, so passing the assignment URNs gives us
-            // exactly the same closed scope the canvas renders.
-            // Without this override, ``computeViewRootUrns`` walks
-            // the loaded canvas nodes and includes top-level
-            // containers like the Sales domain even when Sales isn't
-            // assigned to any layer — leaking unassigned subtrees
-            // into "All nodes in this view" search results. Mirrors
-            // the closed-scope semantics in useLayerAssignment.
-            const layerAssignments = useReferenceModelStore.getState().layers
-            const explicitAssignmentUrns: string[] = []
-            for (const layer of layerAssignments) {
-                if (!layer.entityAssignments) continue
-                for (const a of layer.entityAssignments) {
-                    if (a.entityId) explicitAssignmentUrns.push(a.entityId)
-                }
-            }
-            const allCanvasRootUrns = explicitAssignmentUrns.length > 0
-                ? explicitAssignmentUrns
-                : computeViewRootUrns(
-                    canvas.nodes,
-                    canvas.edges,
-                    schema?.containmentEdgeTypes ?? [],
-                    schema?.rootEntityTypes ?? [],
-                )
-
-            // Client-side safety net matching the BE's
-            // DEEP_SEARCH_SCOPE_ROOT_URNS_CAP (5000). The old value
-            // here was 256 — a stale copy of an earlier BE default —
-            // and views between the two thresholds were silently
-            // clamped to an ARBITRARY first-256 slice, which reads to
-            // the user as "search randomly can't find things".
-            //
-            // Past the cap we now DROP the hint rather than truncate
-            // it. This clamp is only a narrowing hint: the backend's
-            // ViewScopeResolver enforces the view boundary server-side
-            // on every request regardless, so omitting it costs some
-            // candidate-set width but can never widen what the user is
-            // allowed to see, whereas a truncated list silently hides
-            // real matches.
-            const SAFE_ROOT_URN_CAP = 5000
-            const canvasRootUrns = allCanvasRootUrns.length > SAFE_ROOT_URN_CAP
-                ? []
-                : allCanvasRootUrns
-            if (allCanvasRootUrns.length > SAFE_ROOT_URN_CAP) {
-                // eslint-disable-next-line no-console
-                console.warn(
-                    `[advancedSearch] view has ${allCanvasRootUrns.length} `
-                    + `top-level containers, over the ${SAFE_ROOT_URN_CAP} cap; `
-                    + 'searching without the client-side root hint. The view '
-                    + 'boundary is still enforced server-side.',
-                )
-            }
-
-            // Precedence for scope.rootUrns:
-            //   1. Raw.scope.rootUrns (caller-supplied — e.g. a
-            //      template that targets a specific URN).
-            //   2. Canvas view roots (the "in this view" boundary).
-            //
-            // Scoping to a container the user picked out of the results
-            // is deliberately NOT here — it travels as a `descendantOf`
-            // row in their own draft (see the module header).
-            //
-            // Only attaches roots when scope_mode is 'view' or 'visible'
-            // — 'data_source' explicitly opts out of any clamp.
-            const explicitRoots = (raw.scope as { rootUrns?: string[] } | undefined)?.rootUrns
-            let rootUrns: string[] | undefined
-            if (explicitRoots && explicitRoots.length > 0) {
-                rootUrns = explicitRoots
-            } else if (
-                scopeMode !== 'data_source'
-                && canvasRootUrns.length > 0
-            ) {
-                rootUrns = canvasRootUrns
-            }
-
+            // No rootUrns hint for the view itself: the backend
+            // resolves the view's roots from ``scope.viewId`` and only
+            // ever intersects a client hint with them. A template that
+            // targets a specific container still rides through the
+            // ``raw.scope`` spread below.
             const scope: SearchScope = {
                 ...(raw.scope ?? {}),
                 viewId,
                 scopeMode,
                 ...(visibleUrns ? { visibleUrns } : {}),
-                ...(rootUrns ? { rootUrns } : {}),
             }
             // Defensive normalisation: the backend's predicate compiler
             // currently mishandles bare top-level leaf predicates
@@ -461,7 +451,8 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         if (runKey) setRunState({ hash: runKey, status: 'running' })
 
         try {
-            const result = await provider.searchAdvanced(query)
+            const result = await provider.searchAdvanced(
+                query, { signal: controller.signal })
             // An aborted run has been superseded — the newer run owns
             // both the view and the run state, so touch neither.
             if (controller.signal.aborted) return
@@ -505,6 +496,7 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 viewId,
                 matchUrns,
                 ancestorPaths,
+                ancestorCounts: collectAncestorCounts(query, result),
                 queryHash: JSON.stringify(query),
             })
             // Auto-save the dispatched predicate to per-view Recent.
@@ -626,6 +618,12 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         if (isLoadingMore) return
 
         setIsLoadingMore(true)
+        // Page 2 is abortable on the same terms as page 1: it closes over
+        // the result it is appending to, so a page that lands after a new
+        // run started would splice its hits onto a result the user has
+        // already replaced.
+        const controller = new AbortController()
+        abortRef.current = controller
         try {
             const nextQuery: SearchQuery = {
                 ...view.query,
@@ -638,9 +636,20 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                     results: 'hits',
                 },
             }
-            const nextPage = await provider.searchAdvanced(nextQuery)
+            const nextPage = await provider.searchAdvanced(
+                nextQuery, { signal: controller.signal })
+            if (controller.signal.aborted) return
             // Merge: append new hits, replace cursor (may now be null
             // signalling "no more pages"), keep aggregates from p1.
+            //
+            // APPEND ONLY — NEVER RE-SORT BY `score`. The page arrives in
+            // the server's relevance order, computed over a projected
+            // scan; each `hit.score` is then recomputed from the full
+            // node, so the two are not the same number. Sorting the
+            // merged list by `score` would silently reorder the page away
+            // from the ranking the backend actually chose, and every
+            // surface that reads "the first ten" would be reading a
+            // different top ten from the one the panel's counts describe.
             const mergedHits = [
                 ...(view.result.hits ?? []),
                 ...(nextPage.hits ?? []),
@@ -662,9 +671,14 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 viewId,
                 matchUrns: collectMatchUrns(merged),
                 ancestorPaths: collectAncestorPaths(merged),
+                // ``merged`` keeps page 1's aggregates (nextQuery drops
+                // them), so the badges stay exact instead of regressing
+                // to a rollup over a now-longer hit list.
+                ancestorCounts: collectAncestorCounts(view.query, merged),
                 queryHash: JSON.stringify(view.query),
             })
         } catch (e) {
+            if (controller.signal.aborted) return
             // On error, leave the existing result intact. We log here
             // (console — no project logger in the FE) rather than
             // swallowing silently; the user will see a stable page
@@ -696,7 +710,12 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         }
     }, [view])
 
-    return {
+    // Memoised because callers hold this object, not its fields: the view
+    // search session re-exposes it on a context, so a fresh literal every
+    // render would re-render every consumer of that context on any
+    // unrelated canvas state change. Every function below is already
+    // `useCallback`ed, so the identity tracks the state.
+    return useMemo(() => ({
         view,
         runState,
         isIdle: view.kind === 'idle',
@@ -709,5 +728,8 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
         cancel,
         loadMore,
         isLoadingMore,
-    }
+    }), [
+        view, runState, selectTemplate, setInput, resetTemplate,
+        run, runTemplate, runPredicate, cancel, loadMore, isLoadingMore,
+    ])
 }

@@ -24,9 +24,9 @@ import json
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import func, literal, select
+from sqlalchemy import func, literal, or_, select
 
 from . import config, db
 from .reconcile import falkor_counts, pg_live_counts_projectable
@@ -43,9 +43,12 @@ from .service import GraphVersioningService, _is_edge_payload
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
+    _admit_native_keys,
     _compute_searchable_text,
+    _native_property_budget,
     _sanitize_label,
     _split_user_properties,
+    reserve_platform_property_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,16 +70,87 @@ _READ_TIMEOUT_MS = int(1000 * min(170.0, max(
 
 
 async def _q(client, cypher: str, params: Optional[dict] = None,
-             *, timeout_ms: int = _WRITE_TIMEOUT_MS):
+             *, timeout_ms: int = _WRITE_TIMEOUT_MS, read_only: bool = False):
     """Run one query with a server-side kill budget AND a client-side hang
     net (belt over the pool-level socket timeouts, and the bound for client
     fakes without them). Falls back to the timeout-less call for client
-    fakes/libs without the kwarg."""
+    fakes/libs without the kwarg.
+
+    ``read_only`` sends ``GRAPH.RO_QUERY`` instead of ``GRAPH.QUERY``, and is
+    correct ONLY for a statement with no write clause — FalkorDB refuses a
+    RO_QUERY that contains one.
+
+    It does not change WHICH node answers. redis-py auto-routes only the
+    commands in its own read table and no ``GRAPH.*`` command is in it (see
+    the note on the cluster client in ``falkordb_connection``), so this still
+    goes to the primary that owns the key; only ``FalkorDBProvider`` ever
+    targets a replica deliberately, and it does that through its own routing,
+    not through this helper. What the flag buys is that a master running with
+    ``min-replicas-to-write`` will not REFUSE the query: it refuses every
+    write-flagged command while it is short of in-sync replicas, and a
+    read-shaped query sent as ``GRAPH.QUERY`` is write-flagged. A projection
+    read, a reconcile count and a neighbours lookup have no business failing
+    with ``-NOREPLICAS`` because a replica is behind.
+
+    A client without ``ro_query`` (a test fake, an older library) falls back
+    to ``query`` and behaves exactly as it did.
+
+    The two commands differ on one thing besides the flag: ``GRAPH.QUERY``
+    INSTANTIATES a graph key that does not exist and answers from the empty
+    graph, while ``GRAPH.RO_QUERY`` raises ``Invalid graph operation on empty
+    key`` (see ``_is_missing_graph_error`` in ``falkordb_provider``). A
+    never-projected or just-evicted graph is a real state here — reconcile
+    reports on one, and the projector's own verify counts one — so a
+    read-only call that meets it runs the same statement again as
+    ``GRAPH.QUERY``. That is the old behaviour exactly, including the shape
+    of what an aggregate returns, rather than a guessed empty result: a
+    ``count(n)`` answers ``[[0]]``, not ``[]``, and callers index it.
+    """
+    # A WRITE here is bounded by the cluster's failure detector. This helper
+    # talks to the graph client directly, so the provider's own boundary
+    # clamp never sees it — and a 60s projector write against a 15s
+    # ``cluster-node-timeout`` costs the shard its master exactly as a 60s
+    # rebuild batch does.
+    #
+    # A READ is not, for the reason set out on ``cluster_write_ceiling_s``:
+    # it takes no write lock and cannot vote its own master out, so the
+    # ceiling protects nothing it could break, while cutting reconcile's
+    # counts and the bootstrap copy's scans to the window's share would fail
+    # them on the large graphs they exist to describe.
+    from backend.app.providers.falkordb_provider import clamp_write_budget
+
+    asked_s = timeout_ms / 1000.0
+    budget_ms = int(1000 * (asked_s if read_only else clamp_write_budget(asked_s)))
+
+    async def _send(read: bool):
+        call = (getattr(client, "ro_query", None) if read else None) or client.query
+        try:
+            coro = call(cypher, params=params, timeout=budget_ms)
+        except TypeError:
+            coro = call(cypher, params=params)
+        return await asyncio.wait_for(coro, timeout=budget_ms / 1000 + 10)
+
     try:
-        coro = client.query(cypher, params=params, timeout=timeout_ms)
-    except TypeError:
-        coro = client.query(cypher, params=params)
-    return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
+        return await _send(read_only)
+    except Exception as exc:
+        if not read_only or "empty key" not in str(exc).lower():
+            raise
+        return await _send(False)
+
+
+#: Names the read path checks natively for a node's label before it merges
+#: the blob back. The projector keys every node by ``urn`` itself, so the
+#: source's identity property needs no place here.
+_NAME_FALLBACK_KEYS = ("name", "title", "label")
+
+
+async def _registered_property_names(client) -> Set[str]:
+    """Every attribute name the graph has registered — what the native
+    property budget counts against (``_admit_native_keys``). Read on the
+    write node, so the previous pass's names are in it; a graph a full seed
+    just dropped has none."""
+    res = await _q(client, "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey")
+    return {str(r[0]) for r in (getattr(res, "result_set", None) or []) if r and r[0] is not None}
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
@@ -155,8 +229,9 @@ def _node_urn(entity_id: str, payload: Optional[dict]) -> str:
 
 
 def _node_item(entity_id: str, urn: str, payload: dict,
-               level_map: Optional[Dict[str, int]] = None) -> dict:
-    native, residual = _split_user_properties(payload.get("properties"))
+               level_map: Optional[Dict[str, int]] = None,
+               native_keys: Optional[Set[str]] = None) -> dict:
+    native, residual = _split_user_properties(payload.get("properties"), native_keys)
     dn = payload.get("displayName") or ""
     qn = payload.get("qualifiedName") or ""
     desc = payload.get("description") or ""
@@ -181,7 +256,9 @@ def _node_item(entity_id: str, urn: str, payload: dict,
         "sourceSystem": payload.get("sourceSystem") or "",
         "lastSyncedAt": payload.get("lastSyncedAt") or "",
         "level": lvl,
-        "searchableText": _compute_searchable_text(dn, qn, desc, native),
+        "searchableText": _compute_searchable_text(
+            dn, qn, desc, native, tags=payload.get("tags"),
+        ),
     }
 
 
@@ -364,6 +441,14 @@ class FalkorProjector:
                 # resolved client is reachable; if it is not, the error propagates to the outer handler
                 # (records last_error, resets status, re-raises) with NOTHING dropped — reads keep
                 # falling back to Postgres and the existing cache is left intact.
+                # Deliberately NOT ``read_only``, for two reasons that both point
+                # the same way. It is a proof that this node will take the DROP and
+                # the MERGEs below, and only a write-flagged command proves that —
+                # under ``min-replicas-to-write`` a read is answered while the drop
+                # that follows it is refused, which is the one deployment this
+                # probe exists for. And ``GRAPH.RO_QUERY`` RAISES on a key that
+                # does not exist, which is exactly the state here on a fresh
+                # graph's first seed and after an eviction.
                 await _q(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
                 # committed main exactly. The seed only MERGEs the live state, so without this an entity
@@ -424,10 +509,13 @@ class FalkorProjector:
                     # field — the content-drift class the old count-only verify published blind).
                     # DO NOT advance: hold projected < committed so `fresh` stays false and reads
                     # keep falling back to Postgres (the SoR) instead of flipping onto a corrupt
-                    # cache. Pin target down to the un-advanced seq so the poll loop
-                    # (project_pending: projected < target) stops re-running a deterministic-fail
-                    # seed; a manual rebuild (request_projection_rebuild re-arms target=head) or a
-                    # new commit retries it.
+                    # cache. Pin target down to the un-advanced seq so the RETRY is bounded and
+                    # idempotent — each pass re-attempts this one seq rather than climbing.
+                    # It does NOT stop the poll: `project_pending` re-selects on
+                    # `projected < main_head_commit_seq` too, precisely because selecting on
+                    # target alone left a held-back graph unreachable forever once BOTH sat at
+                    # the un-advanced seq — that is the shape that wedged a projection for 14h
+                    # and silently routed every main read back to Postgres.
                     ps.target_commit_seq = ps.projected_commit_seq
                     logger.error("projection for %s verified UNFAITHFUL at seq %d; holding watermark "
                                  "at %d so reads stay on Postgres — %s", graph_id, to_seq,
@@ -539,8 +627,28 @@ class FalkorProjector:
         per-graph failure is logged and does not abort the batch."""
         async with self._session() as s:
             ids = (await s.execute(
-                select(ProjectionStateORM.graph_id).where(
-                    ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
+                select(ProjectionStateORM.graph_id).join(
+                    GraphORM, GraphORM.id == ProjectionStateORM.graph_id,
+                ).where(
+                    # LAG IS MEASURED AGAINST THE COMMITTED HEAD, not against `target`.
+                    #
+                    # `target_commit_seq` is what a projection ATTEMPT aimed at, and the
+                    # failure path holds BOTH counters at the last good seq. So a graph that
+                    # fails to verify ends up `projected == target` below `main_head`: this
+                    # retry can never select it again, while the read path's freshness check
+                    # (`projected >= main_head`, service.py:2126) stays false forever and
+                    # routes every main read to Postgres. That is a permanent wedge with no
+                    # self-healing path — one cost a data source its entire aggregated
+                    # lineage layer for 14 hours and needed a hand-written UPDATE to escape.
+                    #
+                    # Selecting on the head means a held-back graph is retried on the next
+                    # poll. A genuinely unfixable graph therefore retries on a loop, which is
+                    # the correct trade: it is visible and bounded by the poll interval,
+                    # where silence was neither.
+                    or_(
+                        ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
+                        ProjectionStateORM.projected_commit_seq < GraphORM.main_head_commit_seq,
+                    ),
                     # Unpinned graphs (no real FalkorDB target — falkor_graph_name NULL or the
                     # synthetic gv_<id> fallback) are never projected: nothing reads those keys.
                     # Filtered here in SQL so hundreds of test-created graphs can't crowd out
@@ -549,7 +657,8 @@ class FalkorProjector:
                     ProjectionStateORM.falkor_graph_name
                     != literal("gv_").concat(ProjectionStateORM.graph_id),
                 ).order_by(
-                    (ProjectionStateORM.target_commit_seq
+                    (func.greatest(ProjectionStateORM.target_commit_seq,
+                                   GraphORM.main_head_commit_seq)
                      - ProjectionStateORM.projected_commit_seq).desc()
                 ).limit(limit)
             )).scalars().all()
@@ -983,7 +1092,7 @@ class FalkorProjector:
         # graph on full seeds). Catches what per-pair stamps can't: a prior application
         # whose pairs don't recur in this (grown/concurrent) window.
         res = await _q(client, "MATCH (m:_GVRollupMeta) RETURN m.seq",
-                       timeout_ms=_READ_TIMEOUT_MS)
+                       timeout_ms=_READ_TIMEOUT_MS, read_only=True)
         marker = int(res.result_set[0][0]) if getattr(res, "result_set", None) else 0
         if marker >= to_seq:
             return True                                  # whole window already applied (retry no-op)
@@ -1001,7 +1110,7 @@ class FalkorProjector:
         try:
             res = await _q(client,
                            "MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.regime",
-                           timeout_ms=_READ_TIMEOUT_MS)
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
             rows = getattr(res, "result_set", None) or []
             if rows and rows[0] and rows[0][0] in ("cube", "boundary"):
                 regime = str(rows[0][0])
@@ -1033,7 +1142,7 @@ class FalkorProjector:
                     f"UNWIND $batch AS item "
                     f"MATCH (a:{slb} {{urn: item.s}})-[r:AGGREGATED]->(b:{tlb} {{urn: item.t}}) "
                     f"RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq",
-                    params={"batch": chunk}, timeout_ms=_READ_TIMEOUT_MS)
+                    params={"batch": chunk}, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
                 existing = {}
                 for s_, t_, w, types, gv in (getattr(res, "result_set", None) or []):
                     existing[(s_, t_)] = (int(w or 0), list(types or []), int(gv or 0))
@@ -1394,13 +1503,47 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None) -> None:
-        # Nodes in (grouped by label), edges in (grouped by type + endpoint
-        # labels — the per-label URN indexes drive every node match), edges
-        # out, nodes out.
+        """Apply one pass: nodes in (grouped by label), edges in (grouped by
+        type + endpoint labels — the per-label URN indexes drive every node
+        match), edges out, nodes out.
+
+        This writes through its own client and never touches a provider
+        instance, so it stakes the platform's property names itself
+        (``reserve_platform_property_names``) and spends the ENV-wide
+        ``FALKORDB_NATIVE_PROPERTY_BUDGET``. The reserve is decided from the
+        registered names this pass already reads, so it costs nothing on a
+        graph that holds them and happens again by itself after a full seed
+        DROPs the graph and takes every registered name with it."""
+        # Which user property keys this pass writes natively — the same
+        # budget the provider's own writers apply, so a versioned graph and
+        # a direct-load graph spend their attribute ids the same way.
+        native_keys: Optional[Set[str]] = None
+        if node_upserts:
+            registered = await _registered_property_names(client)
+            registered |= await reserve_platform_property_names(
+                lambda cypher, params: _q(client, cypher, params=params),
+                str(getattr(client, "name", "") or "the graph"),
+                registered,
+            )
+            budget = _native_property_budget()
+            native_keys, demoted = _admit_native_keys(
+                [p.get("properties") for _, _, p in node_upserts],
+                registered=registered,
+                budget=budget, reserve=_NAME_FALLBACK_KEYS,
+            )
+            if demoted:
+                logger.warning(
+                    "projection: %d property key(s) stored as values in "
+                    "propertiesRaw rather than as node properties — shown in "
+                    "the Properties panel, not reachable by search predicates. "
+                    "The graph holds %d of the %d native property names "
+                    "FALKORDB_NATIVE_PROPERTY_BUDGET allows. Most common first: %s",
+                    len(demoted), len(native_keys), budget, demoted[:5],
+                )
         by_label: Dict[str, list] = {}
         for eid, urn, p in node_upserts:
             by_label.setdefault(_sanitize_label(p.get("entityType") or "Entity"), []).append(
-                _node_item(eid, urn, p, level_map)
+                _node_item(eid, urn, p, level_map, native_keys)
             )
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):

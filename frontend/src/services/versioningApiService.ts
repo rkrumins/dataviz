@@ -10,7 +10,7 @@
  *
  * Conflict-aware by design: `stageChanges`/`commitDraft`/`publish`/`merge` can return
  * `409 merge_conflict` (main moved) or `422 ontology_violation`; both surface as typed
- * errors so the UI can route to a resolution flow instead of a generic toast.
+ * errors so the UI can route to a resolution flow instead of a generic notification.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'

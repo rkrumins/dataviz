@@ -5,7 +5,7 @@
  * props (Task 4: canonical view-config store). It must never write to the
  * referenceModelStore directly — that store is a render cache now, not a writer.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // jsdom has no layout, so @tanstack/react-virtual would render 0 rows without a
@@ -270,7 +270,25 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     expect(screen.getByText(/itself won’t be placed/)).toBeInTheDocument()
 
     // Placing sends the two children and NOT the parent.
+    //
+    // The key is pressed EXACTLY ONCE, and it has to be. The window listener
+    // is registered in an effect keyed on `selectedIds`
+    // (WizardAssignmentTree.tsx:990-992), and "2 selected" above is RENDER
+    // output, so that text does not prove the listener closing over THAT
+    // selection is the one attached — on a loaded CI worker the previous
+    // listener, still holding the parent, caught the key and placed `urn:a`.
+    //
+    // Retrying the press inside waitFor does NOT fix that, it entrenches it:
+    // `handleBulkAssign` CLEARS the selection when it fires
+    // (WizardAssignmentTree.tsx:901), so a first press against a stale
+    // listener spends the selection, every later press returns early at
+    // `selectedIds.size === 0`, and the last call stays the wrong one
+    // forever. So: flush the pending effect first, then press once, and
+    // assert the count as well as the payload — a stale listener now fails
+    // as a wrong payload rather than hiding behind a retry.
+    await act(async () => {})
     fireEvent.keyDown(window, { key: '1' })
+    expect(onBulkAssign).toHaveBeenCalledTimes(1)
     expect(onBulkAssign).toHaveBeenCalledWith('l1', ['urn:c1', 'urn:c2'])
   })
 
