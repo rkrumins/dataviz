@@ -4027,3 +4027,151 @@ def test_a_real_zero_is_still_a_reading(monkeypatch):
         progress_callback=None, intra_batch_callback=None, should_cancel=None,
     )
     assert _run(pipe._count_aggregated()) == 0
+
+
+# ── the cube projection, and the advisory an operator actually reads ───────
+#
+# _note_cube_projection had no coverage at all, so the numbers in the one
+# message an operator sees about a slow cube were unverified by the suite —
+# and the message was wrong for the case that produces it most often. A
+# forced, uncalibrated run prices an UPPER BOUND on cells produced at the
+# shipped 300 rows/s; a source that aggregates well then lands an order of
+# magnitude under it, completes, and the warning stays on the row.
+
+
+def _projector(monkeypatch, *, hints=None, tuning=None):
+    """A pipeline instance with the clock arithmetic reachable, without
+    running a rebuild: _note_cube_projection and _settled_cube_advisory are
+    pure functions of the hints, the knobs and one count."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    pipeline = mat.AggregationPipeline(
+        p,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"],
+        last_cursor=None,
+        progress_callback=None,
+        intra_batch_callback=None,
+        should_cancel=None,
+        capacity_hints=dict(hints or {}),
+        tuning=dict(tuning or {}),
+    )
+    pipeline._started_mono = time.monotonic()
+    return pipeline
+
+
+def test_the_apply_window_is_six_tenths_of_the_job_wall_clock(monkeypatch):
+    """The ~14.4h an operator sees is 0.6 x the 24h default, and it is the
+    window the projection is CHECKED AGAINST, not the time it needs. The two
+    were easy to read as one number in the message."""
+    monkeypatch.delenv("AGGREGATION_JOB_MAX_WALL_SECS", raising=False)
+    pipeline = _projector(monkeypatch)
+    budget = pipeline._apply_wall_budget_s()
+    assert budget == pytest.approx(86_400 * 0.6, rel=0.01), (
+        "the apply's share of a 24h job is 14.4h")
+    assert mat._APPLY_WALL_SHARE == 0.6
+
+
+def test_an_unmeasured_source_is_priced_at_the_shipped_rate(monkeypatch):
+    """Rate provenance is in the message ('at the default write rate'), so it
+    has to be right: nothing measured means the shipped 300 rows/s, and the
+    figure is reported as such rather than presented as a measurement."""
+    pipeline = _projector(monkeypatch)
+    rate, source = pipeline._apply_rate()
+    assert (rate, source) == (mat._APPLY_ROWS_PER_S_DEFAULT, "default")
+    secs, src = pipeline._projected_apply_secs(20_000_000)
+    assert src == "default"
+    # 20M cells at 300/s is 18.5h, NOT the 14.4h window — the message prints
+    # both and they are not the same number.
+    assert secs == pytest.approx(20_000_000 / 300.0)
+    assert secs > pipeline._apply_wall_budget_s()
+
+
+def test_a_measured_rate_supersedes_the_shipped_one(monkeypatch):
+    """The whole point of carrying the rate across runs."""
+    pipeline = _projector(monkeypatch, hints={"apply_rows_per_s_observed": 2_400.0})
+    assert pipeline._apply_rate() == (2_400.0, "last run")
+
+
+def test_only_a_forced_cube_raises_the_wall_clock_advisory(monkeypatch):
+    """Auto does not warn about the clock — it DEGRADES on it, which is a
+    different outcome and a different message. A warning from Auto would be
+    telling an operator about a hazard Auto already avoided."""
+    pipeline = _projector(monkeypatch)
+    pipeline._note_cube_projection(20_000_000, forced=False)
+    assert pipeline._slow_cube_advisory is None
+    assert pipeline._cube_projection is not None, (
+        "the projection is still recorded — it is the advisory that is forced-only")
+
+    pipeline._note_cube_projection(20_000_000, forced=True)
+    assert pipeline._slow_cube_advisory is not None
+    assert pipeline._slow_cube_advisory["kind"] == "cube_slower_than_wall_clock"
+
+
+def test_a_cube_inside_the_window_raises_nothing(monkeypatch):
+    pipeline = _projector(monkeypatch)
+    pipeline._note_cube_projection(1_000, forced=True)
+    assert pipeline._slow_cube_advisory is None
+
+
+def test_the_advisory_does_not_promise_a_resume_a_completed_run_never_gets(monkeypatch):
+    """It used to read 'The run keeps its checkpoint and resumes, so it will
+    finish eventually'. Both resume paths require the run to have FAILED, and
+    a completed run destroys the trigger for one of them — so on the green row
+    where this message is actually read, that sentence described something
+    that cannot happen."""
+    pipeline = _projector(monkeypatch)
+    pipeline._note_cube_projection(20_000_000, forced=True)
+    message = pipeline._slow_cube_advisory["message"]
+    assert "will finish eventually" not in message
+    # It says what it is instead: a pre-write projection from a bound.
+    assert "UPPER BOUND" in message
+    assert "Nothing is refused or reduced" in message
+    assert "fails with its checkpoint intact" in message
+
+
+def test_measurement_settles_the_advisory_the_run_disproved(monkeypatch):
+    """The fix for the amber-warning-on-a-Completed-row. The projection is
+    made before any write; by the time the result is assembled the run has
+    both real numbers, and a projection it beat is not a live concern."""
+    # The real sequence: nothing has measured this source, so the projection
+    # is priced at the shipped 300 rows/s and 20M cells reads as 18.5h against
+    # a 14.4h window. The advisory is raised here, before a single write.
+    pipeline = _projector(monkeypatch)
+    pipeline._cube_estimate_upper = 20_000_000
+    pipeline._note_cube_projection(20_000_000, forced=True)
+    assert pipeline._slow_cube_advisory["severity"] == "warning"
+
+    # By the time the result is assembled the apply HAS measured itself.
+    pipeline._pace = types.SimpleNamespace(
+        snapshot=lambda: {"rows_per_s": 2_400.0})
+
+    # 1.4M cells at the measured 2,400 rows/s is ~10 minutes, well inside the
+    # window the projection was checked against.
+    settled = pipeline._settled_cube_advisory(1_400_000)
+    assert settled is not None, "the numbers are kept, not deleted"
+    assert settled["severity"] == "info"
+    assert settled["kind"] == "cube_projection_superseded"
+    assert settled["stored_cells"] == 1_400_000
+    assert "14:1" in settled["message"], (
+        "it states the compression that explains the gap")
+    assert "Nothing was refused, reduced or left unwritten" in settled["message"]
+
+
+def test_a_warning_the_run_did_not_disprove_still_stands(monkeypatch):
+    """Not a blanket suppression. A run that really did land outside the
+    window keeps the warning: it got away with it this once and the next
+    one may not."""
+    pipeline = _projector(monkeypatch)
+    pipeline._cube_estimate_upper = 30_000_000
+    pipeline._note_cube_projection(30_000_000, forced=True)
+    # 30M stored cells at the shipped 300/s is ~28h against a 14.4h window.
+    settled = pipeline._settled_cube_advisory(30_000_000)
+    assert settled is pipeline._slow_cube_advisory
+    assert settled["severity"] == "warning"
+
+
+def test_nothing_to_settle_when_nothing_warned(monkeypatch):
+    pipeline = _projector(monkeypatch)
+    assert pipeline._settled_cube_advisory(1_400_000) is None

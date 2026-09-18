@@ -656,6 +656,10 @@ export interface CapacityLimits {
   estimateMarginPctSource?: 'global' | 'default';
   maxCubeEdgesSource?: 'global' | 'default';
   staticCap: number;
+  /** The job wall clock the apply's share (60%) is taken from. Optional:
+   *  a frontend deployed ahead of the backend sees it absent, and the clock
+   *  term is then simply not applied rather than computed from undefined. */
+  maxWallSecs?: CapacityLimitValue;
   budgetRecheckEdges: number;
   /** The graph store container's memory limit when the deployment states it
    *  (FALKORDB_CONTAINER_MEMORY_BYTES); the app cannot read it. */
@@ -674,6 +678,11 @@ export interface CapacitySource {
   edgeCount: number;
   bytesPerEdge: number;
   bytesPerEdgeSource: 'calibrated' | 'default';
+  /** Rows per second this source's apply lands at. Memory decides whether the
+   *  shard can HOLD a cube; this decides whether the job can WRITE it inside
+   *  its wall clock. Optional for the same rollout reason as `maxWallSecs`. */
+  applyRowsPerS?: number;
+  applyRowsPerSSource?: 'measured' | 'default';
   footprintBytes: number;
   lastCubeEstimate?: number | null;
   lastRegime?: string | null;

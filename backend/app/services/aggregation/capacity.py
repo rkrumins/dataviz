@@ -112,7 +112,7 @@ def effective_limits(stored_tuning: Optional[Dict[str, Any]]) -> CapacityLimits:
     # this module is imported by the API layer long before it.
     from backend.app.providers.falkordb_materialize import (
         _budget_recheck_edges, _materialize_fine_pairs_mode, _max_cube_edges,
-        _max_materialized_edges,
+        _max_materialized_edges, _max_wall_secs,
     )
 
     stored = stored_tuning or {}
@@ -160,6 +160,7 @@ def effective_limits(stored_tuning: Optional[Dict[str, Any]]) -> CapacityLimits:
         estimate_margin_pct_source=margin_source,
         max_cube_edges_source=cube_source,
         static_cap=ceiling if ceiling else _max_materialized_edges(),
+        max_wall_secs=pick("max_wall_secs", _max_wall_secs()),
         budget_recheck_edges=_budget_recheck_edges(),
         container_memory_bytes=container_memory_bytes_env(),
     )
@@ -279,6 +280,26 @@ def source_row(
         bpe, bpe_source = observed, "calibrated"
     else:
         bpe, bpe_source = _int_or(limits.bytes_per_edge.value, bytes_per_edge_default()), "default"
+    # The other half of "would this fit": memory decides whether the shard can
+    # HOLD the cube, the rate decides whether the job can WRITE it inside its
+    # wall clock. The fit check had only the first, so it could report a fit
+    # for a run that then raised a wall-clock advisory. Same shape as bytes
+    # per edge — the measurement when there is one, the shipped rate when not.
+    tuning = state.get("observed_tuning")
+    measured_rate = None
+    if isinstance(tuning, dict):
+        raw = tuning.get("apply_rows_per_s")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            measured_rate = float(raw)
+    if measured_rate is not None:
+        rate, rate_source = measured_rate, "measured"
+    else:
+        # Local import for the same reason as _fleet_limits above: the
+        # providers package pulls in the graph client.
+        from backend.app.providers.falkordb_materialize import (
+            _APPLY_ROWS_PER_S_DEFAULT,
+        )
+        rate, rate_source = float(_APPLY_ROWS_PER_S_DEFAULT), "default"
     estimate = stats.get("cube_estimate")
     names = stats.get("attribute_names")
     return CapacitySource(
@@ -293,6 +314,8 @@ def source_row(
         edge_count=edge_count,
         bytes_per_edge=bpe,
         bytes_per_edge_source=bpe_source,
+        apply_rows_per_s=round(rate, 1),
+        apply_rows_per_s_source=rate_source,
         footprint_bytes=edge_count * bpe,
         last_cube_estimate=int(estimate) if isinstance(estimate, (int, float)) else None,
         last_regime=stats.get("regime") if isinstance(stats.get("regime"), str) else None,

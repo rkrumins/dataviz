@@ -235,6 +235,39 @@ def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     return out
 
 
+async def _tuning_with_rate_carried(
+    session: Any, data_source_id: str, learned: dict,
+) -> dict:
+    """``learned``, but never losing a measured apply rate this run had none of.
+
+    ``observed_tuning`` is deliberately overwritten in full on every success,
+    because that is what CLEARS a pressure narrowing a graph no longer needs.
+    The apply rate rides in the same blob and has the opposite requirement: a
+    run that wrote nothing (a no-op reconcile) or resumed from a checkpoint
+    (``_calibrate`` returns "skipped_resume" before recording one) measures no
+    rate, and overwriting the blob then threw away a perfectly good figure.
+    The next cube projection fell back to the shipped 300 rows/s and raised a
+    wall-clock advisory the source had already disproved — which is the same
+    defect as expiring the rate with the lessons, arriving from the write side
+    instead of the read side.
+
+    Best-effort: an unreadable row or blob leaves ``learned`` as it is.
+    """
+    if learned.get("apply_rows_per_s"):
+        return learned
+    from .models import AggregationDataSourceStateORM
+
+    try:
+        state = await session.get(AggregationDataSourceStateORM, data_source_id)
+        prior = json.loads(getattr(state, "observed_tuning", None) or "{}")
+    except Exception:
+        return learned
+    rate = prior.get("apply_rows_per_s") if isinstance(prior, dict) else None
+    if not rate:
+        return learned
+    return {**learned, "apply_rows_per_s": rate}
+
+
 #: How long a lesson learned under pressure keeps steering later runs.
 #: Long enough that a source with a genuinely hard graph keeps its narrowing
 #: across a day's rebuilds; short enough that a one-off incident does not
@@ -946,7 +979,10 @@ class AggregationWorker:
                     # run stores "{}", which clears the previous lesson
                     # (``_update_ds_state`` skips None, so a string it is).
                     observed_tuning=json.dumps(
-                        _learned_from(result.get("run_stats"), job_id=job.id)
+                        await _tuning_with_rate_carried(
+                            session, job.data_source_id,
+                            _learned_from(result.get("run_stats"), job_id=job.id),
+                        )
                     ),
                 )
                 await self._sync_workspace_ds_row(
@@ -1455,6 +1491,22 @@ class AggregationWorker:
                 "so the narrowing is re-measured rather than inherited",
                 data_source_id, _LEARNED_TTL_SECS,
             )
+            # ...except the apply rate, which is not one of the narrowings.
+            # The expiry above exists because a pressure lesson is a RATCHET:
+            # two of those knobs never re-grow inside a run, so one bad
+            # afternoon pinned a source forever. The rate has no such
+            # property — every run that writes measures it again — and
+            # dropping it does not make the next run re-measure anything,
+            # it just makes the cube projection fall back to the shipped
+            # 300 rows/s and raise a wall-clock advisory the source has
+            # already disproved. ``_learned_from`` says as much where it
+            # collects the figure: a MEASUREMENT, not a lesson learned
+            # under pressure. The cell ratio it is projected against lives
+            # in its own column and never expires, so letting the rate go
+            # stale here is what made the two disagree.
+            rate = learned.get("apply_rows_per_s") if isinstance(learned, dict) else None
+            if rate:
+                hints["apply_rows_per_s_observed"] = rate
             return hints
         for key in _LEARNED_KEYS:
             value = learned.get(key) if isinstance(learned, dict) else None

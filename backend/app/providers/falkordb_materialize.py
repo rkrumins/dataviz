@@ -2865,8 +2865,9 @@ class AggregationPipeline:
         advisories = self._conformance_advisories()
         if self._replication_advisory is not None:
             advisories = [*advisories, self._replication_advisory]
-        if self._slow_cube_advisory is not None:
-            advisories = [*advisories, self._slow_cube_advisory]
+        settled_cube = self._settled_cube_advisory(affected)
+        if settled_cube is not None:
+            advisories = [*advisories, settled_cube]
         if self._attribute_advisory is not None:
             advisories = [*advisories, self._attribute_advisory]
         return {
@@ -4809,12 +4810,16 @@ class AggregationPipeline:
             "wall_budget_secs": round(wall_budget),
             "rate_source": rate_src,
             "message": (
-                f"The full cube for this source is ~{cells:,} cells, which at the "
-                f"{rate_src} write rate needs about {needed_s / 3600:.1f} hours to "
-                f"land — more than the ~{wall_budget / 3600:.1f} hours this job's "
-                f"wall clock leaves for the apply. The run keeps its checkpoint and "
-                f"resumes, so it will finish eventually, but to finish in ONE run "
-                f"either raise Max wall clock, lower Write pacing ratio (or its "
+                f"Before writing anything, the full cube for this source projects to "
+                f"~{cells:,} cells, which at the {rate_src} write rate would need about "
+                f"{needed_s / 3600:.1f} hours — more than the ~{wall_budget / 3600:.1f} "
+                f"hours this job's wall clock leaves for the apply. This is a "
+                f"projection from an UPPER BOUND on cells, not a measurement: the "
+                f"bound counts cells produced, while the graph stores cells distinct, "
+                f"so a source that aggregates well lands far below it. Nothing is "
+                f"refused or reduced — if the apply does run out of wall clock the job "
+                f"fails with its checkpoint intact and resumes from it. To make one "
+                f"run enough, raise Max wall clock, lower Write pacing ratio (or its "
                 f"floor) so the node is written to faster, or set Rollup storage to "
                 f"Auto, which stores the depth-diagonal at this size and serves the "
                 f"rest on demand."
@@ -4824,6 +4829,60 @@ class AggregationPipeline:
             "aggregation pipeline on %s: %s",
             self.p._graph_name, self._slow_cube_advisory["message"],
         )
+
+    def _settled_cube_advisory(self, affected: int) -> Optional[Dict[str, Any]]:
+        """The slow-cube advisory as it should READ once the run is over.
+
+        The advisory is raised during extract, before a single edge is
+        written, from an upper bound on cells PRODUCED and — on a source
+        nothing has measured — the shipped 300 rows/s. Both are deliberately
+        pessimistic, and a well-aggregating graph beats them by an order of
+        magnitude. Left as raised it renders as an amber warning on a row
+        badged "Completed", which is the one combination an operator cannot
+        act on: it describes a hazard (running out of wall clock) that this
+        run demonstrably did not hit, because a clock-starved apply cannot
+        reach this method at all — the watchdog cancels the task and the job
+        ends FAILED.
+
+        So once the exact cell count is in, re-ask the question the advisory
+        asked, against the rate the run actually achieved and the window the
+        projection was checked against. If the result would have fitted, the
+        projection was wrong and the run is the proof: keep the numbers, drop
+        the alarm to ``info``, and say what happened instead. If it would NOT
+        have fitted, the warning stands — the run got away with it this time
+        and the next one may not.
+        """
+        advisory = self._slow_cube_advisory
+        if advisory is None:
+            return None
+        budget = float((self._cube_projection or {}).get("wall_budget_s") or 0.0)
+        rate, rate_src = self._apply_rate()
+        if affected <= 0 or budget <= 0:
+            return advisory
+        settled_s = affected / max(1.0, rate)
+        if settled_s > budget:
+            return advisory
+        estimated = int(advisory.get("estimated_cells") or 0)
+        return {
+            **advisory,
+            "kind": "cube_projection_superseded",
+            "severity": "info",
+            "stored_cells": int(affected),
+            "settled_apply_secs": round(settled_s),
+            "settled_rate_source": rate_src,
+            "message": (
+                f"Before writing, the full cube was projected at ~{estimated:,} cells "
+                f"and about {float(advisory.get('projected_apply_secs') or 0) / 3600:.1f} "
+                f"hours of apply — longer than this job's ~{budget / 3600:.1f} hour "
+                f"window. It stored {affected:,} cells instead, which at the "
+                f"{rate_src} rate of {rate:,.0f} rows/s is about "
+                f"{settled_s / 60:.0f} minutes. The projection was an upper bound on "
+                f"cells produced and the graph stores cells distinct, so this source "
+                f"aggregates about {(estimated / affected):.0f}:1. That ratio is now "
+                f"recorded, so the next run projects from it rather than from the "
+                f"bound. Nothing was refused, reduced or left unwritten."
+            ),
+        }
 
     def _corrected_estimate(self, upper: int, ratio: Optional[float]) -> int:
         """The upper bound scaled by what this source actually stores.

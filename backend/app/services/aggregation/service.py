@@ -4235,6 +4235,7 @@ async def _state_map(
                 S.aggregation_edge_count,
                 S.observed_bytes_per_edge,
                 S.rollup_storage,
+                S.observed_tuning,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -4264,6 +4265,11 @@ async def _state_map(
             "observed_bytes_per_edge": r[16],
             # Per-source Rollup storage override (None = inherit).
             "rollup_storage": r[17],
+            # What the last run MEASURED, which for capacity purposes means
+            # the apply rate: the fit check projects a cube's write time from
+            # it, and without it that check has no clock term at all and can
+            # promise a fit the run then warns about.
+            "observed_tuning": _safe_json(r[18]),
         }
         for r in rows
     }

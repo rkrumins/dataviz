@@ -391,14 +391,35 @@ export type FitVerdict = {
     neededBytes: number | null
     freeBytes: number | null
     shortfallBytes: number | null
-    blockedBy: 'shard' | 'ceiling' | null
+    blockedBy: 'shard' | 'ceiling' | 'clock' | null
+    /** Seconds the apply is projected to need, and the window it has. Present
+     *  whenever the caller supplied a rate — the shard can hold a cube the job
+     *  cannot finish, and that is a different answer from "fits". */
+    applySecs: number | null
+    applyBudgetSecs: number | null
 }
+
+/** The share of a job's wall clock the apply may be projected to need —
+ *  ``_APPLY_WALL_SHARE`` in the pipeline. The rest is extract, compute and
+ *  reconcile. Kept here so the two answers cannot drift apart. */
+export const APPLY_WALL_SHARE = 0.6
 
 /**
  * Would a FORCED full cube land, given a draft of the limits? Mirrors the
- * pipeline's verdict: growth over what the graph already holds, at bytes per
- * edge, against free-after-reserve widened by the estimate margin — and an
- * explicit ceiling on the total that the margin never widens.
+ * pipeline's verdict on BOTH counts, because the pipeline asks two questions
+ * and this asked only one:
+ *
+ *  * memory — growth over what the graph already holds, at bytes per edge,
+ *    against free-after-reserve widened by the estimate margin, plus an
+ *    explicit ceiling on the total that the margin never widens;
+ *  * the clock — the same cells at the rate this source writes at, against
+ *    the share of the job's wall clock the apply gets.
+ *
+ * Without the second, this said "Full detail: fits." for a run the pipeline
+ * then greeted with a wall-clock advisory, which is the dialog disagreeing
+ * with the thing it is a preview of. ``applyRowsPerS``/``maxWallSecs`` are
+ * optional so callers that genuinely have no rate keep the memory-only
+ * answer rather than a fabricated one.
  */
 export function fullDetailVerdict(args: {
     shard: ShardReading
@@ -408,25 +429,45 @@ export function fullDetailVerdict(args: {
     bytesPerEdge: number
     reservePct: number
     ceiling: number | null
+    applyRowsPerS?: number | null
+    maxWallSecs?: number | null
 }): FitVerdict {
     const { shard, limits, edgeCount, estimateEdges, bytesPerEdge, reservePct, ceiling } = args
+    const clock = (cells: number | null): { secs: number | null; budget: number | null } => {
+        const rate = args.applyRowsPerS
+        const wall = args.maxWallSecs
+        if (cells == null || rate == null || !(rate > 0) || wall == null || !(wall > 0)) {
+            return { secs: null, budget: null }
+        }
+        return { secs: cells / rate, budget: wall * APPLY_WALL_SHARE }
+    }
     if (estimateEdges == null) {
-        return { verdict: 'unknown', growthEdges: null, neededBytes: null, freeBytes: null, shortfallBytes: null, blockedBy: null }
+        const { secs, budget } = clock(null)
+        return { verdict: 'unknown', growthEdges: null, neededBytes: null, freeBytes: null, shortfallBytes: null, blockedBy: null, applySecs: secs, applyBudgetSecs: budget }
     }
     const growth = Math.max(0, estimateEdges - edgeCount)
     const needed = growth * bytesPerEdge
     const free = freeAfterReserve(shard, reservePct)
+    // The clock is projected from the WHOLE cube, not the growth: every cell
+    // is written (MERGEd) whether or not the graph already held it.
+    const { secs, budget } = clock(estimateEdges)
     if (ceiling != null && estimateEdges > ceiling) {
-        return { verdict: 'short', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: null, blockedBy: 'ceiling' }
+        return { verdict: 'short', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: null, blockedBy: 'ceiling', applySecs: secs, applyBudgetSecs: budget }
     }
     if (free == null) {
-        return { verdict: 'unknown', growthEdges: growth, neededBytes: needed, freeBytes: null, shortfallBytes: null, blockedBy: null }
+        return { verdict: 'unknown', growthEdges: growth, neededBytes: needed, freeBytes: null, shortfallBytes: null, blockedBy: null, applySecs: secs, applyBudgetSecs: budget }
     }
     const allowance = Math.floor(free * (100 + Math.max(0, limits.estimateMarginPct)) / 100)
     if (needed > allowance) {
-        return { verdict: 'short', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: needed - free, blockedBy: 'shard' }
+        return { verdict: 'short', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: needed - free, blockedBy: 'shard', applySecs: secs, applyBudgetSecs: budget }
     }
-    return { verdict: 'fits', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: 0, blockedBy: null }
+    // Memory says yes. The clock is the pipeline's second question, and a
+    // forced cube is NOT refused for failing it — it runs and may need more
+    // than one wall clock — so this is a qualified fit, never a refusal.
+    if (secs != null && budget != null && secs > budget) {
+        return { verdict: 'short', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: 0, blockedBy: 'clock', applySecs: secs, applyBudgetSecs: budget }
+    }
+    return { verdict: 'fits', growthEdges: growth, neededBytes: needed, freeBytes: free, shortfallBytes: 0, blockedBy: null, applySecs: secs, applyBudgetSecs: budget }
 }
 
 /** Compact edge counts for prose: 1.2M, 850K, 42. */

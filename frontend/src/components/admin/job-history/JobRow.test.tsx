@@ -253,3 +253,97 @@ describe('earlier attempts', () => {
         expect(screen.queryByTestId('attempt-log')).toBeNull()
     })
 })
+
+// ── the estimator, where an operator reads it ────────────────────────────
+//
+// A forced, uncalibrated cube prices an UPPER BOUND on cells produced at the
+// shipped 300 rows/s, so a source that aggregates 14:1 gets a wall-clock
+// warning and then completes comfortably. Two things made that unreadable:
+// the advisory rendered amber beside an emerald "Completed" badge, and the
+// three numbers that explain it — bound, exact, ratio — reached the API and
+// were rendered by nothing at all.
+
+const CUBE_STATS = {
+    writes: 1_400_000, deletes: 0, effective_tuning: EFFECTIVE, regime: 'cube',
+    cube_estimate_upper: 20_000_000, cube_estimate: 20_000_000,
+    cells_exact: 1_400_000, cell_ratio_observed: 0.07,
+}
+
+describe('JobRow cube estimate', () => {
+    it('shows what the bound counted against what actually landed', () => {
+        renderRow(job({ createdEdges: 1_400_000, runStats: CUBE_STATS }))
+        // Visible, not behind a hover: the gap is the thing being explained.
+        expect(screen.getByText('Cells')).toBeInTheDocument()
+        expect(screen.getByText(/~20,000,000/)).toBeInTheDocument()
+    })
+
+    it('says on the row itself that an unmeasured bound stood uncorrected', () => {
+        // The one fact that answers "was that alarming estimate a target?".
+        renderRow(job({ createdEdges: 1_400_000, runStats: CUBE_STATS }))
+        expect(screen.getByText(/uncalibrated bound/)).toBeInTheDocument()
+    })
+
+    it('drops the uncalibrated marker once a measured ratio corrected the bound', () => {
+        renderRow(job({
+            createdEdges: 1_400_000,
+            runStats: { ...CUBE_STATS, cell_ratio_used: 0.08, cube_estimate: 1_600_000 },
+        }))
+        expect(screen.queryByText(/uncalibrated bound/)).not.toBeInTheDocument()
+        expect(screen.getByText(/~20,000,000/)).toBeInTheDocument()
+    })
+
+    it('omits the cell row entirely when the estimator did not run', () => {
+        renderRow(job())
+        expect(screen.queryByText('Cells')).not.toBeInTheDocument()
+    })
+})
+
+describe('JobRow advisory severity', () => {
+    const advisory = (severity: string) => ({
+        ...CUBE_STATS,
+        advisories: [{ kind: 'cube_projection_superseded', severity, message: 'the projection was beaten' }],
+    })
+
+    it('does not dress an informational advisory as a warning', () => {
+        // The defect: the render branched on error-or-else-amber, so a note
+        // recording that the run DISPROVED its own pre-write projection was
+        // painted the same as an unresolved problem, on a row badged green.
+        const { container } = renderRow(job({ runStats: advisory('info') }))
+        expect(screen.getByText('the projection was beaten')).toBeInTheDocument()
+        expect(container.querySelector('.border-amber-500\\/20')).toBeNull()
+        expect(container.querySelector('.border-sky-500\\/20')).not.toBeNull()
+    })
+
+    it('still shows a real warning as a warning', () => {
+        const { container } = renderRow(job({ runStats: advisory('warning') }))
+        expect(container.querySelector('.border-amber-500\\/20')).not.toBeNull()
+    })
+
+    it('still shows an error as an error', () => {
+        const { container } = renderRow(job({ runStats: advisory('error') }))
+        expect(container.querySelector('.border-red-500\\/20')).not.toBeNull()
+    })
+})
+
+describe('JobRow degraded reason', () => {
+    // On the AUTO path the clock gate can pick the depth-diagonal, the run
+    // completes green holding far fewer cells than it projected, and
+    // degraded_reason is the ONLY record of which gate said no. It reached
+    // the API and was rendered by nothing — the same invisibility as the
+    // estimate, in the shape where it actually costs you data.
+    it('names the gate that chose the diagonal, on the row', () => {
+        renderRow(job({
+            runStats: {
+                writes: 400_000, deletes: 0, effective_tuning: EFFECTIVE, regime: 'boundary',
+                cube_estimate: 20_000_000,
+                degraded_reason: 'it needs ~18.5h to write and the job allows ~14.4h',
+            },
+        }))
+        expect(screen.getByText('it needs ~18.5h to write and the job allows ~14.4h')).toBeInTheDocument()
+    })
+
+    it('says nothing when the run was not degraded', () => {
+        renderRow(job({ runStats: { ...CUBE_STATS } }))
+        expect(screen.queryByText(/the job allows/)).not.toBeInTheDocument()
+    })
+})
