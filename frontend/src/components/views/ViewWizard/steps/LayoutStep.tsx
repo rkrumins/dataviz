@@ -26,6 +26,7 @@ import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
+import { deriveRootTypeCandidates, layersForRootTypes } from '../autoLayers'
 
 // ============================================
 // Types
@@ -161,6 +162,23 @@ interface GalleryTemplate {
     category?: string
     recommended?: boolean
     layers: Array<Partial<ViewLayerConfig> & { name: string }>
+    /** Pin the view's entity scope when the template's layers only work under one.
+     *  A template whose layers carry `entityTypes` places entities BY RULE and
+     *  writes no assignments — that resolves only in open ('all') scope, and
+     *  `deriveEntityScope` would otherwise flip the view to 'curated' the moment
+     *  the user drags a single entity, emptying every other column. */
+    entityScope?: 'all' | 'curated'
+}
+
+/** "3 columns — Domains, Roots, Platforms — each carrying everything it contains."
+ *  Long type lists are trimmed so the card stays a card. */
+function describeColumns(labels: string[]): string {
+    const shown = labels.slice(0, 4).join(', ')
+    const rest = labels.length - 4
+    const named = rest > 0 ? `${shown} and ${rest} more` : shown
+    return labels.length === 1
+        ? `One ${named} column, carrying everything those entities contain.`
+        : `${labels.length} columns — ${named} — each carrying everything it contains.`
 }
 
 /** Gallery of Quick Start templates — one card per template with a mini preview,
@@ -246,7 +264,12 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
     // Blank models have no data source to probe; their ontology schema is hydrated
     // into the schema store, so read entity types from there instead.
-    const { entityTypes: dsEntityTypes } = useDataSourceSchema(dataSourceId)
+    const {
+        entityTypes: dsEntityTypes,
+        relationshipTypes: dsRelationshipTypes,
+        rootEntityTypes: dsRootEntityTypes,
+        containmentEdgeTypes: dsContainmentEdgeTypes,
+    } = useDataSourceSchema(dataSourceId)
     const storeEntityTypes = useSchemaEntityTypes()
     const schemaEntityTypes = blank ? storeEntityTypes : dsEntityTypes
     const availableEntityTypes = useMemo(
@@ -320,16 +343,48 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // The one list the gallery renders, per flow.
     const galleryTemplates: GalleryTemplate[] = useMemo(() => {
         if (blank) return blankTemplates
+
+        // One column per TOP-LEVEL type, so Domain and Root each get their own
+        // rather than sharing a single level-0 column. Each layer carries its one
+        // entityType, which IS the placement rule: every root of that type lands
+        // there and its containment children inherit, with no per-entity
+        // assignment written and no column to fill in by hand.
+        const rootTypeCandidates = deriveRootTypeCandidates({
+            entityTypes: schemaEntityTypes,
+            relationshipTypes: dsRelationshipTypes,
+            rootEntityTypes: dsRootEntityTypes,
+            containmentEdgeTypes: dsContainmentEdgeTypes,
+        })
+        const perRootType: GalleryTemplate | null = rootTypeCandidates.length > 0 ? {
+            id: 'per-root-type',
+            name: 'One layer per top-level type',
+            description: describeColumns(rootTypeCandidates.map(c => c.label)),
+            category: 'schema',
+            recommended: true,
+            layers: layersForRootTypes(rootTypeCandidates),
+            entityScope: 'all',
+        } : null
+
         const fromSchema: GalleryTemplate | null = schemaEntityTypes.length > 0 ? {
             id: 'from-schema',
             name: 'From your schema',
             description: 'One layer per level of your assigned ontology, with entity types pre-assigned.',
             category: 'schema',
-            recommended: true,
+            // Rule-driven exactly like the card above — its layers carry
+            // entityTypes and no assignments, so it needs the same open scope.
+            entityScope: 'all',
             layers: deriveLayersFromOntology({ entityTypes: schemaEntityTypes }),
         } : null
-        return [...(fromSchema ? [fromSchema] : []), ...activeTemplates]
-    }, [blank, blankTemplates, schemaEntityTypes, activeTemplates])
+
+        return [
+            ...(perRootType ? [perRootType] : []),
+            ...(fromSchema ? [fromSchema] : []),
+            ...activeTemplates,
+        ]
+    }, [
+        blank, blankTemplates, schemaEntityTypes, activeTemplates,
+        dsRelationshipTypes, dsRootEntityTypes, dsContainmentEdgeTypes,
+    ])
 
     // One apply path for every template origin: normalize layers (mint ids/orders,
     // default colors) and record the choice so the picker can be revisited.
@@ -346,7 +401,12 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             id: l.id ?? generateId(),
             order: i,
         }))
-        updateFormData({ layers, assignments: {}, layoutTemplateId: template.id })
+        updateFormData({
+            layers,
+            assignments: {},
+            layoutTemplateId: template.id,
+            entityScope: template.entityScope,
+        })
         setGalleryOpen(false)
     }, [updateFormData])
     // ────────────────────────────────────────────────────────────────────────

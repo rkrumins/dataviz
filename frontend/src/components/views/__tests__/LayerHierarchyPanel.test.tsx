@@ -236,3 +236,78 @@ describe('LayerHierarchyPanel — in-step layer CRUD', () => {
     expect(screen.queryByTitle(/Remove all/)).not.toBeInTheDocument()
   })
 })
+
+describe('LayerHierarchyPanel — rule-placed roots', () => {
+  // A layer's `entityTypes` rule places roots with no assignment entry. The rail
+  // has to list them, or a rule-driven column reads "empty" here while the
+  // canvas renders it full.
+  const index = makeIndex({
+    'urn:ruled': { name: 'Finance', type: 'domain', childCount: 3 },
+    'urn:explicit': { name: 'Risk', type: 'domain', childCount: 0 },
+  })
+
+  function renderWithRules(
+    assignments: Record<string, LayerAssignmentEntry> = {},
+    handlers: Parameters<typeof renderPanel>[2] = {},
+  ) {
+    return render(
+      <LayerHierarchyPanel
+        layers={layers}
+        assignments={assignments}
+        rulePlacedByLayer={new Map([['l1', ['urn:ruled']]])}
+        activeTarget={null}
+        logicalNodes={fakeLogicalNodes}
+        entityIndex={index}
+        onSetActiveTarget={vi.fn()}
+        onDrop={vi.fn()}
+        onUnassign={handlers.onUnassign ?? vi.fn()}
+        onReorderLayers={vi.fn()}
+        onAddLayer={vi.fn()}
+        onRenameLayer={vi.fn()}
+        onDeleteLayer={vi.fn()}
+        onClearLayer={vi.fn()}
+      />
+    )
+  }
+
+  it('lists a rule-placed root under its layer, marked "by type"', () => {
+    renderWithRules()
+    expect(screen.getByText('Finance')).toBeInTheDocument()
+    expect(screen.getByTestId('rail-rule-placed-marker')).toHaveTextContent('by type')
+    expect(screen.getByText('By type (1)')).toBeInTheDocument()
+  })
+
+  it('offers no unassign on a rule-placed row — there is no entry to remove', () => {
+    const onUnassign = vi.fn()
+    renderWithRules({}, { onUnassign })
+    expect(screen.queryByTitle('Remove assignment')).not.toBeInTheDocument()
+    expect(onUnassign).not.toHaveBeenCalled()
+  })
+
+  it('keeps it DRAGGABLE, carrying the same payload the tree emits', () => {
+    renderWithRules()
+    const row = screen.getByText('Finance').closest('[draggable]') as HTMLElement
+    expect(row).toHaveAttribute('draggable', 'true')
+
+    const setData = vi.fn()
+    fireEvent.dragStart(row, { dataTransfer: { setData, effectAllowed: '' } })
+    expect(setData).toHaveBeenCalledWith(
+      'application/x-entity-assignment',
+      expect.stringContaining('urn:ruled'),
+    )
+  })
+
+  it('counts rule-placed roots in the layer badge alongside explicit ones', () => {
+    renderWithRules({ 'urn:explicit': { layerId: 'l1', inheritsChildren: true } })
+    // 1 explicit + 1 by rule.
+    expect(screen.getByTestId('layer-count-l1')).toHaveTextContent('2')
+  })
+
+  it('drops a rule-placed row once the same urn gains an explicit entry', () => {
+    renderWithRules({ 'urn:ruled': { layerId: 'l1', inheritsChildren: true } })
+    // Listed once, as an explicit placement — never twice.
+    expect(screen.queryByTestId('rail-rule-placed-marker')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Finance')).toHaveLength(1)
+    expect(screen.getByTitle('Remove assignment')).toBeInTheDocument()
+  })
+})

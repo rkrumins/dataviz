@@ -30,6 +30,21 @@ vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => ({ getNode: vi.fn().mockResolvedValue(null) }),
 }))
 
+// LayerStudio reads the data source's ontology to offer Auto-layer's candidate
+// top-level types. That hook is react-query backed and this suite renders without
+// a QueryClientProvider, so stub it — same approach as the two mocks above.
+vi.mock('@/hooks/useDataSourceSchema', () => ({
+  useDataSourceSchema: () => ({
+    entityTypes: [],
+    relationshipTypes: [],
+    containmentEdgeTypes: [],
+    lineageEdgeTypes: [],
+    rootEntityTypes: [],
+    isLoading: false,
+    isError: false,
+  }),
+}))
+
 const fakeBrowser = {
   typeFilter: null as string | null,
   typesOnPathTo: () => null,
