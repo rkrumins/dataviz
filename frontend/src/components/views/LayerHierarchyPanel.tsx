@@ -67,6 +67,10 @@ interface LayerHierarchyPanelProps {
      *  for per-layer/per-node entity lists and count badges; layer.entityAssignments
      *  is deprecated and no longer written. */
     assignments: Record<string, LayerAssignmentEntry>
+    /** layerId -> roots that layer's `entityTypes` rule places (no assignment
+     *  entry exists for them). Listing them is what keeps the rail honest about
+     *  what the canvas will render — see ViewWizard/effectivePlacement.ts. */
+    rulePlacedByLayer?: Map<string, string[]>
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     /** Resolves assigned-entity identity + children. The wizard has no canvas
@@ -156,6 +160,7 @@ function AssignedEntityItem({
     entityIndex,
     onUnassign,
     inherited = false,
+    rulePlaced = false,
 }: {
     entityId: string
     depth: number
@@ -165,6 +170,10 @@ function AssignedEntityItem({
      *  it is read-only here (no unassign, no drag: moving it would violate the
      *  containment rule the Studio already enforces). */
     inherited?: boolean
+    /** Placed by this layer's `entityTypes` rule, not by an assignment entry.
+     *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
+     *  dropping it on another layer writes the explicit override. */
+    rulePlaced?: boolean
 }) {
     const [isExpanded, setIsExpanded] = useState(false)
 
@@ -279,8 +288,17 @@ function AssignedEntityItem({
                         </span>
                     )}
                 </div>
+                {rulePlaced && (
+                    <span
+                        data-testid="rail-rule-placed-marker"
+                        className="text-[9px] px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 shrink-0"
+                        title={`Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
+                    >
+                        by type
+                    </span>
+                )}
                 {/* Unassign — only the explicit placement can be removed. */}
-                {!inherited && (
+                {!inherited && !rulePlaced && (
                     <button
                         onClick={(e) => {
                             e.stopPropagation()
@@ -583,6 +601,8 @@ interface LayerRowProps {
     /** 0-based position — surfaces the 1–9 quick-assign shortcut. */
     layerIndex: number
     assignments: Record<string, LayerAssignmentEntry>
+    /** Roots this layer's type rule places, which hold no assignment entry. */
+    rulePlacedUrns?: string[]
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     entityIndex: WizardEntityIndex
@@ -598,6 +618,7 @@ function LayerRow({
     layer,
     layerIndex,
     assignments,
+    rulePlacedUrns,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -627,7 +648,14 @@ function LayerRow({
         [assignments, layer.id]
     )
     const unassignedEntities = layerEntityAssignments.filter(a => !a.logicalNodeId).map(a => a.entityId)
+    // Rule-placed roots have no assignment entry, so they are listed separately
+    // and are not part of what "Clear all" can remove — there is nothing to clear.
+    const rulePlaced = useMemo(
+        () => (rulePlacedUrns ?? []).filter(urn => !assignments[urn]),
+        [rulePlacedUrns, assignments],
+    )
     const totalAssigned = layerEntityAssignments.length
+    const totalShown = totalAssigned + rulePlaced.length
     const color = layer.color || '#3b82f6'
 
     // ── Layer-level drop zone (layer root, no node) ───────────────────────────
@@ -745,8 +773,11 @@ function LayerRow({
                     )}
 
                     {/* Assignment count */}
-                    {totalAssigned > 0 && !isDragOver && (
-                        <span className="text-xs text-slate-400 shrink-0">{totalAssigned}</span>
+                    {totalShown > 0 && !isDragOver && (
+                        <span
+                            data-testid={`layer-count-${layer.id}`}
+                            className="text-xs text-slate-400 shrink-0"
+                        >{totalShown}</span>
                     )}
 
                     {/* Layer actions */}
@@ -907,6 +938,29 @@ function LayerRow({
                                     </div>
                                 )}
 
+                                {/* Roots the layer's entity-type rule places. Shown so the
+                                    wizard agrees with the canvas, which renders them here. */}
+                                {rulePlaced.length > 0 && (
+                                    <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
+                                        <div className="flex items-center gap-1.5 px-3 py-1">
+                                            <Layers className="w-3 h-3 text-slate-400 shrink-0" />
+                                            <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
+                                                By type ({rulePlaced.length})
+                                            </span>
+                                        </div>
+                                        {rulePlaced.map(entityId => (
+                                            <AssignedEntityItem
+                                                key={entityId}
+                                                entityId={entityId}
+                                                depth={0}
+                                                entityIndex={entityIndex}
+                                                onUnassign={onUnassign}
+                                                rulePlaced
+                                            />
+                                        ))}
+                                    </div>
+                                )}
+
                                 {/* Add child group input */}
                                 <AnimatePresence>
                                     {showAddRoot && (
@@ -956,6 +1010,7 @@ function LayerRow({
 export function LayerHierarchyPanel({
     layers,
     assignments,
+    rulePlacedByLayer,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -1052,6 +1107,7 @@ export function LayerHierarchyPanel({
                                 layer={layer}
                                 layerIndex={i}
                                 assignments={assignments}
+                                rulePlacedUrns={rulePlacedByLayer?.get(layer.id)}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
                                 entityIndex={entityIndex}

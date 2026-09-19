@@ -344,3 +344,80 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     expect(onBulkAssign).not.toHaveBeenCalled()
   })
 })
+
+describe('WizardAssignmentTree — rule-placed entities', () => {
+  // A layer that declares the entity's type places it with NO assignment entry.
+  // The tree has to say so, or it would call the entity unassigned while the
+  // canvas rendered it inside that column.
+  const typedLayers: ViewLayerConfig[] = [
+    { id: 'l1', name: 'Domains', entityTypes: ['domain'], order: 0 },
+    { id: 'l2', name: 'Other', entityTypes: [], order: 1 },
+  ]
+
+  function renderTyped(props: Partial<React.ComponentProps<typeof WizardAssignmentTree>> = {}) {
+    return render(
+      <WizardAssignmentTree
+        layers={typedLayers}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+        {...props}
+      />
+    )
+  }
+
+  it('shows the layer the type rule places it in, marked "by type"', () => {
+    renderTyped()
+    expect(screen.getByTestId('assigned-layer-badge')).toHaveTextContent('Domains')
+    expect(screen.getByTestId('rule-placed-marker')).toHaveTextContent('by type')
+  })
+
+  it('offers no remove button — a rule is overridden, never unassigned', () => {
+    renderTyped()
+    expect(screen.queryByTitle('Remove assignment')).not.toBeInTheDocument()
+  })
+
+  it('lets an explicit assignment override the rule, remove button and all', () => {
+    renderTyped({ assignments: { 'urn:a': { layerId: 'l2', inheritsChildren: true } } })
+    expect(screen.getByTestId('assigned-layer-badge')).toHaveTextContent('Other')
+    expect(screen.queryByTestId('rule-placed-marker')).not.toBeInTheDocument()
+    expect(screen.getByTitle('Remove assignment')).toBeInTheDocument()
+  })
+
+  it('counts a rule-placed entity as placed', () => {
+    renderTyped()
+    expect(screen.getByText(/\/ 1 placed/).parentElement).toHaveTextContent('1 / 1 placed')
+  })
+
+  it('"Unassigned only" hides a rule-placed entity — it IS placed', () => {
+    renderTyped()
+    expect(screen.getByText('Node A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Unassigned only/i }))
+    expect(screen.queryByText('Node A')).not.toBeInTheDocument()
+  })
+
+  it('leaves an entity unplaced when no layer declares its type', () => {
+    render(
+      <WizardAssignmentTree
+        layers={[{ id: 'l1', name: 'Tables', entityTypes: ['table'], order: 0 }]}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('assigned-layer-badge')).not.toBeInTheDocument()
+    expect(screen.getByText(/\/ 1 placed/).parentElement).toHaveTextContent('0 / 1 placed')
+  })
+
+  it('does NOT fold case — the canvas would not place it either', () => {
+    render(
+      <WizardAssignmentTree
+        layers={[{ id: 'l1', name: 'Domains', entityTypes: ['Domain'], order: 0 }]}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('assigned-layer-badge')).not.toBeInTheDocument()
+  })
+})

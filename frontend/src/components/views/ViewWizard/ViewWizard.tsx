@@ -75,7 +75,8 @@ import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
 import { useWizardScope } from '@/hooks/useWizardScope'
-import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
+import { resolveWizardEntityScope } from './effectivePlacement'
 import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
@@ -143,6 +144,14 @@ export interface WizardFormData {
      *  shape the canvas writes via persistReferenceLayout. Never embedded back
      *  into `layers[].entityAssignments` (legacy, deprecated). */
     assignments: Record<string, LayerAssignmentEntry>
+    /** Explicit view entity scope, PINNED by a gesture that needs it rather than
+     *  left to derivation. `deriveEntityScope` answers 'curated' as soon as ONE
+     *  assignment exists — which would make a rule-driven layout (layers carrying
+     *  `entityTypes`, e.g. "one layer per top-level type") collapse to just the
+     *  entities someone happened to drag, because curated scope ignores rules for
+     *  root nodes and hydration then loads assigned URNs only. Undefined = derive
+     *  exactly as before. */
+    entityScope?: 'all' | 'curated'
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
     advancedFilters: ActiveFilter[]
@@ -1239,7 +1248,7 @@ function ViewWizardBody({
 
                 // The layout endpoint is the single writer of referenceLayout — write
                 // the full layers+assignments (a new view has no prior layout to race).
-                const entityScope = deriveEntityScope(undefined, normalizedLayout)
+                const entityScope = resolveWizardEntityScope(formData.entityScope, normalizedLayout, undefined)
                 try {
                     const layoutResult = await updateViewLayout(createdViewId, {
                         referenceLayout: normalizedLayout,
@@ -1301,10 +1310,14 @@ function ViewWizardBody({
                     }
                 }
                 if (result.success && result.data) {
-                    // Preserve an explicit editingView.content.entityScope; otherwise derive
-                    // from the submitted assignments — a deliberate wizard save is allowed to
-                    // set scope explicitly, unlike implicit canvas gestures.
-                    const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
+                    // A scope PINNED in this wizard session wins (the user just chose a
+                    // rule-driven layout); else preserve an explicit
+                    // editingView.content.entityScope; else derive from the submitted
+                    // assignments — a deliberate wizard save is allowed to set scope
+                    // explicitly, unlike implicit canvas gestures.
+                    const entityScope = resolveWizardEntityScope(
+                        formData.entityScope, normalizedLayout, editingView?.content,
+                    )
                     // When a draft is open for THIS view, route the layout write to the branch
                     // overlay (null on Published → base write), so wizard layer/scope edits on a
                     // draft don't leak to Published — mirrors the canvas debounced saver.

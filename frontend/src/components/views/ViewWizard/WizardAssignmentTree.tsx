@@ -35,6 +35,7 @@ import {
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, LayerAssignmentEntry, AssignmentConflict } from '@/types/schema'
+import { buildWizardPlacement } from './effectivePlacement'
 import { useContainmentEdgeTypes, useEntityTypes, useSchemaIsLoading } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
@@ -60,6 +61,10 @@ export interface EntityTreeNode {
     parentId?: string
     assignedLayerId?: string
     isInherited?: boolean
+    /** Placed by a layer's `entityTypes` rule rather than by an assignment entry.
+     *  There is nothing to un-assign — a rule is overridden, not removed — so the
+     *  row offers no remove button, only the re-assign dropdown. */
+    isRulePlaced?: boolean
     hasConflict?: boolean
     conflictMessage?: string
 }
@@ -346,17 +351,29 @@ function TreeRow({
                     >
                         {node.isInherited ? '↳ ' : ''}{assignedLayer.name}
                     </span>
-                    {/* Remove assignment button */}
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation()
-                            onAssign(node.id, '')
-                        }}
-                        className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-400 hover:text-red-500 transition-colors"
-                        title="Remove assignment"
-                    >
-                        <X className="w-3 h-3" />
-                    </button>
+                    {node.isRulePlaced ? (
+                        /* Placed by the layer's entity-type rule. Nothing to remove —
+                           picking another layer overrides it for this entity only. */
+                        <span
+                            data-testid="rule-placed-marker"
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
+                            title={`Placed automatically because this layer covers the ${node.type} type. Assign it elsewhere to override.`}
+                        >
+                            by type
+                        </span>
+                    ) : (
+                        /* Remove assignment button */
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                onAssign(node.id, '')
+                            }}
+                            className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-400 hover:text-red-500 transition-colors"
+                            title="Remove assignment"
+                        >
+                            <X className="w-3 h-3" />
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -499,6 +516,12 @@ export function WizardAssignmentTree({
         [browser.topLevelIds, browser.parentMap]
     )
 
+    // Rule placement, compiled once per layout — the canvas's own resolver.
+    const placeByRule = useMemo(
+        () => buildWizardPlacement(layers, assignments ?? {}),
+        [layers, assignments],
+    )
+
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (browser.topLevelIds.length === 0) return []
 
@@ -536,6 +559,20 @@ export function WizardAssignmentTree({
                 isInherited = true
             }
 
+            // Nothing placed it explicitly or by inheritance — so ask the layers'
+            // own type rules, exactly as the canvas will. A layer declaring this
+            // entity's type places it with NO assignment entry to read, and
+            // without this the wizard would call it unassigned while the canvas
+            // rendered it in a column.
+            let isRulePlaced = false
+            if (!effectiveLayerId) {
+                const ruled = placeByRule({ urn, type: node.entityType })
+                if (ruled.source === 'rule' && ruled.layerId) {
+                    effectiveLayerId = ruled.layerId
+                    isRulePlaced = true
+                }
+            }
+
             // "Unassigned only": an assigned node drops out together with its
             // subtree (children inherit its layer, so they're assigned too).
             if (hideAssigned && effectiveLayerId) return null
@@ -562,6 +599,7 @@ export function WizardAssignmentTree({
                 parentId,
                 assignedLayerId: effectiveLayerId,
                 isInherited,
+                isRulePlaced,
                 hasConflict: !!conflict,
                 conflictMessage: conflict?.message,
             }
@@ -575,7 +613,7 @@ export function WizardAssignmentTree({
             .map(urn => buildNode(urn, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned])
+    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned, placeByRule])
 
     // Build child allocation map: for each entity with children, which layers are descendants assigned to?
     const childAllocationMap = useMemo(() => {
@@ -728,11 +766,24 @@ export function WizardAssignmentTree({
     // from the server's total, so it doesn't lie while pages are still loading.
     const coverage = useMemo(() => {
         const explicit = assignments ?? {}
-        const assignedRoots = visibleRootIds.filter(urn => !!explicit[urn]).length
         const perLayer = new Map<string, number>()
         Object.values(explicit).forEach(a => {
             perLayer.set(a.layerId, (perLayer.get(a.layerId) ?? 0) + 1)
         })
+        // A root a layer's type rule places IS placed — it just carries no
+        // assignment entry. Counting only `explicit` reported "0 / N placed" for
+        // a fully rule-driven layout and hid every column from the bar.
+        let ruleRoots = 0
+        for (const urn of visibleRootIds) {
+            if (explicit[urn]) continue
+            const entry = browser.nodes.get(urn)
+            if (!entry) continue
+            const { layerId, source } = placeByRule({ urn, type: entry.node.entityType })
+            if (source !== 'rule' || !layerId) continue
+            ruleRoots++
+            perLayer.set(layerId, (perLayer.get(layerId) ?? 0) + 1)
+        }
+        const assignedRoots = visibleRootIds.filter(urn => !!explicit[urn]).length + ruleRoots
         const loadedRoots = visibleRootIds.length
         const totalRoots = Math.max(browser.topLevelTotalCount, loadedRoots)
         return {
@@ -741,10 +792,10 @@ export function WizardAssignmentTree({
             totalRoots,
             partial: loadedRoots < totalRoots,
             perLayer,
-            totalPlacements: Object.keys(explicit).length,
+            totalPlacements: Object.keys(explicit).length + ruleRoots,
             pct: totalRoots > 0 ? Math.round((assignedRoots / totalRoots) * 100) : 0,
         }
-    }, [assignments, visibleRootIds, browser.topLevelTotalCount])
+    }, [assignments, visibleRootIds, browser.topLevelTotalCount, browser.nodes, placeByRule])
 
     // Handlers
     // CRITICAL: expandNode() ONLY loads direct children of the clicked node.
