@@ -246,6 +246,18 @@ describe('LayerHierarchyPanel — rule-placed roots', () => {
     'urn:explicit': { name: 'Risk', type: 'domain', childCount: 0 },
   })
 
+  /** What the Layer Studio hands down: the column's roots, already ordered,
+   *  with rule-placed rows flagged. Explicit entries come first here. */
+  const rowsForL1 = (assignments: Record<string, LayerAssignmentEntry>) => {
+    const explicit = Object.keys(assignments)
+      .filter(urn => assignments[urn].layerId === 'l1')
+      .map(urn => ({ id: urn, urn, name: '', typeId: 'domain', childCount: 0, rulePlaced: false }))
+    const ruled = assignments['urn:ruled']
+      ? []
+      : [{ id: 'urn:ruled', urn: 'urn:ruled', name: 'Finance', typeId: 'domain', childCount: 3, rulePlaced: true }]
+    return new Map([['l1', [...explicit, ...ruled]]])
+  }
+
   function renderWithRules(
     assignments: Record<string, LayerAssignmentEntry> = {},
     handlers: Parameters<typeof renderPanel>[2] = {},
@@ -254,7 +266,7 @@ describe('LayerHierarchyPanel — rule-placed roots', () => {
       <LayerHierarchyPanel
         layers={layers}
         assignments={assignments}
-        rulePlacedByLayer={new Map([['l1', ['urn:ruled']]])}
+        rootsByLayer={rowsForL1(assignments)}
         activeTarget={null}
         logicalNodes={fakeLogicalNodes}
         entityIndex={index}
@@ -274,7 +286,7 @@ describe('LayerHierarchyPanel — rule-placed roots', () => {
     renderWithRules()
     expect(screen.getByText('Finance')).toBeInTheDocument()
     expect(screen.getByTestId('rail-rule-placed-marker')).toHaveTextContent('by type')
-    expect(screen.getByText('By type (1)')).toBeInTheDocument()
+    expect(screen.getByText('In this column (1)')).toBeInTheDocument()
   })
 
   it('offers no unassign on a rule-placed row — there is no entry to remove', () => {

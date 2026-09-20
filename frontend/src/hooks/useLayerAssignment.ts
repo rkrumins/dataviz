@@ -9,16 +9,16 @@
  */
 
 import { useMemo } from 'react'
-import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo } from '@/types/schema'
 import {
   type GraphNode,
   resolveLayerAssignment,
   type LayerAssignmentRule,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
-import { compareOrderKeys } from '@/utils/orderKeys'
 import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 import { buildLayerRules, resolveRootLayer } from './lib/resolveRootLayer'
+import { rootComparators, childComparator, effectiveSortMode } from './lib/rootSort'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 
 // ============================================
@@ -123,47 +123,18 @@ export function useLayerAssignment({
     // parent's children, or the layer's roots), so each sibling set holds an
     // independent key sequence. All other modes leave children on the
     // server's alphabetical order (asc, or desc when the whole layer is Z→A).
-    const alphaAsc = (a: HierarchyNode, b: HierarchyNode) => a.name.localeCompare(b.name)
-    const alphaDesc = (a: HierarchyNode, b: HierarchyNode) => b.name.localeCompare(a.name)
-    // Property-derived root orders. Type groups alphabetically by the stable
-    // type id (display names would need a schema lookup this hook doesn't
-    // have); container size prefers the backend's childCount (total, not just
-    // loaded) and falls back to the loaded child list. Both tie-break to
-    // name so equal groups stay alphabetical inside.
-    const typeAsc = (a: HierarchyNode, b: HierarchyNode) =>
-      (a.typeId || '').localeCompare(b.typeId || '') || alphaAsc(a, b)
-    const countOf = (n: HierarchyNode) =>
-      Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0
-    const countDesc = (a: HierarchyNode, b: HierarchyNode) =>
-      countOf(b) - countOf(a) || alphaAsc(a, b)
-    // Custom comparator: keyed siblings first (ordinal orderKey, name+urn
-    // tiebreak), unkeyed after (alphabetical). Used for BOTH roots and
-    // children of a custom-sorted layer — only ever applied within one
-    // sibling set, so the shared function is safe.
-    const customCmp = (a: HierarchyNode, b: HierarchyNode) => {
-      const ka = assignments[a.id]?.orderKey
-      const kb = assignments[b.id]?.orderKey
-      if (ka && kb) return compareOrderKeys(ka, kb) || alphaAsc(a, b) || compareOrderKeys(a.urn, b.urn)
-      if (ka) return -1
-      if (kb) return 1
-      return alphaAsc(a, b)
-    }
-    const ROOT_CMPS: Record<LayerNodeSortMode, (a: HierarchyNode, b: HierarchyNode) => number> = {
-      'alpha-asc': alphaAsc,
-      'alpha-desc': alphaDesc,
-      'type-asc': typeAsc,
-      'count-desc': countDesc,
-      custom: customCmp,
-    }
+    // Ordering lives in hooks/lib/rootSort so the wizard's Layer Studio can sort
+    // its rail with the SAME comparators — an arrangement built in the wizard
+    // has to be the one the canvas renders.
+    const ROOT_CMPS = rootComparators<HierarchyNode>(assignments, (n) =>
+      Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0,
+    )
+    const alphaAsc = ROOT_CMPS['alpha-asc']
     const childCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     const rootCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     sortedLayers.forEach(layer => {
-      const mode: LayerNodeSortMode =
-        sortOverrides?.get(layer.id) ?? layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
-      // Children in 'custom' mode order by orderKey too (hierarchical custom
-      // order); every other mode leaves them on the server's alpha order
-      // (desc only flips the direction).
-      childCmpByLayer.set(layer.id, mode === 'custom' ? customCmp : mode === 'alpha-desc' ? alphaDesc : alphaAsc)
+      const mode = effectiveSortMode(layer, defaultNodeSortMode, sortOverrides?.get(layer.id))
+      childCmpByLayer.set(layer.id, childComparator(mode, ROOT_CMPS))
       rootCmpByLayer.set(layer.id, ROOT_CMPS[mode] ?? alphaAsc)
     })
 

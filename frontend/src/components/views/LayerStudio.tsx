@@ -48,7 +48,7 @@ import {
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
-import { LayerHierarchyPanel, type ActiveTarget, type DropPayload } from './LayerHierarchyPanel'
+import { LayerHierarchyPanel, type ActiveTarget, type DropPayload, type LayerRootRow } from './LayerHierarchyPanel'
 import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
 import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
 import { suggestLayerMappings, type MagicMapSuggestion } from '../views/ViewWizard/magicMap'
@@ -65,9 +65,21 @@ import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
 import { useAutoOrganize, type GroupingSuggestion } from '@/hooks/useAutoOrganize'
-import { assignEntities, unassignEntities } from '@/components/canvas/context-view/assignmentMutations'
+import {
+    assignEntities,
+    unassignEntities,
+    ensureSiblingOrderKeys,
+    keysForInsertion,
+    setAssignmentOrderKey,
+} from '@/components/canvas/context-view/assignmentMutations'
+import {
+    setLayerNodeSortMode,
+    setViewDefaultSortMode,
+    clearLayerOrderKeys,
+} from '@/components/canvas/context-view/layerMutations'
+import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
-import type { ViewLayerConfig } from '@/types/schema'
+import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
@@ -1059,6 +1071,12 @@ export function LayerStudio({
     // share one history.
     const layers = formData.layers ?? []
     const assignments = formData.assignments ?? {}
+    const defaultNodeSortMode = formData.defaultNodeSortMode
+    /** The wizard's live layout, in the shape every mutation helper takes. */
+    const layout = useMemo<NormalizedReferenceLayout>(
+        () => ({ layers, assignments, ...(defaultNodeSortMode ? { defaultNodeSortMode } : {}) }),
+        [layers, assignments, defaultNodeSortMode],
+    )
 
     const undoStackRef = useRef<NormalizedReferenceLayout[]>([])
     const redoStackRef = useRef<NormalizedReferenceLayout[]>([])
@@ -1067,14 +1085,18 @@ export function LayerStudio({
     const commitLayout = useCallback(
         (next: NormalizedReferenceLayout) => {
             if (!isUndoRedoRef.current) {
-                undoStackRef.current = [...undoStackRef.current, { layers, assignments }]
+                undoStackRef.current = [...undoStackRef.current, layout]
                 redoStackRef.current = []
                 // Cap stack size
                 if (undoStackRef.current.length > 50) undoStackRef.current.shift()
             }
-            updateFormData({ layers: next.layers, assignments: next.assignments })
+            updateFormData({
+                layers: next.layers,
+                assignments: next.assignments,
+                defaultNodeSortMode: next.defaultNodeSortMode,
+            })
         },
-        [updateFormData, layers, assignments]
+        [updateFormData, layout]
     )
 
     // Layer-structure-only updates (logical node CRUD, reorder, auto-organize)
@@ -1091,21 +1113,29 @@ export function LayerStudio({
         if (undoStackRef.current.length === 0) return
         const prev = undoStackRef.current[undoStackRef.current.length - 1]
         undoStackRef.current = undoStackRef.current.slice(0, -1)
-        redoStackRef.current = [...redoStackRef.current, { layers, assignments }]
+        redoStackRef.current = [...redoStackRef.current, layout]
         isUndoRedoRef.current = true
-        updateFormData({ layers: prev.layers, assignments: prev.assignments })
+        updateFormData({
+            layers: prev.layers,
+            assignments: prev.assignments,
+            defaultNodeSortMode: prev.defaultNodeSortMode,
+        })
         isUndoRedoRef.current = false
-    }, [updateFormData, layers, assignments])
+    }, [updateFormData, layout])
 
     const handleRedo = useCallback(() => {
         if (redoStackRef.current.length === 0) return
         const next = redoStackRef.current[redoStackRef.current.length - 1]
         redoStackRef.current = redoStackRef.current.slice(0, -1)
-        undoStackRef.current = [...undoStackRef.current, { layers, assignments }]
+        undoStackRef.current = [...undoStackRef.current, layout]
         isUndoRedoRef.current = true
-        updateFormData({ layers: next.layers, assignments: next.assignments })
+        updateFormData({
+            layers: next.layers,
+            assignments: next.assignments,
+            defaultNodeSortMode: next.defaultNodeSortMode,
+        })
         isUndoRedoRef.current = false
-    }, [updateFormData, layers, assignments])
+    }, [updateFormData, layout])
 
     // Keyboard shortcuts for undo/redo
     useEffect(() => {
@@ -1474,19 +1504,106 @@ export function LayerStudio({
         [layers, assignments, scannedTopLevel],
     )
 
-    /** layerId -> roots a layer's type rule places, for the rail to list. Without
-     *  this the rail reads "empty" for every rule-driven column while the canvas
-     *  renders them full. */
-    const rulePlacedByLayer = useMemo(() => {
+    /**
+     * Every root each column holds — explicit placements AND the ones a type rule
+     * places — in the order the CANVAS will render them. The rail used to show
+     * these as two separate lists in assignment/scan order, which could not
+     * express a single arrangement and did not match the column it previews.
+     */
+    const rootsByLayer = useMemo(() => {
         const place = buildWizardPlacement(layers, assignments)
-        const byLayer = new Map<string, string[]>()
+        const byLayer = new Map<string, LayerRootRow[]>()
+        const seen = new Set<string>()
+
+        const add = (layerId: string, urn: string, rulePlaced: boolean) => {
+            if (seen.has(urn)) return
+            seen.add(urn)
+            const identity = entityIndex.resolve(urn)
+            byLayer.set(layerId, [...(byLayer.get(layerId) ?? []), {
+                id: urn,
+                urn,
+                name: identity?.name ?? fallbackNameFromUrn(urn),
+                typeId: identity?.type ?? '',
+                childCount: identity?.childCount ?? 0,
+                rulePlaced,
+            }])
+        }
+
+        // Explicit placements first (a logical-node member is drawn inside its
+        // group, not as a column root).
+        for (const [urn, entry] of Object.entries(assignments)) {
+            if (!entry?.layerId || entry.logicalNodeId) continue
+            add(entry.layerId, urn, false)
+        }
+        // Then whatever the type rules place.
         for (const entity of scannedTopLevel) {
             const { layerId, source } = place(entity)
-            if (!layerId || source !== 'rule') continue
-            byLayer.set(layerId, [...(byLayer.get(layerId) ?? []), entity.urn])
+            if (layerId && source === 'rule') add(layerId, entity.urn, true)
         }
+
+        const cmps = rootComparators<LayerRootRow>(assignments, r => r.childCount)
+        byLayer.forEach((rows, layerId) => {
+            const layer = layers.find(l => l.id === layerId)
+            const mode = layer ? effectiveSortMode(layer, defaultNodeSortMode) : 'alpha-asc'
+            rows.sort(cmps[mode] ?? cmps['alpha-asc'])
+        })
         return byLayer
-    }, [layers, assignments, scannedTopLevel])
+    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex])
+
+    // ── Column ordering ─────────────────────────────────────────────────────────
+    // Same two mutations the canvas uses, so an arrangement built here is the one
+    // the canvas renders. Routed through commitLayout, so sorting shares the
+    // single undo history with assignments and layer CRUD.
+    const handleSetLayerSortMode = useCallback((layerId: string, mode: LayerNodeSortMode | null) => {
+        // Seed 'custom' from the column's CURRENT visual order so nothing jumps
+        // the moment the user switches to a manual arrangement.
+        const seedOrder = mode === 'custom'
+            ? (rootsByLayer.get(layerId) ?? []).map(r => r.urn)
+            : undefined
+        commitLayout(setLayerNodeSortMode(layout, layerId, mode, seedOrder))
+    }, [layout, rootsByLayer, commitLayout])
+
+    const handleApplySortToView = useCallback((mode: LayerNodeSortAlgo) => {
+        commitLayout(setViewDefaultSortMode(layout, mode))
+        notify('success', 'Every column now sorts the same way')
+    }, [layout, commitLayout, notify])
+
+    const handleResetCustomOrder = useCallback((layerId: string) => {
+        commitLayout(clearLayerOrderKeys(layout, layerId))
+    }, [layout, commitLayout])
+
+    /**
+     * Drop `draggedUrn` before/after `targetUrn` inside one column. Mirrors the
+     * canvas's handleReorderNode: adopt 'custom' on the first manual move (seeded
+     * from the visible order), make sure every sibling carries a key — including
+     * rule-placed rows, which get an order-carrier entry — then mint one key.
+     */
+    const handleReorderRoot = useCallback((
+        layerId: string,
+        draggedUrn: string,
+        targetUrn: string,
+        position: 'before' | 'after',
+    ) => {
+        if (draggedUrn === targetUrn) return
+        const layer = layers.find(l => l.id === layerId)
+        if (!layer) return
+        const siblings = (rootsByLayer.get(layerId) ?? []).map(r => r.urn)
+        if (!siblings.includes(draggedUrn) || !siblings.includes(targetUrn)) return
+
+        let next = layout
+        if (effectiveSortMode(layer, defaultNodeSortMode) !== 'custom') {
+            next = setLayerNodeSortMode(next, layerId, 'custom', siblings)
+        }
+        next = ensureSiblingOrderKeys(next, layerId, siblings)
+
+        const order = siblings.filter(urn => urn !== draggedUrn)
+        const targetIdx = order.indexOf(targetUrn)
+        if (targetIdx < 0) return
+        const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
+        const keys = keysForInsertion(next, layerId, order, insertIdx, 1)
+        if (keys === null) return   // malformed neighbour keys — refuse, don't corrupt
+        commitLayout(setAssignmentOrderKey(next, draggedUrn, keys[0]))
+    }, [layers, layout, defaultNodeSortMode, rootsByLayer, commitLayout])
 
     // ── Resizable Layers rail ───────────────────────────────────────────────────
     // Deeply-nested placements with long entity names need width; 240px turned
@@ -1641,7 +1758,12 @@ export function LayerStudio({
                     <LayerHierarchyPanel
                         layers={layers}
                         assignments={assignments}
-                        rulePlacedByLayer={rulePlacedByLayer}
+                        rootsByLayer={rootsByLayer}
+                        defaultNodeSortMode={defaultNodeSortMode}
+                        onSetLayerSortMode={handleSetLayerSortMode}
+                        onApplySortToView={handleApplySortToView}
+                        onResetCustomOrder={handleResetCustomOrder}
+                        onReorderRoot={handleReorderRoot}
                         activeTarget={activeTarget}
                         logicalNodes={logicalNodes}
                         entityIndex={entityIndex}

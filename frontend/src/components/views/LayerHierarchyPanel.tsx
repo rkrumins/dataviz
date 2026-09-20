@@ -35,7 +35,11 @@ import {
     X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry } from '@/types/schema'
+import type {
+    ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry,
+    LayerNodeSortMode, LayerNodeSortAlgo,
+} from '@/types/schema'
+import { LayerSortMenu } from '@/components/canvas/context-view/LayerSortMenu'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useEntityTypes } from '@/store/schema'
 import {
@@ -61,16 +65,35 @@ export interface DropPayload {
  *  rendering needs. */
 type LayerEntityRef = Pick<EntityAssignmentConfig, 'entityId' | 'logicalNodeId'>
 
+/** One root of a column, as the canvas will render it. Ordered by the Studio
+ *  with the canvas's own comparators — the rail must not re-sort. */
+export interface LayerRootRow {
+    id: string
+    urn: string
+    name: string
+    typeId: string
+    childCount: number
+    /** Placed by the layer's `entityTypes` rule, so it holds no assignment. */
+    rulePlaced: boolean
+}
+
 interface LayerHierarchyPanelProps {
     layers: ViewLayerConfig[]
     /** Canonical urn-keyed assignment map (formData.assignments) — source of truth
      *  for per-layer/per-node entity lists and count badges; layer.entityAssignments
      *  is deprecated and no longer written. */
     assignments: Record<string, LayerAssignmentEntry>
-    /** layerId -> roots that layer's `entityTypes` rule places (no assignment
-     *  entry exists for them). Listing them is what keeps the rail honest about
-     *  what the canvas will render — see ViewWizard/effectivePlacement.ts. */
-    rulePlacedByLayer?: Map<string, string[]>
+    /** layerId -> the column's roots, already ordered. Includes rule-placed rows
+     *  (which hold no assignment entry), so the rail is honest about what the
+     *  canvas will render — see ViewWizard/effectivePlacement.ts. */
+    rootsByLayer?: Map<string, LayerRootRow[]>
+    /** View-wide default sort, for the per-column menu's "View default" item. */
+    defaultNodeSortMode?: LayerNodeSortAlgo
+    onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+    onApplySortToView?: (mode: LayerNodeSortAlgo) => void
+    onResetCustomOrder?: (layerId: string) => void
+    /** Drop one root before/after another inside the same column. */
+    onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     /** Resolves assigned-entity identity + children. The wizard has no canvas
@@ -161,6 +184,7 @@ function AssignedEntityItem({
     onUnassign,
     inherited = false,
     rulePlaced = false,
+    onReorder,
 }: {
     entityId: string
     depth: number
@@ -174,7 +198,14 @@ function AssignedEntityItem({
      *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
      *  dropping it on another layer writes the explicit override. */
     rulePlaced?: boolean
+    /** Present on column roots: dropping another root on this row's top/bottom
+     *  third reorders instead of re-assigning. Absent on inherited children,
+     *  which have no independent position. */
+    onReorder?: (draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
 }) {
+    // Which third of the row the pointer is over: the outer thirds reorder, the
+    // middle falls through to the LAYER's drop handler (move to this column).
+    const [band, setBand] = useState<'before' | 'after' | null>(null)
     const [isExpanded, setIsExpanded] = useState(false)
 
     // Identity + children come from the entity browser's data (via the wizard
@@ -224,8 +255,47 @@ function AssignedEntityItem({
     })()
     const color = visual?.color ?? '#94a3b8'
 
+    const handleDragOver = (e: React.DragEvent) => {
+        if (!onReorder || !e.dataTransfer.types.includes('application/x-entity-assignment')) return
+        const rect = e.currentTarget.getBoundingClientRect()
+        const y = e.clientY - rect.top
+        const next = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
+        setBand(next)
+        if (next) {
+            e.preventDefault()
+            e.stopPropagation()
+            e.dataTransfer.dropEffect = 'move'
+        }
+    }
+
+    const handleDrop = (e: React.DragEvent) => {
+        const position = band
+        setBand(null)
+        if (!onReorder || !position) return   // middle third — let the layer take it
+        const payload = parseTransfer(e)
+        const draggedUrn = payload?.entityId ?? payload?.entityIds?.[0]
+        if (!draggedUrn) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (draggedUrn !== entityId) onReorder(draggedUrn, entityId, position)
+    }
+
     return (
-        <div>
+        <div
+            onDragOver={handleDragOver}
+            onDragLeave={() => setBand(null)}
+            onDrop={handleDrop}
+            className="relative"
+        >
+            {band && (
+                <div
+                    aria-hidden
+                    className={cn(
+                        'absolute inset-x-1 h-0.5 rounded-full bg-blue-500 z-10',
+                        band === 'before' ? 'top-0' : 'bottom-0',
+                    )}
+                />
+            )}
             <div
                 draggable={!inherited}
                 onDragStart={!inherited ? handleDragStart : undefined}
@@ -601,8 +671,13 @@ interface LayerRowProps {
     /** 0-based position — surfaces the 1–9 quick-assign shortcut. */
     layerIndex: number
     assignments: Record<string, LayerAssignmentEntry>
-    /** Roots this layer's type rule places, which hold no assignment entry. */
-    rulePlacedUrns?: string[]
+    /** This column's roots, already ordered by the Studio. */
+    rows?: LayerRootRow[]
+    defaultNodeSortMode?: LayerNodeSortAlgo
+    onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+    onApplySortToView?: (mode: LayerNodeSortAlgo) => void
+    onResetCustomOrder?: (layerId: string) => void
+    onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     entityIndex: WizardEntityIndex
@@ -618,7 +693,12 @@ function LayerRow({
     layer,
     layerIndex,
     assignments,
-    rulePlacedUrns,
+    rows,
+    defaultNodeSortMode,
+    onSetLayerSortMode,
+    onApplySortToView,
+    onResetCustomOrder,
+    onReorderRoot,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -647,15 +727,32 @@ function LayerRow({
             .map(([urn, entry]) => ({ entityId: urn, logicalNodeId: entry.logicalNodeId })),
         [assignments, layer.id]
     )
-    const unassignedEntities = layerEntityAssignments.filter(a => !a.logicalNodeId).map(a => a.entityId)
-    // Rule-placed roots have no assignment entry, so they are listed separately
-    // and are not part of what "Clear all" can remove — there is nothing to clear.
-    const rulePlaced = useMemo(
-        () => (rulePlacedUrns ?? []).filter(urn => !assignments[urn]),
-        [rulePlacedUrns, assignments],
+    // The column's roots in canvas order. Members of a logical group are drawn
+    // inside that group instead, so they never appear in this list.
+    const groupedIds = useMemo(
+        () => new Set(layerEntityAssignments.filter(a => a.logicalNodeId).map(a => a.entityId)),
+        [layerEntityAssignments],
     )
+    const rootRows = useMemo(() => {
+        if (rows) return rows.filter(r => !groupedIds.has(r.urn))
+        // No ordered rows supplied — fall back to the canonical assignments, as
+        // this panel always did. Identity is resolved per row anyway, so the
+        // blank fields here are never rendered.
+        return layerEntityAssignments
+            .filter(a => !a.logicalNodeId)
+            .map<LayerRootRow>(a => ({
+                id: a.entityId, urn: a.entityId, name: '', typeId: '', childCount: 0, rulePlaced: false,
+            }))
+    }, [rows, groupedIds, layerEntityAssignments])
+    // "Clear all" only ever removes explicit placements — a rule-placed row has
+    // no entry to clear.
     const totalAssigned = layerEntityAssignments.length
-    const totalShown = totalAssigned + rulePlaced.length
+    const totalShown = rootRows.length
+    const sortMode: LayerNodeSortMode = layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
+    const hasCustomOrder = useMemo(
+        () => Object.values(assignments).some(e => e.layerId === layer.id && e.orderKey),
+        [assignments, layer.id],
+    )
     const color = layer.color || '#3b82f6'
 
     // ── Layer-level drop zone (layer root, no node) ───────────────────────────
@@ -778,6 +875,28 @@ function LayerRow({
                             data-testid={`layer-count-${layer.id}`}
                             className="text-xs text-slate-400 shrink-0"
                         >{totalShown}</span>
+                    )}
+
+                    {/* Column sort — the canvas's own menu, writing the same
+                        fields, so the order chosen here is the order it renders. */}
+                    {onSetLayerSortMode && (
+                        <span onClick={e => e.stopPropagation()} className="shrink-0">
+                            <LayerSortMenu
+                                layerName={layer.name}
+                                layerColor={color}
+                                mode={sortMode}
+                                isOverride={layer.nodeSortMode !== undefined}
+                                viewDefault={defaultNodeSortMode ?? 'alpha-asc'}
+                                canPersist
+                                onSelectMode={mode => onSetLayerSortMode(layer.id, mode)}
+                                onApplyToView={() => onApplySortToView?.(
+                                    sortMode === 'custom' ? 'alpha-asc' : sortMode,
+                                )}
+                                onResetCustomOrder={hasCustomOrder && onResetCustomOrder
+                                    ? () => onResetCustomOrder(layer.id)
+                                    : undefined}
+                            />
+                        </span>
                     )}
 
                     {/* Layer actions */}
@@ -906,56 +1025,39 @@ function LayerRow({
                                     />
                                 ))}
 
-                                {/* Entities placed directly in the layer */}
-                                {unassignedEntities.length > 0 && (
+                                {/* The column's roots, in the order the canvas draws
+                                    them. Drag a row onto another row's top or bottom
+                                    edge to rearrange; the middle drops into the layer. */}
+                                {rootRows.length > 0 && (
                                     <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
-                                        {/* The bulk escape hatch lives HERE, next to the things it
-                                            removes — not as a hover-only icon on the layer row, which
-                                            is where nobody found it. */}
                                         <div className="flex items-center gap-1.5 px-3 py-1">
                                             <Layers className="w-3 h-3 text-slate-400 shrink-0" />
                                             <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
-                                                Layer Entities ({unassignedEntities.length})
+                                                In this column ({rootRows.length})
                                             </span>
                                             <span className="flex-1" />
-                                            <button
-                                                onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
-                                                title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
-                                                className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
-                                            >
-                                                Clear all
-                                            </button>
+                                            {totalAssigned > 0 && (
+                                                <button
+                                                    onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
+                                                    title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
+                                                    className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+                                                >
+                                                    Clear all
+                                                </button>
+                                            )}
                                         </div>
-                                        {unassignedEntities.map(entityId => (
+                                        {rootRows.map(row => (
                                             <AssignedEntityItem
-                                                key={entityId}
-                                                entityId={entityId}
+                                                key={row.urn}
+                                                entityId={row.urn}
                                                 depth={0}
                                                 entityIndex={entityIndex}
                                                 onUnassign={onUnassign}
-                                            />
-                                        ))}
-                                    </div>
-                                )}
-
-                                {/* Roots the layer's entity-type rule places. Shown so the
-                                    wizard agrees with the canvas, which renders them here. */}
-                                {rulePlaced.length > 0 && (
-                                    <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
-                                        <div className="flex items-center gap-1.5 px-3 py-1">
-                                            <Layers className="w-3 h-3 text-slate-400 shrink-0" />
-                                            <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
-                                                By type ({rulePlaced.length})
-                                            </span>
-                                        </div>
-                                        {rulePlaced.map(entityId => (
-                                            <AssignedEntityItem
-                                                key={entityId}
-                                                entityId={entityId}
-                                                depth={0}
-                                                entityIndex={entityIndex}
-                                                onUnassign={onUnassign}
-                                                rulePlaced
+                                                rulePlaced={row.rulePlaced}
+                                                onReorder={onReorderRoot
+                                                    ? (dragged, target, position) =>
+                                                        onReorderRoot(layer.id, dragged, target, position)
+                                                    : undefined}
                                             />
                                         ))}
                                     </div>
@@ -1010,7 +1112,12 @@ function LayerRow({
 export function LayerHierarchyPanel({
     layers,
     assignments,
-    rulePlacedByLayer,
+    rootsByLayer,
+    defaultNodeSortMode,
+    onSetLayerSortMode,
+    onApplySortToView,
+    onResetCustomOrder,
+    onReorderRoot,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -1031,6 +1138,7 @@ export function LayerHierarchyPanel({
 
     return (
         <div
+            data-testid="layer-hierarchy-panel"
             className={cn(
                 'relative flex flex-col h-full rounded-2xl overflow-hidden',
                 'bg-white/60 dark:bg-slate-900/60 backdrop-blur-xl',
@@ -1107,7 +1215,12 @@ export function LayerHierarchyPanel({
                                 layer={layer}
                                 layerIndex={i}
                                 assignments={assignments}
-                                rulePlacedUrns={rulePlacedByLayer?.get(layer.id)}
+                                rows={rootsByLayer?.get(layer.id)}
+                                defaultNodeSortMode={defaultNodeSortMode}
+                                onSetLayerSortMode={onSetLayerSortMode}
+                                onApplySortToView={onApplySortToView}
+                                onResetCustomOrder={onResetCustomOrder}
+                                onReorderRoot={onReorderRoot}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
                                 entityIndex={entityIndex}

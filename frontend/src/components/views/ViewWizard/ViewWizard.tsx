@@ -77,7 +77,7 @@ import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useView
 import { useWizardScope } from '@/hooks/useWizardScope'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { resolveWizardEntityScope } from './effectivePlacement'
-import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, LayerNodeSortAlgo, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
@@ -152,6 +152,10 @@ export interface WizardFormData {
      *  root nodes and hydration then loads assigned URNs only. Undefined = derive
      *  exactly as before. */
     entityScope?: 'all' | 'curated'
+    /** View-wide default node sort ("apply to all columns"). A layer's own
+     *  `nodeSortMode` still wins; absent = 'alpha-asc'. Carried here because
+     *  `referenceLayout` stores it beside layers/assignments, not on a layer. */
+    defaultNodeSortMode?: LayerNodeSortAlgo
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
     advancedFilters: ActiveFilter[]
@@ -941,7 +945,7 @@ function ViewWizardBody({
     // visible in the wizard here.
     useEffect(() => {
         if (mode === 'edit' && editingView) {
-            const { layers, assignments } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
+            const { layers, assignments, defaultNodeSortMode } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
@@ -952,6 +956,7 @@ function ViewWizardBody({
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
                 layers,
                 assignments,
+                defaultNodeSortMode,
                 visibleEntityTypes: editingView.content.visibleEntityTypes,
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
                 advancedFilters: (editingView.filters.fieldFilters || []).map(f => ({
@@ -1131,10 +1136,11 @@ function ViewWizardBody({
             const priorDefaultSort = mode === 'edit'
                 ? normalizeReferenceLayout(editingView?.layout?.referenceLayout).defaultNodeSortMode
                 : undefined
+            const effectiveDefaultSort = formData.defaultNodeSortMode ?? priorDefaultSort
             const normalizedLayout = normalizeReferenceLayout({
                 layers: layersWithScope,
                 assignments: formData.assignments,
-                ...(priorDefaultSort ? { defaultNodeSortMode: priorDefaultSort } : {}),
+                ...(effectiveDefaultSort ? { defaultNodeSortMode: effectiveDefaultSort } : {}),
             })
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
