@@ -62,6 +62,7 @@ import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
+import { Section } from './DrawerSection'
 
 // ============================================
 // Types
@@ -865,32 +866,6 @@ function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
   )
 }
 
-interface SectionProps {
-  title: string
-  icon?: React.ComponentType<{ className?: string }>
-  children: React.ReactNode
-  action?: React.ReactNode
-  /** Let content extend closer to the drawer edges (title stays aligned).
-   *  Used for the content-dense Properties section. */
-  flush?: boolean
-}
-
-function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
-  return (
-    <div className="px-5 py-4">
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <div className="flex items-center gap-2">
-          {Icon && <Icon className="w-4 h-4 text-ink-muted" />}
-          <h3 className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
-            {title}
-          </h3>
-        </div>
-        {action}
-      </div>
-      {flush ? <div className="-mx-3">{children}</div> : children}
-    </div>
-  )
-}
 
 // A rich freshness stat — icon chip + label (with an optional live pulse) + the relative time, and
 // the exact UTC timestamp on hover. Used for "Updated" (last change) and "Synced" (live layer).
@@ -1101,7 +1076,7 @@ function RelationshipSummary({
   }
 
   return (
-    <Section title="Relationship" icon={LucideIcons.Network}>
+    <Section title="Relationship" icon={LucideIcons.Network} collapsible sectionKey="relationship">
       <div className="space-y-2">
         {parentNode ? (
           <button

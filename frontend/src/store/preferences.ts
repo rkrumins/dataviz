@@ -72,6 +72,12 @@ interface PreferencesState {
   sidebarCollapsed: boolean
   toggleSidebar: () => void
 
+  // Entity drawer — which sections the user has folded away, by section
+  // key. A key absent from the map is OPEN: the default is open, so a new
+  // section never arrives hidden and an older stored map never hides one.
+  drawerSectionsCollapsed: Record<string, boolean>
+  toggleDrawerSection: (key: string) => void
+
   // Canvas preferences
   showMinimap: boolean
   showGrid: boolean
@@ -293,6 +299,15 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Sidebar
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+
+      // Entity drawer sections
+      drawerSectionsCollapsed: {},
+      toggleDrawerSection: (key) => set((state) => ({
+        drawerSectionsCollapsed: {
+          ...state.drawerSectionsCollapsed,
+          [key]: !state.drawerSectionsCollapsed[key],
+        },
+      })),
 
       // Canvas
       showMinimap: true,
