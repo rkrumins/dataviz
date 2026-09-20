@@ -2049,8 +2049,12 @@ export const LayerColumn = React.memo(function LayerColumn({
                         ? 'Another column holds this entity'
                         : isBlankModel ? 'No entities yet' : 'No assigned entities yet'}
                   </p>
+                  {/* Plain token, not `/40`: an alpha suffix on a CSS-variable
+                      token emits no CSS at all, so the neighbouring hint has been
+                      rendering at full strength regardless. The smaller size
+                      already carries the hierarchy. */}
                   {anchorIssue && (
-                    <p className="text-xs text-ink-muted/40 mt-1 text-center max-w-[220px]">
+                    <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">
                       {anchorIssue === 'missing'
                         ? 'It was removed from the source, so there is nothing left to show here. Delete the column, or point it at another entity.'
                         : 'Two columns are built around the same entity; only the first can show it. Delete this one, or anchor it elsewhere.'}

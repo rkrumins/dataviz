@@ -300,7 +300,11 @@ function AssignedEntityItem({
                 <div
                     aria-hidden
                     className={cn(
-                        'absolute inset-x-1 h-0.5 rounded-full bg-blue-500 z-10',
+                        // pointer-events-none is not decoration: this sits ON the
+                        // drop target's top/bottom edge, exactly where the cursor
+                        // is when the band is showing, and must not take the
+                        // dragover out from under it.
+                        'absolute inset-x-1 h-0.5 rounded-full bg-blue-500 z-10 pointer-events-none',
                         band === 'before' ? 'top-0' : 'bottom-0',
                     )}
                 />

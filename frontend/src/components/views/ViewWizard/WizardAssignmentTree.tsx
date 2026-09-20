@@ -909,9 +909,10 @@ export function WizardAssignmentTree({
     // Deselecting a parent releases its whole subtree — leaving orphaned child
     // selections behind (the old behaviour) meant the next assignment silently
     // placed entities the user thought they'd just let go of.
-    const clearShortfall = () => setShortfall(0)
-
     const handleSelect = useCallback((id: string, isMulti: boolean) => {
+        // The shortfall describes the set select-all produced. Any other
+        // selection change makes it a statement about something else.
+        setShortfall(0)
         setSelectedIds(prev => {
             const isSelected = prev.has(id)
             const subtree = descendantsOf(id)
@@ -942,7 +943,7 @@ export function WizardAssignmentTree({
     const handleBulkAssign = useCallback((layerId: string) => {
         const ids = Array.from(selectedIds)
         if (ids.length === 0) return
-        clearShortfall()
+        setShortfall(0)
 
         if (onBulkAssign) {
             onBulkAssign(layerId, ids)
