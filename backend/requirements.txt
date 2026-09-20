@@ -24,7 +24,7 @@ redis>=8.1.0,<9
 hiredis>=3.4.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
-sqlalchemy>=2.0.52
+sqlalchemy>=2.0.54
 asyncpg>=0.31.0          # PostgreSQL async driver — runtime
 psycopg2-binary>=2.9.12   # PostgreSQL sync driver — Alembic migrations
 alembic>=1.19.2          # Schema migrations
