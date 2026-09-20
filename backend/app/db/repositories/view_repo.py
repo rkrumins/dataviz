@@ -534,6 +534,27 @@ async def create_view(
         req.name, req.workspace_id, req.data_source_id,
         ontology_digest[:12] + "…" if ontology_digest else None,
     )
+
+    # Stamp the entity scope at BIRTH so it is never inferred later.
+    #
+    # `derive_entity_scope` falls back to "curated iff this view has any
+    # assignment", which is a property that CHANGES as the view is edited: a
+    # rule-driven view reads 'all' until the first drag and 'curated' after,
+    # and that flip switches off the very rules placing its contents. Writing
+    # the answer once, here, is what stops it moving.
+    #
+    # Done in the repository rather than in a client so it holds for every
+    # caller — wizard, import, duplicate, direct API — in every environment.
+    # The value written is exactly what the read path would have derived, so a
+    # view created before and after this behaves identically.
+    config = dict(req.config) if isinstance(req.config, dict) else {}
+    if config:
+        content = config.get("content")
+        content = dict(content) if isinstance(content, dict) else {}
+        if content.get("entityScope") not in ("all", "curated"):
+            content["entityScope"] = derive_entity_scope(config)
+        config["content"] = content
+
     row = ViewORM(
         name=req.name,
         description=req.description,
@@ -541,7 +562,7 @@ async def create_view(
         workspace_id=req.workspace_id,
         data_source_id=req.data_source_id,
         view_type=req.view_type or "graph",
-        config=json.dumps(req.config) if req.config else "{}",
+        config=json.dumps(config) if config else "{}",
         visibility=req.visibility or "private",
         created_by=user_id,
         tags=json.dumps(req.tags) if req.tags else None,

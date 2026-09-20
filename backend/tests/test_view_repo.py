@@ -1025,3 +1025,73 @@ async def test_list_views_filtered_search_multi_term_and(db_session: AsyncSessio
     # Single-word search is unchanged: matches both.
     resp_single = await view_repo.list_views_filtered(db_session, search="pipeline")
     assert {v.name for v in resp_single.items} == {"Sales Pipeline", "Pipeline Review"}
+
+
+# ---------------------------------------------------------------------------
+# entityScope is stamped at birth, never inferred later
+# ---------------------------------------------------------------------------
+#
+# `derive_entity_scope` falls back to "curated iff this view has any
+# assignment" — a property that CHANGES as the view is edited. A rule-driven
+# view reads 'all' until the first drag and 'curated' after, and that flip
+# switches off the rules placing its contents. Writing the answer once, at
+# creation, is what stops it moving. Stamped in the repository so it holds for
+# every caller, not just the wizard.
+
+async def _created_config(session: AsyncSession, config: dict) -> dict:
+    ws = await _create_workspace(session)
+    created = await view_repo.create_view(
+        session, _make_create_req(ws.id, view_type="reference", config=config)
+    )
+    fetched = await view_repo.get_view(session, created.id)
+    return fetched.config or {}
+
+
+async def test_create_stamps_entity_scope_all_for_a_rule_driven_view(db_session: AsyncSession):
+    cfg = await _created_config(db_session, {
+        "content": {},
+        "layout": {"type": "reference", "referenceLayout": {
+            "layers": [{"id": "l1", "entityTypes": ["domain"]}], "assignments": {},
+        }},
+    })
+    assert cfg["content"]["entityScope"] == "all"
+
+
+async def test_create_stamps_entity_scope_curated_when_entities_are_placed(db_session: AsyncSession):
+    cfg = await _created_config(db_session, {
+        "content": {},
+        "layout": {"type": "reference", "referenceLayout": {
+            "layers": [{"id": "l1"}],
+            "assignments": {"urn:a": {"layerId": "l1", "inheritsChildren": True}},
+        }},
+    })
+    assert cfg["content"]["entityScope"] == "curated"
+
+
+async def test_create_never_overrides_a_scope_the_caller_chose(db_session: AsyncSession):
+    # Assignments exist, so the derivation would say 'curated' — the caller's
+    # explicit 'all' must win, or pinning a rule-driven view would be pointless.
+    cfg = await _created_config(db_session, {
+        "content": {"entityScope": "all"},
+        "layout": {"type": "reference", "referenceLayout": {
+            "layers": [{"id": "l1"}],
+            "assignments": {"urn:a": {"layerId": "l1", "inheritsChildren": True}},
+        }},
+    })
+    assert cfg["content"]["entityScope"] == "all"
+
+
+async def test_create_adds_content_when_a_config_has_none(db_session: AsyncSession):
+    cfg = await _created_config(db_session, {
+        "layout": {"type": "reference", "referenceLayout": {"layers": [], "assignments": {}}},
+    })
+    assert cfg["content"]["entityScope"] == "all"
+
+
+async def test_create_leaves_an_empty_config_alone(db_session: AsyncSession):
+    # Nothing to reason about, and inventing a `content` block for a view that
+    # has no config would be writing a setting nobody asked for.
+    ws = await _create_workspace(db_session)
+    created = await view_repo.create_view(db_session, _make_create_req(ws.id))
+    fetched = await view_repo.get_view(db_session, created.id)
+    assert not (fetched.config or {}).get("content", {}).get("entityScope")
