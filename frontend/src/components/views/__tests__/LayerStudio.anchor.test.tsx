@@ -148,3 +148,23 @@ describe('LayerStudio — an anchor holding more than one page', () => {
     expect(rows().queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument()
   })
 })
+
+describe('LayerStudio — not creating a column that could never fill', () => {
+  it('skips an entity that already has a column', async () => {
+    // A second column on the same entity can never fill (placement resolves an
+    // anchor to ONE layer), so it is cheaper not to create it.
+    const updateFormData = vi.fn()
+    render(<LayerStudio formData={formData(anchored)} updateFormData={updateFormData} />)
+    await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: /auto-layer/i }))
+    const sheet = within(screen.getByTestId('auto-layer-sheet'))
+    fireEvent.click(sheet.getByRole('radio', { name: /One column each/ }))
+    // Financial Services is the only scanned top-level entity, and it is the
+    // anchor of the column already on the draft.
+    sheet.getAllByRole('checkbox').forEach(box => fireEvent.click(box))
+    fireEvent.click(sheet.getByRole('button', { name: /^Create/ }))
+
+    expect(updateFormData.mock.calls.some(c => 'layers' in c[0])).toBe(false)
+  })
+})

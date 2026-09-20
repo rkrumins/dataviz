@@ -37,7 +37,10 @@ function node(id: string): HierarchyNode {
 /** The anchor's first page, already promoted into the column's rows. */
 const NODES = [node('Payments'), node('Ledger')]
 
-function renderColumn(anchorMore?: { anchorUrn: string; remaining: number }) {
+function renderColumn(
+    anchorMore?: { anchorUrn: string; remaining: number },
+    opts: { nodes?: HierarchyNode[]; anchorIssue?: 'missing' | 'duplicate' } = {},
+) {
     installJsdomLayout()
     const onLoadMore = vi.fn()
     const session = stubSession()
@@ -47,8 +50,9 @@ function renderColumn(anchorMore?: { anchorUrn: string; remaining: number }) {
                 <LayerColumn
                     layer={layer}
                     schema={null}
-                    nodes={NODES}
+                    nodes={opts.nodes ?? NODES}
                     anchorMore={anchorMore}
+                    anchorIssue={opts.anchorIssue}
                     selectedNodeId={null}
                     expandedNodes={new Set()}
                     searchResults={new Set<string>()}
@@ -95,5 +99,28 @@ describe('LayerColumn — paging an anchored column', () => {
         renderColumn(undefined)
         expect(screen.getByText('Payments')).toBeInTheDocument()
         expect(screen.queryByText(/more/i)).not.toBeInTheDocument()
+    })
+})
+
+describe('LayerColumn — an anchored column that can never fill', () => {
+    // Both render as an ordinary empty column otherwise, and "No assigned
+    // entities yet" is untrue in both: the column was built around an entity,
+    // and why it is empty has nothing to do with assignment.
+    it('says so when the entity was deleted at source', () => {
+        renderColumn(undefined, { nodes: [], anchorIssue: 'missing' })
+        expect(screen.getByText(/entity is gone/i)).toBeInTheDocument()
+        expect(screen.getByText(/removed from the source/i)).toBeInTheDocument()
+        expect(screen.queryByText(/No assigned entities yet/i)).not.toBeInTheDocument()
+    })
+
+    it('says so when another column already holds that entity', () => {
+        renderColumn(undefined, { nodes: [], anchorIssue: 'duplicate' })
+        expect(screen.getByText(/Another column holds this entity/i)).toBeInTheDocument()
+        expect(screen.getByText(/only the first can show it/i)).toBeInTheDocument()
+    })
+
+    it('keeps the ordinary empty state for an ordinary empty column', () => {
+        renderColumn(undefined, { nodes: [] })
+        expect(screen.getByText(/No assigned entities yet/i)).toBeInTheDocument()
     })
 })

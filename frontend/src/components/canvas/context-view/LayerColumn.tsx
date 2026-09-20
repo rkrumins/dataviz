@@ -157,6 +157,9 @@ interface LayerColumnProps {
    *  and how many of them are still unloaded. Absent once the column holds the
    *  lot (or when the layer has no anchor), which is what hides the row. */
   anchorMore?: { anchorUrn: string; remaining: number }
+  /** Why an anchored column can never fill — see anchorIssueByLayer. Changes
+   *  the empty state from "nothing assigned" (untrue here) to the real reason. */
+  anchorIssue?: 'missing' | 'duplicate'
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -248,6 +251,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onEndReached,
   onResizeLayer,
   anchorMore,
+  anchorIssue,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -2039,14 +2043,25 @@ export const LayerColumn = React.memo(function LayerColumn({
                     />
                   </div>
                   <p className="text-sm font-medium text-ink-muted/60">
-                    {isBlankModel ? 'No entities yet' : 'No assigned entities yet'}
+                    {anchorIssue === 'missing'
+                      ? 'This column\u2019s entity is gone'
+                      : anchorIssue === 'duplicate'
+                        ? 'Another column holds this entity'
+                        : isBlankModel ? 'No entities yet' : 'No assigned entities yet'}
                   </p>
+                  {anchorIssue && (
+                    <p className="text-xs text-ink-muted/40 mt-1 text-center max-w-[220px]">
+                      {anchorIssue === 'missing'
+                        ? 'It was removed from the source, so there is nothing left to show here. Delete the column, or point it at another entity.'
+                        : 'Two columns are built around the same entity; only the first can show it. Delete this one, or anchor it elsewhere.'}
+                    </p>
+                  )}
                   {/* The hint follows the affordance. `onAddToLayer` is what renders the "+"
                       (see the header above), and the caller only passes it inside a draft — so
                       with editing unavailable (read-only, or version control switched off) there
                       is no "+" anywhere on screen, and telling someone to click one is just a
                       small lie in the corner of the page. */}
-                  {onAddToLayer && (
+                  {onAddToLayer && !anchorIssue && (
                     <p className="text-xs text-ink-muted/40 mt-1">
                       {isBlankModel ? 'Click + to add entities' : 'Click + to assign entities'}
                     </p>

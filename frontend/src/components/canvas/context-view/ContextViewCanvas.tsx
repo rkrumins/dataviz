@@ -3370,6 +3370,38 @@ export function ContextViewCanvas({
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
   const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
   const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'slow' || hydrationStatus === 'unavailable' || hydrationStatus === 'error'
+
+  /**
+   * Why an anchored column can show nothing. Both cases otherwise render as an
+   * ordinary empty column — "No assigned entities yet" — which is a lie here:
+   * the column was built around an entity, and the reason it is empty has
+   * nothing to do with assignment.
+   *
+   *   missing   — the entity is gone from the graph (deleted at source). Only
+   *               diagnosed once hydration is READY; an absence mid-load is
+   *               just an absence mid-load.
+   *   duplicate — another column is already anchored to it. Placement resolves
+   *               the anchor to ONE layer, so this column can never fill, and
+   *               no amount of waiting or dragging will change that.
+   */
+  const anchorIssueByLayer = useMemo(() => {
+    const out = new Map<string, 'missing' | 'duplicate'>()
+    const owner = new Map<string, string>()
+    const assignments = activeReferenceLayout.assignments
+    for (const layer of sortedLayers) {
+      const urn = layer.anchorUrn
+      if (!urn) continue
+      if (!nodeMap.get(urn)) {
+        if (hydrationStatus === 'ready') out.set(layer.id, 'missing')
+        continue
+      }
+      // The layer the anchor's own assignment names is the one that fills;
+      // failing that, the first anchored column in reading order.
+      if (!owner.has(urn)) owner.set(urn, assignments[urn]?.layerId ?? layer.id)
+      if (owner.get(urn) !== layer.id) out.set(layer.id, 'duplicate')
+    }
+    return out
+  }, [sortedLayers, nodeMap, hydrationStatus, activeReferenceLayout])
   const isHydratingInitial = hydrationPhase !== 'complete'
 
   // Floating loading notifications — keep the full set so every long-running operation
@@ -5480,6 +5512,7 @@ export function ContextViewCanvas({
                 layer={layer}
                 nodes={renderByLayer.get(layer.id) ?? EMPTY_LAYER_NODES}
                 anchorMore={anchorMoreByLayer.get(layer.id)}
+                anchorIssue={anchorIssueByLayer.get(layer.id)}
                 schema={schema}
                 // An empty column means something different in each: in a Context View the
                 // entities exist and just aren't assigned here; in a blank model nothing has

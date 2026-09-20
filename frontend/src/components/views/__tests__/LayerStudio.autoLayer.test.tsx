@@ -420,19 +420,31 @@ describe('Auto-layer — scale', () => {
     })
   })
 
-  it('declines a number of columns a view cannot be read across', () => {
+  it('narrows without ticking an unusable number, and says why', () => {
+    // Ticking 250 would leave the action refused with no way back but clearing
+    // — a dead end dressed up as a selection. The pill still narrows the list.
     withEntities(AUTO_LAYER_MAX + 50, () => {
       const updateFormData = vi.fn()
       render(<LayerStudio formData={makeFormData()} updateFormData={updateFormData} />)
       openSheet()
       fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
-      // One click on the type pill selects every entity of that type.
       fireEvent.click(sheet().getByRole('button', { name: /^Domains/ }))
 
+      expect(checkboxes().every(box => !(box as HTMLInputElement).checked)).toBe(true)
       expect(createButton()).toBeDisabled()
-      expect(sheet().getByText(/more than a view can be read across/)).toBeInTheDocument()
+      expect(sheet().getByText(/too many to\s+give each a column/)).toBeInTheDocument()
       fireEvent.click(createButton())
       expect(updateFormData).not.toHaveBeenCalled()
+    })
+  })
+
+  it('still ticks them all when the count is usable', () => {
+    withEntities(5, () => {
+      render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+      openSheet()
+      fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
+      fireEvent.click(sheet().getByRole('button', { name: /^Domains/ }))
+      expect(createButton()).toHaveTextContent('Create 5 columns')
     })
   })
 })

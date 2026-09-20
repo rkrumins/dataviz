@@ -567,15 +567,23 @@ function AutoLayerSheet({
         onModeChange(next)
     }
 
-    /** Picking a type IS the gesture "give each of these its own column", so it
-     *  ticks them all. "Everything" clears instead, rather than selecting 500. */
+    /**
+     * Picking a type IS the gesture "give each of these its own column", so it
+     * ticks them all — but only when that many columns is a view someone could
+     * read. Ticking 10,000 would leave the action refused and no way back except
+     * clearing, which is a dead end dressed up as a selection. Past the cap the
+     * pill still NARROWS the list (that part is always useful) and leaves the
+     * choosing to the user. "Everything" clears, rather than selecting 500.
+     */
     const chooseFacet = (next: string) => {
         setFacet(next)
         setConfirming(false)
         setShownCount(SHEET_PAGE)
-        setEntityKeys(next === ALL_TYPES
+        if (next === ALL_TYPES) { setEntityKeys(new Set()); return }
+        const ofType = entities.filter(e => e.type === next)
+        setEntityKeys(ofType.length > AUTO_LAYER_MAX
             ? new Set()
-            : new Set(entities.filter(e => e.type === next).map(e => e.urn)))
+            : new Set(ofType.map(e => e.urn)))
     }
 
     const [shownCount, setShownCount] = useState(SHEET_PAGE)
@@ -872,6 +880,13 @@ function AutoLayerSheet({
                             of the view. Add {strandedByType.length === 1 ? 'a column' : 'columns'} for
                             {strandedByType.length === 1 ? ' it' : ' them'} with Group by type.
                         </span>
+                    ) : selectedCount === 0 && mode === 'entity'
+                        && facetLabel && matchingEntities.length > AUTO_LAYER_MAX ? (
+                        <>
+                            {matchingEntities.length.toLocaleString()} {facetLabel} is too many to
+                            give each a column. Pick the ones you want, or use Group by type to
+                            hold them all in one.
+                        </>
                     ) : selectedCount === 0 ? (
                         mode === 'type'
                             ? 'Pick the types you want as columns.'
@@ -1512,10 +1527,28 @@ export function LayerStudio({
     /** One column per chosen entity, each carrying its subtree, in ONE commit. */
     const applyEntityLayers = useCallback((selected: TopLevelEntity[]) => {
         if (selected.length === 0) return
-        const { layers: added, assignments: addedAssignments } = layersForTopLevelEntities(selected, layers.length)
+        // A second column anchored to the same entity can never fill — placement
+        // resolves an anchor to ONE layer — so it would sit there empty for ever.
+        // Cheaper to not create it than to explain it afterwards.
+        const alreadyAnchored = new Set(
+            layers.map(l => l.anchorUrn).filter((u): u is string => !!u),
+        )
+        const fresh = selected.filter(e => !alreadyAnchored.has(e.urn))
+        const skipped = selected.length - fresh.length
+        if (fresh.length === 0) {
+            notify('info', skipped === 1
+                ? 'That entity already has a column'
+                : 'Those entities already have columns')
+            setAutoLayerMode(null)
+            return
+        }
+        const { layers: added, assignments: addedAssignments } = layersForTopLevelEntities(fresh, layers.length)
         commitLayout({ layers: [...layers, ...added], assignments: { ...assignments, ...addedAssignments } })
         setAutoLayerMode(null)
-        notify('success', `Added ${added.length} ${added.length === 1 ? 'column' : 'columns'} — each carries everything its entity contains`)
+        notify('success', [
+            `Added ${added.length} ${added.length === 1 ? 'column' : 'columns'} — each carries everything its entity contains`,
+            skipped > 0 ? ` (${skipped} already had one)` : '',
+        ].join(''))
     }, [layers, assignments, commitLayout, notify])
 
     /** Empty a layer in one go — the panel offered no way back out of a bulk place. */
