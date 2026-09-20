@@ -225,6 +225,8 @@ export interface TopLevelEntity {
   urn: string
   name: string
   type: string
+  /** How many entities it contains — what the column would hold. */
+  childCount?: number
 }
 
 /**

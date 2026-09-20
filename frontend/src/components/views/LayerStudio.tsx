@@ -47,6 +47,7 @@ import {
     Loader2,
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
+import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { LayerHierarchyPanel, type ActiveTarget, type DropPayload } from './LayerHierarchyPanel'
 import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
 import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
@@ -357,16 +358,113 @@ function MagicMapSheet({
  *  read left-to-right; forty columns is a scroll bar, not a model. */
 export const AUTO_LAYER_WARN = 24
 
+/** Columns drawn in the preview before it collapses into "+N more". */
+const PREVIEW_LIMIT = 6
+
 export type AutoLayerMode = 'type' | 'entity'
+
+/** Sentinel for the "everything" pill — not a real type id. */
+const ALL_TYPES = '__all_types__'
+
+interface PreviewColumn {
+    key: string
+    name: string
+    color: string
+    meta?: string
+}
+
+/** The columns this selection would create, laid out as the canvas will show
+ *  them. Committing to sixteen columns is a much easier decision when you can
+ *  see them first. */
+function ColumnPreview({ columns }: { columns: PreviewColumn[] }) {
+    const shown = columns.slice(0, PREVIEW_LIMIT)
+    const rest = columns.length - shown.length
+
+    return (
+        <div className="flex items-stretch gap-1.5 overflow-hidden" aria-hidden>
+            {shown.map(col => (
+                <div
+                    key={col.key}
+                    className="w-[92px] shrink-0 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/60 overflow-hidden"
+                >
+                    <div className="h-1" style={{ backgroundColor: col.color }} />
+                    <div className="px-2 py-1.5">
+                        <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200 truncate" title={col.name}>
+                            {col.name}
+                        </div>
+                        {col.meta && <div className="text-[10px] text-slate-400 truncate">{col.meta}</div>}
+                    </div>
+                </div>
+            ))}
+            {rest > 0 && (
+                <div className="w-[64px] shrink-0 rounded-lg border border-dashed border-slate-300 dark:border-slate-600 flex items-center justify-center">
+                    <span className="text-[11px] text-slate-400 tabular-nums">+{rest}</span>
+                </div>
+            )}
+        </div>
+    )
+}
+
+/** One of the two ways to build columns, carrying a live count of what it makes. */
+function ModeChoice({
+    active, title, help, count, onSelect,
+}: {
+    active: boolean
+    title: string
+    help: string
+    count: string
+    onSelect: () => void
+}) {
+    return (
+        <button
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={onSelect}
+            className={cn(
+                'flex-1 text-left px-3.5 py-2.5 rounded-xl border transition-colors',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                active
+                    ? 'border-sky-400 dark:border-sky-500 bg-sky-50 dark:bg-sky-500/10'
+                    : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
+            )}
+        >
+            <div className="flex items-baseline justify-between gap-2">
+                <span className={cn(
+                    'text-sm font-medium',
+                    active ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'
+                )}>
+                    {title}
+                </span>
+                <span className="text-[11px] text-slate-400 shrink-0 tabular-nums">{count}</span>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{help}</p>
+        </button>
+    )
+}
+
+/** A type's colour chip + icon, shared by both lists. */
+function TypeMark({ color, icon }: { color?: string; icon?: string }) {
+    return (
+        <span
+            className="w-5 h-5 rounded flex items-center justify-center text-white shrink-0"
+            style={{ backgroundColor: color ?? '#94a3b8' }}
+        >
+            {icon ? <DynamicIcon name={icon} className="w-3 h-3" /> : <Columns3 className="w-3 h-3" />}
+        </span>
+    )
+}
 
 /**
  * Turn the top of the hierarchy into columns, in one reviewable pass.
  *
- *  • BY TYPE writes layers that carry `entityTypes` and NO assignments — the type
- *    IS the rule, so every root of that type lands in the column and everything
- *    it contains inherits. A root ingested later lands there too.
- *  • BY ENTITY writes one layer per chosen entity plus one inheriting assignment
- *    each, so that entity's whole subtree becomes its own column.
+ *  • GROUP BY TYPE writes layers carrying `entityTypes` and NO assignments — the
+ *    type IS the rule, so every entity of that type lands in the column and
+ *    everything it contains inherits. One ingested later lands there too.
+ *  • ONE COLUMN EACH writes one layer per chosen entity plus one inheriting
+ *    assignment each, so that entity's whole subtree becomes its own column.
+ *    Filtering to a single type first is the common case — "give every Domain
+ *    its own column" — which is why picking a type selects all of them.
  *
  * Mirrors MagicMapSheet: review, then ONE commit (one undo step).
  */
@@ -401,6 +499,10 @@ function AutoLayerSheet({
 }) {
     const available = useMemo(() => candidates.filter(c => !c.coveredByLayerId), [candidates])
 
+    /** Types actually present in the scanned entities — the pills to filter by. */
+    const facets = useMemo(() => candidates.filter(c => (c.observedCount ?? 0) > 0), [candidates])
+    const byTypeId = useMemo(() => new Map(candidates.map(c => [c.typeId, c])), [candidates])
+
     // Default: the declared roots that actually have instances. A type the
     // ontology calls a root but the graph has never seen would build an empty
     // column, and an orphan-root type is a judgement call — both start off.
@@ -413,11 +515,12 @@ function AutoLayerSheet({
     }, [available])
 
     // `null` = "the user hasn't chosen yet", so the defaults stay live as the
-    // scanned population grows (e.g. after "Scan all"). Once they touch a box the
-    // explicit set takes over and a later re-scan can't wipe their choice — which
-    // is also why this is not an effect that re-seeds state.
+    // scanned population grows (e.g. after "Find the rest"). Once they touch a box
+    // the explicit set takes over and a later re-scan can't wipe their choice —
+    // which is also why this is not an effect that re-seeds state.
     const [typeKeys, setTypeKeys] = useState<Set<string> | null>(null)
     const [entityKeys, setEntityKeys] = useState<Set<string>>(new Set())
+    const [facet, setFacet] = useState<string>(ALL_TYPES)
     const [confirming, setConfirming] = useState(false)
 
     const selectedTypeKeys = typeKeys ?? defaultTypeKeys
@@ -442,6 +545,21 @@ function AutoLayerSheet({
         onModeChange(next)
     }
 
+    /** Picking a type IS the gesture "give each of these its own column", so it
+     *  ticks them all. "Everything" clears instead, rather than selecting 500. */
+    const chooseFacet = (next: string) => {
+        setFacet(next)
+        setConfirming(false)
+        setEntityKeys(next === ALL_TYPES
+            ? new Set()
+            : new Set(entities.filter(e => e.type === next).map(e => e.urn)))
+    }
+
+    const visibleEntities = useMemo(
+        () => (facet === ALL_TYPES ? entities : entities.filter(e => e.type === facet)),
+        [entities, facet],
+    )
+
     const selectedTypes = useMemo(
         () => available.filter(c => selectedTypeKeys.has(c.typeId)),
         [available, selectedTypeKeys],
@@ -453,6 +571,40 @@ function AutoLayerSheet({
     const selectedCount = mode === 'type' ? selectedTypes.length : selectedEntities.length
     const needsConfirm = selectedCount > AUTO_LAYER_WARN
 
+    /** Top-level entities that would end up with no column at all. A curated view
+     *  renders only what is placed, so leaving this silent ships a view quietly
+     *  missing entities. */
+    const strandedByType = useMemo(() => {
+        if (mode !== 'entity' || selectedEntities.length === 0) return []
+        const placed = new Set(selectedEntities.map(e => e.urn))
+        const counts = new Map<string, number>()
+        for (const entity of entities) {
+            if (placed.has(entity.urn)) continue
+            counts.set(entity.type, (counts.get(entity.type) ?? 0) + 1)
+        }
+        return [...counts.entries()]
+            .map(([typeId, count]) => ({ label: byTypeId.get(typeId)?.label ?? typeId, count }))
+            .sort((a, b) => b.count - a.count)
+    }, [mode, entities, selectedEntities, byTypeId])
+
+    const previewColumns = useMemo<PreviewColumn[]>(() => (
+        mode === 'type'
+            ? selectedTypes.map(c => ({
+                key: c.typeId,
+                name: c.label,
+                color: c.color ?? '#94a3b8',
+                meta: c.observedCount !== undefined
+                    ? `${c.observedCount} ${c.observedCount === 1 ? 'entity' : 'entities'}`
+                    : undefined,
+            }))
+            : selectedEntities.map(e => ({
+                key: e.urn,
+                name: e.name,
+                color: byTypeId.get(e.type)?.color ?? '#94a3b8',
+                meta: e.childCount ? `${e.childCount} inside` : undefined,
+            }))
+    ), [mode, selectedTypes, selectedEntities, byTypeId])
+
     const apply = () => {
         if (selectedCount === 0) return
         if (needsConfirm && !confirming) { setConfirming(true); return }
@@ -460,11 +612,14 @@ function AutoLayerSheet({
         else onApplyEntities(selectedEntities)
     }
 
-    const rows = mode === 'type' ? candidates.length : entities.length
+    const rows = mode === 'type' ? candidates.length : visibleEntities.length
+    const facetLabel = facet === ALL_TYPES ? null : byTypeId.get(facet)?.label ?? facet
 
     return (
         <motion.div
             data-testid="auto-layer-sheet"
+            role="region"
+            aria-label="Auto-layer"
             initial={{ opacity: 0, y: 20, scale: 0.97 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.97 }}
@@ -472,93 +627,124 @@ function AutoLayerSheet({
                 'absolute inset-x-0 bottom-0 z-50 mx-4 mb-4',
                 'bg-white dark:bg-slate-900 rounded-2xl shadow-2xl',
                 'border border-slate-200 dark:border-slate-700',
-                'max-h-[70%] flex flex-col overflow-hidden'
+                'max-h-[82%] flex flex-col overflow-hidden'
             )}
         >
-            <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-100 dark:border-slate-800">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3">
                 <div className="min-w-0">
                     <h3 className="font-semibold text-slate-800 dark:text-white flex items-center gap-2">
                         <Columns3 className="w-4 h-4 text-sky-500" />
                         Auto-layer
                     </h3>
                     <p className="text-xs text-slate-500 mt-0.5">
-                        {mode === 'type'
-                            ? 'A column per top-level type. Every entity of that type lands there, and everything it contains follows.'
-                            : 'A column per top-level entity, carrying its whole subtree.'}
-                        {mode === 'entity' && hasMore && (
-                            <>
-                                {' · '}
-                                <span className="text-amber-600 dark:text-amber-400">
-                                    scanned {scanned} of {total}
-                                </span>
-                            </>
-                        )}
+                        Build columns from the top of your hierarchy.
                     </p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                    {/* Mode switch */}
-                    <div className="flex items-center p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg">
-                        {(['type', 'entity'] as const).map(m => (
-                            <button
-                                key={m}
-                                onClick={() => switchMode(m)}
-                                aria-pressed={mode === m}
-                                className={cn(
-                                    'px-2.5 py-1 text-xs font-medium rounded-md transition-colors',
-                                    mode === m
-                                        ? 'bg-white dark:bg-slate-700 text-slate-800 dark:text-white shadow-sm'
-                                        : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-                                )}
-                            >
-                                {m === 'type' ? 'By type' : 'By entity'}
-                            </button>
-                        ))}
-                    </div>
-                    {mode === 'entity' && hasMore && (
-                        <button
-                            onClick={onLoadAll}
-                            disabled={busy}
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-60"
-                        >
-                            {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                            Scan all {total}
-                        </button>
-                    )}
-                    <button
-                        onClick={apply}
-                        disabled={selectedCount === 0}
-                        className={cn(
-                            'px-3 py-1.5 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-                            confirming ? 'bg-amber-500 hover:bg-amber-600' : 'bg-sky-500 hover:bg-sky-600'
-                        )}
-                    >
-                        {confirming
-                            ? `Really create ${selectedCount} columns?`
-                            : `Create ${selectedCount} ${selectedCount === 1 ? 'column' : 'columns'}`}
-                    </button>
-                    <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">
-                        <X className="w-4 h-4 text-slate-500" />
-                    </button>
-                </div>
+                <button
+                    onClick={onClose}
+                    aria-label="Close"
+                    className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                >
+                    <X className="w-4 h-4 text-slate-500" />
+                </button>
             </div>
 
+            {/* Choose how the columns are built */}
+            <div className="px-5 pb-3 flex gap-2" role="radiogroup" aria-label="How to build the columns">
+                <ModeChoice
+                    active={mode === 'type'}
+                    title="Group by type"
+                    help="Everything of the same type shares one column."
+                    count={`${selectedTypes.length} ${selectedTypes.length === 1 ? 'column' : 'columns'}`}
+                    onSelect={() => switchMode('type')}
+                />
+                <ModeChoice
+                    active={mode === 'entity'}
+                    title="One column each"
+                    help="Every entity you pick gets a column of its own."
+                    count={`${selectedEntities.length} ${selectedEntities.length === 1 ? 'column' : 'columns'}`}
+                    onSelect={() => switchMode('entity')}
+                />
+            </div>
+
+            {/* What you will get */}
+            {previewColumns.length > 0 && (
+                <div className="px-5 pb-3">
+                    <ColumnPreview columns={previewColumns} />
+                </div>
+            )}
+
             {mode === 'type' && ungoverned && (
-                <div className="flex items-start gap-2 px-5 py-2.5 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-100 dark:border-amber-900/40">
+                <div className="mx-5 mb-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-900/40">
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
                     <p className="text-xs text-amber-700 dark:text-amber-300">
-                        Every type in this ontology reports as a top level, so this list is just the
-                        full type list. The hierarchy may not declare what contains what yet — pick
-                        the ones you actually want as columns.
+                        Every type here sits at the top level, so this is simply the full list of
+                        types. Your hierarchy may not say yet what contains what — pick the ones you
+                        actually want as columns.
                     </p>
                 </div>
             )}
 
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-1.5">
+            {/* Narrow to one type — the "every Domain gets a column" gesture */}
+            {mode === 'entity' && facets.length > 0 && (
+                <div className="px-5 pb-3 pt-3 flex flex-wrap gap-1.5 border-t border-slate-100 dark:border-slate-800">
+                    <button
+                        onClick={() => chooseFacet(ALL_TYPES)}
+                        aria-pressed={facet === ALL_TYPES}
+                        className={cn(
+                            'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150',
+                            facet === ALL_TYPES
+                                ? 'bg-slate-700 dark:bg-slate-600 text-white shadow-sm'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                        )}
+                    >
+                        Everything{scanned > 0 && <span className="ml-1.5 opacity-70 tabular-nums">{scanned}</span>}
+                    </button>
+                    {facets.map(f => (
+                        <button
+                            key={f.typeId}
+                            onClick={() => chooseFacet(f.typeId)}
+                            aria-pressed={facet === f.typeId}
+                            title={`Give every ${f.label} a column of its own`}
+                            className={cn(
+                                'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150 flex items-center gap-1.5',
+                                facet === f.typeId
+                                    ? 'text-white shadow-sm'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                            )}
+                            style={facet === f.typeId ? { backgroundColor: f.color ?? '#475569' } : undefined}
+                        >
+                            {f.icon && <DynamicIcon name={f.icon} className="w-3 h-3" />}
+                            {f.label}
+                            <span className="opacity-70 tabular-nums">{f.observedCount}</span>
+                        </button>
+                    ))}
+                    {hasMore && (
+                        <button
+                            onClick={onLoadAll}
+                            disabled={busy}
+                            className="px-3 py-1.5 text-xs font-medium rounded-full border border-dashed border-slate-300 dark:border-slate-600 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors disabled:opacity-60 flex items-center gap-1.5"
+                        >
+                            {busy && <Loader2 className="w-3 h-3 animate-spin" />}
+                            Find the rest of {total}
+                        </button>
+                    )}
+                </div>
+            )}
+
+            {/* The list */}
+            <div
+                data-testid="auto-layer-list"
+                className="flex-1 overflow-y-auto px-4 py-2 space-y-1 border-t border-slate-100 dark:border-slate-800"
+            >
                 {rows === 0 ? (
-                    <p className="text-center text-sm text-slate-400 py-6">
+                    <p className="text-center text-sm text-slate-400 py-8">
                         {mode === 'type'
-                            ? 'No top-level types found — the ontology declares no roots and nothing scanned sits at the top of the hierarchy.'
-                            : 'No top-level entities found in this data source.'}
+                            ? 'Nothing sits at the top of this hierarchy yet, so there are no columns to build.'
+                            : facetLabel
+                                ? `No ${facetLabel} found at the top level.`
+                                : 'No top-level entities found in this data source.'}
                     </p>
                 ) : mode === 'type' ? (
                     candidates.map(candidate => {
@@ -567,11 +753,12 @@ function AutoLayerSheet({
                         return (
                             <label
                                 key={candidate.typeId}
+                                title={candidate.typeId}
                                 className={cn(
-                                    'flex items-center gap-3 px-3 py-2 rounded-lg',
+                                    'flex items-center gap-3 px-3 py-2 rounded-lg transition-colors',
                                     covered
                                         ? 'opacity-50 cursor-not-allowed'
-                                        : 'bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700/70 cursor-pointer'
+                                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/70 cursor-pointer'
                                 )}
                             >
                                 <input
@@ -581,38 +768,33 @@ function AutoLayerSheet({
                                     onChange={() => toggleType(candidate.typeId)}
                                     className="w-4 h-4 rounded border-slate-300 text-sky-500 focus:ring-sky-500"
                                 />
-                                <span
-                                    className="w-2.5 h-2.5 rounded-full shrink-0"
-                                    style={{ backgroundColor: candidate.color ?? '#94a3b8' }}
-                                />
-                                <span className="flex-1 min-w-0">
-                                    <span className="block text-sm text-slate-700 dark:text-slate-200 truncate">
-                                        {candidate.label}
-                                    </span>
-                                    <span className="block text-[11px] text-slate-400 font-mono truncate">
-                                        {candidate.typeId}
-                                    </span>
+                                <TypeMark color={candidate.color} icon={candidate.icon} />
+                                <span className="flex-1 min-w-0 text-sm text-slate-700 dark:text-slate-200 truncate">
+                                    {candidate.label}
                                 </span>
                                 {!candidate.declaredByOntology && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 shrink-0">
-                                        orphan type
+                                    <span
+                                        title="Found at the top level, though your hierarchy doesn't list it as a starting point"
+                                        className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 shrink-0"
+                                    >
+                                        unexpected
                                     </span>
                                 )}
-                                <span className="text-xs text-slate-400 shrink-0">
+                                <span className="text-xs text-slate-400 shrink-0 tabular-nums">
                                     {covered
                                         ? 'already a column'
                                         : candidate.observedCount !== undefined
-                                            ? `${candidate.observedCount} seen`
-                                            : 'not seen'}
+                                            ? candidate.observedCount
+                                            : 'none found'}
                                 </span>
                             </label>
                         )
                     })
                 ) : (
-                    entities.map(entity => (
+                    visibleEntities.map(entity => (
                         <label
                             key={entity.urn}
-                            className="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700/70 cursor-pointer"
+                            className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/70 cursor-pointer transition-colors"
                         >
                             <input
                                 type="checkbox"
@@ -620,13 +802,54 @@ function AutoLayerSheet({
                                 onChange={() => toggleEntity(entity.urn)}
                                 className="w-4 h-4 rounded border-slate-300 text-sky-500 focus:ring-sky-500"
                             />
+                            <TypeMark color={byTypeId.get(entity.type)?.color} icon={byTypeId.get(entity.type)?.icon} />
                             <span className="flex-1 min-w-0 text-sm text-slate-700 dark:text-slate-200 truncate">
                                 {entity.name}
-                                <span className="ml-1.5 text-xs text-slate-400">({entity.type})</span>
                             </span>
+                            {entity.childCount ? (
+                                <span className="text-xs text-slate-400 shrink-0 tabular-nums">
+                                    {entity.childCount} inside
+                                </span>
+                            ) : null}
                         </label>
                     ))
                 )}
+            </div>
+
+            {/* What happens, and the one button that does it */}
+            <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
+                <p className="text-xs text-slate-500 min-w-0">
+                    {strandedByType.length > 0 ? (
+                        <span className="text-amber-600 dark:text-amber-400">
+                            {strandedByType.map(s => `${s.count} ${s.label}`).join(' and ')}
+                            {strandedByType.reduce((n, s) => n + s.count, 0) === 1 ? ' stays' : ' stay'} out
+                            of the view. Add {strandedByType.length === 1 ? 'a column' : 'columns'} for
+                            {strandedByType.length === 1 ? ' it' : ' them'} with Group by type.
+                        </span>
+                    ) : selectedCount === 0 ? (
+                        mode === 'type'
+                            ? 'Pick the types you want as columns.'
+                            : facetLabel
+                                ? `Pick which ${facetLabel} get a column.`
+                                : 'Pick a type above, or choose entities one by one.'
+                    ) : (
+                        'Everything inside these comes along automatically.'
+                    )}
+                </p>
+                <button
+                    onClick={apply}
+                    disabled={selectedCount === 0}
+                    className={cn(
+                        'px-4 py-2 text-white text-sm font-medium rounded-lg shrink-0 transition-colors',
+                        'disabled:opacity-40 disabled:cursor-not-allowed',
+                        'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-sky-400 dark:focus-visible:ring-offset-slate-900',
+                        confirming ? 'bg-amber-500 hover:bg-amber-600' : 'bg-sky-500 hover:bg-sky-600'
+                    )}
+                >
+                    {confirming
+                        ? `Create ${selectedCount} columns?`
+                        : `Create ${selectedCount} ${selectedCount === 1 ? 'column' : 'columns'}`}
+                </button>
             </div>
         </motion.div>
     )
@@ -1196,7 +1419,9 @@ export function LayerStudio({
         if (!snapshot) return []
         return snapshot.topLevelIds.flatMap(urn => {
             const identity = snapshot.directory.get(urn)
-            return identity ? [{ urn, name: identity.name, type: identity.type }] : []
+            return identity
+                ? [{ urn, name: identity.name, type: identity.type, childCount: identity.childCount }]
+                : []
         })
     }, [snapshot])
 

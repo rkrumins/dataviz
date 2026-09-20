@@ -54,9 +54,9 @@ vi.mock('@/hooks/useDataSourceSchema', () => ({
   }),
 }))
 
-const node = (urn: string, entityType: string, displayName: string) => [urn, {
+const node = (urn: string, entityType: string, displayName: string, totalChildren = 0) => [urn, {
   node: { urn, entityType, displayName, properties: {} },
-  childIds: [], totalChildren: 0, hasMore: false, nextCursor: null, loaded: true,
+  childIds: [], totalChildren, hasMore: false, nextCursor: null, loaded: true,
 }] as const
 
 const fakeBrowser = {
@@ -64,7 +64,7 @@ const fakeBrowser = {
   typesOnPathTo: () => null,
   topLevelIds: ['urn:finance', 'urn:risk', 'urn:stray'],
   nodes: new Map([
-    node('urn:finance', 'Domain', 'Finance'),
+    node('urn:finance', 'Domain', 'Finance', 3),
     node('urn:risk', 'Domain', 'Risk'),
     // An orphan root: a Platform ingested with no Domain above it.
     node('urn:stray', 'Platform', 'Stray Platform'),
@@ -117,18 +117,20 @@ const openSheet = () => fireEvent.click(screen.getByRole('button', { name: /auto
 const sheet = () => within(screen.getByTestId('auto-layer-sheet'))
 const createButton = () => sheet().getByRole('button', { name: /^(Create|Really create)/ })
 const checkboxes = () => sheet().getAllByRole('checkbox')
+/** The row list only — names also appear in the column preview above it. */
+const list = () => within(screen.getByTestId('auto-layer-list'))
 
 describe('Auto-layer — by type', () => {
   it('offers one column per declared root type, and flags observed orphan types', () => {
     render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
     openSheet()
 
-    expect(sheet().getByText('Domains')).toBeInTheDocument()
+    expect(list().getByText('Domains')).toBeInTheDocument()
     // Platform is not a declared root, but the graph holds one at top level.
-    expect(sheet().getByText('Platforms')).toBeInTheDocument()
-    expect(sheet().getByText('orphan type')).toBeInTheDocument()
+    expect(list().getByText('Platforms')).toBeInTheDocument()
+    expect(list().getByText('unexpected')).toBeInTheDocument()
     // Table is neither a root nor observed at top level.
-    expect(sheet().queryByText('Tables')).not.toBeInTheDocument()
+    expect(list().queryByText('Tables')).not.toBeInTheDocument()
   })
 
   it('pre-selects only the observed declared roots, so orphans are opt-in', () => {
@@ -175,7 +177,7 @@ describe('Auto-layer — by type', () => {
     render(<LayerStudio formData={makeFormData({ layers: existing })} updateFormData={vi.fn()} />)
     openSheet()
 
-    expect(sheet().getByText('already a column')).toBeInTheDocument()
+    expect(list().getByText('already a column')).toBeInTheDocument()
     expect(createButton()).toBeDisabled()
   })
 
@@ -195,16 +197,16 @@ describe('Auto-layer — by type', () => {
 })
 
 describe('Auto-layer — by entity', () => {
-  const toEntityMode = () => fireEvent.click(sheet().getByRole('button', { name: 'By entity' }))
+  const toEntityMode = () => fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
 
   it('lists the scanned top-level entities', () => {
     render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
     openSheet()
     toEntityMode()
 
-    expect(sheet().getByText(/Finance/)).toBeInTheDocument()
-    expect(sheet().getByText(/Risk/)).toBeInTheDocument()
-    expect(sheet().getByText(/Stray Platform/)).toBeInTheDocument()
+    expect(list().getByText(/Finance/)).toBeInTheDocument()
+    expect(list().getByText(/Risk/)).toBeInTheDocument()
+    expect(list().getByText(/Stray Platform/)).toBeInTheDocument()
   })
 
   it('starts with nothing selected — a column per entity is a deliberate choice', () => {
@@ -260,12 +262,12 @@ describe('Auto-layer — guards', () => {
     try {
       render(<LayerStudio formData={makeFormData()} updateFormData={updateFormData} />)
       openSheet()
-      fireEvent.click(sheet().getByRole('button', { name: 'By entity' }))
+      fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
       checkboxes().forEach(box => fireEvent.click(box))
 
       fireEvent.click(createButton())
       expect(updateFormData).not.toHaveBeenCalled()
-      expect(createButton()).toHaveTextContent(`Really create ${many.length} columns?`)
+      expect(createButton()).toHaveTextContent(`Create ${many.length} columns?`)
 
       fireEvent.click(createButton())
       expect(updateFormData).toHaveBeenCalledTimes(1)
@@ -295,6 +297,102 @@ describe('Auto-layer — guards', () => {
 
     render(<Ungoverned formData={makeFormData()} updateFormData={vi.fn()} />)
     openSheet()
-    expect(sheet().getByText(/may not declare what contains what/i)).toBeInTheDocument()
+    expect(sheet().getByText(/may not say yet what contains what/i)).toBeInTheDocument()
+  })
+})
+
+describe('Auto-layer — splitting one type into a column each', () => {
+  const toEntityMode = () => fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
+  const pill = (name: RegExp) => sheet().getByRole('button', { name })
+
+  it('offers a pill per type actually present, with its count', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+
+    expect(pill(/^Everything/)).toBeInTheDocument()
+    expect(pill(/^Domains2$/)).toBeInTheDocument()   // 2 domains scanned
+    expect(pill(/^Platforms1$/)).toBeInTheDocument() // 1 orphan platform
+  })
+
+  it('picking a type selects every one of them — the whole point of the gesture', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+    expect(createButton()).toBeDisabled()
+
+    fireEvent.click(pill(/^Domains2$/))
+    expect(createButton()).toHaveTextContent('Create 2 columns')
+  })
+
+  it('narrows the list to that type', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+    fireEvent.click(pill(/^Domains2$/))
+
+    expect(list().getByText('Finance')).toBeInTheDocument()
+    expect(list().getByText('Risk')).toBeInTheDocument()
+    expect(list().queryByText('Stray Platform')).not.toBeInTheDocument()
+  })
+
+  it('commits a column per entity of that type, each carrying its subtree', () => {
+    const updateFormData = vi.fn()
+    render(<LayerStudio formData={makeFormData()} updateFormData={updateFormData} />)
+    openSheet()
+    toEntityMode()
+    fireEvent.click(pill(/^Domains2$/))
+    fireEvent.click(createButton())
+
+    expect(updateFormData).toHaveBeenCalledTimes(1)
+    const call = updateFormData.mock.calls[0][0]
+    expect(call.layers.map((l: ViewLayerConfig) => l.name)).toEqual(['Finance', 'Risk'])
+    expect(Object.keys(call.assignments)).toEqual(['urn:finance', 'urn:risk'])
+    expect(call.assignments['urn:finance'].inheritsChildren).toBe(true)
+  })
+
+  it('says which entities would be left out of the view', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+    fireEvent.click(pill(/^Domains2$/))
+
+    // The one Platform is not placed by a Domains split — never silently.
+    expect(sheet().getByText(/1 Platforms stays out of the view/)).toBeInTheDocument()
+  })
+
+  it('says nothing about leftovers once everything is covered', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+    checkboxes().forEach(box => fireEvent.click(box))
+
+    expect(sheet().queryByText(/stays out of the view|stay out of the view/)).not.toBeInTheDocument()
+  })
+
+  it('"Everything" clears the selection rather than ticking hundreds', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+    fireEvent.click(pill(/^Domains2$/))
+    expect(createButton()).toHaveTextContent('Create 2 columns')
+
+    fireEvent.click(pill(/^Everything/))
+    expect(createButton()).toBeDisabled()
+    expect(list().getByText('Stray Platform')).toBeInTheDocument()
+  })
+
+  it('previews the columns it would create, with what each holds', () => {
+    render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+    openSheet()
+    toEntityMode()
+    fireEvent.click(pill(/^Domains2$/))
+
+    // Finance appears twice: once in the preview column, once in the list row.
+    expect(sheet().getAllByText('Finance')).toHaveLength(2)
+    // The preview says what the column will hold, not just its name.
+    expect(within(screen.getByTestId('auto-layer-sheet')).getAllByText('3 inside').length)
+        .toBeGreaterThanOrEqual(1)
+    expect(list().getByText('3 inside')).toBeInTheDocument()
   })
 })
