@@ -909,6 +909,8 @@ export function WizardAssignmentTree({
     // Deselecting a parent releases its whole subtree — leaving orphaned child
     // selections behind (the old behaviour) meant the next assignment silently
     // placed entities the user thought they'd just let go of.
+    const clearShortfall = () => setShortfall(0)
+
     const handleSelect = useCallback((id: string, isMulti: boolean) => {
         setSelectedIds(prev => {
             const isSelected = prev.has(id)
@@ -940,6 +942,7 @@ export function WizardAssignmentTree({
     const handleBulkAssign = useCallback((layerId: string) => {
         const ids = Array.from(selectedIds)
         if (ids.length === 0) return
+        clearShortfall()
 
         if (onBulkAssign) {
             onBulkAssign(layerId, ids)
@@ -970,6 +973,9 @@ export function WizardAssignmentTree({
      * child ends up placed, and the "included" chip already says so. Walking a
      * million-node subtree to tick boxes helps nobody.
      */
+    /** Children the bulk loader could not reach, so the banner can say so. */
+    const [shortfall, setShortfall] = useState(0)
+
     const handleSelectAllChildren = useCallback(async () => {
         if (selectedIds.size !== 1 || selectAllBusy) return
         const parentId = Array.from(selectedIds)[0]
@@ -978,6 +984,13 @@ export function WizardAssignmentTree({
         try {
             const childIds = await browser.loadAllChildren(parentId)
             if (childIds.length === 0) return
+
+            // "Select all N" must mean all N. The bulk loader has a safety stop,
+            // so on a very large container it can hand back fewer than the server
+            // reports — say so rather than let a partial selection be assigned as
+            // if it were the whole thing.
+            const reported = browser.peekNode(parentId)?.totalChildren ?? childIds.length
+            setShortfall(childIds.length < reported ? reported - childIds.length : 0)
 
             setExpandedIds(prev => new Set(prev).add(parentId))
             setSelectedIds(new Set(childIds))
@@ -1271,6 +1284,16 @@ export function WizardAssignmentTree({
                                         </button>
                                     )
                                 })()}
+
+                                {shortfall > 0 && (
+                                    <span
+                                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 shrink-0"
+                                        title="This container is larger than the wizard loads in one go. Place the parent instead — its children follow automatically, however many there are."
+                                    >
+                                        <AlertTriangle className="w-3 h-3" />
+                                        {shortfall.toLocaleString()} more couldn’t be loaded
+                                    </span>
+                                )}
 
                                 <select
                                     className="text-sm bg-white dark:bg-slate-800 border border-blue-200 dark:border-blue-700 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400 shrink-0"

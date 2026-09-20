@@ -12,7 +12,8 @@ import { useMemo } from 'react'
 import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo } from '@/types/schema'
 import {
   type GraphNode,
-  resolveLayerAssignment,
+  resolveLayerAssignmentIn,
+  sortLayerRules,
   type LayerAssignmentRule,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -109,7 +110,10 @@ export function useLayerAssignment({
 
   // Build layer assignment rules (shared with the trace overlay — see
   // buildLayerRules in lib/resolveRootLayer)
-  const layerRules = useMemo<LayerAssignmentRule[]>(() => buildLayerRules(sortedLayers), [sortedLayers])
+  // Sorted here so the per-node resolution below does not re-sort the list for
+  // every node on the canvas.
+  const layerRules = useMemo<LayerAssignmentRule[]>(
+    () => sortLayerRules(buildLayerRules(sortedLayers)), [sortedLayers])
 
   // Core Logic: Group nodes by layer with Deep Inheritance support
   const nodesByLayer = useMemo(() => {
@@ -163,7 +167,7 @@ export function useLayerAssignment({
         tags: node.data.classifications || []
       }
 
-      const ruleLayerId = resolveLayerAssignment(graphNode, layerRules)
+      const ruleLayerId = resolveLayerAssignmentIn(graphNode, layerRules)
       if (ruleLayerId) {
         ruleAssignments.set(node.id, ruleLayerId)
       }
