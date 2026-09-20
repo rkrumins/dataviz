@@ -663,6 +663,53 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                     }
 
+                    // ── Anchored columns ──────────────────────────────
+                    // A column anchored to an entity renders that entity's
+                    // CHILDREN as its rows. Curated hydration loads assigned
+                    // URNs and deliberately does not prefetch children, so
+                    // without this the column comes up empty until someone
+                    // expands the anchor — which an anchored column never draws.
+                    // Fetched per anchor (not per column) so two columns on the
+                    // same entity cost one request.
+                    // ONE page per anchor, whatever its size. The column draws
+                    // these as its rows and carries its own "Load more" for the
+                    // rest, so a 5000-child container costs the same first page
+                    // as a 5-child one and the user pulls what they need.
+                    const declaredAnchors = new Set(
+                        normLayout.layers.map(l => l.anchorUrn).filter((u): u is string => !!u),
+                    )
+                    const anchorUrns = allNodes
+                        .filter(n => declaredAnchors.has(n.urn) && (n.childCount ?? 0) > 0)
+                        .map(n => n.urn)
+                    if (anchorUrns.length > 0) {
+                        const loaded = new Set(allNodes.map(n => n.urn))
+                        const settled = await mapWithConcurrency(
+                            anchorUrns, HYDRATION_CONCURRENCY,
+                            urn => provider.getChildren(urn, {
+                                edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
+                                limit: CHILDREN_PAGE_SIZE,
+                            }),
+                        )
+                        if (controller.signal.aborted) return
+                        settled.forEach((outcome, i) => {
+                            if (outcome.status !== 'fulfilled') {
+                                // One anchor's children missing is a partial load,
+                                // not a dead view — the others still render.
+                                batchErrors.push(outcome.reason)
+                                console.warn(
+                                    `[useGraphHydration] children of anchored column ${anchorUrns[i]} failed to load`,
+                                    outcome.reason,
+                                )
+                                return
+                            }
+                            for (const child of outcome.value) {
+                                if (loaded.has(child.urn)) continue
+                                loaded.add(child.urn)
+                                allNodes.push(child)
+                            }
+                        })
+                    }
+
                     if (allNodes.length === 0) {
                         // Distinguish "failed to load" from "genuinely empty" by the
                         // ONLY reliable signal: did a fetch error? A healthy provider

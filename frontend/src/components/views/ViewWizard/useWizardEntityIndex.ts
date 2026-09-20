@@ -40,6 +40,8 @@ export interface WizardEntityIndex {
     childrenOf: (urn: string) => string[]
     /** Lazy-load one level of children via the provider (cached, one-shot). */
     loadChildren: (urn: string) => Promise<void>
+    /** Append the NEXT page of `urn`'s children to what is already cached. */
+    loadMoreChildren: (urn: string) => Promise<void>
     isLoading: (urn: string) => boolean
 }
 
@@ -140,18 +142,29 @@ export function useWizardEntityIndex(opts: {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tick])
 
-    const loadChildren = useCallback(async (urn: string) => {
-        if (childrenRef.current.has(urn) || loadingRef.current.has(urn)) return
+    /**
+     * One page of `urn`'s children, appended to whatever is cached. `offset` is
+     * the cached length, so repeated calls walk the container a page at a time —
+     * an anchored column shows a first page and pulls the rest on demand rather
+     * than dragging 5000 rows into the wizard.
+     */
+    const fetchChildPage = useCallback(async (urn: string, offset: number) => {
+        if (loadingRef.current.has(urn)) return
         loadingRef.current.add(urn)
         setTick(t => t + 1)
         try {
             const result = await provider.getChildrenWithEdges(urn, {
                 edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
                 limit: CHILDREN_PAGE_SIZE,
-                offset: 0,
+                offset,
                 includeLineageEdges: false,
             })
-            childrenRef.current.set(urn, result.children.map(c => c.urn))
+            const known = childrenRef.current.get(urn) ?? []
+            const seen = new Set(known)
+            childrenRef.current.set(urn, [
+                ...known,
+                ...result.children.map(c => c.urn).filter(u => !seen.has(u)),
+            ])
             // Children arrive with full identity — seed the cache so their rows
             // render names without another round-trip.
             for (const child of result.children) {
@@ -164,18 +177,36 @@ export function useWizardEntityIndex(opts: {
                 }
             }
         } catch (err) {
+            // Do NOT cache "no children" here. It reads as a completed empty
+            // load, and `loadChildren` short-circuits on `has(urn)` — so one
+            // failed first page left the container permanently empty with no
+            // retry path for the rest of the session. Record the failure
+            // separately and leave the cache untouched.
+            // Leaving the key ABSENT is the whole point: `loadChildren`
+            // short-circuits on `has(urn)`, so caching [] here made one failed
+            // first page permanent for the session.
             console.error(`[useWizardEntityIndex] Failed to load children for ${urn}:`, err)
-            childrenRef.current.set(urn, [])
         } finally {
             loadingRef.current.delete(urn)
             setTick(t => t + 1)
         }
     }, [provider, containmentEdgeTypes])
 
+    /** First page only — idempotent, so expanding a row twice costs one fetch. */
+    const loadChildren = useCallback(async (urn: string) => {
+        if (childrenRef.current.has(urn)) return
+        await fetchChildPage(urn, 0)
+    }, [fetchChildPage])
+
+    /** The next page, for a container the user is still walking through. */
+    const loadMoreChildren = useCallback(async (urn: string) => {
+        await fetchChildPage(urn, (childrenRef.current.get(urn) ?? []).length)
+    }, [fetchChildPage])
+
     const isLoading = useCallback((urn: string) => loadingRef.current.has(urn),
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [tick])
 
-    return useMemo(() => ({ resolve, childrenOf, loadChildren, isLoading }),
-        [resolve, childrenOf, loadChildren, isLoading])
+    return useMemo(() => ({ resolve, childrenOf, loadChildren, loadMoreChildren, isLoading }),
+        [resolve, childrenOf, loadChildren, loadMoreChildren, isLoading])
 }

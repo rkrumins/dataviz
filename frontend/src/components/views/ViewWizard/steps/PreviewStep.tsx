@@ -18,7 +18,9 @@ import {
     Sparkles,
     Tag,
     Server,
-    Database
+    Database,
+    Infinity as InfinityIcon,
+    ListChecks
 } from 'lucide-react'
 import { useBrand } from '@/store/branding'
 import { usePublishGate } from '@/hooks/usePublishGate'
@@ -28,6 +30,9 @@ import {
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { slugifyGraphName } from '../blankModel'
+import { resolveWizardEntityScope } from '../effectivePlacement'
+import { cn } from '@/lib/utils'
+import type { ViewContentConfig } from '@/types/schema'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
 // ============================================
@@ -38,6 +43,9 @@ interface PreviewStepProps {
     formData: WizardFormData
     /** Resolved scope context — used for workspace/data source display. */
     scopeContext?: ScopeContext
+    /** The scope the view being EDITED already stores. Ranks below a choice made
+     *  in this session and above the derivation — the order the save applies. */
+    viewEntityScope?: 'all' | 'curated'
 }
 
 // ============================================
@@ -48,7 +56,7 @@ interface PreviewStepProps {
 // a tenth private copy, which is how the review step ended up announcing
 // "Enterprise" with a green tick and no word about what that does.
 
-export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
+export function PreviewStep({ formData, scopeContext, viewEntityScope }: PreviewStepProps) {
     const schema = useSchemaStore(s => s.schema)
     const { appName } = useBrand()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
@@ -59,6 +67,20 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
     // wrong twice over when the tier is Enterprise: it does not say what
     // that exposes, and where publishing needs approval nothing is
     // confirmed at all.
+    // Resolved exactly as the save resolves it, so the screen cannot promise one
+    // thing and write another.
+    const entityScope = resolveWizardEntityScope(
+        formData.entityScope,
+        {
+            layers: formData.layers,
+            assignments: formData.assignments,
+            defaultNodeSortMode: formData.defaultNodeSortMode,
+        },
+        viewEntityScope ? ({ entityScope: viewEntityScope } as ViewContentConfig) : undefined,
+    )
+    const isOpenScope = entityScope === 'all'
+    const placedCount = Object.keys(formData.assignments ?? {}).length
+
     const wsId = scopeContext?.workspaceId ?? activeWorkspace?.id
     const gate = usePublishGate(wsId, formData.dataSourceId ?? scopeContext?.dataSourceId)
     const needsApproval = formData.visibility === 'enterprise' && !gate.canPublish
@@ -209,6 +231,43 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
                                         {layer.name}
                                     </span>
                                 ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* What this view will actually contain.
+                        Whether a view shows everything matching its columns or
+                        only what was placed by hand was decided silently, by an
+                        inference over whether any assignment happened to exist —
+                        and it is the difference between a view that keeps up with
+                        the source and one that is a snapshot. Say which you are
+                        getting, on the last screen before it exists. */}
+                    {formData.layoutType === 'reference' && formData.layers.length > 0 && (
+                        <div className="p-5">
+                            <div className="flex items-center gap-3">
+                                <div className={cn(
+                                    'w-10 h-10 rounded-lg flex items-center justify-center',
+                                    isOpenScope
+                                        ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400'
+                                        : 'bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400',
+                                )}>
+                                    {isOpenScope ? <InfinityIcon className="w-5 h-5" /> : <ListChecks className="w-5 h-5" />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-medium text-slate-500 uppercase tracking-wide">
+                                        What it shows
+                                    </p>
+                                    <p className="font-semibold text-slate-800 dark:text-slate-200">
+                                        {isOpenScope
+                                            ? 'Everything that matches your columns'
+                                            : `Only the ${placedCount} ${placedCount === 1 ? 'entity' : 'entities'} you placed`}
+                                    </p>
+                                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                                        {isOpenScope
+                                            ? 'Entities added to the source later appear on their own, in the column their type belongs to.'
+                                            : 'Everything else stays out, including entities added to the source later. Their children come along with them.'}
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     )}

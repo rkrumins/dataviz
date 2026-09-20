@@ -54,3 +54,34 @@ describe('VisibilityImpact with a tier the app does not implement', () => {
     }
   })
 })
+
+describe('VisibilityImpact switching between a known and an unknown tier', () => {
+  /**
+   * The guard above introduced a SECOND bug: it returns before the component's
+   * `useMemo`, so an unknown tier rendered one hook where a known tier renders
+   * two. Rendering either on its own is fine — the crash needs the same
+   * instance to switch, which is what the wizard does when it hydrates a view's
+   * saved visibility over the form's default:
+   *
+   *   Error: Rendered fewer hooks than expected.
+   *     at VisibilityImpact (VisibilityImpact.tsx:67)
+   */
+  it('survives a known -> unknown transition', () => {
+    const { rerender } = render(
+      <VisibilityImpact selected={'private' as ViewVisibility} counts={{ workspaceMemberCount: 12 }} />,
+    )
+    expect(() =>
+      rerender(<VisibilityImpact selected={UNKNOWN} counts={{ workspaceMemberCount: 12 }} />),
+    ).not.toThrow()
+    expect(screen.getByText(/isn’t one of the sharing options/)).toBeInTheDocument()
+  })
+
+  it('survives an unknown -> known transition', () => {
+    const { rerender } = render(
+      <VisibilityImpact selected={UNKNOWN} counts={{ workspaceMemberCount: 12 }} />,
+    )
+    expect(() =>
+      rerender(<VisibilityImpact selected={'workspace' as ViewVisibility} counts={{ workspaceMemberCount: 12 }} />),
+    ).not.toThrow()
+  })
+})

@@ -75,8 +75,9 @@ import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
 import { useWizardScope } from '@/hooks/useWizardScope'
-import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
-import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
+import { resolveWizardEntityScope } from './effectivePlacement'
+import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, LayerNodeSortAlgo, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
@@ -143,6 +144,18 @@ export interface WizardFormData {
      *  shape the canvas writes via persistReferenceLayout. Never embedded back
      *  into `layers[].entityAssignments` (legacy, deprecated). */
     assignments: Record<string, LayerAssignmentEntry>
+    /** Explicit view entity scope, PINNED by a gesture that needs it rather than
+     *  left to derivation. `deriveEntityScope` answers 'curated' as soon as ONE
+     *  assignment exists — which would make a rule-driven layout (layers carrying
+     *  `entityTypes`, e.g. "one layer per top-level type") collapse to just the
+     *  entities someone happened to drag, because curated scope ignores rules for
+     *  root nodes and hydration then loads assigned URNs only. Undefined = derive
+     *  exactly as before. */
+    entityScope?: 'all' | 'curated'
+    /** View-wide default node sort ("apply to all columns"). A layer's own
+     *  `nodeSortMode` still wins; absent = 'alpha-asc'. Carried here because
+     *  `referenceLayout` stores it beside layers/assignments, not on a layer. */
+    defaultNodeSortMode?: LayerNodeSortAlgo
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
     advancedFilters: ActiveFilter[]
@@ -932,7 +945,7 @@ function ViewWizardBody({
     // visible in the wizard here.
     useEffect(() => {
         if (mode === 'edit' && editingView) {
-            const { layers, assignments } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
+            const { layers, assignments, defaultNodeSortMode } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
@@ -943,6 +956,7 @@ function ViewWizardBody({
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
                 layers,
                 assignments,
+                defaultNodeSortMode,
                 visibleEntityTypes: editingView.content.visibleEntityTypes,
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
                 advancedFilters: (editingView.filters.fieldFilters || []).map(f => ({
@@ -1122,10 +1136,11 @@ function ViewWizardBody({
             const priorDefaultSort = mode === 'edit'
                 ? normalizeReferenceLayout(editingView?.layout?.referenceLayout).defaultNodeSortMode
                 : undefined
+            const effectiveDefaultSort = formData.defaultNodeSortMode ?? priorDefaultSort
             const normalizedLayout = normalizeReferenceLayout({
                 layers: layersWithScope,
                 assignments: formData.assignments,
-                ...(priorDefaultSort ? { defaultNodeSortMode: priorDefaultSort } : {}),
+                ...(effectiveDefaultSort ? { defaultNodeSortMode: effectiveDefaultSort } : {}),
             })
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
@@ -1239,7 +1254,7 @@ function ViewWizardBody({
 
                 // The layout endpoint is the single writer of referenceLayout — write
                 // the full layers+assignments (a new view has no prior layout to race).
-                const entityScope = deriveEntityScope(undefined, normalizedLayout)
+                const entityScope = resolveWizardEntityScope(formData.entityScope, normalizedLayout, undefined)
                 try {
                     const layoutResult = await updateViewLayout(createdViewId, {
                         referenceLayout: normalizedLayout,
@@ -1301,10 +1316,14 @@ function ViewWizardBody({
                     }
                 }
                 if (result.success && result.data) {
-                    // Preserve an explicit editingView.content.entityScope; otherwise derive
-                    // from the submitted assignments — a deliberate wizard save is allowed to
-                    // set scope explicitly, unlike implicit canvas gestures.
-                    const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
+                    // A scope PINNED in this wizard session wins (the user just chose a
+                    // rule-driven layout); else preserve an explicit
+                    // editingView.content.entityScope; else derive from the submitted
+                    // assignments — a deliberate wizard save is allowed to set scope
+                    // explicitly, unlike implicit canvas gestures.
+                    const entityScope = resolveWizardEntityScope(
+                        formData.entityScope, normalizedLayout, editingView?.content,
+                    )
                     // When a draft is open for THIS view, route the layout write to the branch
                     // overlay (null on Published → base write), so wizard layer/scope edits on a
                     // draft don't leak to Published — mirrors the canvas debounced saver.
@@ -1599,6 +1618,7 @@ function ViewWizardBody({
                 <AssignmentStep
                     formData={formData}
                     updateFormData={updateFormData}
+                    viewEntityScope={editingView?.content?.entityScope}
                 />
             )}
             {currentStep === 'entities' && (
@@ -1610,7 +1630,11 @@ function ViewWizardBody({
                 />
             )}
             {currentStep === 'preview' && (
-                <PreviewStep formData={formData} scopeContext={scopeContext} />
+                <PreviewStep
+                    formData={formData}
+                    scopeContext={scopeContext}
+                    viewEntityScope={editingView?.content?.entityScope}
+                />
             )}
             </>
             )}

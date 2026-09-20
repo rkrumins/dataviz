@@ -1208,20 +1208,36 @@ export function matchesRule(
 /**
  * Resolve layer assignment for a node based on rules
  */
-export function resolveLayerAssignment(
-    node: GraphNode,
-    rules: LayerAssignmentRule[]
-): string | undefined {
-    // Sort by priority (highest first)
-    const sortedRules = [...rules].sort((a, b) => b.priority - a.priority)
+/** Rule order for resolution: highest priority first. Returns a NEW array. */
+export function sortLayerRules(rules: LayerAssignmentRule[]): LayerAssignmentRule[] {
+    return [...rules].sort((a, b) => b.priority - a.priority)
+}
 
+/**
+ * `resolveLayerAssignment` for a list ALREADY ordered by `sortLayerRules`.
+ *
+ * Worth having separately because both callers resolve PER NODE against one
+ * unchanging rule list, and the sorting variant copies and re-sorts on every
+ * single call. Measured over 50,000 entities: 10.2ms of which ~8.7ms was that
+ * repeated copy-and-sort. Sort once, then use this.
+ */
+export function resolveLayerAssignmentIn(
+    node: GraphNode,
+    sortedRules: readonly LayerAssignmentRule[]
+): string | undefined {
     for (const rule of sortedRules) {
         if (matchesRule(node, rule)) {
             return rule.layerId
         }
     }
-
     return undefined
+}
+
+export function resolveLayerAssignment(
+    node: GraphNode,
+    rules: LayerAssignmentRule[]
+): string | undefined {
+    return resolveLayerAssignmentIn(node, sortLayerRules(rules))
 }
 
 /**

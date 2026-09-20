@@ -9,16 +9,17 @@
  */
 
 import { useMemo } from 'react'
-import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry, LayerNodeSortAlgo } from '@/types/schema'
 import {
   type GraphNode,
-  resolveLayerAssignment,
+  resolveLayerAssignmentIn,
+  sortLayerRules,
   type LayerAssignmentRule,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
-import { compareOrderKeys } from '@/utils/orderKeys'
 import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 import { buildLayerRules, resolveRootLayer } from './lib/resolveRootLayer'
+import { rootComparators, childComparator, effectiveSortMode } from './lib/rootSort'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 
 // ============================================
@@ -109,10 +110,16 @@ export function useLayerAssignment({
 
   // Build layer assignment rules (shared with the trace overlay — see
   // buildLayerRules in lib/resolveRootLayer)
-  const layerRules = useMemo<LayerAssignmentRule[]>(() => buildLayerRules(sortedLayers), [sortedLayers])
+  // Sorted here so the per-node resolution below does not re-sort the list for
+  // every node on the canvas.
+  const layerRules = useMemo<LayerAssignmentRule[]>(
+    () => sortLayerRules(buildLayerRules(sortedLayers)), [sortedLayers])
 
-  // Core Logic: Group nodes by layer with Deep Inheritance support
-  const nodesByLayer = useMemo(() => {
+  // Core Logic: Group nodes by layer with Deep Inheritance support.
+  // Returns the promoted-anchor set alongside the grouping: `unassignedNodes`
+  // needs it, and deriving it here beats writing a ref during render (which the
+  // React Compiler rightly refuses) or restating the promotion rule elsewhere.
+  const layerGrouping = useMemo(() => {
     const grouped = new Map<string, HierarchyNode[]>()
 
     // Per-layer node comparators. Effective mode resolution: ephemeral session
@@ -123,47 +130,18 @@ export function useLayerAssignment({
     // parent's children, or the layer's roots), so each sibling set holds an
     // independent key sequence. All other modes leave children on the
     // server's alphabetical order (asc, or desc when the whole layer is Z→A).
-    const alphaAsc = (a: HierarchyNode, b: HierarchyNode) => a.name.localeCompare(b.name)
-    const alphaDesc = (a: HierarchyNode, b: HierarchyNode) => b.name.localeCompare(a.name)
-    // Property-derived root orders. Type groups alphabetically by the stable
-    // type id (display names would need a schema lookup this hook doesn't
-    // have); container size prefers the backend's childCount (total, not just
-    // loaded) and falls back to the loaded child list. Both tie-break to
-    // name so equal groups stay alphabetical inside.
-    const typeAsc = (a: HierarchyNode, b: HierarchyNode) =>
-      (a.typeId || '').localeCompare(b.typeId || '') || alphaAsc(a, b)
-    const countOf = (n: HierarchyNode) =>
-      Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0
-    const countDesc = (a: HierarchyNode, b: HierarchyNode) =>
-      countOf(b) - countOf(a) || alphaAsc(a, b)
-    // Custom comparator: keyed siblings first (ordinal orderKey, name+urn
-    // tiebreak), unkeyed after (alphabetical). Used for BOTH roots and
-    // children of a custom-sorted layer — only ever applied within one
-    // sibling set, so the shared function is safe.
-    const customCmp = (a: HierarchyNode, b: HierarchyNode) => {
-      const ka = assignments[a.id]?.orderKey
-      const kb = assignments[b.id]?.orderKey
-      if (ka && kb) return compareOrderKeys(ka, kb) || alphaAsc(a, b) || compareOrderKeys(a.urn, b.urn)
-      if (ka) return -1
-      if (kb) return 1
-      return alphaAsc(a, b)
-    }
-    const ROOT_CMPS: Record<LayerNodeSortMode, (a: HierarchyNode, b: HierarchyNode) => number> = {
-      'alpha-asc': alphaAsc,
-      'alpha-desc': alphaDesc,
-      'type-asc': typeAsc,
-      'count-desc': countDesc,
-      custom: customCmp,
-    }
+    // Ordering lives in hooks/lib/rootSort so the wizard's Layer Studio can sort
+    // its rail with the SAME comparators — an arrangement built in the wizard
+    // has to be the one the canvas renders.
+    const ROOT_CMPS = rootComparators<HierarchyNode>(assignments, (n) =>
+      Number((n.data as Record<string, unknown> | undefined)?.childCount ?? n.children.length) || 0,
+    )
+    const alphaAsc = ROOT_CMPS['alpha-asc']
     const childCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     const rootCmpByLayer = new Map<string, (a: HierarchyNode, b: HierarchyNode) => number>()
     sortedLayers.forEach(layer => {
-      const mode: LayerNodeSortMode =
-        sortOverrides?.get(layer.id) ?? layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
-      // Children in 'custom' mode order by orderKey too (hierarchical custom
-      // order); every other mode leaves them on the server's alpha order
-      // (desc only flips the direction).
-      childCmpByLayer.set(layer.id, mode === 'custom' ? customCmp : mode === 'alpha-desc' ? alphaDesc : alphaAsc)
+      const mode = effectiveSortMode(layer, defaultNodeSortMode, sortOverrides?.get(layer.id))
+      childCmpByLayer.set(layer.id, childComparator(mode, ROOT_CMPS))
       rootCmpByLayer.set(layer.id, ROOT_CMPS[mode] ?? alphaAsc)
     })
 
@@ -192,7 +170,7 @@ export function useLayerAssignment({
         tags: node.data.classifications || []
       }
 
-      const ruleLayerId = resolveLayerAssignment(graphNode, layerRules)
+      const ruleLayerId = resolveLayerAssignmentIn(graphNode, layerRules)
       if (ruleLayerId) {
         ruleAssignments.set(node.id, ruleLayerId)
       }
@@ -371,6 +349,18 @@ export function useLayerAssignment({
       return built[0]
     }
 
+    // A column may be ANCHORED to an entity, meaning the column IS that entity:
+    // its children are the rows, and the anchor itself is not drawn (the header
+    // already names it). Purely a promotion at render time — the anchor keeps
+    // its assignment, so a client without this field draws the old shape.
+    const anchorByLayer = new Map<string, string>()
+    sortedLayers.forEach(l => { if (l.anchorUrn) anchorByLayer.set(l.id, l.anchorUrn) })
+    // Only an anchor that was actually PROMOTED renders as its column. One that
+    // fell back to a row is an ordinary node; one that nothing places at all
+    // (its assignment cleared, the anchorUrn left behind) genuinely renders
+    // nowhere and must still be reported as such.
+    const promotedAnchors = new Set<string>()
+
     nodes.forEach((node: any) => {
       const layerId = effectiveLayer.get(node.id)
       if (!layerId) return // Unassigned
@@ -380,12 +370,36 @@ export function useLayerAssignment({
       const parentLayerId = parentId ? effectiveLayer.get(parentId) : undefined
 
       if (layerId !== parentLayerId) {
+        const list = grouped.get(layerId)
+        if (!list) return
+
+        const nodeUrn = (node.data?.urn as string | undefined) ?? node.id
+        const children = childMap.get(node.id) ?? []
+        // Promote once we hold ANY of the anchor's children: the column carries
+        // its own "Load more" for the rest (see anchorMore in LayerColumn), so a
+        // partial set is a first page rather than a silent truncation.
+        //
+        // Holding NONE of them is different — the fetch failed, or has not run.
+        // Flattening there would draw an empty column with nothing to click, so
+        // fall back to the anchor ROW, which states its child count and pages on
+        // expand. The promotion resumes by itself once a page lands.
+        const total = Number(node.data?.childCount ?? children.length) || 0
+        const canPromote = children.length > 0 || total === 0
+        if (anchorByLayer.get(layerId) === nodeUrn && canPromote) {
+          promotedAnchors.add(nodeUrn)
+          // They stay in this layer by ordinary containment inheritance, so each
+          // carries its own subtree — and a child added at source simply appears.
+          for (const childId of children) {
+            if (effectiveLayer.get(childId) !== layerId) continue
+            const childNode = buildHierarchyNode(childId)
+            if (childNode) list.push(childNode)
+          }
+          return
+        }
+
         // It's a root in this layer context!
         const hNode = buildHierarchyNode(node.id)
-        if (hNode) {
-          const list = grouped.get(layerId)
-          if (list) list.push(hNode)
-        }
+        if (hNode) list.push(hNode)
       }
     })
 
@@ -481,9 +495,11 @@ export function useLayerAssignment({
       })
     }
 
-    return grouped
+    return { grouped, promotedAnchors }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides])
+
+  const nodesByLayer = layerGrouping.grouped
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
@@ -537,9 +553,11 @@ export function useLayerAssignment({
   // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
   // canvas actually shows.
   const unassignedNodes = useMemo(
-    () => nodes.filter((n: { id: string }) => !nodeLayerMap.has(n.id)),
+    () => nodes.filter((n: { id: string; data?: Record<string, unknown> }) =>
+      !nodeLayerMap.has(n.id)
+      && !layerGrouping.promotedAnchors.has((n.data?.urn as string | undefined) ?? n.id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodeEdgeFingerprint, nodeLayerMap],
+    [nodeEdgeFingerprint, nodeLayerMap, layerGrouping],
   )
 
   return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes }

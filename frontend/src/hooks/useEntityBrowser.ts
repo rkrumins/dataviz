@@ -533,6 +533,16 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 if (!result.hasMore) break
                 cursor = result.nextCursor ?? null
                 if (!cursor) break // defensive: server claims more but gave no cursor
+
+                // The safety stop used to end the loop in silence, handing back a
+                // PARTIAL list that every caller treats as "all of them" — a
+                // select-all would then place a fraction and look finished.
+                if (page === BULK_MAX_PAGES - 1) {
+                    console.warn(
+                        `[useEntityBrowser] "load all children" hit its ${BULK_MAX_PAGES}-page stop `
+                        + `for ${parentUrn} after ${childIds.length} — the rest was NOT loaded.`,
+                    )
+                }
             }
 
             return childIds
@@ -571,6 +581,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 if (!result.hasMore) break
                 cursor = result.nextCursor ?? null
                 if (!cursor) break
+
+                if (page === BULK_MAX_PAGES - 1) {
+                    console.warn(
+                        `[useEntityBrowser] "load all top-level" hit its ${BULK_MAX_PAGES}-page stop `
+                        + `after ${topLevelIdsRef.current.length} — the rest was NOT loaded.`,
+                    )
+                }
             }
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load all top-level nodes:', err)

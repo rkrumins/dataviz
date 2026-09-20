@@ -15,7 +15,7 @@
  * - Collapse/expand per node
  */
 
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import {
@@ -35,7 +35,17 @@ import {
     X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry } from '@/types/schema'
+import type {
+    ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry,
+    LayerNodeSortMode, LayerNodeSortAlgo,
+} from '@/types/schema'
+import { LayerSortMenu } from '@/components/canvas/context-view/LayerSortMenu'
+
+import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
+
+/** Rows a column draws before it offers to show more. The rail is a 300px
+ *  authoring aid, not the canvas — a long column is scrolled past, not read. */
+const RAIL_PAGE = 50
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useEntityTypes } from '@/store/schema'
 import {
@@ -61,12 +71,38 @@ export interface DropPayload {
  *  rendering needs. */
 type LayerEntityRef = Pick<EntityAssignmentConfig, 'entityId' | 'logicalNodeId'>
 
+/** One root of a column, as the canvas will render it. Ordered by the Studio
+ *  with the canvas's own comparators — the rail must not re-sort. */
+export interface LayerRootRow {
+    id: string
+    urn: string
+    name: string
+    typeId: string
+    childCount: number
+    /** Placed by the layer's `entityTypes` rule, so it holds no assignment. */
+    rulePlaced: boolean
+}
+
 interface LayerHierarchyPanelProps {
     layers: ViewLayerConfig[]
     /** Canonical urn-keyed assignment map (formData.assignments) — source of truth
      *  for per-layer/per-node entity lists and count badges; layer.entityAssignments
      *  is deprecated and no longer written. */
     assignments: Record<string, LayerAssignmentEntry>
+    /** layerId -> the column's roots, already ordered. Includes rule-placed rows
+     *  (which hold no assignment entry), so the rail is honest about what the
+     *  canvas will render — see ViewWizard/effectivePlacement.ts. */
+    rootsByLayer?: Map<string, LayerRootRow[]>
+    /** View-wide default sort, for the per-column menu's "View default" item. */
+    defaultNodeSortMode?: LayerNodeSortAlgo
+    onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+    onApplySortToView?: (mode: LayerNodeSortAlgo) => void
+    onResetCustomOrder?: (layerId: string) => void
+    /** Drop one root before/after another inside the same column. */
+    onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
+    /** layerId -> an anchored column's unloaded remainder, mirroring the canvas. */
+    anchorMoreByLayer?: Map<string, { anchorUrn: string; remaining: number }>
+    onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     /** Resolves assigned-entity identity + children. The wizard has no canvas
@@ -156,6 +192,8 @@ function AssignedEntityItem({
     entityIndex,
     onUnassign,
     inherited = false,
+    rulePlaced = false,
+    onReorder,
 }: {
     entityId: string
     depth: number
@@ -165,7 +203,20 @@ function AssignedEntityItem({
      *  it is read-only here (no unassign, no drag: moving it would violate the
      *  containment rule the Studio already enforces). */
     inherited?: boolean
+    /** Placed by this layer's `entityTypes` rule, not by an assignment entry.
+     *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
+     *  dropping it on another layer writes the explicit override. */
+    rulePlaced?: boolean
+    /** Present on column roots: dropping another root on this row's top/bottom
+     *  third reorders instead of re-assigning. Absent on inherited children,
+     *  which have no independent position. */
+    onReorder?: (draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
 }) {
+    // Which third of the row the pointer is over: the outer thirds reorder, the
+    // middle falls through to the LAYER's drop handler (move to this column).
+    const [band, setBand] = useState<'before' | 'after' | null>(null)
+    /** The row's own header, so drop bands measure it and not its whole subtree. */
+    const rowRef = useRef<HTMLDivElement | null>(null)
     const [isExpanded, setIsExpanded] = useState(false)
 
     // Identity + children come from the entity browser's data (via the wizard
@@ -215,9 +266,57 @@ function AssignedEntityItem({
     })()
     const color = visual?.color ?? '#94a3b8'
 
+    const handleDragOver = (e: React.DragEvent) => {
+        if (!onReorder || !e.dataTransfer.types.includes('application/x-entity-assignment')) return
+        // Measure the HEADER ROW, not the wrapper: the wrapper also contains the
+        // expanded children, so on a root with 20 of them its top third reached
+        // most of the way down the subtree and a drop over the 3rd child
+        // reordered against the parent.
+        const rect = (rowRef.current ?? e.currentTarget).getBoundingClientRect()
+        const y = e.clientY - rect.top
+        const next = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
+        setBand(next)
+        if (next) {
+            e.preventDefault()
+            e.stopPropagation()
+            e.dataTransfer.dropEffect = 'move'
+        }
+    }
+
+    const handleDrop = (e: React.DragEvent) => {
+        const position = band
+        setBand(null)
+        if (!onReorder || !position) return   // middle third — let the layer take it
+        const payload = parseTransfer(e)
+        const draggedUrn = payload?.entityId ?? payload?.entityIds?.[0]
+        if (!draggedUrn) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (draggedUrn !== entityId) onReorder(draggedUrn, entityId, position)
+    }
+
     return (
-        <div>
+        <div
+            onDragOver={handleDragOver}
+            onDragLeave={() => setBand(null)}
+            onDrop={handleDrop}
+            className="relative"
+        >
+            {band && (
+                <div
+                    aria-hidden
+                    className={cn(
+                        // pointer-events-none is not decoration: this sits ON the
+                        // drop target's top/bottom edge, exactly where the cursor
+                        // is when the band is showing, and must not take the
+                        // dragover out from under it.
+                        'absolute inset-x-1 h-0.5 rounded-full bg-blue-500 z-10 pointer-events-none',
+                        band === 'before' ? 'top-0' : 'bottom-0',
+                    )}
+                />
+            )}
             <div
+                ref={rowRef}
                 draggable={!inherited}
                 onDragStart={!inherited ? handleDragStart : undefined}
                 className={cn(
@@ -279,8 +378,17 @@ function AssignedEntityItem({
                         </span>
                     )}
                 </div>
+                {rulePlaced && (
+                    <span
+                        data-testid="rail-rule-placed-marker"
+                        className="text-[9px] px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 shrink-0"
+                        title={`Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
+                    >
+                        by type
+                    </span>
+                )}
                 {/* Unassign — only the explicit placement can be removed. */}
-                {!inherited && (
+                {!inherited && !rulePlaced && (
                     <button
                         onClick={(e) => {
                             e.stopPropagation()
@@ -583,6 +691,16 @@ interface LayerRowProps {
     /** 0-based position — surfaces the 1–9 quick-assign shortcut. */
     layerIndex: number
     assignments: Record<string, LayerAssignmentEntry>
+    /** This column's roots, already ordered by the Studio. */
+    rows?: LayerRootRow[]
+    defaultNodeSortMode?: LayerNodeSortAlgo
+    onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+    onApplySortToView?: (mode: LayerNodeSortAlgo) => void
+    onResetCustomOrder?: (layerId: string) => void
+    onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
+    /** This column's unloaded remainder, when it is anchored. */
+    anchorMore?: { anchorUrn: string; remaining: number }
+    onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     entityIndex: WizardEntityIndex
@@ -598,6 +716,14 @@ function LayerRow({
     layer,
     layerIndex,
     assignments,
+    rows,
+    defaultNodeSortMode,
+    onSetLayerSortMode,
+    onApplySortToView,
+    onResetCustomOrder,
+    onReorderRoot,
+    anchorMore,
+    onLoadMoreAnchor,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -626,8 +752,48 @@ function LayerRow({
             .map(([urn, entry]) => ({ entityId: urn, logicalNodeId: entry.logicalNodeId })),
         [assignments, layer.id]
     )
-    const unassignedEntities = layerEntityAssignments.filter(a => !a.logicalNodeId).map(a => a.entityId)
+    // The column's roots in canvas order. Members of a logical group are drawn
+    // inside that group instead, so they never appear in this list.
+    const groupedIds = useMemo(
+        () => new Set(layerEntityAssignments.filter(a => a.logicalNodeId).map(a => a.entityId)),
+        [layerEntityAssignments],
+    )
+    const rootRows = useMemo(() => {
+        if (rows) return rows.filter(r => !groupedIds.has(r.urn))
+        // No ordered rows supplied — fall back to the canonical assignments, as
+        // this panel always did. Identity is resolved per row anyway, so the
+        // blank fields here are never rendered.
+        return layerEntityAssignments
+            .filter(a => !a.logicalNodeId)
+            .map<LayerRootRow>(a => ({
+                id: a.entityId, urn: a.entityId, name: '', typeId: '', childCount: 0, rulePlaced: false,
+            }))
+    }, [rows, groupedIds, layerEntityAssignments])
+    // "Clear all" only ever removes explicit placements — a rule-placed row has
+    // no entry to clear.
+    // The rail is ONE scroller wrapping a Reorder.Group of layers, so a column
+    // cannot own a virtualized viewport without breaking layer drag-reorder.
+    // Render a window instead: a column that holds 50,000 scanned roots draws
+    // RAIL_PAGE of them and says how many are left. Bounded either way.
+    const [visibleCount, setVisibleCount] = useState(RAIL_PAGE)
     const totalAssigned = layerEntityAssignments.length
+    const shownRows = useMemo(() => rootRows.slice(0, visibleCount), [rootRows, visibleCount])
+    const heldButHidden = rootRows.length - shownRows.length
+    // What the column has yet to show: rows it holds but has not drawn, plus
+    // rows the server still has. Both read as "more" to the user.
+    const remaining = heldButHidden + (anchorMore?.remaining ?? 0)
+    // How many the next click actually produces: revealing rows we hold is a
+    // RAIL_PAGE, fetching the anchor's next page is a CHILDREN_PAGE_SIZE.
+    // Naming the wrong one would promise 50 and deliver 100.
+    const nextChunk = heldButHidden > 0
+        ? Math.min(heldButHidden, RAIL_PAGE)
+        : Math.min(anchorMore?.remaining ?? 0, CHILDREN_PAGE_SIZE)
+    const totalShown = rootRows.length + (anchorMore?.remaining ?? 0)
+    const sortMode: LayerNodeSortMode = layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
+    const hasCustomOrder = useMemo(
+        () => Object.values(assignments).some(e => e.layerId === layer.id && e.orderKey),
+        [assignments, layer.id],
+    )
     const color = layer.color || '#3b82f6'
 
     // ── Layer-level drop zone (layer root, no node) ───────────────────────────
@@ -745,8 +911,33 @@ function LayerRow({
                     )}
 
                     {/* Assignment count */}
-                    {totalAssigned > 0 && !isDragOver && (
-                        <span className="text-xs text-slate-400 shrink-0">{totalAssigned}</span>
+                    {totalShown > 0 && !isDragOver && (
+                        <span
+                            data-testid={`layer-count-${layer.id}`}
+                            className="text-xs text-slate-400 shrink-0"
+                        >{totalShown}</span>
+                    )}
+
+                    {/* Column sort — the canvas's own menu, writing the same
+                        fields, so the order chosen here is the order it renders. */}
+                    {onSetLayerSortMode && (
+                        <span onClick={e => e.stopPropagation()} className="shrink-0">
+                            <LayerSortMenu
+                                layerName={layer.name}
+                                layerColor={color}
+                                mode={sortMode}
+                                isOverride={layer.nodeSortMode !== undefined}
+                                viewDefault={defaultNodeSortMode ?? 'alpha-asc'}
+                                canPersist
+                                onSelectMode={mode => onSetLayerSortMode(layer.id, mode)}
+                                onApplyToView={() => onApplySortToView?.(
+                                    sortMode === 'custom' ? 'alpha-asc' : sortMode,
+                                )}
+                                onResetCustomOrder={hasCustomOrder && onResetCustomOrder
+                                    ? () => onResetCustomOrder(layer.id)
+                                    : undefined}
+                            />
+                        </span>
                     )}
 
                     {/* Layer actions */}
@@ -875,35 +1066,65 @@ function LayerRow({
                                     />
                                 ))}
 
-                                {/* Entities placed directly in the layer */}
-                                {unassignedEntities.length > 0 && (
-                                    <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
-                                        {/* The bulk escape hatch lives HERE, next to the things it
-                                            removes — not as a hover-only icon on the layer row, which
-                                            is where nobody found it. */}
+                                {/* The column's roots, in the order the canvas draws
+                                    them. Drag a row onto another row's top or bottom
+                                    edge to rearrange; the middle drops into the layer. */}
+                                {rootRows.length > 0 && (
+                                    <div
+                                        data-testid={`layer-rows-${layer.id}`}
+                                        className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1"
+                                    >
                                         <div className="flex items-center gap-1.5 px-3 py-1">
                                             <Layers className="w-3 h-3 text-slate-400 shrink-0" />
                                             <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
-                                                Layer Entities ({unassignedEntities.length})
+                                                In this column ({totalShown.toLocaleString()})
                                             </span>
                                             <span className="flex-1" />
-                                            <button
-                                                onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
-                                                title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
-                                                className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
-                                            >
-                                                Clear all
-                                            </button>
+                                            {totalAssigned > 0 && (
+                                                <button
+                                                    onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
+                                                    title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
+                                                    className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+                                                >
+                                                    Clear all
+                                                </button>
+                                            )}
                                         </div>
-                                        {unassignedEntities.map(entityId => (
+                                        {shownRows.map(row => (
                                             <AssignedEntityItem
-                                                key={entityId}
-                                                entityId={entityId}
+                                                key={row.urn}
+                                                entityId={row.urn}
                                                 depth={0}
                                                 entityIndex={entityIndex}
                                                 onUnassign={onUnassign}
+                                                rulePlaced={row.rulePlaced}
+                                                onReorder={onReorderRoot
+                                                    ? (dragged, target, position) =>
+                                                        onReorderRoot(layer.id, dragged, target, position)
+                                                    : undefined}
                                             />
                                         ))}
+                                        {/* ONE affordance for both kinds of "more":
+                                            reveal what this column already holds,
+                                            and once it is all on screen, fetch the
+                                            anchor's next page. An anchored column
+                                            draws no anchor row, so this is also the
+                                            only place its paging can live. */}
+                                        {remaining > 0 && (
+                                            <button
+                                                onClick={e => {
+                                                    e.stopPropagation()
+                                                    if (heldButHidden > 0) setVisibleCount(v => v + RAIL_PAGE)
+                                                    else if (anchorMore) onLoadMoreAnchor?.(anchorMore.anchorUrn)
+                                                }}
+                                                className="w-full text-left px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+                                            >
+                                                Show {nextChunk} more
+                                                <span className="ml-1 text-slate-400 font-normal tabular-nums">
+                                                    ({remaining.toLocaleString()} left)
+                                                </span>
+                                            </button>
+                                        )}
                                     </div>
                                 )}
 
@@ -956,6 +1177,14 @@ function LayerRow({
 export function LayerHierarchyPanel({
     layers,
     assignments,
+    rootsByLayer,
+    defaultNodeSortMode,
+    onSetLayerSortMode,
+    onApplySortToView,
+    onResetCustomOrder,
+    onReorderRoot,
+    anchorMoreByLayer,
+    onLoadMoreAnchor,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -976,6 +1205,7 @@ export function LayerHierarchyPanel({
 
     return (
         <div
+            data-testid="layer-hierarchy-panel"
             className={cn(
                 'relative flex flex-col h-full rounded-2xl overflow-hidden',
                 'bg-white/60 dark:bg-slate-900/60 backdrop-blur-xl',
@@ -1052,6 +1282,14 @@ export function LayerHierarchyPanel({
                                 layer={layer}
                                 layerIndex={i}
                                 assignments={assignments}
+                                rows={rootsByLayer?.get(layer.id)}
+                                defaultNodeSortMode={defaultNodeSortMode}
+                                onSetLayerSortMode={onSetLayerSortMode}
+                                onApplySortToView={onApplySortToView}
+                                onResetCustomOrder={onResetCustomOrder}
+                                onReorderRoot={onReorderRoot}
+                                anchorMore={anchorMoreByLayer?.get(layer.id)}
+                                onLoadMoreAnchor={onLoadMoreAnchor}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
                                 entityIndex={entityIndex}

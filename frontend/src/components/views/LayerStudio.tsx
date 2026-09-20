@@ -39,22 +39,47 @@ import {
     Eye,
     EyeOff,
     AlertCircle,
+    AlertTriangle,
     Check,
+    Columns3,
     X,
     ChevronRight,
     Loader2,
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
-import { LayerHierarchyPanel, type ActiveTarget, type DropPayload } from './LayerHierarchyPanel'
+import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { LayerHierarchyPanel, type ActiveTarget, type DropPayload, type LayerRootRow } from './LayerHierarchyPanel'
 import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
 import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
 import { suggestLayerMappings, type MagicMapSuggestion } from '../views/ViewWizard/magicMap'
+import {
+    deriveRootTypeCandidates,
+    layersForRootTypes,
+    layersForTopLevelEntities,
+    ontologyLooksUngoverned,
+    type RootTypeCandidate,
+    type TopLevelEntity,
+} from '../views/ViewWizard/autoLayers'
+import { buildWizardPlacement, resolveWizardEntityScope } from '../views/ViewWizard/effectivePlacement'
+import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
 import { useAutoOrganize, type GroupingSuggestion } from '@/hooks/useAutoOrganize'
-import { assignEntities, unassignEntities } from '@/components/canvas/context-view/assignmentMutations'
+import {
+    assignEntities,
+    unassignEntities,
+    ensureSiblingOrderKeys,
+    keysForInsertion,
+    setAssignmentOrderKey,
+} from '@/components/canvas/context-view/assignmentMutations'
+import {
+    setLayerNodeSortMode,
+    setViewDefaultSortMode,
+    clearLayerOrderKeys,
+} from '@/components/canvas/context-view/layerMutations'
+import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
-import type { ViewLayerConfig, LayerAssignmentEntry } from '@/types/schema'
+import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo, ViewContentConfig } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
@@ -68,6 +93,10 @@ import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/C
 interface LayerStudioProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
+    /** The scope the view being EDITED already stores, when there is one. Ranks
+     *  below a pin made in this session and above the derivation — the same
+     *  order `resolveWizardEntityScope` applies at save. */
+    viewEntityScope?: 'all' | 'curated'
 }
 
 /** Layers rail sizing. Wide enough by default to read a nested entity name. */
@@ -339,11 +368,577 @@ function MagicMapSheet({
     )
 }
 
+// ─── Auto-Layer Sheet ─────────────────────────────────────────────────────────
+
+/** Above this many new columns, applying asks a second time. A Context View is
+ *  read left-to-right; forty columns is a scroll bar, not a model. */
+export const AUTO_LAYER_WARN = 24
+
+/** Columns drawn in the preview before it collapses into "+N more". */
+const PREVIEW_LIMIT = 6
+
+/** Entity rows the sheet draws at once. "Find the rest" can pull tens of
+ *  thousands into memory; the list must not try to draw them all. */
+const SHEET_PAGE = 100
+
+/** A Context View read left-to-right cannot be hundreds of columns wide, and
+ *  clicking a type pill selects EVERY entity of that type — so a 10,000-entity
+ *  type is two clicks from an unusable view. Past this we decline and point at
+ *  the tool that handles that scale: one column for the whole type. */
+export const AUTO_LAYER_MAX = 200
+
+export type AutoLayerMode = 'type' | 'entity'
+
+/** Sentinel for the "everything" pill — not a real type id. */
+const ALL_TYPES = '__all_types__'
+
+interface PreviewColumn {
+    key: string
+    name: string
+    color: string
+    meta?: string
+}
+
+/** The columns this selection would create, laid out as the canvas will show
+ *  them. Committing to sixteen columns is a much easier decision when you can
+ *  see them first. */
+function ColumnPreview({ columns }: { columns: PreviewColumn[] }) {
+    const shown = columns.slice(0, PREVIEW_LIMIT)
+    const rest = columns.length - shown.length
+
+    return (
+        <div className="flex items-stretch gap-1.5 overflow-hidden" aria-hidden>
+            {shown.map(col => (
+                <div
+                    key={col.key}
+                    className="w-[92px] shrink-0 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/60 overflow-hidden"
+                >
+                    <div className="h-1" style={{ backgroundColor: col.color }} />
+                    <div className="px-2 py-1.5">
+                        <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200 truncate" title={col.name}>
+                            {col.name}
+                        </div>
+                        {col.meta && <div className="text-[10px] text-slate-400 truncate">{col.meta}</div>}
+                    </div>
+                </div>
+            ))}
+            {rest > 0 && (
+                <div className="w-[64px] shrink-0 rounded-lg border border-dashed border-slate-300 dark:border-slate-600 flex items-center justify-center">
+                    <span className="text-[11px] text-slate-400 tabular-nums">+{rest}</span>
+                </div>
+            )}
+        </div>
+    )
+}
+
+/** One of the two ways to build columns, carrying a live count of what it makes. */
+function ModeChoice({
+    active, title, help, count, onSelect,
+}: {
+    active: boolean
+    title: string
+    help: string
+    count: string
+    onSelect: () => void
+}) {
+    return (
+        <button
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={onSelect}
+            className={cn(
+                'flex-1 text-left px-3.5 py-2.5 rounded-xl border transition-colors',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                active
+                    ? 'border-sky-400 dark:border-sky-500 bg-sky-50 dark:bg-sky-500/10'
+                    : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
+            )}
+        >
+            <div className="flex items-baseline justify-between gap-2">
+                <span className={cn(
+                    'text-sm font-medium',
+                    active ? 'text-sky-700 dark:text-sky-300' : 'text-slate-700 dark:text-slate-200'
+                )}>
+                    {title}
+                </span>
+                <span className="text-[11px] text-slate-400 shrink-0 tabular-nums">{count}</span>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{help}</p>
+        </button>
+    )
+}
+
+/** A type's colour chip + icon, shared by both lists. */
+function TypeMark({ color, icon }: { color?: string; icon?: string }) {
+    return (
+        <span
+            className="w-5 h-5 rounded flex items-center justify-center text-white shrink-0"
+            style={{ backgroundColor: color ?? '#94a3b8' }}
+        >
+            {icon ? <DynamicIcon name={icon} className="w-3 h-3" /> : <Columns3 className="w-3 h-3" />}
+        </span>
+    )
+}
+
+/**
+ * Turn the top of the hierarchy into columns, in one reviewable pass.
+ *
+ *  • GROUP BY TYPE writes layers carrying `entityTypes` and NO assignments — the
+ *    type IS the rule, so every entity of that type lands in the column and
+ *    everything it contains inherits. One ingested later lands there too.
+ *  • ONE COLUMN EACH writes one layer per chosen entity plus one inheriting
+ *    assignment each, so that entity's whole subtree becomes its own column.
+ *    Filtering to a single type first is the common case — "give every Domain
+ *    its own column" — which is why picking a type selects all of them.
+ *
+ * Mirrors MagicMapSheet: review, then ONE commit (one undo step).
+ */
+function AutoLayerSheet({
+    mode,
+    onModeChange,
+    candidates,
+    entities,
+    scanned,
+    total,
+    hasMore,
+    busy,
+    ungoverned,
+    onLoadAll,
+    onApplyTypes,
+    onApplyEntities,
+    onClose,
+    placeExisting,
+}: {
+    mode: AutoLayerMode
+    onModeChange: (mode: AutoLayerMode) => void
+    candidates: RootTypeCandidate[]
+    entities: TopLevelEntity[]
+    scanned: number
+    total: number
+    hasMore: boolean
+    busy: boolean
+    ungoverned: boolean
+    onLoadAll: () => void
+    onApplyTypes: (selected: RootTypeCandidate[]) => void
+    onApplyEntities: (selected: TopLevelEntity[]) => void
+    onClose: () => void
+    /** Where the draft ALREADY places an entity — so "stays out of the view"
+     *  never counts something an existing column holds. */
+    placeExisting: (entity: { urn: string; type: string }) => { layerId?: string }
+}) {
+    const available = useMemo(() => candidates.filter(c => !c.coveredByLayerId), [candidates])
+
+    /** Types actually present in the scanned entities — the pills to filter by. */
+    const facets = useMemo(() => candidates.filter(c => (c.observedCount ?? 0) > 0), [candidates])
+    const byTypeId = useMemo(() => new Map(candidates.map(c => [c.typeId, c])), [candidates])
+
+    // Default: the declared roots that actually have instances. A type the
+    // ontology calls a root but the graph has never seen would build an empty
+    // column, and an orphan-root type is a judgement call — both start off.
+    const defaultTypeKeys = useMemo(() => {
+        const observed = available.filter(c => c.declaredByOntology && (c.observedCount ?? 0) > 0)
+        const pool = observed.length > 0
+            ? observed
+            : available.filter(c => c.declaredByOntology && c.observedCount === undefined)
+        return new Set(pool.map(c => c.typeId))
+    }, [available])
+
+    // `null` = "the user hasn't chosen yet", so the defaults stay live as the
+    // scanned population grows (e.g. after "Find the rest"). Once they touch a box
+    // the explicit set takes over and a later re-scan can't wipe their choice —
+    // which is also why this is not an effect that re-seeds state.
+    const [typeKeys, setTypeKeys] = useState<Set<string> | null>(null)
+    const [entityKeys, setEntityKeys] = useState<Set<string>>(new Set())
+    const [facet, setFacet] = useState<string>(ALL_TYPES)
+    const [confirming, setConfirming] = useState(false)
+
+    const selectedTypeKeys = typeKeys ?? defaultTypeKeys
+
+    const toggle = (set: Set<string>, key: string) => {
+        const next = new Set(set)
+        if (next.has(key)) next.delete(key); else next.add(key)
+        return next
+    }
+
+    // Any change to what would be created retracts a pending confirmation.
+    const toggleType = (typeId: string) => {
+        setTypeKeys(prev => toggle(prev ?? defaultTypeKeys, typeId))
+        setConfirming(false)
+    }
+    const toggleEntity = (urn: string) => {
+        setEntityKeys(prev => toggle(prev, urn))
+        setConfirming(false)
+    }
+    const switchMode = (next: AutoLayerMode) => {
+        setConfirming(false)
+        onModeChange(next)
+    }
+
+    /**
+     * Picking a type IS the gesture "give each of these its own column", so it
+     * ticks them all — but only when that many columns is a view someone could
+     * read. Ticking 10,000 would leave the action refused and no way back except
+     * clearing, which is a dead end dressed up as a selection. Past the cap the
+     * pill still NARROWS the list (that part is always useful) and leaves the
+     * choosing to the user. "Everything" clears, rather than selecting 500.
+     */
+    const chooseFacet = (next: string) => {
+        setFacet(next)
+        setConfirming(false)
+        setShownCount(SHEET_PAGE)
+        if (next === ALL_TYPES) { setEntityKeys(new Set()); return }
+        const nextFold = next.toLowerCase()
+        const ofType = entities.filter(e => e.type.toLowerCase() === nextFold)
+        setEntityKeys(ofType.length > AUTO_LAYER_MAX
+            ? new Set()
+            : new Set(ofType.map(e => e.urn)))
+    }
+
+    const [shownCount, setShownCount] = useState(SHEET_PAGE)
+    const matchingEntities = useMemo(() => {
+        if (facet === ALL_TYPES) return entities
+        // The pill's count sums every case-fold variant (`Domain` + `domain`),
+        // so an exact filter here would show fewer than the pill promises and
+        // leave the odd-cased ones unreachable from this sheet.
+        const fold = facet.toLowerCase()
+        return entities.filter(e => e.type.toLowerCase() === fold)
+    }, [entities, facet])
+    const visibleEntities = useMemo(
+        () => matchingEntities.slice(0, shownCount),
+        [matchingEntities, shownCount],
+    )
+    const undrawn = matchingEntities.length - visibleEntities.length
+
+    const selectedTypes = useMemo(
+        () => available.filter(c => selectedTypeKeys.has(c.typeId)),
+        [available, selectedTypeKeys],
+    )
+    const selectedEntities = useMemo(
+        () => entities.filter(e => entityKeys.has(e.urn)),
+        [entities, entityKeys],
+    )
+    const selectedCount = mode === 'type' ? selectedTypes.length : selectedEntities.length
+    const needsConfirm = selectedCount > AUTO_LAYER_WARN
+    const tooMany = selectedCount > AUTO_LAYER_MAX
+
+    /** Top-level entities that would end up with no column at all. A curated view
+     *  renders only what is placed, so leaving this silent ships a view quietly
+     *  missing entities. */
+    const strandedByType = useMemo(() => {
+        if (mode !== 'entity' || selectedEntities.length === 0) return []
+        const placed = new Set(selectedEntities.map(e => e.urn))
+        const counts = new Map<string, number>()
+        for (const entity of entities) {
+            if (placed.has(entity.urn)) continue
+            // An entity an existing column already holds — by assignment or by a
+            // type rule — is not stranded. Counting it turned a draft that
+            // already covered its Platforms into a false amber warning.
+            if (placeExisting(entity).layerId) continue
+            counts.set(entity.type, (counts.get(entity.type) ?? 0) + 1)
+        }
+        return [...counts.entries()]
+            .map(([typeId, count]) => ({ label: byTypeId.get(typeId)?.label ?? typeId, count }))
+            .sort((a, b) => b.count - a.count)
+    }, [mode, entities, selectedEntities, byTypeId, placeExisting])
+
+    const previewColumns = useMemo<PreviewColumn[]>(() => (
+        mode === 'type'
+            ? selectedTypes.map(c => ({
+                key: c.typeId,
+                name: c.label,
+                color: c.color ?? '#94a3b8',
+                meta: c.observedCount !== undefined
+                    ? `${c.observedCount} ${c.observedCount === 1 ? 'entity' : 'entities'}`
+                    : undefined,
+            }))
+            : selectedEntities.map(e => ({
+                key: e.urn,
+                name: e.name,
+                color: byTypeId.get(e.type)?.color ?? '#94a3b8',
+                meta: e.childCount ? `${e.childCount} inside` : undefined,
+            }))
+    ), [mode, selectedTypes, selectedEntities, byTypeId])
+
+    const apply = () => {
+        if (selectedCount === 0 || tooMany) return
+        if (needsConfirm && !confirming) { setConfirming(true); return }
+        if (mode === 'type') onApplyTypes(selectedTypes)
+        else onApplyEntities(selectedEntities)
+    }
+
+    const rows = mode === 'type' ? candidates.length : matchingEntities.length
+    const facetLabel = facet === ALL_TYPES ? null : byTypeId.get(facet)?.label ?? facet
+
+    return (
+        <motion.div
+            data-testid="auto-layer-sheet"
+            role="region"
+            aria-label="Auto-layer"
+            initial={{ opacity: 0, y: 20, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.97 }}
+            className={cn(
+                'absolute inset-x-0 bottom-0 z-50 mx-4 mb-4',
+                'bg-white dark:bg-slate-900 rounded-2xl shadow-2xl',
+                'border border-slate-200 dark:border-slate-700',
+                'max-h-[82%] flex flex-col overflow-hidden'
+            )}
+        >
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3">
+                <div className="min-w-0">
+                    <h3 className="font-semibold text-slate-800 dark:text-white flex items-center gap-2">
+                        <Columns3 className="w-4 h-4 text-sky-500" />
+                        Auto-layer
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                        Build columns from the top of your hierarchy.
+                    </p>
+                </div>
+                <button
+                    onClick={onClose}
+                    aria-label="Close"
+                    className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                >
+                    <X className="w-4 h-4 text-slate-500" />
+                </button>
+            </div>
+
+            {/* Choose how the columns are built */}
+            <div className="px-5 pb-3 flex gap-2" role="radiogroup" aria-label="How to build the columns">
+                <ModeChoice
+                    active={mode === 'type'}
+                    title="Group by type"
+                    help="Everything of the same type shares one column."
+                    count={`${selectedTypes.length} ${selectedTypes.length === 1 ? 'column' : 'columns'}`}
+                    onSelect={() => switchMode('type')}
+                />
+                <ModeChoice
+                    active={mode === 'entity'}
+                    title="One column each"
+                    help="Every entity you pick gets a column of its own."
+                    count={`${selectedEntities.length} ${selectedEntities.length === 1 ? 'column' : 'columns'}`}
+                    onSelect={() => switchMode('entity')}
+                />
+            </div>
+
+            {/* What you will get */}
+            {previewColumns.length > 0 && (
+                <div className="px-5 pb-3">
+                    <ColumnPreview columns={previewColumns} />
+                </div>
+            )}
+
+            {mode === 'type' && ungoverned && (
+                <div className="mx-5 mb-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-900/40">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                        Every type here sits at the top level, so this is simply the full list of
+                        types. Your hierarchy may not say yet what contains what — pick the ones you
+                        actually want as columns.
+                    </p>
+                </div>
+            )}
+
+            {/* Narrow to one type — the "every Domain gets a column" gesture */}
+            {mode === 'entity' && facets.length > 0 && (
+                <div className="px-5 pb-3 pt-3 flex flex-wrap gap-1.5 border-t border-slate-100 dark:border-slate-800">
+                    <button
+                        onClick={() => chooseFacet(ALL_TYPES)}
+                        aria-pressed={facet === ALL_TYPES}
+                        className={cn(
+                            'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150',
+                            facet === ALL_TYPES
+                                ? 'bg-slate-700 dark:bg-slate-600 text-white shadow-sm'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                        )}
+                    >
+                        Everything{scanned > 0 && <span className="ml-1.5 opacity-70 tabular-nums">{scanned}</span>}
+                    </button>
+                    {facets.map(f => (
+                        <button
+                            key={f.typeId}
+                            onClick={() => chooseFacet(f.typeId)}
+                            aria-pressed={facet === f.typeId}
+                            title={`Give every ${f.label} a column of its own`}
+                            className={cn(
+                                'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150 flex items-center gap-1.5',
+                                facet === f.typeId
+                                    ? 'text-white shadow-sm'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                            )}
+                            style={facet === f.typeId ? { backgroundColor: f.color ?? '#475569' } : undefined}
+                        >
+                            {f.icon && <DynamicIcon name={f.icon} className="w-3 h-3" />}
+                            {f.label}
+                            <span className="opacity-70 tabular-nums">{f.observedCount}</span>
+                        </button>
+                    ))}
+                    {hasMore && (
+                        <button
+                            onClick={onLoadAll}
+                            disabled={busy}
+                            className="px-3 py-1.5 text-xs font-medium rounded-full border border-dashed border-slate-300 dark:border-slate-600 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors disabled:opacity-60 flex items-center gap-1.5"
+                        >
+                            {busy && <Loader2 className="w-3 h-3 animate-spin" />}
+                            Find the rest of {total}
+                        </button>
+                    )}
+                </div>
+            )}
+
+            {/* The list */}
+            <div
+                data-testid="auto-layer-list"
+                className="flex-1 overflow-y-auto px-4 py-2 space-y-1 border-t border-slate-100 dark:border-slate-800"
+            >
+                {rows === 0 ? (
+                    <p className="text-center text-sm text-slate-400 py-8">
+                        {mode === 'type'
+                            ? 'Nothing sits at the top of this hierarchy yet, so there are no columns to build.'
+                            : facetLabel
+                                ? `No ${facetLabel} found at the top level.`
+                                : 'No top-level entities found in this data source.'}
+                    </p>
+                ) : mode === 'type' ? (
+                    candidates.map(candidate => {
+                        const covered = !!candidate.coveredByLayerId
+                        const checked = selectedTypeKeys.has(candidate.typeId)
+                        return (
+                            <label
+                                key={candidate.typeId}
+                                title={candidate.typeId}
+                                className={cn(
+                                    'flex items-center gap-3 px-3 py-2 rounded-lg transition-colors',
+                                    covered
+                                        ? 'opacity-50 cursor-not-allowed'
+                                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/70 cursor-pointer'
+                                )}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={checked && !covered}
+                                    disabled={covered}
+                                    onChange={() => toggleType(candidate.typeId)}
+                                    className="w-4 h-4 rounded border-slate-300 text-sky-500 focus:ring-sky-500"
+                                />
+                                <TypeMark color={candidate.color} icon={candidate.icon} />
+                                <span className="flex-1 min-w-0 text-sm text-slate-700 dark:text-slate-200 truncate">
+                                    {candidate.label}
+                                </span>
+                                {!candidate.declaredByOntology && (
+                                    <span
+                                        title="Found at the top level, though your hierarchy doesn't list it as a starting point"
+                                        className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 shrink-0"
+                                    >
+                                        unexpected
+                                    </span>
+                                )}
+                                <span className="text-xs text-slate-400 shrink-0 tabular-nums">
+                                    {covered
+                                        ? 'already a column'
+                                        : candidate.observedCount !== undefined
+                                            ? candidate.observedCount
+                                            : 'none found'}
+                                </span>
+                            </label>
+                        )
+                    })
+                ) : (
+                    visibleEntities.map(entity => (
+                        <label
+                            key={entity.urn}
+                            className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/70 cursor-pointer transition-colors"
+                        >
+                            <input
+                                type="checkbox"
+                                checked={entityKeys.has(entity.urn)}
+                                onChange={() => toggleEntity(entity.urn)}
+                                className="w-4 h-4 rounded border-slate-300 text-sky-500 focus:ring-sky-500"
+                            />
+                            <TypeMark color={byTypeId.get(entity.type)?.color} icon={byTypeId.get(entity.type)?.icon} />
+                            <span className="flex-1 min-w-0 text-sm text-slate-700 dark:text-slate-200 truncate">
+                                {entity.name}
+                            </span>
+                            {entity.childCount ? (
+                                <span className="text-xs text-slate-400 shrink-0 tabular-nums">
+                                    {entity.childCount} inside
+                                </span>
+                            ) : null}
+                        </label>
+                    ))
+                )}
+                {mode === 'entity' && undrawn > 0 && (
+                    <button
+                        onClick={() => setShownCount(c => c + SHEET_PAGE)}
+                        className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium text-sky-600 dark:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-900/20 transition-colors"
+                    >
+                        Show {Math.min(undrawn, SHEET_PAGE)} more
+                        <span className="ml-1 text-slate-400 font-normal tabular-nums">
+                            ({undrawn.toLocaleString()} left)
+                        </span>
+                    </button>
+                )}
+            </div>
+
+            {/* What happens, and the one button that does it */}
+            <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
+                <p className="text-xs text-slate-500 min-w-0">
+                    {tooMany ? (
+                        <span className="text-amber-600 dark:text-amber-400">
+                            {selectedCount.toLocaleString()} columns is more than a view can be read
+                            across. Pick fewer, or use Group by type to hold them all in one column.
+                        </span>
+                    ) : strandedByType.length > 0 ? (
+                        <span className="text-amber-600 dark:text-amber-400">
+                            {strandedByType.map(s => `${s.count} ${s.label}`).join(' and ')}
+                            {strandedByType.reduce((n, s) => n + s.count, 0) === 1 ? ' stays' : ' stay'} out
+                            of the view. Add {strandedByType.length === 1 ? 'a column' : 'columns'} for
+                            {strandedByType.length === 1 ? ' it' : ' them'} with Group by type.
+                        </span>
+                    ) : selectedCount === 0 && mode === 'entity'
+                        && facetLabel && matchingEntities.length > AUTO_LAYER_MAX ? (
+                        <>
+                            {matchingEntities.length.toLocaleString()} {facetLabel} is too many to
+                            give each a column. Pick the ones you want, or use Group by type to
+                            hold them all in one.
+                        </>
+                    ) : selectedCount === 0 ? (
+                        mode === 'type'
+                            ? 'Pick the types you want as columns.'
+                            : facetLabel
+                                ? `Pick which ${facetLabel} get a column.`
+                                : 'Pick a type above, or choose entities one by one.'
+                    ) : (
+                        'Everything inside these comes along automatically.'
+                    )}
+                </p>
+                <button
+                    onClick={apply}
+                    disabled={selectedCount === 0 || tooMany}
+                    className={cn(
+                        'px-4 py-2 text-white text-sm font-medium rounded-lg shrink-0 transition-colors',
+                        'disabled:opacity-40 disabled:cursor-not-allowed',
+                        'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-sky-400 dark:focus-visible:ring-offset-slate-900',
+                        confirming ? 'bg-amber-500 hover:bg-amber-600' : 'bg-sky-500 hover:bg-sky-600'
+                    )}
+                >
+                    {confirming
+                        ? `Create ${selectedCount} columns?`
+                        : `Create ${selectedCount} ${selectedCount === 1 ? 'column' : 'columns'}`}
+                </button>
+            </div>
+        </motion.div>
+    )
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function LayerStudio({
     formData,
     updateFormData,
+    viewEntityScope,
 }: LayerStudioProps) {
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
@@ -543,6 +1138,29 @@ export function LayerStudio({
     // share one history.
     const layers = formData.layers ?? []
     const assignments = formData.assignments ?? {}
+    const defaultNodeSortMode = formData.defaultNodeSortMode
+    /** The wizard's live layout, in the shape every mutation helper takes. */
+    const layout = useMemo<NormalizedReferenceLayout>(
+        // The key is ALWAYS present, even undefined: an undo snapshot has to be
+        // able to restore "no view default", which an absent key cannot express.
+        () => ({ layers, assignments, defaultNodeSortMode }),
+        [layers, assignments, defaultNodeSortMode],
+    )
+
+    /**
+     * What scope this draft will actually be saved under — the same precedence
+     * the save applies. Rule placements only exist in an OPEN view, so every
+     * surface that shows "by type" has to agree with this or the wizard starts
+     * promising placements the canvas will not make.
+     */
+    const effectiveScope = useMemo(
+        () => resolveWizardEntityScope(
+            formData.entityScope,
+            layout,
+            viewEntityScope ? ({ entityScope: viewEntityScope } as ViewContentConfig) : undefined,
+        ),
+        [formData.entityScope, layout, viewEntityScope],
+    )
 
     const undoStackRef = useRef<NormalizedReferenceLayout[]>([])
     const redoStackRef = useRef<NormalizedReferenceLayout[]>([])
@@ -551,14 +1169,25 @@ export function LayerStudio({
     const commitLayout = useCallback(
         (next: NormalizedReferenceLayout) => {
             if (!isUndoRedoRef.current) {
-                undoStackRef.current = [...undoStackRef.current, { layers, assignments }]
+                undoStackRef.current = [...undoStackRef.current, layout]
                 redoStackRef.current = []
                 // Cap stack size
                 if (undoStackRef.current.length > 50) undoStackRef.current.shift()
             }
-            updateFormData({ layers: next.layers, assignments: next.assignments })
+            // Most callers hand over a bare { layers, assignments }. Writing
+            // `defaultNodeSortMode: undefined` for those would spread over the
+            // stored value and silently undo "Apply to all columns" on the very
+            // next drag — so only write the key when the caller actually carries
+            // one. Undo/redo pass a full snapshot, which always does.
+            updateFormData({
+                layers: next.layers,
+                assignments: next.assignments,
+                ...('defaultNodeSortMode' in next
+                    ? { defaultNodeSortMode: next.defaultNodeSortMode }
+                    : {}),
+            })
         },
-        [updateFormData, layers, assignments]
+        [updateFormData, layout]
     )
 
     // Layer-structure-only updates (logical node CRUD, reorder, auto-organize)
@@ -575,21 +1204,29 @@ export function LayerStudio({
         if (undoStackRef.current.length === 0) return
         const prev = undoStackRef.current[undoStackRef.current.length - 1]
         undoStackRef.current = undoStackRef.current.slice(0, -1)
-        redoStackRef.current = [...redoStackRef.current, { layers, assignments }]
+        redoStackRef.current = [...redoStackRef.current, layout]
         isUndoRedoRef.current = true
-        updateFormData({ layers: prev.layers, assignments: prev.assignments })
+        updateFormData({
+            layers: prev.layers,
+            assignments: prev.assignments,
+            defaultNodeSortMode: prev.defaultNodeSortMode,   // snapshot: always explicit
+        })
         isUndoRedoRef.current = false
-    }, [updateFormData, layers, assignments])
+    }, [updateFormData, layout])
 
     const handleRedo = useCallback(() => {
         if (redoStackRef.current.length === 0) return
         const next = redoStackRef.current[redoStackRef.current.length - 1]
         redoStackRef.current = redoStackRef.current.slice(0, -1)
-        undoStackRef.current = [...undoStackRef.current, { layers, assignments }]
+        undoStackRef.current = [...undoStackRef.current, layout]
         isUndoRedoRef.current = true
-        updateFormData({ layers: next.layers, assignments: next.assignments })
+        updateFormData({
+            layers: next.layers,
+            assignments: next.assignments,
+            defaultNodeSortMode: next.defaultNodeSortMode,   // snapshot: always explicit
+        })
         isUndoRedoRef.current = false
-    }, [updateFormData, layers, assignments])
+    }, [updateFormData, layout])
 
     // Keyboard shortcuts for undo/redo
     useEffect(() => {
@@ -884,6 +1521,85 @@ export function LayerStudio({
         notify('success', `Placed ${accepted.length} ${accepted.length === 1 ? 'entity' : 'entities'} — their children follow automatically`)
     }, [layers, assignments, commitLayout, getRedundantDescendants, notify])
 
+    // ── Auto-layer ──────────────────────────────────────────────────────────────
+    // Turns the top of the hierarchy into columns. BY TYPE writes rule-driven
+    // layers (`entityTypes` IS the placement rule) and no assignments, so the
+    // view must run in open scope or curated semantics would ignore those rules
+    // and empty every column — hence the entityScope pin. BY ENTITY writes one
+    // inheriting assignment per column, which curated scope handles correctly.
+    const [autoLayerMode, setAutoLayerMode] = useState<AutoLayerMode | null>(null)
+    const {
+        entityTypes: dsEntityTypes,
+        relationshipTypes: dsRelationshipTypes,
+        rootEntityTypes: dsRootEntityTypes,
+        containmentEdgeTypes: dsContainmentEdgeTypes,
+    } = useDataSourceSchema(formData.dataSourceId)
+
+    /** Every top-level entity the browser has scanned so far. */
+    const scannedTopLevel = useMemo<TopLevelEntity[]>(() => {
+        if (!snapshot) return []
+        return snapshot.topLevelIds.flatMap(urn => {
+            const identity = snapshot.directory.get(urn)
+            return identity
+                ? [{ urn, name: identity.name, type: identity.type, childCount: identity.childCount }]
+                : []
+        })
+    }, [snapshot])
+
+    const rootTypeCandidates = useMemo(() => deriveRootTypeCandidates({
+        entityTypes: dsEntityTypes,
+        relationshipTypes: dsRelationshipTypes,
+        rootEntityTypes: dsRootEntityTypes,
+        containmentEdgeTypes: dsContainmentEdgeTypes,
+        observedTopLevel: scannedTopLevel,
+        existingLayers: layers,
+    }), [dsEntityTypes, dsRelationshipTypes, dsRootEntityTypes, dsContainmentEdgeTypes, scannedTopLevel, layers])
+
+    /** One rule-driven column per chosen type, in ONE commit. */
+    const applyRootTypeLayers = useCallback((selected: RootTypeCandidate[]) => {
+        if (selected.length === 0) return
+        const added = layersForRootTypes(selected, layers.length)
+        commitLayout({ layers: [...layers, ...added], assignments })
+        // Rules only resolve in open scope — see resolveWizardEntityScope.
+        updateFormData({ entityScope: 'all' })
+        setAutoLayerMode(null)
+        notify('success', `Added ${added.length} ${added.length === 1 ? 'column' : 'columns'} — entities of those types place themselves, children included`)
+    }, [layers, assignments, commitLayout, updateFormData, notify])
+
+    /** One column per chosen entity, each carrying its subtree, in ONE commit. */
+    const applyEntityLayers = useCallback((selected: TopLevelEntity[]) => {
+        if (selected.length === 0) return
+        // A second column anchored to the same entity can never fill — placement
+        // resolves an anchor to ONE layer — so it would sit there empty for ever.
+        // Cheaper to not create it than to explain it afterwards.
+        const alreadyAnchored = new Set(
+            layers.map(l => l.anchorUrn).filter((u): u is string => !!u),
+        )
+        const fresh = selected.filter(e => !alreadyAnchored.has(e.urn))
+        const skipped = selected.length - fresh.length
+        // Giving an entity its own column MOVES it out of wherever it was placed
+        // by hand. That is the right outcome, but it must not happen silently.
+        const moved = fresh.filter(e => {
+            const prior = assignments[e.urn]?.layerId
+            return !!prior && layers.some(l => l.id === prior)
+        }).length
+        if (fresh.length === 0) {
+            notify('info', skipped === 1
+                ? 'That entity already has a column'
+                : 'Those entities already have columns')
+            setAutoLayerMode(null)
+            return
+        }
+        const { layers: added, assignments: addedAssignments } = layersForTopLevelEntities(fresh, layers.length)
+        commitLayout({ layers: [...layers, ...added], assignments: { ...assignments, ...addedAssignments } })
+        setAutoLayerMode(null)
+        notify('success', [
+            `Added ${added.length} ${added.length === 1 ? 'column' : 'columns'} — each carries everything its entity contains`,
+            skipped > 0 ? ` (${skipped} already had one)` : '',
+            moved > 0 ? ` · ${moved} moved out of ${moved === 1 ? 'its' : 'their'} previous column` : '',
+        ].join(''))
+    }, [layers, assignments, commitLayout, notify])
+
     /** Empty a layer in one go — the panel offered no way back out of a bulk place. */
     const handleClearLayer = useCallback((layerId: string) => {
         const urns = Object.entries(assignments)
@@ -897,6 +1613,181 @@ export function LayerStudio({
 
     // ── Preview pane toggle ─────────────────────────────────────────────────────
     const [showPreview, setShowPreview] = useState(false)
+
+
+    /**
+     * Every root each column holds — explicit placements AND the ones a type rule
+     * places — in the order the CANVAS will render them. The rail used to show
+     * these as two separate lists in assignment/scan order, which could not
+     * express a single arrangement and did not match the column it previews.
+     */
+    const rootsByLayer = useMemo(() => {
+        const place = buildWizardPlacement(layers, assignments, effectiveScope)
+        const byLayer = new Map<string, LayerRootRow[]>()
+        const seen = new Set<string>()
+
+        const add = (layerId: string, urn: string, rulePlaced: boolean) => {
+            if (seen.has(urn)) return
+            seen.add(urn)
+            const identity = entityIndex.resolve(urn)
+            byLayer.set(layerId, [...(byLayer.get(layerId) ?? []), {
+                id: urn,
+                urn,
+                name: identity?.name ?? fallbackNameFromUrn(urn),
+                typeId: identity?.type ?? '',
+                childCount: identity?.childCount ?? 0,
+                rulePlaced,
+            }])
+        }
+
+        // Explicit placements first (a logical-node member is drawn inside its
+        // group, not as a column root).
+        for (const [urn, entry] of Object.entries(assignments)) {
+            if (!entry?.layerId || entry.logicalNodeId) continue
+            add(entry.layerId, urn, false)
+        }
+        // Then whatever the type rules place.
+        for (const entity of scannedTopLevel) {
+            const { layerId, source } = place(entity)
+            if (layerId && source === 'rule') add(layerId, entity.urn, true)
+        }
+
+        // An ANCHORED column is that entity, so its rows are the entity's
+        // children — not the entity itself, which the header already names.
+        // Only while we hold them ALL, though: the canvas falls back to the
+        // anchor row when it doesn't, and the rail has to show the same thing.
+        for (const layer of layers) {
+            if (!layer.anchorUrn) continue
+            const children = entityIndex.childrenOf(layer.anchorUrn)
+            const total = entityIndex.resolve(layer.anchorUrn)?.childCount ?? children.length
+            // Nothing loaded yet (or the fetch failed) — keep the anchor row, so
+            // the column still says what it holds. Matches useLayerAssignment.
+            if (children.length === 0 && total > 0) continue
+            // Promotion replaces the ANCHOR row, not the column: anything else
+            // placed here (an unrelated root dragged in) is still a root of this
+            // layer on the canvas and has to stay listed here too.
+            const others = (byLayer.get(layer.id) ?? []).filter(r => r.urn !== layer.anchorUrn)
+            byLayer.set(layer.id, [...others, ...children.map(childUrn => {
+                const identity = entityIndex.resolve(childUrn)
+                return {
+                    id: childUrn,
+                    urn: childUrn,
+                    name: identity?.name ?? fallbackNameFromUrn(childUrn),
+                    typeId: identity?.type ?? '',
+                    childCount: identity?.childCount ?? 0,
+                    rulePlaced: false,
+                }
+            })])
+        }
+
+        const cmps = rootComparators<LayerRootRow>(assignments, r => r.childCount)
+        byLayer.forEach((rows, layerId) => {
+            const layer = layers.find(l => l.id === layerId)
+            const mode = layer ? effectiveSortMode(layer, defaultNodeSortMode) : 'alpha-asc'
+            rows.sort(cmps[mode] ?? cmps['alpha-asc'])
+        })
+        return byLayer
+    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex, effectiveScope])
+
+    /** What each column actually holds — derived from the very rows the rail
+     *  lists, so an ANCHORED column reports its children rather than the single
+     *  assignment that anchors it. */
+    const placementCounts = useMemo(() => {
+        const counts = new Map<string, number>()
+        rootsByLayer.forEach((rows, layerId) => counts.set(layerId, rows.length))
+        return counts
+    }, [rootsByLayer])
+
+    /** The draft's CURRENT placement for an entity — what the Auto-layer sheet
+     *  consults before calling anything stranded. */
+    const placeCurrent = useMemo(
+        () => buildWizardPlacement(layers, assignments, effectiveScope),
+        [layers, assignments, effectiveScope],
+    )
+
+    /** Mirrors the canvas: how much of each anchored column is still unloaded. */
+    const anchorMoreByLayer = useMemo(() => {
+        const out = new Map<string, { anchorUrn: string; remaining: number }>()
+        for (const layer of layers) {
+            if (!layer.anchorUrn) continue
+            const loaded = entityIndex.childrenOf(layer.anchorUrn).length
+            const total = entityIndex.resolve(layer.anchorUrn)?.childCount ?? loaded
+            if (loaded > 0 && total > loaded) {
+                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
+            }
+        }
+        return out
+    }, [layers, entityIndex])
+
+    // An anchored column draws its entity's children, so they have to be fetched
+    // — nothing else in the wizard expands the anchor.
+    const anchorUrns = useMemo(
+        () => layers
+            .map(l => l.anchorUrn)
+            .filter((u): u is string => !!u)
+            .join('\u0000'),
+        [layers],
+    )
+    useEffect(() => {
+        if (!anchorUrns) return
+        for (const urn of anchorUrns.split('\u0000')) void entityIndex.loadChildren(urn)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [anchorUrns])
+
+    // ── Column ordering ─────────────────────────────────────────────────────────
+    // Same two mutations the canvas uses, so an arrangement built here is the one
+    // the canvas renders. Routed through commitLayout, so sorting shares the
+    // single undo history with assignments and layer CRUD.
+    const handleSetLayerSortMode = useCallback((layerId: string, mode: LayerNodeSortMode | null) => {
+        // Seed 'custom' from the column's CURRENT visual order so nothing jumps
+        // the moment the user switches to a manual arrangement.
+        const seedOrder = mode === 'custom'
+            ? (rootsByLayer.get(layerId) ?? []).map(r => r.urn)
+            : undefined
+        commitLayout(setLayerNodeSortMode(layout, layerId, mode, seedOrder))
+    }, [layout, rootsByLayer, commitLayout])
+
+    const handleApplySortToView = useCallback((mode: LayerNodeSortAlgo) => {
+        commitLayout(setViewDefaultSortMode(layout, mode))
+        notify('success', 'Every column now sorts the same way')
+    }, [layout, commitLayout, notify])
+
+    const handleResetCustomOrder = useCallback((layerId: string) => {
+        commitLayout(clearLayerOrderKeys(layout, layerId))
+    }, [layout, commitLayout])
+
+    /**
+     * Drop `draggedUrn` before/after `targetUrn` inside one column. Mirrors the
+     * canvas's handleReorderNode: adopt 'custom' on the first manual move (seeded
+     * from the visible order), make sure every sibling carries a key — including
+     * rule-placed rows, which get an order-carrier entry — then mint one key.
+     */
+    const handleReorderRoot = useCallback((
+        layerId: string,
+        draggedUrn: string,
+        targetUrn: string,
+        position: 'before' | 'after',
+    ) => {
+        if (draggedUrn === targetUrn) return
+        const layer = layers.find(l => l.id === layerId)
+        if (!layer) return
+        const siblings = (rootsByLayer.get(layerId) ?? []).map(r => r.urn)
+        if (!siblings.includes(draggedUrn) || !siblings.includes(targetUrn)) return
+
+        let next = layout
+        if (effectiveSortMode(layer, defaultNodeSortMode) !== 'custom') {
+            next = setLayerNodeSortMode(next, layerId, 'custom', siblings)
+        }
+        next = ensureSiblingOrderKeys(next, layerId, siblings)
+
+        const order = siblings.filter(urn => urn !== draggedUrn)
+        const targetIdx = order.indexOf(targetUrn)
+        if (targetIdx < 0) return
+        const insertIdx = position === 'before' ? targetIdx : targetIdx + 1
+        const keys = keysForInsertion(next, layerId, order, insertIdx, 1)
+        if (keys === null) return   // malformed neighbour keys — refuse, don't corrupt
+        commitLayout(setAssignmentOrderKey(next, draggedUrn, keys[0]))
+    }, [layers, layout, defaultNodeSortMode, rootsByLayer, commitLayout])
 
     // ── Resizable Layers rail ───────────────────────────────────────────────────
     // Deeply-nested placements with long entity names need width; 240px turned
@@ -988,6 +1879,7 @@ export function LayerStudio({
                     <button
                         onClick={() => {
                             if (magicSuggestions !== null) { setMagicSuggestions(null); return }
+                            setAutoLayerMode(null)   // one bottom sheet at a time; they share a slot
                             runMagicMap()
                         }}
                         disabled={layers.length === 0 || !snapshot}
@@ -998,6 +1890,22 @@ export function LayerStudio({
                     >
                         <Wand2 className="w-4 h-4" />
                         Magic Map
+                    </button>
+
+                    {/* Auto-layer — turn the top of the hierarchy into columns */}
+                    <button
+                        onClick={() => {
+                            setMagicSuggestions(null)   // see runMagicMap: one sheet at a time
+                            setAutoLayerMode(prev => (prev ? null : 'type'))
+                        }}
+                        disabled={rootTypeCandidates.length === 0 && scannedTopLevel.length === 0}
+                        title={rootTypeCandidates.length === 0 && scannedTopLevel.length === 0
+                            ? 'No top-level types or entities found to build columns from'
+                            : 'Create a column per top-level type, or per top-level entity'}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-sky-600 hover:text-sky-700 hover:bg-sky-50 dark:hover:bg-sky-900/20 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                        <Columns3 className="w-4 h-4" />
+                        Auto-layer
                     </button>
                 </div>
 
@@ -1038,6 +1946,14 @@ export function LayerStudio({
                     <LayerHierarchyPanel
                         layers={layers}
                         assignments={assignments}
+                        rootsByLayer={rootsByLayer}
+                        defaultNodeSortMode={defaultNodeSortMode}
+                        onSetLayerSortMode={handleSetLayerSortMode}
+                        onApplySortToView={handleApplySortToView}
+                        onResetCustomOrder={handleResetCustomOrder}
+                        onReorderRoot={handleReorderRoot}
+                        anchorMoreByLayer={anchorMoreByLayer}
+                        onLoadMoreAnchor={urn => void entityIndex.loadMoreChildren(urn)}
                         activeTarget={activeTarget}
                         logicalNodes={logicalNodes}
                         entityIndex={entityIndex}
@@ -1069,6 +1985,7 @@ export function LayerStudio({
                         <WizardAssignmentTree
                             layers={layers}
                             assignments={assignments}
+                            entityScope={effectiveScope}
                             activeTarget={activeTarget}
                             onAssignmentChange={handleAssignmentChange}
                             onBulkAssign={handleBulkAssignment}
@@ -1097,7 +2014,10 @@ export function LayerStudio({
                                 </div>
                                 <div className="flex-1 flex items-center justify-center text-xs text-slate-400 p-4 text-center">
                                     {/* Mini canvas preview — rendered at scale */}
-                                    <ContextModelMiniPreview layers={layers} assignments={assignments} />
+                                    <ContextModelMiniPreview
+                                        layers={layers}
+                                        placementCounts={placementCounts}
+                                    />
                                 </div>
                             </motion.div>
                         )}
@@ -1140,6 +2060,28 @@ export function LayerStudio({
                         />
                     )}
                 </AnimatePresence>
+
+                {/* Auto-layer review sheet */}
+                <AnimatePresence>
+                    {autoLayerMode !== null && (
+                        <AutoLayerSheet
+                            mode={autoLayerMode}
+                            onModeChange={setAutoLayerMode}
+                            candidates={rootTypeCandidates}
+                            entities={scannedTopLevel}
+                            scanned={scannedTopLevel.length}
+                            total={Math.max(snapshot?.topLevelTotalCount ?? 0, scannedTopLevel.length)}
+                            hasMore={snapshot?.topLevelHasMore ?? false}
+                            busy={magicBusy}
+                            ungoverned={ontologyLooksUngoverned(rootTypeCandidates, dsEntityTypes.length)}
+                            onLoadAll={loadAllThenMagicMap}
+                            onApplyTypes={applyRootTypeLayers}
+                            onApplyEntities={applyEntityLayers}
+                            placeExisting={placeCurrent}
+                            onClose={() => setAutoLayerMode(null)}
+                        />
+                    )}
+                </AnimatePresence>
             </div>
 
             {/* Child reassignment confirmation dialog */}
@@ -1157,16 +2099,15 @@ export function LayerStudio({
 
 function ContextModelMiniPreview({
     layers,
-    assignments,
+    placementCounts,
 }: {
     layers: ViewLayerConfig[]
-    assignments: Record<string, LayerAssignmentEntry>
+    /** What each column actually holds. Counting raw `assignments` reads 0 for
+     *  every rule-driven column and 1 for an anchored one, neither of which is
+     *  what the column shows. */
+    placementCounts: Map<string, number>
 }) {
-    const assignedCounts = useMemo(() => {
-        const counts = new Map<string, number>()
-        Object.values(assignments).forEach(a => counts.set(a.layerId, (counts.get(a.layerId) ?? 0) + 1))
-        return counts
-    }, [assignments])
+    const assignedCounts = placementCounts
 
     if (layers.length === 0) {
         return <span>No layers to preview</span>
