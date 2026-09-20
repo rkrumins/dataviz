@@ -362,11 +362,19 @@ export function useLayerAssignment({
         if (!list) return
 
         const nodeUrn = (node.data?.urn as string | undefined) ?? node.id
-        if (anchorByLayer.get(layerId) === nodeUrn) {
-          // Promote the anchor's children in its place. They stay in this layer
-          // by ordinary containment inheritance, so they carry their own
-          // subtrees — and a child added at source simply appears.
-          for (const childId of childMap.get(node.id) ?? []) {
+        const children = childMap.get(node.id) ?? []
+        // Promote ONLY while we hold the anchor's whole set. Paging lives on the
+        // anchor ROW (LoadMoreItem is parent-scoped), so a partially-loaded
+        // anchor drawn flat would show its first page and silently swallow the
+        // rest, with nothing left to expand. Falling back to the row keeps the
+        // column complete and reachable, and the promotion resumes by itself
+        // once everything is loaded.
+        const total = Number(node.data?.childCount ?? children.length) || 0
+        const holdsEveryChild = children.length >= total
+        if (anchorByLayer.get(layerId) === nodeUrn && holdsEveryChild) {
+          // They stay in this layer by ordinary containment inheritance, so each
+          // carries its own subtree — and a child added at source simply appears.
+          for (const childId of children) {
             if (effectiveLayer.get(childId) !== layerId) continue
             const childNode = buildHierarchyNode(childId)
             if (childNode) list.push(childNode)
@@ -527,6 +535,9 @@ export function useLayerAssignment({
   // Loaded nodes that render nowhere — absent from every layer's emitted
   // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
   // canvas actually shows.
+  // Anchors that were actually promoted render AS their column; one that fell
+  // back to a row is in nodeLayerMap already, so this set only ever suppresses
+  // a false "renders nowhere".
   const anchorUrns = useMemo(
     () => new Set(sortedLayers.map(l => l.anchorUrn).filter((u): u is string => !!u)),
     [sortedLayers],

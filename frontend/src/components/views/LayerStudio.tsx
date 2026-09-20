@@ -78,6 +78,7 @@ import {
     clearLayerOrderKeys,
 } from '@/components/canvas/context-view/layerMutations'
 import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
+import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
@@ -1538,9 +1539,14 @@ export function LayerStudio({
 
         // An ANCHORED column is that entity, so its rows are the entity's
         // children — not the entity itself, which the header already names.
+        // Only while we hold them ALL, though: the canvas falls back to the
+        // anchor row when it doesn't, and the rail has to show the same thing.
         for (const layer of layers) {
             if (!layer.anchorUrn) continue
-            byLayer.set(layer.id, entityIndex.childrenOf(layer.anchorUrn).map(childUrn => {
+            const children = entityIndex.childrenOf(layer.anchorUrn)
+            const total = entityIndex.resolve(layer.anchorUrn)?.childCount ?? children.length
+            if (children.length < total) continue
+            byLayer.set(layer.id, children.map(childUrn => {
                 const identity = entityIndex.resolve(childUrn)
                 return {
                     id: childUrn,
@@ -1574,8 +1580,14 @@ export function LayerStudio({
     // An anchored column draws its entity's children, so they have to be fetched
     // — nothing else in the wizard expands the anchor.
     const anchorUrns = useMemo(
-        () => layers.map(l => l.anchorUrn).filter((u): u is string => !!u).join('\u0000'),
-        [layers],
+        () => layers
+            .map(l => l.anchorUrn)
+            .filter((u): u is string => !!u)
+            // Skip containers too big to hold in one page — those columns draw
+            // their anchor row instead, so the fetch would go unused.
+            .filter(u => (entityIndex.resolve(u)?.childCount ?? 0) <= CHILDREN_PAGE_SIZE)
+            .join('\u0000'),
+        [layers, entityIndex],
     )
     useEffect(() => {
         if (!anchorUrns) return

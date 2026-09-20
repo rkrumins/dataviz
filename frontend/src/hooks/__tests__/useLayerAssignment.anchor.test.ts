@@ -87,3 +87,64 @@ describe('useLayerAssignment — anchored columns', () => {
     expect(out.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['finance'])
   })
 })
+
+describe('useLayerAssignment — anchors with more children than are loaded', () => {
+  /** Finance reports 5000 children; hydration only holds the first page. */
+  const partial = [
+    { id: 'finance', data: { urn: 'finance', type: 'obj', label: 'finance', childCount: 5000 } },
+    node('payments'), node('ledger'),
+  ]
+
+  function renderPartial(layers: ViewLayerConfig[]) {
+    const nodeMap = new Map(partial.map(n => [n.id, n]))
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes: partial,
+        sortedLayers: layers,
+        nodeEdgeFingerprint: 'partial',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap,
+        childMap: new Map([['finance', ['payments', 'ledger']]]),
+        parentMap: new Map([['payments', 'finance'], ['ledger', 'finance']]),
+        assignments: { finance: assign('l1') },
+      }),
+    )
+    return result.current
+  }
+
+  it('does NOT flatten a partially-loaded anchor — that would hide the rest', () => {
+    // Paging hangs off the anchor row; flattening it here would show page one
+    // of 5000 and leave nothing to expand.
+    const out = renderPartial([layer('l1', { anchorUrn: 'finance' })])
+    expect(out.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['finance'])
+  })
+
+  it('keeps the loaded children reachable beneath the row', () => {
+    const out = renderPartial([layer('l1', { anchorUrn: 'finance' })])
+    const row = out.nodesByLayer.get('l1')?.[0]
+    expect(row?.children.map(c => c.name)).toEqual(['ledger', 'payments'])
+  })
+
+  it('promotes as soon as the whole set is held', () => {
+    const whole = [
+      { id: 'finance', data: { urn: 'finance', type: 'obj', label: 'finance', childCount: 2 } },
+      node('payments'), node('ledger'),
+    ]
+    const nodeMap = new Map(whole.map(n => [n.id, n]))
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes: whole,
+        sortedLayers: [layer('l1', { anchorUrn: 'finance' })],
+        nodeEdgeFingerprint: 'whole',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap,
+        childMap: new Map([['finance', ['payments', 'ledger']]]),
+        parentMap: new Map([['payments', 'finance'], ['ledger', 'finance']]),
+        assignments: { finance: assign('l1') },
+      }),
+    )
+    expect(result.current.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['ledger', 'payments'])
+  })
+})

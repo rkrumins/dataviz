@@ -110,3 +110,20 @@ describe('LayerStudio — anchored columns', () => {
     expect(rows().queryByText('Payments')).not.toBeInTheDocument()
   })
 })
+
+describe('LayerStudio — an anchor holding more than one page', () => {
+  it('keeps the anchor row rather than showing only its first page', async () => {
+    // The rail must agree with the canvas, which falls back to the row so the
+    // rest stays reachable — paging hangs off that row.
+    const entry = fakeBrowser.nodes.get('urn:finance')!
+    const original = entry.totalChildren
+    fakeBrowser.nodes.set('urn:finance', { ...entry, totalChildren: 5000 })
+    try {
+      render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
+      await waitFor(() => expect(rows().getByText('Financial Services')).toBeInTheDocument())
+      expect(rows().queryByText('Payments')).not.toBeInTheDocument()
+    } finally {
+      fakeBrowser.nodes.set('urn:finance', { ...entry, totalChildren: original })
+    }
+  })
+})
