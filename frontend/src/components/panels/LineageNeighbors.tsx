@@ -36,6 +36,7 @@ import {
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 import { useLensLineage, EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
+import { useEntityLineageCounts } from '@/hooks/useEntityLineageCounts'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
@@ -141,8 +142,26 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
     [edges, nodeMap, nodeId, containmentEdgeTypes],
   )
 
-  const incomingCount = incomingRecords.length
-  const outgoingCount = outgoingRecords.length
+  // THE COUNT IS THE WALK'S, not ours.
+  //
+  // Deriving it from locally-held edges disagreed with the Focus Lens in
+  // two structural ways: it counted the aggregation worker's synthetic
+  // `AGGREGATED` rollups as declared flows (the closure strips them at one
+  // seam), and it matched only edges whose endpoint IS the focal — so a
+  // container, which carries no edges of its own, reported almost nothing
+  // while the Lens reported what its contents reach. One depth-1 closure
+  // answers both, and it is the very request the Lens reads.
+  const walk = useEntityLineageCounts(nodeId, provider, lineageEdgeTypes)
+  const walkAnswered = walk.status === 'done' && walk.upstream !== null && walk.downstream !== null
+
+  // The fallback still counts CONNECTED ENTITIES, not records: a partner
+  // reached by two kinds of flow is one connected entity either way, so
+  // the unit's noun stays true whichever source answered.
+  const localIncoming = new Set(incomingRecords.map((r) => r.neighborId)).size
+  const localOutgoing = new Set(outgoingRecords.map((r) => r.neighborId)).size
+
+  const incomingCount = walkAnswered ? walk.upstream! : localIncoming
+  const outgoingCount = walkAnswered ? walk.downstream! : localOutgoing
   const totalCount = incomingCount + outgoingCount
 
   // Same grain split as the Lens header, so the two surfaces can never
@@ -158,7 +177,11 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   for (const r of outgoingRecords) {
     if (isCoarserGrain(grainClosure, r.neighborNode?.data?.type as string | undefined, focalType)) rollupTotal++
   }
-  const directTotal = totalCount - rollupTotal
+  // The grain split reads the local records, so it can only annotate a
+  // locally-derived total. When the walk answered, the total is the walk's
+  // and the split would be describing a different set of things.
+  const directTotal = walkAnswered ? totalCount : totalCount - rollupTotal
+  const showRollupSplit = !walkAnswered && rollupTotal > 0
 
   const handleNeighborClick = async (neighborId: string) => {
     // Drawer-swap first (instant, no awaiting). selectNode so the canvas's
@@ -205,8 +228,9 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           )}
           {totalCount > 0 && (
             <span title={unitMeaning('neighbors')}>
+              {walkAnswered && walk.truncated && 'at least '}
               {formatUnitCount(directTotal, 'neighbors')}
-              {rollupTotal > 0 && ` · ${rollupTotal} rolled-up`}
+              {showRollupSplit && ` · ${rollupTotal} rolled-up`}
             </span>
           )}
         </span>

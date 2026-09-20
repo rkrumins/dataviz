@@ -619,3 +619,113 @@ describe('on-demand source fetch', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Headline counts come from the closure walk — the Lens's own source
+// ---------------------------------------------------------------------------
+
+/** A closure response shaped like the wire, with the partners it found. */
+function closure(upstream: string[], downstream: string[], extra: Record<string, unknown> = {}) {
+  return {
+    nodes: [],
+    edges: [],
+    containmentEdges: [],
+    upstreamUrns: new Set(upstream),
+    downstreamUrns: new Set(downstream),
+    focus: { urn: FOCAL, level: 1, entityType: 'table' },
+    effectiveLevel: 1,
+    isInherited: false,
+    truncated: false,
+    frontierUp: [],
+    frontierDown: [],
+    seedTruncated: false,
+    ...extra,
+  }
+}
+
+const countIn = (label: string) =>
+  within(screen.getByText(label).closest('button')!)
+
+describe('LineageNeighbors — counts agree with the Focus Lens', () => {
+  it('shows the server walk counts, not the locally-held edge count', async () => {
+    // The store holds ONE upstream edge; the walk found three partners.
+    // The drawer must report the walk — that is what the Lens shows.
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['u1', 'u2', 'u3'], ['d1']),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('3')).toBeInTheDocument())
+      expect(countIn('Data Consumers').getByText('1')).toBeInTheDocument()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('does not count a synthetic AGGREGATED rollup the walk strips', async () => {
+    // Locally this reads as two connections; the closure strips its own
+    // materialised rollups and reports the one real flow.
+    seedCanvas([
+      makeEdge('real', UPSTREAM_A, FOCAL, 'FLOWS_TO'),
+      makeEdge('rollup', PARENT, FOCAL, 'AGGREGATED'),
+    ])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['u1'], []),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('counts what a container reaches through its contents', async () => {
+    // A container carries no edges of its own — its columns do. The store
+    // sees nothing on the focal; the walk seeds from its contents.
+    seedCanvas([])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['via-a-column'], []),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('says the count is a floor when the walk did not finish', async () => {
+    seedCanvas([])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['u1'], [], { seedTruncated: true }),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(screen.getByText(/at least/i)).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('falls back to the locally-derived count when the provider cannot walk', async () => {
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    // No traceClosure on this provider at all.
+    mockProviderHolder.current = { getEdges: async () => [], getNodes: async () => [] }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
