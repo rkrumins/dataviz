@@ -125,8 +125,8 @@ describe('LayerStudio — an anchor holding more than one page', () => {
       render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
       await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
       // Never a silent 2-of-5000: the remainder is stated and reachable.
-      expect(rows().getByRole('button', { name: /Load 100 more/ })).toBeInTheDocument()
-      expect(rows().getByText(/4998 left/)).toBeInTheDocument()
+      expect(rows().getByRole('button', { name: /Show 100 more/ })).toBeInTheDocument()
+      expect(rows().getByText(/4,998 left/)).toBeInTheDocument()
     })
   })
 
@@ -135,7 +135,7 @@ describe('LayerStudio — an anchor holding more than one page', () => {
       render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
       await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
       getChildrenWithEdges.mockClear()
-      fireEvent.click(rows().getByRole('button', { name: /Load 100 more/ }))
+      fireEvent.click(rows().getByRole('button', { name: /Show 100 more/ }))
       await waitFor(() => expect(getChildrenWithEdges).toHaveBeenCalled())
       // Paged, not refetched from the top.
       expect(getChildrenWithEdges.mock.calls[0][1].offset).toBe(2)
@@ -145,6 +145,6 @@ describe('LayerStudio — an anchor holding more than one page', () => {
   it('offers nothing more once the column holds the lot', async () => {
     render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
     await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
-    expect(rows().queryByRole('button', { name: /Load .* more/ })).not.toBeInTheDocument()
+    expect(rows().queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument()
   })
 })

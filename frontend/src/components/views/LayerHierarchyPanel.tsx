@@ -40,7 +40,12 @@ import type {
     LayerNodeSortMode, LayerNodeSortAlgo,
 } from '@/types/schema'
 import { LayerSortMenu } from '@/components/canvas/context-view/LayerSortMenu'
+
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
+
+/** Rows a column draws before it offers to show more. The rail is a 300px
+ *  authoring aid, not the canvas — a long column is scrolled past, not read. */
+const RAIL_PAGE = 50
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useEntityTypes } from '@/store/schema'
 import {
@@ -755,8 +760,24 @@ function LayerRow({
     }, [rows, groupedIds, layerEntityAssignments])
     // "Clear all" only ever removes explicit placements — a rule-placed row has
     // no entry to clear.
+    // The rail is ONE scroller wrapping a Reorder.Group of layers, so a column
+    // cannot own a virtualized viewport without breaking layer drag-reorder.
+    // Render a window instead: a column that holds 50,000 scanned roots draws
+    // RAIL_PAGE of them and says how many are left. Bounded either way.
+    const [visibleCount, setVisibleCount] = useState(RAIL_PAGE)
     const totalAssigned = layerEntityAssignments.length
-    const totalShown = rootRows.length
+    const shownRows = useMemo(() => rootRows.slice(0, visibleCount), [rootRows, visibleCount])
+    const heldButHidden = rootRows.length - shownRows.length
+    // What the column has yet to show: rows it holds but has not drawn, plus
+    // rows the server still has. Both read as "more" to the user.
+    const remaining = heldButHidden + (anchorMore?.remaining ?? 0)
+    // How many the next click actually produces: revealing rows we hold is a
+    // RAIL_PAGE, fetching the anchor's next page is a CHILDREN_PAGE_SIZE.
+    // Naming the wrong one would promise 50 and deliver 100.
+    const nextChunk = heldButHidden > 0
+        ? Math.min(heldButHidden, RAIL_PAGE)
+        : Math.min(anchorMore?.remaining ?? 0, CHILDREN_PAGE_SIZE)
+    const totalShown = rootRows.length + (anchorMore?.remaining ?? 0)
     const sortMode: LayerNodeSortMode = layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
     const hasCustomOrder = useMemo(
         () => Object.values(assignments).some(e => e.layerId === layer.id && e.orderKey),
@@ -1045,7 +1066,7 @@ function LayerRow({
                                         <div className="flex items-center gap-1.5 px-3 py-1">
                                             <Layers className="w-3 h-3 text-slate-400 shrink-0" />
                                             <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
-                                                In this column ({rootRows.length})
+                                                In this column ({totalShown.toLocaleString()})
                                             </span>
                                             <span className="flex-1" />
                                             {totalAssigned > 0 && (
@@ -1058,7 +1079,7 @@ function LayerRow({
                                                 </button>
                                             )}
                                         </div>
-                                        {rootRows.map(row => (
+                                        {shownRows.map(row => (
                                             <AssignedEntityItem
                                                 key={row.urn}
                                                 entityId={row.urn}
@@ -1072,21 +1093,24 @@ function LayerRow({
                                                     : undefined}
                                             />
                                         ))}
-                                        {/* An anchored column shows the anchor's
-                                            children, so the anchor row that would
-                                            carry "Load more" isn't drawn — the
-                                            column gets one instead. */}
-                                        {anchorMore && onLoadMoreAnchor && (
+                                        {/* ONE affordance for both kinds of "more":
+                                            reveal what this column already holds,
+                                            and once it is all on screen, fetch the
+                                            anchor's next page. An anchored column
+                                            draws no anchor row, so this is also the
+                                            only place its paging can live. */}
+                                        {remaining > 0 && (
                                             <button
                                                 onClick={e => {
                                                     e.stopPropagation()
-                                                    onLoadMoreAnchor(anchorMore.anchorUrn)
+                                                    if (heldButHidden > 0) setVisibleCount(v => v + RAIL_PAGE)
+                                                    else if (anchorMore) onLoadMoreAnchor?.(anchorMore.anchorUrn)
                                                 }}
                                                 className="w-full text-left px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
                                             >
-                                                Load {Math.min(anchorMore.remaining, CHILDREN_PAGE_SIZE)} more
+                                                Show {nextChunk} more
                                                 <span className="ml-1 text-slate-400 font-normal tabular-nums">
-                                                    ({anchorMore.remaining} left)
+                                                    ({remaining.toLocaleString()} left)
                                                 </span>
                                             </button>
                                         )}

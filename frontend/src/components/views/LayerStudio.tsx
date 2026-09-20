@@ -373,6 +373,16 @@ export const AUTO_LAYER_WARN = 24
 /** Columns drawn in the preview before it collapses into "+N more". */
 const PREVIEW_LIMIT = 6
 
+/** Entity rows the sheet draws at once. "Find the rest" can pull tens of
+ *  thousands into memory; the list must not try to draw them all. */
+const SHEET_PAGE = 100
+
+/** A Context View read left-to-right cannot be hundreds of columns wide, and
+ *  clicking a type pill selects EVERY entity of that type — so a 10,000-entity
+ *  type is two clicks from an unusable view. Past this we decline and point at
+ *  the tool that handles that scale: one column for the whole type. */
+export const AUTO_LAYER_MAX = 200
+
 export type AutoLayerMode = 'type' | 'entity'
 
 /** Sentinel for the "everything" pill — not a real type id. */
@@ -562,15 +572,22 @@ function AutoLayerSheet({
     const chooseFacet = (next: string) => {
         setFacet(next)
         setConfirming(false)
+        setShownCount(SHEET_PAGE)
         setEntityKeys(next === ALL_TYPES
             ? new Set()
             : new Set(entities.filter(e => e.type === next).map(e => e.urn)))
     }
 
-    const visibleEntities = useMemo(
+    const [shownCount, setShownCount] = useState(SHEET_PAGE)
+    const matchingEntities = useMemo(
         () => (facet === ALL_TYPES ? entities : entities.filter(e => e.type === facet)),
         [entities, facet],
     )
+    const visibleEntities = useMemo(
+        () => matchingEntities.slice(0, shownCount),
+        [matchingEntities, shownCount],
+    )
+    const undrawn = matchingEntities.length - visibleEntities.length
 
     const selectedTypes = useMemo(
         () => available.filter(c => selectedTypeKeys.has(c.typeId)),
@@ -582,6 +599,7 @@ function AutoLayerSheet({
     )
     const selectedCount = mode === 'type' ? selectedTypes.length : selectedEntities.length
     const needsConfirm = selectedCount > AUTO_LAYER_WARN
+    const tooMany = selectedCount > AUTO_LAYER_MAX
 
     /** Top-level entities that would end up with no column at all. A curated view
      *  renders only what is placed, so leaving this silent ships a view quietly
@@ -618,13 +636,13 @@ function AutoLayerSheet({
     ), [mode, selectedTypes, selectedEntities, byTypeId])
 
     const apply = () => {
-        if (selectedCount === 0) return
+        if (selectedCount === 0 || tooMany) return
         if (needsConfirm && !confirming) { setConfirming(true); return }
         if (mode === 'type') onApplyTypes(selectedTypes)
         else onApplyEntities(selectedEntities)
     }
 
-    const rows = mode === 'type' ? candidates.length : visibleEntities.length
+    const rows = mode === 'type' ? candidates.length : matchingEntities.length
     const facetLabel = facet === ALL_TYPES ? null : byTypeId.get(facet)?.label ?? facet
 
     return (
@@ -826,12 +844,28 @@ function AutoLayerSheet({
                         </label>
                     ))
                 )}
+                {mode === 'entity' && undrawn > 0 && (
+                    <button
+                        onClick={() => setShownCount(c => c + SHEET_PAGE)}
+                        className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium text-sky-600 dark:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-900/20 transition-colors"
+                    >
+                        Show {Math.min(undrawn, SHEET_PAGE)} more
+                        <span className="ml-1 text-slate-400 font-normal tabular-nums">
+                            ({undrawn.toLocaleString()} left)
+                        </span>
+                    </button>
+                )}
             </div>
 
             {/* What happens, and the one button that does it */}
             <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
                 <p className="text-xs text-slate-500 min-w-0">
-                    {strandedByType.length > 0 ? (
+                    {tooMany ? (
+                        <span className="text-amber-600 dark:text-amber-400">
+                            {selectedCount.toLocaleString()} columns is more than a view can be read
+                            across. Pick fewer, or use Group by type to hold them all in one column.
+                        </span>
+                    ) : strandedByType.length > 0 ? (
                         <span className="text-amber-600 dark:text-amber-400">
                             {strandedByType.map(s => `${s.count} ${s.label}`).join(' and ')}
                             {strandedByType.reduce((n, s) => n + s.count, 0) === 1 ? ' stays' : ' stay'} out
@@ -850,7 +884,7 @@ function AutoLayerSheet({
                 </p>
                 <button
                     onClick={apply}
-                    disabled={selectedCount === 0}
+                    disabled={selectedCount === 0 || tooMany}
                     className={cn(
                         'px-4 py-2 text-white text-sm font-medium rounded-lg shrink-0 transition-colors',
                         'disabled:opacity-40 disabled:cursor-not-allowed',

@@ -12,7 +12,7 @@
  *    the wizard, which is why assigned rows used to render as raw URN fragments
  *    and could never expand. These tests deliberately never seed a canvas.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ViewLayerConfig, LayerAssignmentEntry } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
@@ -322,5 +322,81 @@ describe('LayerHierarchyPanel — rule-placed roots', () => {
     expect(screen.queryByTestId('rail-rule-placed-marker')).not.toBeInTheDocument()
     expect(screen.getAllByText('Finance')).toHaveLength(1)
     expect(screen.getByTitle('Remove assignment')).toBeInTheDocument()
+  })
+})
+
+describe('LayerHierarchyPanel — a column holding far more than it draws', () => {
+  // The rail is one scroller wrapping a Reorder.Group, so a column cannot own a
+  // virtualized viewport without breaking layer drag-reorder. It draws a window
+  // instead — the guarantee is that the DOM stays bounded however many rows a
+  // column holds.
+  const MANY = 1000
+  const manyRows = Array.from({ length: MANY }, (_, i) => ({
+    id: `urn:e${i}`, urn: `urn:e${i}`, name: `Entity ${i}`,
+    typeId: 'domain', childCount: 0, rulePlaced: true,
+  }))
+  const index = makeIndex(Object.fromEntries(
+    manyRows.map(r => [r.urn, { name: r.name, type: 'domain', childCount: 0 }]),
+  ))
+
+  const renderMany = () => render(
+    <LayerHierarchyPanel
+      layers={layers}
+      assignments={{}}
+      rootsByLayer={new Map([['l1', manyRows]])}
+      activeTarget={null}
+      logicalNodes={fakeLogicalNodes}
+      entityIndex={index}
+      onSetActiveTarget={vi.fn()}
+      onDrop={vi.fn()}
+      onUnassign={vi.fn()}
+      onReorderLayers={vi.fn()}
+      onAddLayer={vi.fn()}
+      onRenameLayer={vi.fn()}
+      onDeleteLayer={vi.fn()}
+      onClearLayer={vi.fn()}
+    />
+  )
+
+  it('draws a bounded window, not a row per entity', () => {
+    renderMany()
+    const drawn = screen.getByTestId('layer-rows-l1').querySelectorAll('[draggable]')
+    expect(drawn.length).toBeLessThanOrEqual(50)
+    expect(drawn[0]).toHaveTextContent('Entity 0')
+  })
+
+  it('states the whole count rather than the window', () => {
+    renderMany()
+    expect(screen.getByText(`In this column (${MANY.toLocaleString()})`)).toBeInTheDocument()
+    expect(screen.getByText(/950 left/)).toBeInTheDocument()
+  })
+
+  it('reveals another window on demand', () => {
+    renderMany()
+    fireEvent.click(within(screen.getByTestId('layer-rows-l1')).getByRole('button', { name: /Show 50 more/ }))
+    const drawn = screen.getByTestId('layer-rows-l1').querySelectorAll('[draggable]')
+    expect(drawn.length).toBe(100)
+  })
+
+  it('offers nothing when the column fits in one window', () => {
+    render(
+      <LayerHierarchyPanel
+        layers={layers}
+        assignments={{}}
+        rootsByLayer={new Map([['l1', manyRows.slice(0, 3)]])}
+        activeTarget={null}
+        logicalNodes={fakeLogicalNodes}
+        entityIndex={index}
+        onSetActiveTarget={vi.fn()}
+        onDrop={vi.fn()}
+        onUnassign={vi.fn()}
+        onReorderLayers={vi.fn()}
+        onAddLayer={vi.fn()}
+        onRenameLayer={vi.fn()}
+        onDeleteLayer={vi.fn()}
+        onClearLayer={vi.fn()}
+      />
+    )
+    expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument()
   })
 })

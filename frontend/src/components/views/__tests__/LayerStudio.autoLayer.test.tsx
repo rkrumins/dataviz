@@ -91,7 +91,7 @@ vi.mock('../LayerHierarchyPanel', () => ({
   LayerHierarchyPanel: () => <div data-testid="layer-hierarchy-panel-stub" />,
 }))
 
-import { LayerStudio, AUTO_LAYER_WARN } from '../LayerStudio'
+import { LayerStudio, AUTO_LAYER_WARN, AUTO_LAYER_MAX } from '../LayerStudio'
 
 function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
   return {
@@ -394,5 +394,45 @@ describe('Auto-layer — splitting one type into a column each', () => {
     expect(within(screen.getByTestId('auto-layer-sheet')).getAllByText('3 inside').length)
         .toBeGreaterThanOrEqual(1)
     expect(list().getByText('3 inside')).toBeInTheDocument()
+  })
+})
+
+describe('Auto-layer — scale', () => {
+  const withEntities = (n: number, run: () => void) => {
+    const original = { ids: fakeBrowser.topLevelIds, nodes: fakeBrowser.nodes }
+    const many = Array.from({ length: n }, (_, i) => `urn:m${i}`)
+    fakeBrowser.topLevelIds = many
+    fakeBrowser.nodes = new Map(many.map(urn => node(urn, 'Domain', urn)))
+    try { run() } finally {
+      fakeBrowser.topLevelIds = original.ids
+      fakeBrowser.nodes = original.nodes
+    }
+  }
+
+  it('draws a bounded list however many entities were scanned', () => {
+    withEntities(5000, () => {
+      render(<LayerStudio formData={makeFormData()} updateFormData={vi.fn()} />)
+      openSheet()
+      fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
+      // 5000 scanned, but the sheet never tries to draw 5000 rows.
+      expect(checkboxes().length).toBeLessThanOrEqual(100)
+      expect(sheet().getByRole('button', { name: /Show 100 more/ })).toBeInTheDocument()
+    })
+  })
+
+  it('declines a number of columns a view cannot be read across', () => {
+    withEntities(AUTO_LAYER_MAX + 50, () => {
+      const updateFormData = vi.fn()
+      render(<LayerStudio formData={makeFormData()} updateFormData={updateFormData} />)
+      openSheet()
+      fireEvent.click(sheet().getByRole('radio', { name: /One column each/ }))
+      // One click on the type pill selects every entity of that type.
+      fireEvent.click(sheet().getByRole('button', { name: /^Domains/ }))
+
+      expect(createButton()).toBeDisabled()
+      expect(sheet().getByText(/more than a view can be read across/)).toBeInTheDocument()
+      fireEvent.click(createButton())
+      expect(updateFormData).not.toHaveBeenCalled()
+    })
   })
 })
