@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildWizardPlacement, countPlacementsByLayer, resolveWizardEntityScope } from '../effectivePlacement'
+import { buildWizardPlacement, resolveWizardEntityScope } from '../effectivePlacement'
 import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 
 const layer = (id: string, order: number, entityTypes: string[] = []): ViewLayerConfig =>
@@ -61,46 +61,6 @@ describe('buildWizardPlacement', () => {
     it('refuses an explicit assignment naming a layer that no longer exists', () => {
         const place = buildWizardPlacement([layer('domains', 0, ['Domain'])], { 'urn:a': entry('deleted') })
         expect(place({ urn: 'urn:a', type: 'Domain' })).toEqual({ source: 'none' })
-    })
-})
-
-describe('countPlacementsByLayer', () => {
-    const layers = [layer('domains', 0, ['Domain']), layer('platforms', 1, ['Platform'])]
-
-    it('counts rule-placed roots, which raw assignments would report as zero', () => {
-        const counts = countPlacementsByLayer(layers, {}, [
-            { urn: 'urn:a', type: 'Domain' },
-            { urn: 'urn:b', type: 'Domain' },
-            { urn: 'urn:c', type: 'Platform' },
-        ])
-        expect(counts.get('domains')).toBe(2)
-        expect(counts.get('platforms')).toBe(1)
-    })
-
-    it('counts an explicit placement once, under its own layer', () => {
-        const counts = countPlacementsByLayer(layers, { 'urn:a': entry('platforms') }, [
-            { urn: 'urn:a', type: 'Domain' },
-            { urn: 'urn:b', type: 'Domain' },
-        ])
-        expect(counts.get('platforms')).toBe(1)
-        expect(counts.get('domains')).toBe(1)
-    })
-
-    it('counts a hand-placed entity outside the scanned population', () => {
-        const counts = countPlacementsByLayer(layers, { 'urn:deep': entry('domains') }, [])
-        expect(counts.get('domains')).toBe(1)
-    })
-
-    it('never double-counts a urn present in both sources', () => {
-        const counts = countPlacementsByLayer(layers, { 'urn:a': entry('domains') }, [
-            { urn: 'urn:a', type: 'Domain' },
-        ])
-        expect(counts.get('domains')).toBe(1)
-    })
-
-    it('omits layers nothing resolves into', () => {
-        const counts = countPlacementsByLayer(layers, {}, [{ urn: 'urn:a', type: 'Domain' }])
-        expect(counts.has('platforms')).toBe(false)
     })
 })
 

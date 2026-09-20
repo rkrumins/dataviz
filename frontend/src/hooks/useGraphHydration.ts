@@ -663,6 +663,46 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                     }
 
+                    // ── Anchored columns ──────────────────────────────
+                    // A column anchored to an entity renders that entity's
+                    // CHILDREN as its rows. Curated hydration loads assigned
+                    // URNs and deliberately does not prefetch children, so
+                    // without this the column comes up empty until someone
+                    // expands the anchor — which an anchored column never draws.
+                    // Fetched per anchor (not per column) so two columns on the
+                    // same entity cost one request.
+                    const anchorUrns = [...new Set(
+                        normLayout.layers.map(l => l.anchorUrn).filter((u): u is string => !!u),
+                    )]
+                    if (anchorUrns.length > 0) {
+                        const loaded = new Set(allNodes.map(n => n.urn))
+                        const settled = await mapWithConcurrency(
+                            anchorUrns, HYDRATION_CONCURRENCY,
+                            urn => provider.getChildren(urn, {
+                                edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
+                                limit: CHILDREN_PAGE_SIZE,
+                            }),
+                        )
+                        if (controller.signal.aborted) return
+                        settled.forEach((outcome, i) => {
+                            if (outcome.status !== 'fulfilled') {
+                                // One anchor's children missing is a partial load,
+                                // not a dead view — the others still render.
+                                batchErrors.push(outcome.reason)
+                                console.warn(
+                                    `[useGraphHydration] children of anchored column ${anchorUrns[i]} failed to load`,
+                                    outcome.reason,
+                                )
+                                return
+                            }
+                            for (const child of outcome.value) {
+                                if (loaded.has(child.urn)) continue
+                                loaded.add(child.urn)
+                                allNodes.push(child)
+                            }
+                        })
+                    }
+
                     if (allNodes.length === 0) {
                         // Distinguish "failed to load" from "genuinely empty" by the
                         // ONLY reliable signal: did a fetch error? A healthy provider

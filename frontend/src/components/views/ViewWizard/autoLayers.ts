@@ -230,8 +230,10 @@ export interface TopLevelEntity {
 }
 
 /**
- * One layer per entity, each with a single explicit assignment so the entity's
- * whole containment subtree renders in its column.
+ * One layer per entity: an `anchorUrn` so the column IS that entity and its
+ * children are the rows, plus a single explicit assignment so the subtree
+ * resolves into the column in the first place. The assignment is what a client
+ * without `anchorUrn` falls back to, which is why both are written.
  *
  * `entityTypes` is deliberately EMPTY: a type rule here would drag every other
  * entity of the same type into this entity's column. Placement is the assignment.
@@ -255,6 +257,10 @@ export function layersForTopLevelEntities(
       entityTypes: [],
       order,
       sequence: order,
+      // The column IS this entity, so its CHILDREN are the rows — otherwise the
+      // column spends its only row repeating its own name, with everything you
+      // came to see one expand deeper.
+      anchorUrn: entity.urn,
     })
     assignments[entity.urn] = {
       layerId: id,

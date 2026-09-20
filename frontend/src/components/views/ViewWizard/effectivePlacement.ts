@@ -89,38 +89,6 @@ export function buildWizardPlacement(
 }
 
 /**
- * Per-layer counts of what the canvas would actually render at root level —
- * explicit placements AND rule-placed roots. The wizard's mini preview counted
- * raw `assignments` entries, which reads 0 for every rule-driven column.
- */
-export function countPlacementsByLayer(
-  layers: ViewLayerConfig[],
-  assignments: Record<string, LayerAssignmentEntry>,
-  entities: Iterable<PlaceableEntity>,
-): Map<string, number> {
-  const place = buildWizardPlacement(layers, assignments)
-  const counts = new Map<string, number>()
-  const seen = new Set<string>()
-
-  for (const entity of entities) {
-    if (seen.has(entity.urn)) continue
-    seen.add(entity.urn)
-    const { layerId } = place(entity)
-    if (layerId) counts.set(layerId, (counts.get(layerId) ?? 0) + 1)
-  }
-
-  // An explicit placement for an entity outside the scanned population (a deeper
-  // node the user placed by hand) still occupies its column.
-  for (const [urn, entry] of Object.entries(assignments)) {
-    if (seen.has(urn) || !entry?.layerId) continue
-    seen.add(urn)
-    counts.set(entry.layerId, (counts.get(entry.layerId) ?? 0) + 1)
-  }
-
-  return counts
-}
-
-/**
  * The scope a wizard save should write.
  *
  * A PINNED scope (set when the user picks a rule-driven layout) is honoured only

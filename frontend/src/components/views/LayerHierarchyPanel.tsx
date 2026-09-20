@@ -1029,7 +1029,10 @@ function LayerRow({
                                     them. Drag a row onto another row's top or bottom
                                     edge to rearrange; the middle drops into the layer. */}
                                 {rootRows.length > 0 && (
-                                    <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
+                                    <div
+                                        data-testid={`layer-rows-${layer.id}`}
+                                        className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1"
+                                    >
                                         <div className="flex items-center gap-1.5 px-3 py-1">
                                             <Layers className="w-3 h-3 text-slate-400 shrink-0" />
                                             <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">

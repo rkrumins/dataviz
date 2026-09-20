@@ -342,6 +342,13 @@ export function useLayerAssignment({
       return built[0]
     }
 
+    // A column may be ANCHORED to an entity, meaning the column IS that entity:
+    // its children are the rows, and the anchor itself is not drawn (the header
+    // already names it). Purely a promotion at render time — the anchor keeps
+    // its assignment, so a client without this field draws the old shape.
+    const anchorByLayer = new Map<string, string>()
+    sortedLayers.forEach(l => { if (l.anchorUrn) anchorByLayer.set(l.id, l.anchorUrn) })
+
     nodes.forEach((node: any) => {
       const layerId = effectiveLayer.get(node.id)
       if (!layerId) return // Unassigned
@@ -351,12 +358,25 @@ export function useLayerAssignment({
       const parentLayerId = parentId ? effectiveLayer.get(parentId) : undefined
 
       if (layerId !== parentLayerId) {
+        const list = grouped.get(layerId)
+        if (!list) return
+
+        const nodeUrn = (node.data?.urn as string | undefined) ?? node.id
+        if (anchorByLayer.get(layerId) === nodeUrn) {
+          // Promote the anchor's children in its place. They stay in this layer
+          // by ordinary containment inheritance, so they carry their own
+          // subtrees — and a child added at source simply appears.
+          for (const childId of childMap.get(node.id) ?? []) {
+            if (effectiveLayer.get(childId) !== layerId) continue
+            const childNode = buildHierarchyNode(childId)
+            if (childNode) list.push(childNode)
+          }
+          return
+        }
+
         // It's a root in this layer context!
         const hNode = buildHierarchyNode(node.id)
-        if (hNode) {
-          const list = grouped.get(layerId)
-          if (list) list.push(hNode)
-        }
+        if (hNode) list.push(hNode)
       }
     })
 
@@ -507,10 +527,15 @@ export function useLayerAssignment({
   // Loaded nodes that render nowhere — absent from every layer's emitted
   // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
   // canvas actually shows.
+  const anchorUrns = useMemo(
+    () => new Set(sortedLayers.map(l => l.anchorUrn).filter((u): u is string => !!u)),
+    [sortedLayers],
+  )
   const unassignedNodes = useMemo(
-    () => nodes.filter((n: { id: string }) => !nodeLayerMap.has(n.id)),
+    () => nodes.filter((n: { id: string; data?: Record<string, unknown> }) =>
+      !nodeLayerMap.has(n.id) && !anchorUrns.has((n.data?.urn as string | undefined) ?? n.id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodeEdgeFingerprint, nodeLayerMap],
+    [nodeEdgeFingerprint, nodeLayerMap, anchorUrns],
   )
 
   return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes }

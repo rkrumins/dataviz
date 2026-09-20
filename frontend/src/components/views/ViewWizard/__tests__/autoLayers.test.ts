@@ -226,6 +226,16 @@ describe('layersForTopLevelEntities', () => {
         expect(assignments['urn:b'].layerId).toBe(layers[1].id)
     })
 
+    it('anchors each column to its entity, so the children are the rows', () => {
+        const { layers } = layersForTopLevelEntities(entities)
+        expect(layers.map(l => l.anchorUrn)).toEqual(['urn:a', 'urn:b'])
+    })
+
+    it('still writes the assignment, so a client without anchors renders the old shape', () => {
+        const { layers, assignments } = layersForTopLevelEntities(entities)
+        expect(assignments['urn:a'].layerId).toBe(layers[0].id)
+    })
+
     it('leaves entityTypes empty so siblings of the same type are not dragged in', () => {
         const { layers } = layersForTopLevelEntities(entities)
         expect(layers.every(l => l.entityTypes.length === 0)).toBe(true)

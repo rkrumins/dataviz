@@ -60,7 +60,7 @@ import {
     type RootTypeCandidate,
     type TopLevelEntity,
 } from '../views/ViewWizard/autoLayers'
-import { buildWizardPlacement, countPlacementsByLayer } from '../views/ViewWizard/effectivePlacement'
+import { buildWizardPlacement } from '../views/ViewWizard/effectivePlacement'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
@@ -1498,11 +1498,6 @@ export function LayerStudio({
     // ── Preview pane toggle ─────────────────────────────────────────────────────
     const [showPreview, setShowPreview] = useState(false)
 
-    /** Effective per-column counts — explicit placements AND rule-placed roots. */
-    const placementCounts = useMemo(
-        () => countPlacementsByLayer(layers, assignments, scannedTopLevel),
-        [layers, assignments, scannedTopLevel],
-    )
 
     /**
      * Every root each column holds — explicit placements AND the ones a type rule
@@ -1541,6 +1536,23 @@ export function LayerStudio({
             if (layerId && source === 'rule') add(layerId, entity.urn, true)
         }
 
+        // An ANCHORED column is that entity, so its rows are the entity's
+        // children — not the entity itself, which the header already names.
+        for (const layer of layers) {
+            if (!layer.anchorUrn) continue
+            byLayer.set(layer.id, entityIndex.childrenOf(layer.anchorUrn).map(childUrn => {
+                const identity = entityIndex.resolve(childUrn)
+                return {
+                    id: childUrn,
+                    urn: childUrn,
+                    name: identity?.name ?? fallbackNameFromUrn(childUrn),
+                    typeId: identity?.type ?? '',
+                    childCount: identity?.childCount ?? 0,
+                    rulePlaced: false,
+                }
+            }))
+        }
+
         const cmps = rootComparators<LayerRootRow>(assignments, r => r.childCount)
         byLayer.forEach((rows, layerId) => {
             const layer = layers.find(l => l.id === layerId)
@@ -1549,6 +1561,27 @@ export function LayerStudio({
         })
         return byLayer
     }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex])
+
+    /** What each column actually holds — derived from the very rows the rail
+     *  lists, so an ANCHORED column reports its children rather than the single
+     *  assignment that anchors it. */
+    const placementCounts = useMemo(() => {
+        const counts = new Map<string, number>()
+        rootsByLayer.forEach((rows, layerId) => counts.set(layerId, rows.length))
+        return counts
+    }, [rootsByLayer])
+
+    // An anchored column draws its entity's children, so they have to be fetched
+    // — nothing else in the wizard expands the anchor.
+    const anchorUrns = useMemo(
+        () => layers.map(l => l.anchorUrn).filter((u): u is string => !!u).join('\u0000'),
+        [layers],
+    )
+    useEffect(() => {
+        if (!anchorUrns) return
+        for (const urn of anchorUrns.split('\u0000')) void entityIndex.loadChildren(urn)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [anchorUrns])
 
     // ── Column ordering ─────────────────────────────────────────────────────────
     // Same two mutations the canvas uses, so an arrangement built here is the one
@@ -1910,9 +1943,9 @@ function ContextModelMiniPreview({
     placementCounts,
 }: {
     layers: ViewLayerConfig[]
-    /** What each column would actually hold — see countPlacementsByLayer. Counting
-     *  raw `assignments` reads 0 for every rule-driven column, which is exactly
-     *  the layout the Auto-layer "by type" mode produces. */
+    /** What each column actually holds. Counting raw `assignments` reads 0 for
+     *  every rule-driven column and 1 for an anchored one, neither of which is
+     *  what the column shows. */
     placementCounts: Map<string, number>
 }) {
     const assignedCounts = placementCounts
