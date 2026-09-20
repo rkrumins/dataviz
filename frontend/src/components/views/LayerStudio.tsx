@@ -78,7 +78,6 @@ import {
     clearLayerOrderKeys,
 } from '@/components/canvas/context-view/layerMutations'
 import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
-import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
@@ -1545,7 +1544,9 @@ export function LayerStudio({
             if (!layer.anchorUrn) continue
             const children = entityIndex.childrenOf(layer.anchorUrn)
             const total = entityIndex.resolve(layer.anchorUrn)?.childCount ?? children.length
-            if (children.length < total) continue
+            // Nothing loaded yet (or the fetch failed) — keep the anchor row, so
+            // the column still says what it holds. Matches useLayerAssignment.
+            if (children.length === 0 && total > 0) continue
             byLayer.set(layer.id, children.map(childUrn => {
                 const identity = entityIndex.resolve(childUrn)
                 return {
@@ -1577,17 +1578,28 @@ export function LayerStudio({
         return counts
     }, [rootsByLayer])
 
+    /** Mirrors the canvas: how much of each anchored column is still unloaded. */
+    const anchorMoreByLayer = useMemo(() => {
+        const out = new Map<string, { anchorUrn: string; remaining: number }>()
+        for (const layer of layers) {
+            if (!layer.anchorUrn) continue
+            const loaded = entityIndex.childrenOf(layer.anchorUrn).length
+            const total = entityIndex.resolve(layer.anchorUrn)?.childCount ?? loaded
+            if (loaded > 0 && total > loaded) {
+                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
+            }
+        }
+        return out
+    }, [layers, entityIndex])
+
     // An anchored column draws its entity's children, so they have to be fetched
     // — nothing else in the wizard expands the anchor.
     const anchorUrns = useMemo(
         () => layers
             .map(l => l.anchorUrn)
             .filter((u): u is string => !!u)
-            // Skip containers too big to hold in one page — those columns draw
-            // their anchor row instead, so the fetch would go unused.
-            .filter(u => (entityIndex.resolve(u)?.childCount ?? 0) <= CHILDREN_PAGE_SIZE)
             .join('\u0000'),
-        [layers, entityIndex],
+        [layers],
     )
     useEffect(() => {
         if (!anchorUrns) return
@@ -1809,6 +1821,8 @@ export function LayerStudio({
                         onApplySortToView={handleApplySortToView}
                         onResetCustomOrder={handleResetCustomOrder}
                         onReorderRoot={handleReorderRoot}
+                        anchorMoreByLayer={anchorMoreByLayer}
+                        onLoadMoreAnchor={urn => void entityIndex.loadMoreChildren(urn)}
                         activeTarget={activeTarget}
                         logicalNodes={logicalNodes}
                         entityIndex={entityIndex}

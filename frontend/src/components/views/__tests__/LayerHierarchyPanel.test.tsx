@@ -57,6 +57,7 @@ function makeIndex(
     resolve: (urn: string) => directory[urn],
     childrenOf: (urn: string) => children[urn] ?? [],
     loadChildren,
+    loadMoreChildren: vi.fn().mockResolvedValue(undefined),
     isLoading: () => false,
   }
 }

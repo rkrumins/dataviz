@@ -88,7 +88,7 @@ describe('useLayerAssignment — anchored columns', () => {
   })
 })
 
-describe('useLayerAssignment — anchors with more children than are loaded', () => {
+describe('useLayerAssignment — anchors bigger than one page', () => {
   /** Finance reports 5000 children; hydration only holds the first page. */
   const partial = [
     { id: 'finance', data: { urn: 'finance', type: 'obj', label: 'finance', childCount: 5000 } },
@@ -113,17 +113,33 @@ describe('useLayerAssignment — anchors with more children than are loaded', ()
     return result.current
   }
 
-  it('does NOT flatten a partially-loaded anchor — that would hide the rest', () => {
-    // Paging hangs off the anchor row; flattening it here would show page one
-    // of 5000 and leave nothing to expand.
+  it('flattens the page it holds — the column pages for the rest', () => {
+    // The column carries its own Load more (anchorMore), so a partial set is a
+    // first page, not a truncation.
     const out = renderPartial([layer('l1', { anchorUrn: 'finance' })])
-    expect(out.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['finance'])
+    expect(out.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['ledger', 'payments'])
   })
 
-  it('keeps the loaded children reachable beneath the row', () => {
-    const out = renderPartial([layer('l1', { anchorUrn: 'finance' })])
-    const row = out.nodesByLayer.get('l1')?.[0]
-    expect(row?.children.map(c => c.name)).toEqual(['ledger', 'payments'])
+  it('falls back to the anchor row when it holds NONE of them', () => {
+    // A failed or not-yet-run fetch: flattening would draw an empty column with
+    // nothing to click. The row states its count and pages on expand.
+    const nodesOnly = [
+      { id: 'finance', data: { urn: 'finance', type: 'obj', label: 'finance', childCount: 5000 } },
+    ]
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes: nodesOnly,
+        sortedLayers: [layer('l1', { anchorUrn: 'finance' })],
+        nodeEdgeFingerprint: 'none',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap: new Map(nodesOnly.map(n => [n.id, n])),
+        childMap: new Map(),
+        parentMap: new Map(),
+        assignments: { finance: assign('l1') },
+      }),
+    )
+    expect(result.current.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['finance'])
   })
 
   it('promotes as soon as the whole set is held', () => {

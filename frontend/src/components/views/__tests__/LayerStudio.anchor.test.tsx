@@ -5,7 +5,7 @@
  * CHILDREN — matching what the canvas draws. Without this the rail would show a
  * single row repeating the column's own name.
  */
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { WizardFormData } from '../ViewWizard/ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -112,18 +112,39 @@ describe('LayerStudio — anchored columns', () => {
 })
 
 describe('LayerStudio — an anchor holding more than one page', () => {
-  it('keeps the anchor row rather than showing only its first page', async () => {
-    // The rail must agree with the canvas, which falls back to the row so the
-    // rest stays reachable — paging hangs off that row.
+  const withChildCount = async (total: number, assertions: () => void | Promise<void>) => {
     const entry = fakeBrowser.nodes.get('urn:finance')!
     const original = entry.totalChildren
-    fakeBrowser.nodes.set('urn:finance', { ...entry, totalChildren: 5000 })
-    try {
+    fakeBrowser.nodes.set('urn:finance', { ...entry, totalChildren: total })
+    try { await assertions() }
+    finally { fakeBrowser.nodes.set('urn:finance', { ...entry, totalChildren: original }) }
+  }
+
+  it('shows the page it has and offers the rest', async () => {
+    await withChildCount(5000, async () => {
       render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
-      await waitFor(() => expect(rows().getByText('Financial Services')).toBeInTheDocument())
-      expect(rows().queryByText('Payments')).not.toBeInTheDocument()
-    } finally {
-      fakeBrowser.nodes.set('urn:finance', { ...entry, totalChildren: original })
-    }
+      await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
+      // Never a silent 2-of-5000: the remainder is stated and reachable.
+      expect(rows().getByRole('button', { name: /Load 100 more/ })).toBeInTheDocument()
+      expect(rows().getByText(/4998 left/)).toBeInTheDocument()
+    })
+  })
+
+  it('asks for the next page when the row is clicked', async () => {
+    await withChildCount(5000, async () => {
+      render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
+      await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
+      getChildrenWithEdges.mockClear()
+      fireEvent.click(rows().getByRole('button', { name: /Load 100 more/ }))
+      await waitFor(() => expect(getChildrenWithEdges).toHaveBeenCalled())
+      // Paged, not refetched from the top.
+      expect(getChildrenWithEdges.mock.calls[0][1].offset).toBe(2)
+    })
+  })
+
+  it('offers nothing more once the column holds the lot', async () => {
+    render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
+    await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
+    expect(rows().queryByRole('button', { name: /Load .* more/ })).not.toBeInTheDocument()
   })
 })

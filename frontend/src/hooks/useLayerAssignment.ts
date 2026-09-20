@@ -363,15 +363,17 @@ export function useLayerAssignment({
 
         const nodeUrn = (node.data?.urn as string | undefined) ?? node.id
         const children = childMap.get(node.id) ?? []
-        // Promote ONLY while we hold the anchor's whole set. Paging lives on the
-        // anchor ROW (LoadMoreItem is parent-scoped), so a partially-loaded
-        // anchor drawn flat would show its first page and silently swallow the
-        // rest, with nothing left to expand. Falling back to the row keeps the
-        // column complete and reachable, and the promotion resumes by itself
-        // once everything is loaded.
+        // Promote once we hold ANY of the anchor's children: the column carries
+        // its own "Load more" for the rest (see anchorMore in LayerColumn), so a
+        // partial set is a first page rather than a silent truncation.
+        //
+        // Holding NONE of them is different — the fetch failed, or has not run.
+        // Flattening there would draw an empty column with nothing to click, so
+        // fall back to the anchor ROW, which states its child count and pages on
+        // expand. The promotion resumes by itself once a page lands.
         const total = Number(node.data?.childCount ?? children.length) || 0
-        const holdsEveryChild = children.length >= total
-        if (anchorByLayer.get(layerId) === nodeUrn && holdsEveryChild) {
+        const canPromote = children.length > 0 || total === 0
+        if (anchorByLayer.get(layerId) === nodeUrn && canPromote) {
           // They stay in this layer by ordinary containment inheritance, so each
           // carries its own subtree — and a child added at source simply appears.
           for (const childId of children) {

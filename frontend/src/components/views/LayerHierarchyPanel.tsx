@@ -40,6 +40,7 @@ import type {
     LayerNodeSortMode, LayerNodeSortAlgo,
 } from '@/types/schema'
 import { LayerSortMenu } from '@/components/canvas/context-view/LayerSortMenu'
+import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useEntityTypes } from '@/store/schema'
 import {
@@ -94,6 +95,9 @@ interface LayerHierarchyPanelProps {
     onResetCustomOrder?: (layerId: string) => void
     /** Drop one root before/after another inside the same column. */
     onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
+    /** layerId -> an anchored column's unloaded remainder, mirroring the canvas. */
+    anchorMoreByLayer?: Map<string, { anchorUrn: string; remaining: number }>
+    onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     /** Resolves assigned-entity identity + children. The wizard has no canvas
@@ -678,6 +682,9 @@ interface LayerRowProps {
     onApplySortToView?: (mode: LayerNodeSortAlgo) => void
     onResetCustomOrder?: (layerId: string) => void
     onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
+    /** This column's unloaded remainder, when it is anchored. */
+    anchorMore?: { anchorUrn: string; remaining: number }
+    onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     entityIndex: WizardEntityIndex
@@ -699,6 +706,8 @@ function LayerRow({
     onApplySortToView,
     onResetCustomOrder,
     onReorderRoot,
+    anchorMore,
+    onLoadMoreAnchor,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -1063,6 +1072,24 @@ function LayerRow({
                                                     : undefined}
                                             />
                                         ))}
+                                        {/* An anchored column shows the anchor's
+                                            children, so the anchor row that would
+                                            carry "Load more" isn't drawn — the
+                                            column gets one instead. */}
+                                        {anchorMore && onLoadMoreAnchor && (
+                                            <button
+                                                onClick={e => {
+                                                    e.stopPropagation()
+                                                    onLoadMoreAnchor(anchorMore.anchorUrn)
+                                                }}
+                                                className="w-full text-left px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+                                            >
+                                                Load {Math.min(anchorMore.remaining, CHILDREN_PAGE_SIZE)} more
+                                                <span className="ml-1 text-slate-400 font-normal tabular-nums">
+                                                    ({anchorMore.remaining} left)
+                                                </span>
+                                            </button>
+                                        )}
                                     </div>
                                 )}
 
@@ -1121,6 +1148,8 @@ export function LayerHierarchyPanel({
     onApplySortToView,
     onResetCustomOrder,
     onReorderRoot,
+    anchorMoreByLayer,
+    onLoadMoreAnchor,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -1224,6 +1253,8 @@ export function LayerHierarchyPanel({
                                 onApplySortToView={onApplySortToView}
                                 onResetCustomOrder={onResetCustomOrder}
                                 onReorderRoot={onReorderRoot}
+                                anchorMore={anchorMoreByLayer?.get(layer.id)}
+                                onLoadMoreAnchor={onLoadMoreAnchor}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
                                 entityIndex={entityIndex}

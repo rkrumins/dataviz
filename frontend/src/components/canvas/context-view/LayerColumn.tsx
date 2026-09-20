@@ -153,6 +153,10 @@ interface LayerColumnProps {
   /** Draft mode: persist a resized width into the VIEW definition
    *  (null clears it). Absent ⇒ resizes stay a personal override. */
   onResizeLayer?: (layerId: string, width: number | null) => void
+  /** Anchored column paging: the anchor whose children are this column's rows,
+   *  and how many of them are still unloaded. Absent once the column holds the
+   *  lot (or when the layer has no anchor), which is what hides the row. */
+  anchorMore?: { anchorUrn: string; remaining: number }
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -243,6 +247,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onProxyMore,
   onEndReached,
   onResizeLayer,
+  anchorMore,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -422,6 +427,33 @@ export const LayerColumn = React.memo(function LayerColumn({
           rows: InlineSearchHitRow[]; overflow: number; endsTheGroup: boolean }
 
     const stack: FrameItem[] = []
+    // An ANCHORED column draws the anchor's children as its roots, so the
+    // anchor row that would normally carry "Load more" is not on screen. Give
+    // the COLUMN one instead, standing in for the anchor: LoadMoreItem keys off
+    // `node.id`, so handing it the anchor's id routes the click into exactly
+    // the same paged `loadChildren(anchorUrn)` every expandable row uses.
+    // Pushed first, so the LIFO stack emits it last — at the foot of the column.
+    if (anchorMore && !localFocusId) {
+      stack.push({
+        kind: 'loadMore',
+        // A COMPLETE stand-in, not a two-field cast: the row pipeline walks
+        // `children` on whatever node a frame carries.
+        parent: {
+          id: anchorMore.anchorUrn,
+          urn: anchorMore.anchorUrn,
+          name: layer.name,
+          typeId: '',
+          data: {},
+          children: [],
+          depth: 0,
+          entityTypeOption: '',
+          tags: [],
+        } as HierarchyNode,
+        depth: 0,
+        parentIsLast: [],
+        count: anchorMore.remaining,
+      })
+    }
     // Push root nodes in reverse so first root is processed first
     for (let i = rootNodes.length - 1; i >= 0; i--) {
       stack.push({ kind: 'node', node: rootNodes[i], depth: 0, isLast: i === rootNodes.length - 1, parentIsLast: [] })
@@ -585,7 +617,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not

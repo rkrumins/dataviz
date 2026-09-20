@@ -671,16 +671,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // expands the anchor — which an anchored column never draws.
                     // Fetched per anchor (not per column) so two columns on the
                     // same entity cost one request.
+                    // ONE page per anchor, whatever its size. The column draws
+                    // these as its rows and carries its own "Load more" for the
+                    // rest, so a 5000-child container costs the same first page
+                    // as a 5-child one and the user pulls what they need.
                     const declaredAnchors = new Set(
                         normLayout.layers.map(l => l.anchorUrn).filter((u): u is string => !!u),
                     )
-                    // Only anchors we can hold ENTIRELY within one page. Past
-                    // that the column falls back to drawing its anchor row,
-                    // which pages on expand (LoadMoreItem is parent-scoped), so
-                    // prefetching a page we would not render is pure waste —
-                    // and on a 5000-child container, a lot of it.
                     const anchorUrns = allNodes
-                        .filter(n => declaredAnchors.has(n.urn) && (n.childCount ?? 0) <= CHILDREN_PAGE_SIZE)
+                        .filter(n => declaredAnchors.has(n.urn) && (n.childCount ?? 0) > 0)
                         .map(n => n.urn)
                     if (anchorUrns.length > 0) {
                         const loaded = new Set(allNodes.map(n => n.urn))

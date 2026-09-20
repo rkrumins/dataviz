@@ -1664,6 +1664,32 @@ export function ContextViewCanvas({
     nodes, edges, isContainmentEdge, fingerprint: nodeEdgeFingerprint,
   })
 
+  /**
+   * How much of each ANCHORED column is still unloaded. The column draws the
+   * anchor's children as its rows, so the anchor row that normally carries
+   * "Load more" is not on screen — the column gets one instead, and it routes
+   * into the very same paged `loadChildren(anchorUrn)`.
+   *
+   * Counted from the containment map rather than the column's row count, so a
+   * child the user moved elsewhere still counts as loaded and the row does not
+   * offer a page that will never arrive.
+   */
+  const anchorMoreByLayer = useMemo(() => {
+    const out = new Map<string, { anchorUrn: string; remaining: number }>()
+    for (const layer of sortedLayers) {
+      if (!layer.anchorUrn) continue
+      const anchor = nodeMap.get(layer.anchorUrn)
+      if (!anchor) continue
+      const total = Number((anchor.data as Record<string, unknown> | undefined)?.childCount ?? 0) || 0
+      const loaded = (childMap.get(layer.anchorUrn) ?? []).length
+      if (total > loaded) {
+        out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
+      }
+    }
+    return out
+  }, [sortedLayers, nodeMap, childMap])
+
+
   // Helper: Calculate currently visible top-level nodes (containers)
   const getVisibleContainerUrns = useCallback(() => {
     return nodes
@@ -5453,6 +5479,7 @@ export function ContextViewCanvas({
                 key={layer.id}
                 layer={layer}
                 nodes={renderByLayer.get(layer.id) ?? EMPTY_LAYER_NODES}
+                anchorMore={anchorMoreByLayer.get(layer.id)}
                 schema={schema}
                 // An empty column means something different in each: in a Context View the
                 // entities exist and just aren't assigned here; in a blank model nothing has
