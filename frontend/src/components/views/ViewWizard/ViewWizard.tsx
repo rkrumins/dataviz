@@ -1618,6 +1618,7 @@ function ViewWizardBody({
                 <AssignmentStep
                     formData={formData}
                     updateFormData={updateFormData}
+                    viewEntityScope={editingView?.content?.entityScope}
                 />
             )}
             {currentStep === 'entities' && (
@@ -1629,7 +1630,11 @@ function ViewWizardBody({
                 />
             )}
             {currentStep === 'preview' && (
-                <PreviewStep formData={formData} scopeContext={scopeContext} />
+                <PreviewStep
+                    formData={formData}
+                    scopeContext={scopeContext}
+                    viewEntityScope={editingView?.content?.entityScope}
+                />
             )}
             </>
             )}
