@@ -239,3 +239,24 @@ describe('LayerStudio — column sort', () => {
     expect(openSortMenu).not.toThrow()
   })
 })
+
+describe('LayerStudio — the view-wide sort default survives other edits', () => {
+  it('is not wiped by a later commit that carries no sort of its own', () => {
+    // commitLayout writes what the caller hands it, and most callers hand over a
+    // bare { layers, assignments }. Writing `defaultNodeSortMode: undefined` for
+    // those spread over the stored value, so "Apply to all columns" was undone
+    // by the very next drag.
+    const updateFormData = vi.fn()
+    render(
+      <LayerStudio
+        formData={makeFormData({ defaultNodeSortMode: 'count-desc' })}
+        updateFormData={updateFormData}
+      />
+    )
+    dragOnto('Chemicals', 'Agriculture', 10)
+
+    const call = lastCommit(updateFormData)
+    expect(call).toBeDefined()
+    expect('defaultNodeSortMode' in call ? call.defaultNodeSortMode : 'count-desc').toBe('count-desc')
+  })
+})

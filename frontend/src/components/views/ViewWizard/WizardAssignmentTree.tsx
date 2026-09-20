@@ -94,6 +94,9 @@ interface WizardAssignmentTreeProps {
     layers: ViewLayerConfig[]
     /** Canonical flattened urn -> layer assignment map (the wizard's live buffer). */
     assignments?: Record<string, LayerAssignmentEntry>
+    /** The view's effective scope. A curated view never places a root by rule,
+     *  so the "by type" badge must not claim otherwise. */
+    entityScope?: 'all' | 'curated'
     /** Active drop target from the Layer Studio (shows strip indicator) */
     activeTarget?: ActiveTarget | null
     /** Callback when assignment changes */
@@ -407,6 +410,7 @@ function TreeRow({
 export function WizardAssignmentTree({
     layers,
     assignments,
+    entityScope,
     onAssignmentChange,
     onBulkAssign,
     onParentMapChange,
@@ -518,8 +522,8 @@ export function WizardAssignmentTree({
 
     // Rule placement, compiled once per layout — the canvas's own resolver.
     const placeByRule = useMemo(
-        () => buildWizardPlacement(layers, assignments ?? {}),
-        [layers, assignments],
+        () => buildWizardPlacement(layers, assignments ?? {}, entityScope),
+        [layers, assignments, entityScope],
     )
 
     const entityTree = useMemo<EntityTreeNode[]>(() => {

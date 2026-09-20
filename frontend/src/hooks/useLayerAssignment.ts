@@ -115,8 +115,11 @@ export function useLayerAssignment({
   const layerRules = useMemo<LayerAssignmentRule[]>(
     () => sortLayerRules(buildLayerRules(sortedLayers)), [sortedLayers])
 
-  // Core Logic: Group nodes by layer with Deep Inheritance support
-  const nodesByLayer = useMemo(() => {
+  // Core Logic: Group nodes by layer with Deep Inheritance support.
+  // Returns the promoted-anchor set alongside the grouping: `unassignedNodes`
+  // needs it, and deriving it here beats writing a ref during render (which the
+  // React Compiler rightly refuses) or restating the promotion rule elsewhere.
+  const layerGrouping = useMemo(() => {
     const grouped = new Map<string, HierarchyNode[]>()
 
     // Per-layer node comparators. Effective mode resolution: ephemeral session
@@ -352,6 +355,11 @@ export function useLayerAssignment({
     // its assignment, so a client without this field draws the old shape.
     const anchorByLayer = new Map<string, string>()
     sortedLayers.forEach(l => { if (l.anchorUrn) anchorByLayer.set(l.id, l.anchorUrn) })
+    // Only an anchor that was actually PROMOTED renders as its column. One that
+    // fell back to a row is an ordinary node; one that nothing places at all
+    // (its assignment cleared, the anchorUrn left behind) genuinely renders
+    // nowhere and must still be reported as such.
+    const promotedAnchors = new Set<string>()
 
     nodes.forEach((node: any) => {
       const layerId = effectiveLayer.get(node.id)
@@ -378,6 +386,7 @@ export function useLayerAssignment({
         const total = Number(node.data?.childCount ?? children.length) || 0
         const canPromote = children.length > 0 || total === 0
         if (anchorByLayer.get(layerId) === nodeUrn && canPromote) {
+          promotedAnchors.add(nodeUrn)
           // They stay in this layer by ordinary containment inheritance, so each
           // carries its own subtree — and a child added at source simply appears.
           for (const childId of children) {
@@ -486,9 +495,11 @@ export function useLayerAssignment({
       })
     }
 
-    return grouped
+    return { grouped, promotedAnchors }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides])
+
+  const nodesByLayer = layerGrouping.grouped
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
@@ -541,18 +552,12 @@ export function useLayerAssignment({
   // Loaded nodes that render nowhere — absent from every layer's emitted
   // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
   // canvas actually shows.
-  // Anchors that were actually promoted render AS their column; one that fell
-  // back to a row is in nodeLayerMap already, so this set only ever suppresses
-  // a false "renders nowhere".
-  const anchorUrns = useMemo(
-    () => new Set(sortedLayers.map(l => l.anchorUrn).filter((u): u is string => !!u)),
-    [sortedLayers],
-  )
   const unassignedNodes = useMemo(
     () => nodes.filter((n: { id: string; data?: Record<string, unknown> }) =>
-      !nodeLayerMap.has(n.id) && !anchorUrns.has((n.data?.urn as string | undefined) ?? n.id)),
+      !nodeLayerMap.has(n.id)
+      && !layerGrouping.promotedAnchors.has((n.data?.urn as string | undefined) ?? n.id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodeEdgeFingerprint, nodeLayerMap, anchorUrns],
+    [nodeEdgeFingerprint, nodeLayerMap, layerGrouping],
   )
 
   return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes }

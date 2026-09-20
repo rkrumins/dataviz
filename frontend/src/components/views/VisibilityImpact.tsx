@@ -116,6 +116,19 @@ export function VisibilityImpact({
     const { appName } = useBrand()
     const counts = rawCounts ?? {}
 
+    // Hoisted ABOVE the unknown-tier return below. React counts hooks per
+    // render, so leaving this after that return made a view with an
+    // out-of-domain visibility (`ck_views_visibility` still permits 'public')
+    // render ONE hook where a known tier renders two — "Rendered fewer hooks
+    // than expected" the moment anything switched between them.
+    //
+    // On that path `visibilityGrants` falls off its switch and yields
+    // undefined; harmless, because the unknown-tier branch never reads `grants`.
+    const grants = useMemo(
+        () => visibilityGrants(selected, { appName, workspaceName }),
+        [selected, appName, workspaceName],
+    )
+
     // The database's domain is wider than this app's: `ck_views_visibility`
     // still permits 'public', and live rows carry it. Every per-tier map here
     // has three keys, so an unknown tier used to reach `accent.chipBg` on
@@ -157,11 +170,6 @@ export function VisibilityImpact({
 
     const accent = VISIBILITY_ACCENT[selected]
     const Icon = VISIBILITY_ICON[selected]
-
-    const grants = useMemo(
-        () => visibilityGrants(selected, { appName, workspaceName }),
-        [selected, appName, workspaceName],
-    )
 
     const reach = reachOf(selected, counts)
     const savedReach = saved ? reachOf(saved, counts) : null

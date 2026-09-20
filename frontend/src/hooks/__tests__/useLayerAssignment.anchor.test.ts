@@ -164,3 +164,32 @@ describe('useLayerAssignment — anchors bigger than one page', () => {
     expect(result.current.nodesByLayer.get('l1')?.map(n => n.name)).toEqual(['ledger', 'payments'])
   })
 })
+
+describe('useLayerAssignment — an anchor that nothing places', () => {
+  it('still reports it as rendering nowhere', () => {
+    // "Clear all" on an anchored layer removes the anchor's assignment but
+    // leaves layer.anchorUrn behind. The anchor is then drawn by nothing —
+    // suppressing it from the report because it is *declared* an anchor would
+    // hide a genuinely stranded node.
+    const nodesOnly = [node('finance')]
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes: nodesOnly,
+        sortedLayers: [layer('l1', { anchorUrn: 'finance' })],
+        nodeEdgeFingerprint: 'stranded',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap: new Map(nodesOnly.map(n => [n.id, n])),
+        childMap: new Map(),
+        parentMap: new Map(),
+        assignments: {},           // its placement was cleared
+      }),
+    )
+    expect(result.current.unassignedNodes.map(n => n.id)).toContain('finance')
+  })
+
+  it('does NOT report an anchor that was promoted', () => {
+    const out = render([layer('l1', { anchorUrn: 'finance' })], { finance: assign('l1') })
+    expect(out.unassignedNodes.map(n => n.id)).not.toContain('finance')
+  })
+})

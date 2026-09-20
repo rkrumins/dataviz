@@ -63,12 +63,24 @@ const NOWHERE: Placement = { source: 'none' }
 export function buildWizardPlacement(
   layers: ViewLayerConfig[],
   assignments: Record<string, LayerAssignmentEntry>,
+  /**
+   * The view's effective scope. CURATED views never consult type rules for a
+   * root (`resolveRootLayer` reaches `ruleAssignment` only down the open
+   * branch), so claiming a rule placement here would badge entities "by type"
+   * that the canvas drops and curated hydration never even fetches — the very
+   * wizard/canvas divergence this module exists to prevent, inverted.
+   * Defaults to the same derivation `deriveEntityScope` uses.
+   */
+  entityScope?: 'all' | 'curated',
 ): (entity: PlaceableEntity) => Placement {
   const sortedLayers = [...layers].sort((a, b) => a.order - b.order)
   // Sorted ONCE here, not per entity: this resolver runs across every scanned
   // top-level entity and re-sorting each time measured ~8.7ms per 50,000.
   const rules = sortLayerRules(buildLayerRules(sortedLayers))
   const validLayerIds = new Set(sortedLayers.map(l => l.id))
+  const curated = entityScope
+    ? entityScope === 'curated'
+    : Object.keys(assignments).length > 0
 
   return (entity: PlaceableEntity): Placement => {
     // Explicit wins in BOTH scopes — same order as resolveRootLayer.
@@ -77,7 +89,7 @@ export function buildWizardPlacement(
       // A stale id (its layer was deleted) must not strand the entity silently.
       return validLayerIds.has(explicit) ? { layerId: explicit, source: 'explicit' } : NOWHERE
     }
-    if (rules.length === 0) return NOWHERE
+    if (curated || rules.length === 0) return NOWHERE
 
     const node: GraphNode = {
       urn: entity.urn,

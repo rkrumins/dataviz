@@ -60,7 +60,7 @@ import {
     type RootTypeCandidate,
     type TopLevelEntity,
 } from '../views/ViewWizard/autoLayers'
-import { buildWizardPlacement } from '../views/ViewWizard/effectivePlacement'
+import { buildWizardPlacement, resolveWizardEntityScope } from '../views/ViewWizard/effectivePlacement'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
@@ -79,7 +79,7 @@ import {
 } from '@/components/canvas/context-view/layerMutations'
 import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
-import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo } from '@/types/schema'
+import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo, ViewContentConfig } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
@@ -93,6 +93,10 @@ import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/C
 interface LayerStudioProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
+    /** The scope the view being EDITED already stores, when there is one. Ranks
+     *  below a pin made in this session and above the derivation — the same
+     *  order `resolveWizardEntityScope` applies at save. */
+    viewEntityScope?: 'all' | 'curated'
 }
 
 /** Layers rail sizing. Wide enough by default to read a nested entity name. */
@@ -504,6 +508,7 @@ function AutoLayerSheet({
     onApplyTypes,
     onApplyEntities,
     onClose,
+    placeExisting,
 }: {
     mode: AutoLayerMode
     onModeChange: (mode: AutoLayerMode) => void
@@ -518,6 +523,9 @@ function AutoLayerSheet({
     onApplyTypes: (selected: RootTypeCandidate[]) => void
     onApplyEntities: (selected: TopLevelEntity[]) => void
     onClose: () => void
+    /** Where the draft ALREADY places an entity — so "stays out of the view"
+     *  never counts something an existing column holds. */
+    placeExisting: (entity: { urn: string; type: string }) => { layerId?: string }
 }) {
     const available = useMemo(() => candidates.filter(c => !c.coveredByLayerId), [candidates])
 
@@ -580,17 +588,22 @@ function AutoLayerSheet({
         setConfirming(false)
         setShownCount(SHEET_PAGE)
         if (next === ALL_TYPES) { setEntityKeys(new Set()); return }
-        const ofType = entities.filter(e => e.type === next)
+        const nextFold = next.toLowerCase()
+        const ofType = entities.filter(e => e.type.toLowerCase() === nextFold)
         setEntityKeys(ofType.length > AUTO_LAYER_MAX
             ? new Set()
             : new Set(ofType.map(e => e.urn)))
     }
 
     const [shownCount, setShownCount] = useState(SHEET_PAGE)
-    const matchingEntities = useMemo(
-        () => (facet === ALL_TYPES ? entities : entities.filter(e => e.type === facet)),
-        [entities, facet],
-    )
+    const matchingEntities = useMemo(() => {
+        if (facet === ALL_TYPES) return entities
+        // The pill's count sums every case-fold variant (`Domain` + `domain`),
+        // so an exact filter here would show fewer than the pill promises and
+        // leave the odd-cased ones unreachable from this sheet.
+        const fold = facet.toLowerCase()
+        return entities.filter(e => e.type.toLowerCase() === fold)
+    }, [entities, facet])
     const visibleEntities = useMemo(
         () => matchingEntities.slice(0, shownCount),
         [matchingEntities, shownCount],
@@ -618,12 +631,16 @@ function AutoLayerSheet({
         const counts = new Map<string, number>()
         for (const entity of entities) {
             if (placed.has(entity.urn)) continue
+            // An entity an existing column already holds — by assignment or by a
+            // type rule — is not stranded. Counting it turned a draft that
+            // already covered its Platforms into a false amber warning.
+            if (placeExisting(entity).layerId) continue
             counts.set(entity.type, (counts.get(entity.type) ?? 0) + 1)
         }
         return [...counts.entries()]
             .map(([typeId, count]) => ({ label: byTypeId.get(typeId)?.label ?? typeId, count }))
             .sort((a, b) => b.count - a.count)
-    }, [mode, entities, selectedEntities, byTypeId])
+    }, [mode, entities, selectedEntities, byTypeId, placeExisting])
 
     const previewColumns = useMemo<PreviewColumn[]>(() => (
         mode === 'type'
@@ -921,6 +938,7 @@ function AutoLayerSheet({
 export function LayerStudio({
     formData,
     updateFormData,
+    viewEntityScope,
 }: LayerStudioProps) {
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
@@ -1123,8 +1141,25 @@ export function LayerStudio({
     const defaultNodeSortMode = formData.defaultNodeSortMode
     /** The wizard's live layout, in the shape every mutation helper takes. */
     const layout = useMemo<NormalizedReferenceLayout>(
-        () => ({ layers, assignments, ...(defaultNodeSortMode ? { defaultNodeSortMode } : {}) }),
+        // The key is ALWAYS present, even undefined: an undo snapshot has to be
+        // able to restore "no view default", which an absent key cannot express.
+        () => ({ layers, assignments, defaultNodeSortMode }),
         [layers, assignments, defaultNodeSortMode],
+    )
+
+    /**
+     * What scope this draft will actually be saved under — the same precedence
+     * the save applies. Rule placements only exist in an OPEN view, so every
+     * surface that shows "by type" has to agree with this or the wizard starts
+     * promising placements the canvas will not make.
+     */
+    const effectiveScope = useMemo(
+        () => resolveWizardEntityScope(
+            formData.entityScope,
+            layout,
+            viewEntityScope ? ({ entityScope: viewEntityScope } as ViewContentConfig) : undefined,
+        ),
+        [formData.entityScope, layout, viewEntityScope],
     )
 
     const undoStackRef = useRef<NormalizedReferenceLayout[]>([])
@@ -1139,10 +1174,17 @@ export function LayerStudio({
                 // Cap stack size
                 if (undoStackRef.current.length > 50) undoStackRef.current.shift()
             }
+            // Most callers hand over a bare { layers, assignments }. Writing
+            // `defaultNodeSortMode: undefined` for those would spread over the
+            // stored value and silently undo "Apply to all columns" on the very
+            // next drag — so only write the key when the caller actually carries
+            // one. Undo/redo pass a full snapshot, which always does.
             updateFormData({
                 layers: next.layers,
                 assignments: next.assignments,
-                defaultNodeSortMode: next.defaultNodeSortMode,
+                ...('defaultNodeSortMode' in next
+                    ? { defaultNodeSortMode: next.defaultNodeSortMode }
+                    : {}),
             })
         },
         [updateFormData, layout]
@@ -1167,7 +1209,7 @@ export function LayerStudio({
         updateFormData({
             layers: prev.layers,
             assignments: prev.assignments,
-            defaultNodeSortMode: prev.defaultNodeSortMode,
+            defaultNodeSortMode: prev.defaultNodeSortMode,   // snapshot: always explicit
         })
         isUndoRedoRef.current = false
     }, [updateFormData, layout])
@@ -1181,7 +1223,7 @@ export function LayerStudio({
         updateFormData({
             layers: next.layers,
             assignments: next.assignments,
-            defaultNodeSortMode: next.defaultNodeSortMode,
+            defaultNodeSortMode: next.defaultNodeSortMode,   // snapshot: always explicit
         })
         isUndoRedoRef.current = false
     }, [updateFormData, layout])
@@ -1535,6 +1577,12 @@ export function LayerStudio({
         )
         const fresh = selected.filter(e => !alreadyAnchored.has(e.urn))
         const skipped = selected.length - fresh.length
+        // Giving an entity its own column MOVES it out of wherever it was placed
+        // by hand. That is the right outcome, but it must not happen silently.
+        const moved = fresh.filter(e => {
+            const prior = assignments[e.urn]?.layerId
+            return !!prior && layers.some(l => l.id === prior)
+        }).length
         if (fresh.length === 0) {
             notify('info', skipped === 1
                 ? 'That entity already has a column'
@@ -1548,6 +1596,7 @@ export function LayerStudio({
         notify('success', [
             `Added ${added.length} ${added.length === 1 ? 'column' : 'columns'} — each carries everything its entity contains`,
             skipped > 0 ? ` (${skipped} already had one)` : '',
+            moved > 0 ? ` · ${moved} moved out of ${moved === 1 ? 'its' : 'their'} previous column` : '',
         ].join(''))
     }, [layers, assignments, commitLayout, notify])
 
@@ -1573,7 +1622,7 @@ export function LayerStudio({
      * express a single arrangement and did not match the column it previews.
      */
     const rootsByLayer = useMemo(() => {
-        const place = buildWizardPlacement(layers, assignments)
+        const place = buildWizardPlacement(layers, assignments, effectiveScope)
         const byLayer = new Map<string, LayerRootRow[]>()
         const seen = new Set<string>()
 
@@ -1614,7 +1663,11 @@ export function LayerStudio({
             // Nothing loaded yet (or the fetch failed) — keep the anchor row, so
             // the column still says what it holds. Matches useLayerAssignment.
             if (children.length === 0 && total > 0) continue
-            byLayer.set(layer.id, children.map(childUrn => {
+            // Promotion replaces the ANCHOR row, not the column: anything else
+            // placed here (an unrelated root dragged in) is still a root of this
+            // layer on the canvas and has to stay listed here too.
+            const others = (byLayer.get(layer.id) ?? []).filter(r => r.urn !== layer.anchorUrn)
+            byLayer.set(layer.id, [...others, ...children.map(childUrn => {
                 const identity = entityIndex.resolve(childUrn)
                 return {
                     id: childUrn,
@@ -1624,7 +1677,7 @@ export function LayerStudio({
                     childCount: identity?.childCount ?? 0,
                     rulePlaced: false,
                 }
-            }))
+            })])
         }
 
         const cmps = rootComparators<LayerRootRow>(assignments, r => r.childCount)
@@ -1634,7 +1687,7 @@ export function LayerStudio({
             rows.sort(cmps[mode] ?? cmps['alpha-asc'])
         })
         return byLayer
-    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex])
+    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex, effectiveScope])
 
     /** What each column actually holds — derived from the very rows the rail
      *  lists, so an ANCHORED column reports its children rather than the single
@@ -1644,6 +1697,13 @@ export function LayerStudio({
         rootsByLayer.forEach((rows, layerId) => counts.set(layerId, rows.length))
         return counts
     }, [rootsByLayer])
+
+    /** The draft's CURRENT placement for an entity — what the Auto-layer sheet
+     *  consults before calling anything stranded. */
+    const placeCurrent = useMemo(
+        () => buildWizardPlacement(layers, assignments, effectiveScope),
+        [layers, assignments, effectiveScope],
+    )
 
     /** Mirrors the canvas: how much of each anchored column is still unloaded. */
     const anchorMoreByLayer = useMemo(() => {
@@ -1819,6 +1879,7 @@ export function LayerStudio({
                     <button
                         onClick={() => {
                             if (magicSuggestions !== null) { setMagicSuggestions(null); return }
+                            setAutoLayerMode(null)   // one bottom sheet at a time; they share a slot
                             runMagicMap()
                         }}
                         disabled={layers.length === 0 || !snapshot}
@@ -1833,7 +1894,10 @@ export function LayerStudio({
 
                     {/* Auto-layer — turn the top of the hierarchy into columns */}
                     <button
-                        onClick={() => setAutoLayerMode(prev => (prev ? null : 'type'))}
+                        onClick={() => {
+                            setMagicSuggestions(null)   // see runMagicMap: one sheet at a time
+                            setAutoLayerMode(prev => (prev ? null : 'type'))
+                        }}
                         disabled={rootTypeCandidates.length === 0 && scannedTopLevel.length === 0}
                         title={rootTypeCandidates.length === 0 && scannedTopLevel.length === 0
                             ? 'No top-level types or entities found to build columns from'
@@ -1921,6 +1985,7 @@ export function LayerStudio({
                         <WizardAssignmentTree
                             layers={layers}
                             assignments={assignments}
+                            entityScope={effectiveScope}
                             activeTarget={activeTarget}
                             onAssignmentChange={handleAssignmentChange}
                             onBulkAssign={handleBulkAssignment}
@@ -2012,6 +2077,7 @@ export function LayerStudio({
                             onLoadAll={loadAllThenMagicMap}
                             onApplyTypes={applyRootTypeLayers}
                             onApplyEntities={applyEntityLayers}
+                            placeExisting={placeCurrent}
                             onClose={() => setAutoLayerMode(null)}
                         />
                     )}

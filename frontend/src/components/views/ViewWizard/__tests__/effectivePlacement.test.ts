@@ -28,10 +28,35 @@ describe('buildWizardPlacement', () => {
         const place = buildWizardPlacement(
             [layer('domains', 0, ['Domain']), layer('special', 1)],
             { 'urn:a': entry('special') },
+            'all',
         )
         expect(place({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'special', source: 'explicit' })
         // Its siblings still follow the rule.
         expect(place({ urn: 'urn:b', type: 'Domain' })).toEqual({ layerId: 'domains', source: 'rule' })
+    })
+
+    it('reports NO rule placement in a curated view — the canvas makes none', () => {
+        // resolveRootLayer reaches `ruleAssignment` only down the open branch, so
+        // badging a root "by type" here would promise a placement the canvas
+        // drops and curated hydration never even fetches.
+        const place = buildWizardPlacement([layer('domains', 0, ['Domain'])], {}, 'curated')
+        expect(place({ urn: 'urn:b', type: 'Domain' })).toEqual({ source: 'none' })
+    })
+
+    it('still honours an explicit assignment under curated scope', () => {
+        const place = buildWizardPlacement(
+            [layer('domains', 0, ['Domain'])], { 'urn:a': entry('domains') }, 'curated',
+        )
+        expect(place({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'domains', source: 'explicit' })
+    })
+
+    it('derives the scope when none is given, as deriveEntityScope does', () => {
+        const layers = [layer('domains', 0, ['Domain'])]
+        // No assignments -> open -> rules apply.
+        expect(buildWizardPlacement(layers, {})({ urn: 'urn:b', type: 'Domain' }).source).toBe('rule')
+        // Any assignment -> curated -> they do not.
+        expect(buildWizardPlacement(layers, { 'urn:a': entry('domains') })(
+            { urn: 'urn:b', type: 'Domain' }).source).toBe('none')
     })
 
     it('resolves a duplicated type to the LATER layer, matching the canvas', () => {

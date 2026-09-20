@@ -15,7 +15,7 @@
  * - Collapse/expand per node
  */
 
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import {
@@ -215,6 +215,8 @@ function AssignedEntityItem({
     // Which third of the row the pointer is over: the outer thirds reorder, the
     // middle falls through to the LAYER's drop handler (move to this column).
     const [band, setBand] = useState<'before' | 'after' | null>(null)
+    /** The row's own header, so drop bands measure it and not its whole subtree. */
+    const rowRef = useRef<HTMLDivElement | null>(null)
     const [isExpanded, setIsExpanded] = useState(false)
 
     // Identity + children come from the entity browser's data (via the wizard
@@ -266,7 +268,11 @@ function AssignedEntityItem({
 
     const handleDragOver = (e: React.DragEvent) => {
         if (!onReorder || !e.dataTransfer.types.includes('application/x-entity-assignment')) return
-        const rect = e.currentTarget.getBoundingClientRect()
+        // Measure the HEADER ROW, not the wrapper: the wrapper also contains the
+        // expanded children, so on a root with 20 of them its top third reached
+        // most of the way down the subtree and a drop over the 3rd child
+        // reordered against the parent.
+        const rect = (rowRef.current ?? e.currentTarget).getBoundingClientRect()
         const y = e.clientY - rect.top
         const next = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
         setBand(next)
@@ -310,6 +316,7 @@ function AssignedEntityItem({
                 />
             )}
             <div
+                ref={rowRef}
                 draggable={!inherited}
                 onDragStart={!inherited ? handleDragStart : undefined}
                 className={cn(

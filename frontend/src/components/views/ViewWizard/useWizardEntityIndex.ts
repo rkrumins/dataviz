@@ -177,10 +177,15 @@ export function useWizardEntityIndex(opts: {
                 }
             }
         } catch (err) {
-            // A failed page must not be cached as "no children" — that would
-            // strand the container with nothing to retry. Leave what we had.
+            // Do NOT cache "no children" here. It reads as a completed empty
+            // load, and `loadChildren` short-circuits on `has(urn)` — so one
+            // failed first page left the container permanently empty with no
+            // retry path for the rest of the session. Record the failure
+            // separately and leave the cache untouched.
+            // Leaving the key ABSENT is the whole point: `loadChildren`
+            // short-circuits on `has(urn)`, so caching [] here made one failed
+            // first page permanent for the session.
             console.error(`[useWizardEntityIndex] Failed to load children for ${urn}:`, err)
-            if (!childrenRef.current.has(urn)) childrenRef.current.set(urn, [])
         } finally {
             loadingRef.current.delete(urn)
             setTick(t => t + 1)

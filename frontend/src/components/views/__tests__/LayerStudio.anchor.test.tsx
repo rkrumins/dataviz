@@ -168,3 +168,23 @@ describe('LayerStudio — not creating a column that could never fill', () => {
     expect(updateFormData.mock.calls.some(c => 'layers' in c[0])).toBe(false)
   })
 })
+
+describe('LayerStudio — an anchored column also holding something else', () => {
+  it('lists the dragged-in root alongside the anchor\'s children', async () => {
+    // Promotion replaces the ANCHOR row, not the column. The canvas keeps any
+    // other visual root of that layer, so the rail has to as well or the two
+    // disagree and the count is short.
+    const withExtra: WizardFormData = {
+      ...formData(anchored),
+      assignments: {
+        'urn:finance': { layerId: 'l1', inheritsChildren: true },
+        'urn:other': { layerId: 'l1', inheritsChildren: true },
+      },
+    }
+    render(<LayerStudio formData={withExtra} updateFormData={vi.fn()} />)
+    await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
+    // The extra root resolves by urn fallback; what matters is that it is drawn.
+    expect(screen.getByTestId('layer-rows-l1').querySelectorAll('[draggable]').length)
+      .toBeGreaterThanOrEqual(3)
+  })
+})
