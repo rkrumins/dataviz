@@ -210,6 +210,11 @@ export function useLensWalk(
     /** Full flow: fetch the initial closure DEEP and drain every frontier
      *  entry, depth ones included, until the flow is complete. */
     fullWalk = false,
+    /** Where the walk parks and asks (`continuePastCheckpoint`). The Lens
+     *  keeps the memory checkpoint; a caller that only COUNTS — the entity
+     *  drawer, opened on every selection — parks sooner, so selecting a
+     *  giant container never starts a walk of it unasked. */
+    checkpointNodes = TRACE_CHECKPOINT_NODES,
 ): LensWalkData {
     // One shape internally. `focusKey` keeps the memo (and every effect that
     // depends on the list) stable across the fresh array a caller re-creates
@@ -526,7 +531,7 @@ export function useLensWalk(
             // The failsafe and the checkpoint are PER FOCAL: one seed hitting
             // its ceiling must not stop the others being walked.
             if (meta.requests >= WALK_REQUEST_FAILSAFE) continue
-            if (!meta.unbounded && entry.model.nodes.length >= TRACE_CHECKPOINT_NODES) continue
+            if (!meta.unbounded && entry.model.nodes.length >= checkpointNodes) continue
 
             // 1. The focus's own owed contents FIRST — nothing else can
             //    complete the picture of the thing the user asked about.
@@ -558,7 +563,7 @@ export function useLensWalk(
                 slots--
             }
         }
-    }, [fullWalk, focusUrns, provider, state, walkMeta, pageFor, pageSeeds, bulk])
+    }, [fullWalk, checkpointNodes, focusUrns, provider, state, walkMeta, pageFor, pageSeeds, bulk])
 
     const computeWalkProgress = useCallback((urn: string): WalkProgress | null => {
         const cacheKey = cacheKeyFor(provider, urn)
@@ -588,14 +593,14 @@ export function useLensWalk(
         if (meta.requests >= WALK_REQUEST_FAILSAFE) {
             return { ...base, phase: 'error', pending: owed, error: 'the walk did not converge' }
         }
-        if (!meta.unbounded && entry.model.nodes.length >= TRACE_CHECKPOINT_NODES) {
+        if (!meta.unbounded && entry.model.nodes.length >= checkpointNodes) {
             return { ...base, phase: 'checkpoint', pending: owed }
         }
         if (anyError) return { ...base, phase: 'error', pending: owed, error: entry.model.truncationReason ?? 'a step failed' }
         // Candidates remain and nothing is in flight: the driver is about to
         // fire (it runs after this render).
         return { ...base, phase: fullWalk ? 'walking' : 'seeding', pending: owed }
-    }, [provider, state, walkMeta, fullWalk])
+    }, [provider, state, walkMeta, fullWalk, checkpointNodes])
 
     /**
      * `walkProgressFor`, but stable per (provider, urn) for as long as the walk
@@ -614,7 +619,7 @@ export function useLensWalk(
         // so the rule's "unnecessary dependencies" reading is backwards here:
         // dropping them makes the cache permanent and it starts serving stale phases.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [provider, state, walkMeta, fullWalk],
+        [provider, state, walkMeta, fullWalk, checkpointNodes],
     )
 
     const walkProgressFor = useCallback((urn: string): WalkProgress | null => {

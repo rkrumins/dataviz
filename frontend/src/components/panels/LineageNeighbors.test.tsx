@@ -702,16 +702,26 @@ describe('LineageNeighbors — counts agree with the Focus Lens', () => {
     }
   })
 
-  it('says the count is a floor when the walk did not finish', async () => {
+  it('says the count is a floor while the walk is still counting', async () => {
     seedCanvas([])
+    let fine = 0
     mockProviderHolder.current = {
       getEdges: async () => [],
       getNodes: async () => [],
-      traceClosure: async () => closure(['u1'], [], { seedTruncated: true }),
+      // The first page owes the rest of the focal's contents (a seed
+      // cursor, as the server sends it); the rest has not landed.
+      traceClosure: (req: { grain?: string }) => {
+        if (req.grain === 'coarse') return Promise.resolve(closure([], [], { grain: 'coarse' }))
+        fine++
+        return fine === 1
+          ? Promise.resolve(closure(['u1'], [], { truncated: true, seedTruncated: true, seedCursor: 's:next' }))
+          : new Promise(() => {})
+      },
     }
     try {
       render(<LineageNeighbors nodeId={FOCAL} />)
       await waitFor(() => expect(screen.getByText(/at least/i)).toBeInTheDocument())
+      expect(countIn('Data Sources').getByText('1+')).toBeInTheDocument()
     } finally {
       mockProviderHolder.current = null
     }
@@ -810,5 +820,118 @@ describe('LineageNeighbors — show all on canvas', () => {
     render(<LineageNeighbors nodeId={FOCAL} />)
 
     expect(screen.queryByRole('button', { name: /show all/i })).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The list is the walk's too — grouped by system, opened in place
+// ---------------------------------------------------------------------------
+
+/**
+ * The reported bug: "747 Data Sources" over "No flows in this direction".
+ * The count came from the walk and the list from the canvas's own edges, so
+ * a table whose partners were not loaded listed nothing — and one whose
+ * partners sat under a collapsed root listed that root alone. The list now
+ * comes from the same walk as the count, whatever the canvas holds.
+ */
+describe('LineageNeighbors — partners from the walk, by system', () => {
+  const gnode = (urn: string, displayName: string) => ({ urn, entityType: 'table', displayName, properties: {} })
+  // Focal FOCAL ⊃ f1, f2. Web Analytics ⊃ Customers ⊃ c1, c2 ; Web Analytics ⊃ Orders ⊃ o1.
+  const walkPage = () => closure(['c1', 'c2', 'o1'], [], {
+    nodes: [
+      gnode(FOCAL, 'Focal Table'), gnode('f1', 'account_id'), gnode('f2', 'amount'),
+      gnode('wa', 'Web Analytics'), gnode('customers', 'Customers'), gnode('orders', 'Orders'),
+      gnode('c1', 'customer_id'), gnode('c2', 'customer_name'), gnode('o1', 'order_total'),
+    ],
+    containmentEdges: [
+      { sourceUrn: FOCAL, targetUrn: 'f1' }, { sourceUrn: FOCAL, targetUrn: 'f2' },
+      { sourceUrn: 'wa', targetUrn: 'customers' }, { sourceUrn: 'wa', targetUrn: 'orders' },
+      { sourceUrn: 'customers', targetUrn: 'c1' }, { sourceUrn: 'customers', targetUrn: 'c2' },
+      { sourceUrn: 'orders', targetUrn: 'o1' },
+    ],
+    edges: [
+      { id: 'x1', sourceUrn: 'c1', targetUrn: 'f1', edgeType: 'FLOWS_TO' },
+      { id: 'x2', sourceUrn: 'c2', targetUrn: 'f1', edgeType: 'FLOWS_TO' },
+      { id: 'x3', sourceUrn: 'o1', targetUrn: 'f2', edgeType: 'FLOWS_TO' },
+    ],
+  })
+
+  function installWalk() {
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) =>
+        req.grain === 'coarse' ? closure([], [], { grain: 'coarse' }) : walkPage(),
+    }
+  }
+
+  it('lists every partner the count counts, though the canvas holds none of them', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    installWalk()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('3')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+
+      // The one system opens by itself; its entities are listed with how
+      // many sources each holds.
+      expect(screen.queryByText('No flows in this direction')).not.toBeInTheDocument()
+      expect(screen.getByText('Web Analytics')).toBeInTheDocument()
+      expect(screen.getByText('Customers')).toBeInTheDocument()
+      expect(screen.getByText('Orders')).toBeInTheDocument()
+
+      // An entity opens in place, down to the fields a flow joins — and
+      // which of the focal's own fields each one feeds.
+      await user.click(screen.getByRole('button', { name: 'Expand Customers' }))
+      expect(screen.getByText('customer_id')).toBeInTheDocument()
+      expect(screen.getByText('customer_name')).toBeInTheDocument()
+      expect(screen.getAllByText('feeds account_id')).toHaveLength(2)
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('names the flows and the system under the count', async () => {
+    seedCanvas([])
+    installWalk()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(screen.getByText('Upstream · 3 underlying flows in Web Analytics')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('"Show on canvas" brings in the entities beside this one, not every field', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    installWalk()
+    const onLocateMany = vi.fn()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} onLocateMany={onLocateMany} />)
+      const button = await screen.findByText('Show their 2 entities on canvas')
+      await user.click(button)
+      expect(onLocateMany).toHaveBeenCalledTimes(1)
+      expect([...onLocateMany.mock.calls[0][0]].sort()).toEqual(['customers', 'orders'])
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('a search finds a field inside a closed entity and opens the way to it', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    installWalk()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('3')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+      await user.type(screen.getByLabelText('Search data sources'), 'order_t')
+      expect(screen.getByText('order_total')).toBeInTheDocument()
+      expect(screen.queryByText('Customers')).not.toBeInTheDocument()
+    } finally {
+      mockProviderHolder.current = null
+    }
   })
 })
