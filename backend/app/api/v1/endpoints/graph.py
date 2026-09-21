@@ -70,7 +70,11 @@ from backend.insights_service.enqueue import (
 )
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-router = APIRouter()
+from backend.app.api.raw_path_route import RawPathSegmentRoute
+
+# Graph routes take URNs as path segments, and URNs carry '/': match on the RAW
+# path so an encoded slash stays inside its parameter (see RawPathSegmentRoute).
+router = APIRouter(route_class=RawPathSegmentRoute)
 
 # Workspace-scoped mutation gate. The router-level dependency in api.py
 # already enforces ``workspace:datasource:read`` for every graph route;
