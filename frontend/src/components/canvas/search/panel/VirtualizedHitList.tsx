@@ -49,6 +49,7 @@ import {
     useLayoutEffect,
     useMemo,
     useRef,
+    useState,
 } from 'react'
 
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -58,6 +59,13 @@ import type { AncestorRef, SearchHit } from '@/types/search'
 import { SearchHitRow } from '../SearchHitRow'
 import { captureAnchor, restoreScrollTop, type ScrollAnchor } from './scrollAnchor'
 
+
+/** A painted `SearchHitRow`: padding + a 40px icon + the name row + a
+ *  WRAPPING ancestor-chip row + a highlight line + the action-chip row. The
+ *  old 64px was roughly half of it, which at 1,000 rows meant a 64,000px
+ *  estimate against ~130,000px of content — every row corrected its own
+ *  position as it scrolled into view. */
+export const HIT_ROW_ESTIMATE_PX = 128
 
 export interface VirtualizedHitListProps {
     /** Flat-hit mode: HitsByParent's large-page fallback. Every row is a
@@ -79,8 +87,8 @@ export interface VirtualizedHitListProps {
     scrollElementRef: RefObject<HTMLElement | null>
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
-    /** Estimated row height in px. Used until the virtualizer measures
-     *  actual rows. SearchHitRow's natural height is ~64px. */
+    /** Estimated row height in px, until the virtualizer measures the real
+     *  ones. Defaults to {@link HIT_ROW_ESTIMATE_PX}. */
     estimatedRowHeightPx?: number
     /** Rows to keep mounted outside the visible range — smooths fast
      *  scrolling. Default 6. */
@@ -90,13 +98,44 @@ export interface VirtualizedHitListProps {
 
 export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
     hits, rows, estimateRowSize, renderRow, scrollElementRef, onReveal, onOpen,
-    estimatedRowHeightPx = 64, overscan = 6,
+    estimatedRowHeightPx = HIT_ROW_ESTIMATE_PX, overscan = 6,
 }) => {
-    const measureRef = useRef<Map<number, HTMLDivElement>>(new Map())
+
+    // WHERE THE LIST STARTS INSIDE THE SCROLLER.
+    //
+    // This is the one virtualizer in the app that does not own its scroll
+    // element — `ResultsPane` does, and the match count, the section header
+    // and the entity-type facet pills sit ABOVE the list inside it. Without
+    // `scrollMargin`, react-virtual maps `scrollTop` straight onto offsets
+    // that start at 0, so every row it mounted was ~150px out. Worse, the
+    // offset MOVES: the facet row appears once a second entity type lands,
+    // and the "showing the first N" paragraph disappears on the last page —
+    // both re-map scroll position onto different rows with no gesture from
+    // the reader.
+    const listRef = useRef<HTMLDivElement>(null)
+    const [scrollMargin, setScrollMargin] = useState(0)
+    useLayoutEffect(() => {
+        const el = listRef.current
+        const scroller = scrollElementRef.current
+        if (!el || !scroller) return
+        const measure = () => {
+            const top = el.getBoundingClientRect().top
+                - scroller.getBoundingClientRect().top
+                + scroller.scrollTop
+            setScrollMargin((prev) => (Math.abs(prev - top) > 0.5 ? top : prev))
+        }
+        measure()
+        // The content above the list changes height as pages land, so this
+        // has to be watched rather than measured once.
+        const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+        ro?.observe(scroller)
+        return () => ro?.disconnect()
+    })
 
     const virtualizer = useVirtualizer({
         count: rows ? rows.length : (hits?.length ?? 0),
         getScrollElement: () => scrollElementRef.current,
+        scrollMargin,
         estimateSize: (index) => (rows && estimateRowSize
             ? estimateRowSize(index)
             : estimatedRowHeightPx),
@@ -173,6 +212,7 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
 
     return (
         <div
+            ref={listRef}
             className="relative px-2 py-1"
             style={{ height: `${totalSize}px` }}
         >
@@ -181,21 +221,20 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
                 return (
                     <div
                         key={vRow.key}
-                        ref={(el) => {
-                            if (el) {
-                                measureRef.current.set(vRow.index, el)
-                                virtualizer.measureElement(el)
-                            } else {
-                                measureRef.current.delete(vRow.index)
-                            }
-                        }}
+                        // The virtualizer's own measure ref, passed straight
+                        // through. An inline closure here was a NEW ref every
+                        // render, so React detached and re-attached every
+                        // mounted row each time a page landed — a forced sync
+                        // layout per row, per render, and the detach never
+                        // told the ResizeObserver the row had gone.
+                        ref={virtualizer.measureElement}
                         data-index={vRow.index}
                         style={{
                             position: 'absolute',
                             top: 0,
                             left: 0,
                             width: '100%',
-                            transform: `translateY(${vRow.start}px)`,
+                            transform: `translateY(${vRow.start - scrollMargin}px)`,
                         }}
                     >
                         {rows && renderRow
