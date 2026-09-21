@@ -35,6 +35,7 @@ import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
+import { useLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
 import { OffCanvasStub } from './OffCanvasStub'
@@ -171,6 +172,7 @@ export function LineageFlowOverlay({
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
+  const tints = useLineageDirectionColors()
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
   const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
   // Trailing edge stubs — partial curves from visible nodes toward container boundary
@@ -581,10 +583,13 @@ export function LineageFlowOverlay({
             const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
             const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
 
+            // The product's lineage direction pair (useLineageDirectionColors):
+            // a trace's upstream and downstream wear the same colours as the
+            // ports, the drawer and the Focus Lens.
             if (srcInUpstream || tgtInUpstream) {
-              color = '#06b6d4'
+              color = tints.in
             } else if (srcInDownstream || tgtInDownstream) {
-              color = '#f59e0b'
+              color = tints.out
             } else if (!edge.isGhost) {
               color = '#a78bfa'
             }
@@ -735,7 +740,11 @@ export function LineageFlowOverlay({
           if (prev) prev.count += bundleCount
           else proxyCandidates.set(partnerId, { nodeId: partnerId, layerId: owningLayer, count: bundleCount, color, direction })
           if (dockedProxyIdsRef.current.has(partnerId)) {
+            // The partner's own tray entry — or, in hint mode (no tray open
+            // in that column), the column's hint pill, where all of its
+            // lines that way dock together.
             const chipEl = document.getElementById(`anchor-proxy-${partnerId}`)
+              ?? document.getElementById(`anchor-rail-${owningLayer}-${direction}`)
             if (chipEl) {
               const cRect = chipEl.getBoundingClientRect()
               const chipCy = (cRect.top + cRect.bottom) / 2 - containerRect.top
@@ -1045,7 +1054,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, tints])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after

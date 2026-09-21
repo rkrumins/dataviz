@@ -232,6 +232,10 @@ import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { bySignificance } from './lineDensity'
+import { buildNodePorts } from './lineagePorts'
+import { PortHoverTip } from './PortHoverTip'
+import { LineageGuide } from './LineageGuide'
+import { zoomScalesPercentages } from '@/lib/cssZoom'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
@@ -4388,6 +4392,14 @@ export function ContextViewCanvas({
   // full projected set (not the hover-filtered slice) so the markers
   // reflect the entity's true lineage volume regardless of which edges
   // happen to be materialized for the current hover.
+  // Where each card's lines plug in, by side and direction — its lineage
+  // ports (lineagePorts.ts). Sides follow the columns' left-to-right order,
+  // exactly as lineRoute.ts attaches the lines themselves.
+  const nodePorts = useMemo(
+    () => buildNodePorts(visibleLineageEdges, (id) => nodeLayerIndexMap.get(id)),
+    [visibleLineageEdges, nodeLayerIndexMap],
+  )
+
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()
     for (const e of visibleLineageEdges) {
@@ -4400,6 +4412,28 @@ export function ContextViewCanvas({
     }
     return counts
   }, [visibleLineageEdges])
+
+  // The entities with the most lineage on the canvas — the Adaptive guide
+  // names them, each one click from all of its lines. Only while Adaptive is
+  // drawing a subset: that is when "which ones matter?" needs answering.
+  const lineageHubs = useMemo(() => {
+    if (edgePresentation.ambientTotal <= edgePresentation.ambientShown) return []
+    const ranked: Array<{ id: string; lines: number }> = []
+    nodeStubCounts.forEach((c, id) => {
+      if (renderMap.has(id)) ranked.push({ id, lines: c.in + c.out })
+    })
+    ranked.sort((a, b) => b.lines - a.lines || (a.id < b.id ? -1 : 1))
+    const colorOf = new Map(sortedLayers.map(l => [l.id, l.color]))
+    return ranked.slice(0, 4).map(({ id, lines }) => {
+      const node = renderMap.get(id)
+      const layerId = renderLayerOf.get(id)
+      return { id, lines, data: node?.data, name: node?.name, layerColor: layerId ? colorOf.get(layerId) : undefined }
+    })
+  }, [edgePresentation.ambientTotal, edgePresentation.ambientShown, nodeStubCounts, renderMap, renderLayerOf, sortedLayers])
+  const focusHub = useCallback((id: string) => {
+    selectNode(id)
+    scrollHitIntoView(id)
+  }, [selectNode, scrollHitIntoView])
 
   // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
@@ -4591,14 +4625,15 @@ export function ContextViewCanvas({
   // anchors the focus edges to the chip rects. Chip click reuses the
   // reveal mechanism (per-partner Frame); the "+N more" overflow routes
   // to the Lens — the full, searchable list.
-  // ── External lineage (curated views) — "no lineage" vs "outside this
-  // view". Total degrees fetched per hydration settle; external =
-  // total − internal(loaded). Selection-scoped surface: a status chip
-  // for the selected node. Absent totals mean UNKNOWN → no chip, never
+  // ── Total lineage per entity — "no lineage" vs "lineage elsewhere".
+  // Degrees over the whole graph, fetched per hydration settle for every
+  // view: each card's lineage ports read them (lineagePorts.ts), so a card
+  // whose lineage all leads to entities not on this canvas still shows it.
+  // In a CURATED view they also drive the "outside this view" cue: external
+  // = total − internal(loaded). Absent totals mean UNKNOWN → no cue, never
   // a false "no lineage" claim.
-  const externalDegrees = useExternalDegrees(
-    activeEntityScope === 'curated' && showMissingConnectionIndicators,
-  )
+  const externalDegrees = useExternalDegrees(showLineageFlow)
+  const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   // Ambient per-node cue: external = total − internal(loaded), for every
   // loaded node with a KNOWN total. One O(E) pass builds internal
   // degrees; nodes absent from externalDegrees stay absent here
@@ -4606,7 +4641,7 @@ export function ContextViewCanvas({
   // renders nothing.
   const externalCueByNode = useMemo(() => {
     const cue = new Map<string, { in: number; out: number }>()
-    if (externalDegrees.size === 0) return cue
+    if (!showExternalCue || externalDegrees.size === 0) return cue
     const lineageTypeSet = new Set(lineageEdgeTypes)
     const internal = new Map<string, { in: number; out: number }>()
     for (const e of edges) {
@@ -4624,10 +4659,10 @@ export function ContextViewCanvas({
       if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
     })
     return cue
-  }, [externalDegrees, edges, lineageEdgeTypes])
+  }, [showExternalCue, externalDegrees, edges, lineageEdgeTypes])
 
   const selectedExternalLineage = useMemo(() => {
-    if (!selectedNodeId) return null
+    if (!showExternalCue || !selectedNodeId) return null
     const total = externalDegrees.get(selectedNodeId)
     if (!total) return null
     const lineageTypeSet = new Set(lineageEdgeTypes)
@@ -4642,7 +4677,7 @@ export function ContextViewCanvas({
     const exIn = Math.max(0, total.in - inLoaded)
     const exOut = Math.max(0, total.out - outLoaded)
     return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
-  }, [selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
+  }, [showExternalCue, selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
 
   // ── External lineage PREVIEW (feature-flagged) — the guided
   // click-through: fetch ONE node's out-of-scope partners on demand
@@ -5423,9 +5458,6 @@ export function ContextViewCanvas({
           aggDetailTotal={aggDetailStatus.total}
           onLoadMoreDetail={handleLoadMoreAggDetail}
           viewScope={activeEntityScope}
-          adaptiveShown={edgePresentation.ambientShown}
-          adaptiveTotal={edgePresentation.ambientTotal}
-          onShowAllEdges={() => setLineageRenderMode('raw')}
           focusShown={edgePresentation.focusShown}
           focusTotal={edgePresentation.focusTotal}
           onOpenFocusLens={() => {
@@ -5541,6 +5573,17 @@ export function ContextViewCanvas({
               enabled: foldLayersEnabled,
               onToggle: () => setFoldLayersEnabled(!foldLayersEnabled),
             } : undefined}
+            // Adaptive drawing a subset: what is drawn, the most-connected
+            // entities, and the way to all of them — in the canvas's own bar.
+            trailing={edgePresentation.ambientTotal > edgePresentation.ambientShown && edgePresentation.ambientShown > 0 ? (
+              <LineageGuide
+                shown={edgePresentation.ambientShown}
+                total={edgePresentation.ambientTotal}
+                hubs={lineageHubs}
+                onFocusHub={focusHub}
+                onShowAll={() => setLineageRenderMode('raw')}
+              />
+            ) : undefined}
           />
         )}
 
@@ -5683,6 +5726,9 @@ export function ContextViewCanvas({
             />
           )}
 
+          {/* What a lineage port means, on hover — one tip for every port. */}
+          <PortHoverTip scrollerRef={horizontalScrollRef} />
+
           {/* In-progress edge while dragging a connection (shares the overlay
               coordinate space — absolute sibling inside the scroll container). */}
           <ConnectionDragLayer
@@ -5741,14 +5787,20 @@ export function ContextViewCanvas({
               paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
               paddingRight: EXTREMITY_EDGE_GUTTER_PX,
               // Canvas zoom — CSS `zoom` (NOT transform: scale). zoom is a
-              // LAYOUT-affecting scale: the wrapper's 100/zoom% size lays
-              // out back to exactly 100% of the scroll container, so the
-              // scrollable area always equals the visible content. A
-              // transform here left a 100/zoom% layout-sized ghost scroll
-              // region (transforms never affect layout), letting users
-              // scroll far past the canvas into emptiness — and wheel
-              // scrolls chained into that ghost area instead of the
-              // columns' internal lists.
+              // LAYOUT-affecting scale, so the wrapper lays out at exactly
+              // 100% of the scroll container and the scrollable area always
+              // equals the visible content. A transform here left a
+              // layout-sized ghost scroll region (transforms never affect
+              // layout), letting users scroll far past the canvas into
+              // emptiness — and wheel scrolls chained into that ghost area
+              // instead of the columns' internal lists.
+              //
+              // How to size it depends on the browser (lib/cssZoom.ts):
+              // legacy zoom scales percentages too, so the size is undone by
+              // the zoom (100/zoom%); standardised zoom — Chromium since 128,
+              // Firefox — scales only absolute lengths, and undoing it there
+              // left the columns at 1/zoom of the canvas's height over dead
+              // space (62.5% at 160%).
               //
               // The height is the container's CONTENT box, undone by the
               // zoom the same way the width is. A percentage already
@@ -5761,8 +5813,8 @@ export function ContextViewCanvas({
               // every column, its bottom periphery scrim and its
               // end-of-list sentinel 11px short of the visible edge.
               zoom: canvasZoom !== 1 ? canvasZoom : undefined,
-              width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: `calc(100% / ${canvasZoom})`,
+              width: canvasZoom !== 1 && zoomScalesPercentages() ? `${100 / canvasZoom}%` : undefined,
+              height: zoomScalesPercentages() ? `calc(100% / ${canvasZoom})` : '100%',
             }}
           >
             {sortedLayers.map((layer) => (
@@ -5840,6 +5892,8 @@ export function ContextViewCanvas({
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
                 externalCue={externalCueByNode}
+                lineageTotals={externalDegrees}
+                lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
                 onProxyReveal={scrollHitIntoView}

@@ -15,6 +15,8 @@ import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { portView, type NodePorts } from './lineagePorts'
+import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
@@ -72,16 +74,17 @@ interface FlatTreeItemProps {
    *  band keeps the existing reparent drop. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
-  /** Ambient in/out lineage counts for THIS node. Rendered as edge
-   *  hairlines ANCHORED TO THE ROW BOX — so they always track the card's
-   *  width/position and unmount with it (no overlay coordinate math, no
-   *  stale/offset/ghost marks). */
-  lineageIn?: number
-  lineageOut?: number
-  /** Relative volume (0..1) vs the column's heaviest node — drives the
-   *  hairline opacity so hubs stand out and median rows fade. */
-  lineageIntensityIn?: number
-  lineageIntensityOut?: number
+  /** Where this card's lines on the canvas plug in, by side and direction —
+   *  its lineage PORTS (lineagePorts.ts). Rendered as children of the row
+   *  box, so they track the card's width and position and unmount with it. */
+  ports?: NodePorts
+  /** Relative volume (0..1) per side vs the column's busiest card — a port's
+   *  glow, so hubs stand out; every port is the same height. */
+  portStrengthLeft?: number
+  portStrengthRight?: number
+  /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
+   *  known. Shows a hollow port for lineage with nothing on this canvas. */
+  lineageTotals?: { in: number; out: number }
   /** Out-of-view lineage cue (curated views) — sky dashed marks. */
   externalIn?: number
   externalOut?: number
@@ -129,10 +132,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
-  lineageIn = 0,
-  lineageOut = 0,
-  lineageIntensityIn = 0,
-  lineageIntensityOut = 0,
+  ports,
+  portStrengthLeft = 0,
+  portStrengthRight = 0,
+  lineageTotals,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -262,6 +265,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const leftPort = portView('left', ports, lineageTotals)
+  const rightPort = portView('right', ports, lineageTotals)
   const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
@@ -878,49 +883,44 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </div>
 
-      {/* Hover indicator line */}
-      <motion.div
-        className="absolute left-0 top-1/2 -translate-y-1/2 rounded-r-full"
-        // Selection speaks in the accent, not in the entity's type colour:
-        // a rail tinted per type reads as decoration, and a column of them
-        // cannot be scanned for "what did I pick?".
-        style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
-        initial={false}
-        animate={{
-          width: isBulkSelected ? 4 : 3,
-          height: isSelected ? '85%' : isHovered ? '50%' : '0%',
-          opacity: isSelected ? 1 : isHovered ? 0.6 : 0,
-        }}
-        transition={{ duration: 0.2 }}
-      />
-
-      {/* ── Ambient lineage hairlines — ANCHORED TO THIS ROW BOX ──────────
-          Incoming hugs the left edge, outgoing the right; sky dashed cues
-          sit just inboard for out-of-view lineage. Because these are
-          children of the row (position:relative), they track the card's
-          width and position for free, unmount when the row collapses, and
-          can never drift/offset/ghost — no overlay coordinate math.
-          Opacity floors at 0.6 (presence is always legible) with volume
-          intensity on top so hubs stand out. Kept inside the box so the
-          column's overflow-x-hidden never clips them. ── */}
-      {lineageIn > 0 && (
-        <div
-          className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
-          style={{
-            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
-            opacity: 0.6 + lineageIntensityIn * 0.4,
+      {/* Hover indicator line. A left lineage port owns that edge — its rail
+          runs the card's height — so the indicator steps aside there rather
+          than stack a second bar on the same 4px; the card's tint and ring
+          still say hovered / selected. */}
+      {!leftPort && (
+        <motion.div
+          className="absolute left-0 top-1/2 -translate-y-1/2 rounded-r-full"
+          // Selection speaks in the accent, not in the entity's type colour:
+          // a rail tinted per type reads as decoration, and a column of them
+          // cannot be scanned for "what did I pick?".
+          style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
+          initial={false}
+          animate={{
+            width: isBulkSelected ? 4 : 3,
+            height: isSelected ? '85%' : isHovered ? '50%' : '0%',
+            opacity: isSelected ? 1 : isHovered ? 0.6 : 0,
           }}
-          title={`${lineageIn.toLocaleString()} incoming ${unitNoun(lineageIn, 'lines')} on this canvas — ${unitMeaning('lines')}`}
+          transition={{ duration: 0.2 }}
         />
       )}
-      {lineageOut > 0 && (
-        <div
-          className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
-          style={{
-            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
-            opacity: 0.6 + lineageIntensityOut * 0.4,
-          }}
-          title={`${lineageOut.toLocaleString()} outgoing ${unitNoun(lineageOut, 'lines')} on this canvas — ${unitMeaning('lines')}`}
+
+      {/* ── Lineage ports — ANCHORED TO THIS ROW BOX ──────────────────────
+          Where this card's lines plug in: a rail down each edge that carries
+          lines, the card's height, in the lineage direction colours —
+          incoming, outgoing, or split when a side carries both
+          (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
+          brighter the more they carry. Hollow: lineage in the data, none of
+          it on this canvas. No rail: no lineage that way. ── */}
+      {leftPort && (
+        <LineagePortGlyph
+          side="left" view={leftPort} strength={portStrengthLeft}
+          counts={leftPort.kind === 'here' ? ports?.left : lineageTotals}
+        />
+      )}
+      {rightPort && (
+        <LineagePortGlyph
+          side="right" view={rightPort} strength={portStrengthRight}
+          counts={rightPort.kind === 'here' ? ports?.right : lineageTotals}
         />
       )}
       {externalIn > 0 && (

@@ -25,6 +25,7 @@ import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
+import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
 import { NotificationStack } from '@/components/ui/notifications'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
@@ -104,6 +105,10 @@ export function AppLayout() {
   useEffect(() => {
     document.documentElement.classList.toggle('reduce-motion', reducedMotion)
   }, [reducedMotion])
+
+  // The reader's lineage direction colours onto <html> — every surface that
+  // colours incoming / outgoing lineage reads them from there.
+  useApplyLineageDirectionColors()
 
   // Global "?" shortcut toggles the Help drawer — ignored while typing in a
   // field so it never steals a literal question mark.

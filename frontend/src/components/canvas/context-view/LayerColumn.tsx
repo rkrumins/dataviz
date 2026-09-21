@@ -39,6 +39,7 @@ import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { useAnchorRailStore } from '@/store/anchorRail'
+import { sideVolume, type NodePorts } from './lineagePorts'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
 import { matchesQuick } from '../search/session/quickPredicate'
@@ -148,6 +149,12 @@ interface LayerColumnProps {
   lineageCounts?: Map<string, { in: number; out: number }>
   /** Per-node out-of-view lineage counts (curated views) — sky cue. */
   externalCue?: Map<string, { in: number; out: number }>
+  /** Lineage in/out per entity over the whole graph (`/nodes/degree`) —
+   *  absent = not known. Lets a card's port say "lineage exists" even when
+   *  none of it leads to anything on this canvas. */
+  lineageTotals?: ReadonlyMap<string, { in: number; out: number }>
+  /** Where each card's lines plug in, by side and direction (lineagePorts.ts). */
+  lineagePorts?: ReadonlyMap<string, NodePorts>
   /** Render the per-row ambient in/out hairlines (follows the lineage-
    *  flow master switch). Now anchored to the row box, not the overlay. */
   showLineageIndicators?: boolean
@@ -288,6 +295,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   overscan = 15,
   lineageCounts,
   externalCue,
+  lineageTotals,
+  lineagePorts,
   showLineageIndicators = false,
   showDensityGutter = false,
   onProxyReveal,
@@ -1221,6 +1230,17 @@ export const LayerColumn = React.memo(function LayerColumn({
   // column, docked as proxy chips the edge overlay anchors to. A store read,
   // so the rail following the pointer re-renders only the columns it moves in.
   const anchorProxies = useAnchorRailStore(s => s.groups.get(layer.id))
+  // Trays, or a hint that opens one (Display > Lineage). A tray opened from
+  // its hint stays open for the entity it lists, and folds back when the
+  // focus moves on — adjusted as the change arrives, not in an effect.
+  const showConnectedTrays = usePreferencesStore(s => s.showConnectedTrays) ?? true
+  const railFocusId = useAnchorRailStore(s => s.focusId)
+  const [openRail, setOpenRail] = useState<'up' | 'down' | null>(null)
+  const [railFocusSeen, setRailFocusSeen] = useState(railFocusId)
+  if (railFocusSeen !== railFocusId) {
+    setRailFocusSeen(railFocusId)
+    setOpenRail(null)
+  }
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in
@@ -1254,11 +1274,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   // out. Per-column and across ALL rows so intensity is stable regardless
   // of which rows are scrolled into view. 0 = no lineage / indicators off.
   const lineageLogMax = useMemo(() => {
-    if (!showLineageIndicators || !lineageCounts || lineageCounts.size === 0) return 0
+    if (!showLineageIndicators || !lineagePorts || lineagePorts.size === 0) return 0
     let maxCount = 0
-    for (const c of lineageCounts.values()) maxCount = Math.max(maxCount, c.in, c.out)
+    for (const p of lineagePorts.values()) maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
     return Math.log2(1 + Math.max(1, maxCount))
-  }, [showLineageIndicators, lineageCounts])
+  }, [showLineageIndicators, lineagePorts])
 
   // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
@@ -2066,41 +2086,101 @@ export const LayerColumn = React.memo(function LayerColumn({
               surfaces never collide. ── */}
           <AnimatePresence>
             {anchorProxies && anchorProxies.proxies.length > 0 && (() => {
+              // The focused entity's partners scrolled out of THIS column,
+              // gathered on one opaque tray at the edge they are beyond — its
+              // lines dock to the entries. Chips once floated here one by one
+              // on a background that painted nothing (`bg-canvas-elevated/95`
+              // is alpha on a CSS-variable token), so the rows behind showed
+              // through and their names ran into the chips' own.
               const upProxies = anchorProxies.proxies.filter(p => p.direction === 'up')
               const downProxies = anchorProxies.proxies.filter(p => p.direction === 'down')
-              const renderChip = (p: typeof anchorProxies.proxies[number]) => (
+              const renderEntry = (p: typeof anchorProxies.proxies[number]) => (
                 <button
                   key={p.nodeId}
                   id={`anchor-proxy-${p.nodeId}`}
                   type="button"
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
-                  title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
-                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
-                  style={{ borderLeft: `2px solid ${p.color}` }}
+                  title={`${proxyLabel(p.nodeId)} — ${p.count.toLocaleString()} ${p.count === 1 ? 'line' : 'lines'}, off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
+                  className="pointer-events-auto w-full flex items-center gap-2 pl-2 pr-1.5 py-1 rounded-lg text-[11px] font-medium text-ink hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors min-w-0"
                 >
-                  {p.direction === 'up'
-                    ? <LucideIcons.ChevronUp className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
-                    : <LucideIcons.ChevronDown className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />}
+                  <span className="w-1 h-3.5 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
                   <span className="truncate">{proxyLabel(p.nodeId)}</span>
-                  {p.count > 1 && (
-                    <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted/70">×{p.count}</span>
-                  )}
+                  <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>
                 </button>
               )
-              const moreChip = anchorProxies.moreCount > 0 && onProxyMore && (
+              const moreEntry = anchorProxies.moreCount > 0 && onProxyMore && (
                 <button
                   key="anchor-more"
                   type="button"
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
-                  title="Every flow of the selected entity, grouped and searchable"
-                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  title="Every flow of the focused entity, grouped and searchable"
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
-                  +{anchorProxies.moreCount} more · Open lens
+                  {anchorProxies.moreCount.toLocaleString()} more in the lens
                 </button>
               )
+              const tray = (direction: 'up' | 'down', entries: typeof upProxies, withMore: boolean) => {
+                // Hint mode (Display > Lineage): one small pill at the edge,
+                // which the focused entity's lines dock to, until a click
+                // opens the tray. The tray itself is the default.
+                if (!showConnectedTrays && openRail !== direction) {
+                  const count = entries.length + (withMore ? anchorProxies.moreCount : 0)
+                  return (
+                    <button
+                      id={`anchor-rail-${layer.id}-${direction}`}
+                      type="button"
+                      data-canvas-interactive
+                      onClick={(e) => { e.stopPropagation(); setOpenRail(direction) }}
+                      title={`${count.toLocaleString()} connected ${direction === 'up' ? 'above' : 'below'} — click to list them`}
+                      className={cn(
+                        'absolute left-2.5 z-30 pointer-events-auto inline-flex items-center gap-1 pl-1.5 pr-2 py-0.5 rounded-full',
+                        'bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-md',
+                        'text-[10.5px] font-medium text-ink-muted hover:text-ink',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors',
+                        direction === 'up' ? 'top-12' : 'bottom-12',
+                      )}
+                    >
+                      {direction === 'up'
+                        ? <LucideIcons.ArrowUp className="w-3 h-3" />
+                        : <LucideIcons.ArrowDown className="w-3 h-3" />}
+                      <span className="tabular-nums">{count.toLocaleString()}</span> connected
+                    </button>
+                  )
+                }
+                return (
+                  <div
+                    className={cn(
+                      'absolute left-2.5 right-2.5 z-30 pointer-events-auto p-1 rounded-xl',
+                      'bg-canvas-elevated border border-black/10 dark:border-white/10',
+                      'shadow-lg shadow-black/10 dark:shadow-black/40',
+                      direction === 'up' ? 'top-12' : 'bottom-12',
+                    )}
+                  >
+                    <p className="flex items-center gap-1 px-2 pt-0.5 pb-1 text-[10.5px] font-medium text-ink-muted">
+                      {direction === 'up'
+                        ? <LucideIcons.ArrowUp className="w-3 h-3" />
+                        : <LucideIcons.ArrowDown className="w-3 h-3" />}
+                      {direction === 'up' ? 'Connected, above' : 'Connected, below'}
+                      {!showConnectedTrays && (
+                        <button
+                          type="button"
+                          data-canvas-interactive
+                          onClick={(e) => { e.stopPropagation(); setOpenRail(null) }}
+                          aria-label="Fold back to the hint"
+                          className="ml-auto p-0.5 rounded-md hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                        >
+                          <LucideIcons.X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </p>
+                    {entries.map(renderEntry)}
+                    {withMore && moreEntry}
+                  </div>
+                )
+              }
               return (
                 <motion.div
                   key="anchor-rail"
@@ -2110,18 +2190,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                   transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                   className="pointer-events-none"
                 >
-                  {(upProxies.length > 0 || (downProxies.length === 0 && moreChip)) && (
-                    <div className="absolute top-12 left-3 right-3 z-30 flex flex-col gap-1">
-                      {upProxies.map(renderChip)}
-                      {downProxies.length === 0 && moreChip}
-                    </div>
-                  )}
-                  {(downProxies.length > 0) && (
-                    <div className="absolute bottom-12 left-3 right-3 z-30 flex flex-col gap-1">
-                      {downProxies.map(renderChip)}
-                      {moreChip}
-                    </div>
-                  )}
+                  {(upProxies.length > 0 || (downProxies.length === 0 && moreEntry)) &&
+                    tray('up', upProxies, downProxies.length === 0)}
+                  {downProxies.length > 0 && tray('down', downProxies, true)}
                 </motion.div>
               )
             })()}
@@ -2526,10 +2597,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
-                        lineageIn={showLineageIndicators ? (lineageCounts?.get(node.id)?.in ?? 0) : 0}
-                        lineageOut={showLineageIndicators ? (lineageCounts?.get(node.id)?.out ?? 0) : 0}
-                        lineageIntensityIn={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.in ?? 0)) / lineageLogMax : 0}
-                        lineageIntensityOut={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.out ?? 0)) / lineageLogMax : 0}
+                        ports={showLineageIndicators ? lineagePorts?.get(node.id) : undefined}
+                        portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
+                        portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
+                        lineageTotals={showLineageIndicators ? lineageTotals?.get(node.id) : undefined}
                         externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
                         externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />

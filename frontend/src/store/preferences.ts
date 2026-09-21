@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { LayerNodeSortAlgo } from '@/types/schema'
+import { DEFAULT_LINEAGE_DIRECTION_COLORS, type LineageDirectionColors } from '@/lib/lineageDirectionColors'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -167,6 +168,15 @@ interface PreferencesState {
    */
   frostedCards: boolean
   toggleFrostedCards: () => void
+  /** The Anchor Rail's "Connected, above / below" trays — the focused
+   *  entity's partners scrolled out of each column, listed at its edge. Off:
+   *  a small hint in their place, which opens the tray on a click. */
+  showConnectedTrays: boolean
+  toggleConnectedTrays: () => void
+  /** Incoming (upstream) and outgoing (downstream) lineage colours — one pair
+   *  for every surface (lib/lineageDirectionColors.ts). */
+  lineageDirectionColors: LineageDirectionColors
+  setLineageDirectionColors: (colors: LineageDirectionColors) => void
   /**
    * "N on this lineage" pills on the cards of a trace — how much of what is
    * inside a closed card the lineage runs through. On by default; lives
@@ -382,6 +392,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLineageMotion: (lineageMotion) => set({ lineageMotion }),
       frostedCards: false,
       toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
+      showConnectedTrays: true,
+      toggleConnectedTrays: () => set((state) => ({ showConnectedTrays: !state.showConnectedTrays })),
+      lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS,
+      setLineageDirectionColors: (lineageDirectionColors) => set({ lineageDirectionColors }),
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
@@ -518,7 +532,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       // v9 (2026-09-21): flow ribbons are opt-in. They float at the middle of
       // the view across columns they do not connect; a stored `true` is the
       // old default, not a choice — reset it.
-      version: 9,
+      // v10 (2026-09-21): the lineage direction pair's default is blue / green.
+      // The sky / amber stored for the hour before was that default, not a
+      // choice — reset it.
+      version: 10,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -532,6 +549,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         }
         if (version < 8) state = { ...state, canvasFoldLayers: false }
         if (version < 9) state = { ...state, showFlowRibbons: false }
+        if (version < 10) state = { ...state, lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS }
         return state
       },
     }

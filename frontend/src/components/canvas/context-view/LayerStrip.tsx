@@ -68,6 +68,7 @@ export function LayerStrip({
   onFit,
   fold,
   foldToggle,
+  trailing,
 }: {
   layers: LayerStripLayer[]
   /** The canvas's horizontal scroll container. */
@@ -79,6 +80,10 @@ export function LayerStrip({
   fold?: LayerStripFold
   /** Folding on or off — passed only while the layers do not all fit. */
   foldToggle?: { enabled: boolean; onToggle: () => void }
+  /** Status that belongs to the whole canvas, at the bar's end — Adaptive's
+   *  lineage guide. In the bar, not floating over the columns: the bar's band
+   *  is already reserved, so nothing it shows can cover a card. */
+  trailing?: React.ReactNode
 }) {
   // Layer ids whose columns are currently (mostly) inside the viewport.
   const [visibleIds, setVisibleIds] = useState<Set<string>>(() => new Set())
@@ -357,6 +362,12 @@ export function LayerStrip({
                 <LucideIcons.Maximize2 className="w-3 h-3" />
                 Fit
               </button>
+            </>
+          )}
+          {trailing && (
+            <>
+              <div className="w-px self-stretch my-0.5 bg-black/10 dark:bg-white/10" />
+              {trailing}
             </>
           )}
         </div>

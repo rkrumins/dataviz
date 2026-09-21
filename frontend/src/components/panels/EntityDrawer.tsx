@@ -641,26 +641,29 @@ export function EntityDrawer({
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceUp?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-colors duration-150 group"
+                // Upstream and downstream wear the product's lineage direction
+                // pair (lib/lineageDirectionColors.ts) — the canvas's ports,
+                // the lineage cards below, the Focus Lens and a trace.
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-lineage-in/10 border border-lineage-in/20 hover:bg-lineage-in/20 transition-colors duration-150 group"
               >
-                <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
-                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-blue-500" />
+                <div className="w-10 h-10 rounded-full bg-lineage-in/20 flex items-center justify-center group-hover:bg-lineage-in/30 transition-colors">
+                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-lineage-in" />
                 </div>
-                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Root Cause</span>
-                <span className="text-[10px] text-blue-500/60">Trace Upstream</span>
+                <span className="text-xs font-medium text-lineage-in">Root Cause</span>
+                <span className="text-[10px] text-lineage-in/60">Trace Upstream</span>
               </motion.button>
 
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceDown?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-green-500/10 border border-green-500/20 hover:bg-green-500/20 transition-colors duration-150 group"
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-lineage-out/10 border border-lineage-out/20 hover:bg-lineage-out/20 transition-colors duration-150 group"
               >
-                <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center group-hover:bg-green-500/30 transition-colors">
-                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-green-500" />
+                <div className="w-10 h-10 rounded-full bg-lineage-out/20 flex items-center justify-center group-hover:bg-lineage-out/30 transition-colors">
+                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-lineage-out" />
                 </div>
-                <span className="text-xs font-medium text-green-600 dark:text-green-400">Impact</span>
-                <span className="text-[10px] text-green-500/60">Trace Downstream</span>
+                <span className="text-xs font-medium text-lineage-out">Impact</span>
+                <span className="text-[10px] text-lineage-out/60">Trace Downstream</span>
               </motion.button>
 
               <motion.button
