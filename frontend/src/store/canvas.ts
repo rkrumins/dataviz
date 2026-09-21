@@ -131,6 +131,13 @@ interface CanvasState {
    *  action need. Logical groupings are filtered out: a group is a visual
    *  container, not an entity, and bulk actions have nothing to walk from. */
   setSelection: (ids: string[]) => void
+  /**
+   * Multi-select armed from the UI. Cmd/Ctrl-click is the shortcut for it,
+   * but a modifier nobody is told about is not a feature — with this on, a
+   * plain click adds to the selection instead of replacing it.
+   */
+  multiSelectArmed: boolean
+  setMultiSelectArmed: (armed: boolean) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
   /** Last selectNode() call. `drawerNodeId` is sticky, so click observers (the
@@ -407,7 +414,9 @@ export const useCanvasStore = create<CanvasState>()(
           ...(next.length === 1 ? { drawerNodeId: next[0] } : {}),
         }
       }),
-      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
+      multiSelectArmed: false,
+      setMultiSelectArmed: (multiSelectArmed) => set({ multiSelectArmed }),
+      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [], multiSelectArmed: false }),
       lastNodeClick: { nodeId: null, seq: 0 },
 
       // Sticky entity drawer

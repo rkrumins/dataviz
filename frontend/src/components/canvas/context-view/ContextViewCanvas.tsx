@@ -47,7 +47,7 @@ import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { Crosshair, X } from 'lucide-react'
+import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
@@ -357,6 +357,10 @@ export function ContextViewCanvas({
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const setSelection = useCanvasStore((s) => s.setSelection)
+  const canvasDockMinimized = usePreferencesStore((s) => s.canvasDockMinimized)
+  const setCanvasDockMinimized = usePreferencesStore((s) => s.setCanvasDockMinimized)
+  const multiSelectArmed = useCanvasStore((s) => s.multiSelectArmed)
+  const setMultiSelectArmed = useCanvasStore((s) => s.setMultiSelectArmed)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   // Set form for the columns, which ask "is this row selected?" per row.
@@ -4397,7 +4401,9 @@ export function ContextViewCanvas({
     if (entries.length === 0) return null
     const model = unionWalkModels(entries.map((e) => e.model))
     if (!model) return null
-    const label = `${lensMembers.length} selected entities`
+    // The card's own header already reads SELECTION, so the name is just the
+    // count. "3 selected entities" wrapped to "3 selectedentities" in the card.
+    const label = `${lensMembers.length} entities`
     return {
       model: withSelectionFocus(model, lensMembers, label),
       status: entries.some((e) => e.status === 'loading')
@@ -4823,6 +4829,8 @@ export function ContextViewCanvas({
         canTrace={selectedNodeIds.length > 0}
         traceSeedCount={selectedNodeIds.length}
         canOpenLens={selectedNodeIds.length > 0}
+        multiSelectArmed={multiSelectArmed}
+        onToggleMultiSelect={() => setMultiSelectArmed(!multiSelectArmed)}
         onStartTrace={() => { if (selectedNodeIds.length > 0) startCanvasTrace(selectedNodeIds) }}
         onExitTrace={exitCanvasTrace}
         lineageReady={hydrationPhase === 'complete'}
@@ -5226,6 +5234,35 @@ export function ContextViewCanvas({
             maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
+          {/* Minimized: one slim strip instead of two headers, so the
+              columns get their width and height back. Both counts stay
+              readable — minimizing must not hide what the panels were
+              telling you, only how much room they take to tell it. */}
+          {canvasDockMinimized ? (
+            <button
+              type="button"
+              onClick={() => setCanvasDockMinimized(false)}
+              className="self-end flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-canvas-elevated border border-glass-border shadow-lg text-[11.5px] text-ink-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              title="Show Data loads and Flows"
+            >
+              <History className="w-3.5 h-3.5 text-accent-lineage" />
+              <span>Data loads</span>
+              <span className="w-px h-3 bg-glass-border" />
+              <Workflow className="w-3.5 h-3.5 text-accent-lineage" />
+              <span className="tabular-nums">{connectionModel.relationships.toLocaleString()}</span>
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+          ) : (
+          <>
+          <button
+            type="button"
+            onClick={() => setCanvasDockMinimized(true)}
+            className="self-end -mb-0.5 flex items-center gap-1 px-2 py-1 rounded-lg bg-canvas-elevated border border-glass-border shadow text-[11px] text-ink-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            title="Minimize Data loads and Flows"
+          >
+            <ChevronDown className="w-3.5 h-3.5" />
+            Minimize
+          </button>
           <DataLoadsPanel dataSourceId={dataSourceId} />
           <ConnectionsPanel
             key={connectionsViewId}
@@ -5239,6 +5276,8 @@ export function ContextViewCanvas({
             onShowAll={showAllConnectionTypes}
             onHighlight={setConnectionHighlight}
           />
+          </>
+          )}
         </div>
 
         {/* Status chips — loaded-but-hidden data (unresolved edges,
@@ -5251,7 +5290,10 @@ export function ContextViewCanvas({
           // During a trace the external-scope chip speaks browse-view
           // language that contradicts the trace picture (and its counts
           // live in the trace dock) — suppressed until exit.
-          selectedExternal={traceActive ? null : selectedExternalLineage}
+          // Withheld for a multi-selection: it is computed for ONE entity
+          // (the first), and a chip that says "Selected:" while several are
+          // held would be reporting one entity's lineage as the group's.
+          selectedExternal={traceActive || selectedNodeIds.length > 1 ? null : selectedExternalLineage}
           onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
           // The chip counts BROWSE connections the canvas could not place. A
           // drawing trace has none to report (see the projection call site);

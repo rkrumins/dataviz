@@ -72,6 +72,12 @@ interface PreferencesState {
   sidebarCollapsed: boolean
   toggleSidebar: () => void
 
+  // Canvas bottom-right dock (Data loads + Flows). Collapsed individually
+  // each is still a header; minimizing folds the pair into one slim strip
+  // so the columns get their width and height back.
+  canvasDockMinimized: boolean
+  setCanvasDockMinimized: (minimized: boolean) => void
+
   // Entity drawer — which sections the user has folded away, by section
   // key. A key absent from the map is OPEN: the default is open, so a new
   // section never arrives hidden and an older stored map never hides one.
@@ -299,6 +305,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Sidebar
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+
+      canvasDockMinimized: false,
+      setCanvasDockMinimized: (canvasDockMinimized) => set({ canvasDockMinimized }),
 
       // Entity drawer sections
       drawerSectionsCollapsed: {},

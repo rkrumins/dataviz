@@ -127,7 +127,7 @@ export function CanvasStatusChips({
     <div
       className="absolute z-30 flex flex-col items-end gap-1.5 pointer-events-none"
       style={{
-        bottom: 'calc(0.5rem + var(--edge-legend-height, 0px) + var(--trace-dock-height, 0px))',
+        bottom: 'calc(0.5rem + var(--edge-legend-height, 0px) + var(--trace-dock-height, 0px) + var(--selection-bar-height, 0px))',
         right: 'calc(1rem + 20rem + 0.5rem)',
       }}
       data-canvas-interactive

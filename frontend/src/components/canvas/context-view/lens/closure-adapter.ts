@@ -430,6 +430,7 @@ export function withSelectionFocus(
         entityType: 'selection',
     } as LensWalkNode
 
+    const members = new Set(memberUrns)
     return {
         ...model,
         focusUrn,
@@ -441,7 +442,12 @@ export function withSelectionFocus(
             ...memberUrns
                 .filter((urn) => present.has(urn))
                 .map((urn) => ({ sourceUrn: focusUrn, targetUrn: urn })),
-            ...model.containmentEdges,
+            // A member belongs to the SELECTION now, and to nothing else.
+            // `buildLensSubgraph` takes the first parent it sees but lets
+            // every claimant keep the child in its own `childrenOf` list, so
+            // leaving the real container's edge in place drew that container
+            // as a second card insisting it still held them.
+            ...model.containmentEdges.filter((e) => !members.has(e.targetUrn)),
         ],
     }
 }

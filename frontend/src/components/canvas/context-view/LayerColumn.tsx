@@ -786,7 +786,8 @@ export const LayerColumn = React.memo(function LayerColumn({
         return
       }
     }
-    onSelect(id, modifiers.multi)
+    // Armed from the UI, a plain click behaves as a modifier-click would.
+    onSelect(id, modifiers.multi || useCanvasStore.getState().multiSelectArmed)
   }, [navigableItems, navigableIndexMap, onSelect, onSelectRange])
 
   // O(1) lookup: node ID → flatTree index (for virtualizer.scrollToIndex)
@@ -2325,6 +2326,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         schema={schema}
                         isSelected={selectedNodeIds ? selectedNodeIds.has(node.id) : selectedNodeId === node.id}
                         isBulkSelected={(selectedNodeIds?.size ?? 0) > 1 && !!selectedNodeIds?.has(node.id)}
+                        isDimmedBySelection={(selectedNodeIds?.size ?? 0) > 1 && !selectedNodeIds?.has(node.id)}
                         isExpanded={expandedNodes.has(node.id)}
                         isLoading={loadingNodes?.has(node.id) ?? false}
                         isSearchResult={searchResults.has(node.id)}

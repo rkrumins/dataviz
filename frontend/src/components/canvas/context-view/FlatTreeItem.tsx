@@ -49,6 +49,10 @@ interface FlatTreeItemProps {
   isClickHighlighted?: boolean
   isHoverHighlighted?: boolean
   isDimmedByHighlight?: boolean
+  /** A multi-selection is active and this row is not in it. Dimmed more
+   *  gently than the search spotlight: the reader is still PICKING, so the
+   *  rows they have not chosen yet have to stay comfortably readable. */
+  isDimmedBySelection?: boolean
   isFocused?: boolean
   isTracing?: boolean
   /** A row click, with the modifiers that were held. `multi` toggles the
@@ -113,6 +117,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isClickHighlighted = false,
   isHoverHighlighted = false,
   isDimmedByHighlight = false,
+  isDimmedBySelection = false,
   isFocused = false,
   isTracing = false,
   onSelect,
@@ -455,6 +460,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         stagedRowClass,
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40",
+        // The selection spotlight: lighter than the search one, and never
+        // applied on top of it (a row cannot be dimmed twice).
+        !isDimmed && isDimmedBySelection && "opacity-60",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse",
         // Reparent drop target (middle band) — a node drag will nest INTO

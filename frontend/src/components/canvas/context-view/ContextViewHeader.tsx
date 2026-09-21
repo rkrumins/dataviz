@@ -59,6 +59,8 @@ export interface ContextViewHeaderProps {
   canTrace: boolean
   /** How many entities a press of Trace would walk (bulk trace). */
   traceSeedCount?: number
+  multiSelectArmed?: boolean
+  onToggleMultiSelect?: () => void
   /** The Lens stays single-focal; gated separately from Trace. */
   canOpenLens?: boolean
   onStartTrace: () => void
@@ -155,6 +157,8 @@ export function ContextViewHeader({
   traceActive,
   canTrace,
   traceSeedCount,
+  multiSelectArmed,
+  onToggleMultiSelect,
   canOpenLens,
   onStartTrace,
   onExitTrace,
@@ -219,6 +223,8 @@ export function ContextViewHeader({
     traceActive,
     canTrace,
     traceSeedCount,
+    multiSelectArmed,
+    onToggleMultiSelect,
     canOpenLens,
     onStartTrace,
     onExitTrace,

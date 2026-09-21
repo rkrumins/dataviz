@@ -671,12 +671,27 @@ describe('selection focus', () => {
         expect(focused.nodes.find(n => n.urn === focused.focusUrn)?.displayName).toBe('Selection')
     })
 
-    it('keeps the containment the walk already found', () => {
+    it('takes a member away from its real container, which no longer holds it', () => {
+        // buildLensSubgraph takes the FIRST parent it sees but lets every
+        // claimant keep the child in its own children list — so leaving the
+        // real container's edge in drew it as a second card insisting it
+        // still held the selected rows.
         const model = base({
             nodes: [{ urn: 'a' } as never],
             containmentEdges: [{ sourceUrn: 'parent', targetUrn: 'a' }],
         })
         const focused = withSelectionFocus(model, ['a'], 'Selection')
-        expect(focused.containmentEdges).toContainEqual({ sourceUrn: 'parent', targetUrn: 'a' })
+
+        expect(focused.containmentEdges).not.toContainEqual({ sourceUrn: 'parent', targetUrn: 'a' })
+        expect(focused.containmentEdges).toContainEqual({ sourceUrn: focused.focusUrn, targetUrn: 'a' })
+    })
+
+    it('leaves containment between NON-members exactly as it was', () => {
+        const model = base({
+            nodes: [{ urn: 'a' } as never, { urn: 'x' } as never],
+            containmentEdges: [{ sourceUrn: 'parent', targetUrn: 'x' }],
+        })
+        const focused = withSelectionFocus(model, ['a'], 'Selection')
+        expect(focused.containmentEdges).toContainEqual({ sourceUrn: 'parent', targetUrn: 'x' })
     })
 })

@@ -59,6 +59,9 @@ export interface ComprehensionToolsProps {
   /** How many entities a press of Trace would walk. 1 for an ordinary trace;
    *  more for a bulk trace of a multi-selection. */
   traceSeedCount?: number
+  /** Multi-select armed from the UI (plain clicks add to the selection). */
+  multiSelectArmed?: boolean
+  onToggleMultiSelect?: () => void
   /** The Focus Lens is single-focal by construction, so it stays gated on a
    *  selection of exactly one rather than quietly focusing the first of five. */
   canOpenLens?: boolean
@@ -118,6 +121,8 @@ export function ComprehensionTools({
   traceActive,
   canTrace,
   traceSeedCount = 1,
+  multiSelectArmed = false,
+  onToggleMultiSelect,
   canOpenLens,
   onStartTrace,
   onExitTrace,
@@ -230,6 +235,31 @@ export function ComprehensionTools({
           trace: open the Lens on the selection and walk its connections
           hop by hop. Same gating as Trace (single non-logical entity);
           same feature flag (the lens rides the same trace backend). */}
+      {onToggleMultiSelect && !traceActive && (
+        <HoverTip
+          className="inline-flex"
+          label={multiSelectArmed
+            ? 'Clicking a row adds it to the selection'
+            : 'Pick several entities, then trace or focus all of them'}
+          detail={multiSelectArmed ? 'Turn off to go back to single select' : 'Cmd-click does the same thing'}
+        >
+          <button
+            type="button"
+            onClick={onToggleMultiSelect}
+            aria-pressed={multiSelectArmed}
+            className={cn(
+              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+              multiSelectArmed
+                ? 'bg-accent-lineage/20 text-accent-lineage border border-accent-lineage/50 hover:bg-accent-lineage/30'
+                : 'bg-black/[0.03] border border-black/[0.06] text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:bg-white/[0.03] dark:border-white/[0.06] dark:hover:bg-white/[0.08]',
+            )}
+          >
+            <LucideIcons.SquareCheckBig className="w-4 h-4" strokeWidth={2.2} />
+            {multiSelectArmed ? 'Selecting' : 'Select'}
+          </button>
+        </HoverTip>
+      )}
+
       {traceEnabled && onOpenLens && !traceActive && (
         <HoverTip
           className="inline-flex"
