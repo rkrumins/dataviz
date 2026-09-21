@@ -202,6 +202,24 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   const showRollupSplit = !walkAnswered && rollupTotal > 0
 
   const handleNeighborClick = async (neighborId: string) => {
+    // THE PARTNER MAY NOT BE ON THE CANVAS. `useLensLineage` fetches partners
+    // lens-locally and deliberately writes nothing to the canvas store, so a
+    // partner inside a container that was never expanded exists here and
+    // nowhere else. The drawer resolves its entity FROM THE STORE and closes
+    // when it cannot — so clicking such a row looked like nothing happened.
+    //
+    // Seed it first, marked `viaReveal` exactly as a search reveal marks the
+    // spine it primes, so the drawer has something to open on immediately and
+    // the reveal below only has to bring it into view.
+    if (!useCanvasStore.getState()._nodeIndex.has(neighborId)) {
+      const known = sourceFetch.supplementalNodes.get(neighborId)
+      if (known) {
+        useCanvasStore.getState().addGraph(
+          [{ ...known, data: { ...known.data, viaReveal: true } }],
+          [],
+        )
+      }
+    }
     // Drawer-swap first (instant, no awaiting). selectNode so the canvas's
     // selection-driven highlight (useHighlightState in GraphCanvas, the
     // selectedNodeId styling in ContextView) lights up the target after the
@@ -303,6 +321,9 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           selectionEnabled={!!onLocateMany}
           selectedIds={selectedIds}
           setSelectedIds={setSelectedIds}
+          onShowAll={onLocateMany && incomingRecords.length > 0
+            ? () => onLocateMany(incomingRecords.map((r) => r.neighborId))
+            : undefined}
         />
         <DirectionCard
           direction="outgoing"
@@ -317,6 +338,9 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           selectionEnabled={!!onLocateMany}
           selectedIds={selectedIds}
           setSelectedIds={setSelectedIds}
+          onShowAll={onLocateMany && outgoingRecords.length > 0
+            ? () => onLocateMany(outgoingRecords.map((r) => r.neighborId))
+            : undefined}
         />
       </div>
       </ParentLabelContext.Provider>
@@ -401,6 +425,54 @@ interface DirectionCardProps {
   selectionEnabled: boolean
   selectedIds: Set<string>
   setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>
+  /** Reveal every partner in this direction on the canvas, in one click.
+   *  Without it, seeing them meant leaving the drawer and finding each one
+   *  by hand — or ticking them one at a time. */
+  onShowAll?: () => void | Promise<void>
+}
+
+/** "Show all N on canvas" — the one-click alternative to ticking each row.
+ *  Busy while the reveal cascade runs, because revealing a dozen partners
+ *  expands their ancestors one at a time and silence would read as nothing
+ *  happening. */
+function ShowAllOnCanvas({
+  direction,
+  count,
+  onShowAll,
+}: {
+  direction: Direction
+  count: number
+  onShowAll: () => void | Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const isIncoming = direction === 'incoming'
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={async () => {
+        if (busy) return
+        setBusy(true)
+        try { await onShowAll() } finally { setBusy(false) }
+      }}
+      className={cn(
+        'w-full flex items-center justify-center gap-1.5 px-3 py-1.5',
+        'border-t border-white/[0.06] text-[11.5px] font-medium',
+        'transition-colors duration-150 focus-visible:outline-none',
+        'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
+        busy
+          ? 'text-ink-muted cursor-progress'
+          : isIncoming
+            ? 'text-blue-500 hover:bg-blue-500/10'
+            : 'text-green-500 hover:bg-green-500/10',
+      )}
+    >
+      {busy
+        ? <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" />
+        : <LucideIcons.Sparkles className="w-3.5 h-3.5" />}
+      {busy ? 'Revealing…' : `Show all ${count} on canvas`}
+    </button>
+  )
 }
 
 function DirectionCard({
@@ -416,6 +488,7 @@ function DirectionCard({
   selectionEnabled,
   selectedIds,
   setSelectedIds,
+  onShowAll,
 }: DirectionCardProps) {
   const isIncoming = direction === 'incoming'
   const ArrowIcon = isIncoming
@@ -523,6 +596,13 @@ function DirectionCard({
           </div>
         )}
       </button>
+
+      {/* One click to put them all on the board. A sibling of the header
+          rather than a control inside it: the header is itself a button, and
+          the expand toggle must stay the whole row's job. */}
+      {!disabled && onShowAll && (
+        <ShowAllOnCanvas direction={direction} count={count} onShowAll={onShowAll} />
+      )}
 
       <AnimatePresence initial={false}>
         {expanded && !disabled && (

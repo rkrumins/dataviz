@@ -729,3 +729,83 @@ describe('LineageNeighbors — counts agree with the Focus Lens', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Jumping to a partner the canvas has never loaded
+// ---------------------------------------------------------------------------
+
+/**
+ * `useLensLineage` fetches partners lens-locally and deliberately writes
+ * nothing to the canvas store, so a partner inside a container that was never
+ * expanded exists in this panel and nowhere else. The drawer resolves its
+ * entity FROM THE STORE and closes when it cannot — so clicking such a row
+ * looked like nothing happened at all.
+ */
+describe('LineageNeighbors — clicking a partner that is not on the canvas', () => {
+  it('seeds it into the store so the drawer has something to open on', async () => {
+    const user = userEvent.setup()
+    useCanvasStore.setState({
+      nodes: [makeNode('focal-y', 'dataset', 'Focal Y')],
+      edges: [],
+      visibleEdges: [],
+      drawerNodeId: null,
+    } as never)
+    mockProviderHolder.current = {
+      getEdges: async (q: { sourceUrns?: string[] }) =>
+        q.sourceUrns?.length
+          ? [{ id: 'sy1', sourceUrn: 'focal-y', targetUrn: 'far-away', edgeType: 'FLOWS_TO' }]
+          : [],
+      getNodes: async () => [
+        { urn: 'far-away', entityType: 'dataset', displayName: 'Far Away', properties: {} },
+      ],
+    }
+    try {
+      const onFocusNode = vi.fn()
+      render(<LineageNeighbors nodeId="focal-y" onFocusNode={onFocusNode} />)
+
+      // The partner arrives from the fetch, not from the store.
+      await waitFor(() => expect(screen.getByText('1 connected entity')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Consumers'))
+      const row = await screen.findByText('Far Away')
+      await user.click(row)
+
+      await waitFor(() => {
+        expect(useCanvasStore.getState().nodes.some(n => n.id === 'far-away')).toBe(true)
+      })
+      expect(useCanvasStore.getState().drawerNodeId).toBe('far-away')
+      expect(onFocusNode).toHaveBeenCalledWith('far-away')
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+describe('LineageNeighbors — show all on canvas', () => {
+  it('reveals every partner in a direction in one click', async () => {
+    const user = userEvent.setup()
+    seedCanvas([
+      makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO'),
+      makeEdge('e2', UPSTREAM_B, FOCAL, 'FLOWS_TO'),
+    ])
+    const onLocateMany = vi.fn()
+    render(<LineageNeighbors nodeId={FOCAL} onLocateMany={onLocateMany} />)
+
+    await user.click(screen.getByRole('button', { name: /show all 2 on canvas/i }))
+    expect(onLocateMany).toHaveBeenCalledWith([UPSTREAM_A, UPSTREAM_B])
+  })
+
+  it('offers nothing to reveal when a direction is empty', () => {
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    render(<LineageNeighbors nodeId={FOCAL} onLocateMany={vi.fn()} />)
+
+    // One direction has a partner, the other has none.
+    expect(screen.getAllByRole('button', { name: /show all \d+ on canvas/i })).toHaveLength(1)
+  })
+
+  it('is absent when the canvas cannot reveal', () => {
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    render(<LineageNeighbors nodeId={FOCAL} />)
+
+    expect(screen.queryByRole('button', { name: /show all/i })).not.toBeInTheDocument()
+  })
+})
