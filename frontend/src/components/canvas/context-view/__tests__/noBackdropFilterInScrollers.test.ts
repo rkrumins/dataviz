@@ -53,8 +53,10 @@ describe('bottom chrome and scroller surfaces carry no backdrop-filter', () => {
     expect(src.match(BLUR) ?? []).toEqual([])
     expect(src).toMatch(/"nx-row-card"/)
     const css = readFileSync(resolve(here, '../../../styles/globals.css'), 'utf8')
+    // Every regex metacharacter escaped — the backslash too.
+    const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const rule = (selector: string) =>
-      css.match(new RegExp(`(?:^|\\n)\\s*${selector.replace(/[[\]().]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? null
+      css.match(new RegExp(`(?:^|\\n)\\s*${escapeRegExp(selector)}\\s*\\{([^}]*)\\}`))?.[1] ?? null
     expect(rule('.nx-row-card')).toMatch(/background-color:\s*var\(--nx-bg-canvas\)/)
     expect(rule('.nx-row-card')).not.toMatch(/backdrop-filter/)
     expect(rule('[data-frosted-cards] .nx-row-card')).toMatch(/backdrop-filter:\s*blur/)
