@@ -157,12 +157,17 @@ describe('LoadMoreItem', () => {
 
 describe('LoadMoreItem — latch on landed pages, not on the count', () => {
     let fire: ((entries: { isIntersecting: boolean }[]) => void) | null = null
+    let observerRoot: unknown = 'unset'
 
     beforeEach(() => {
         vi.useFakeTimers()
         fire = null
+        observerRoot = 'unset'
         vi.stubGlobal('IntersectionObserver', class {
-            constructor(cb: (entries: { isIntersecting: boolean }[]) => void) { fire = cb }
+            constructor(cb: (entries: { isIntersecting: boolean }[]) => void, opts?: { root?: unknown }) {
+                fire = cb
+                observerRoot = opts?.root
+            }
             observe() {}
             unobserve() {}
             disconnect() {}
@@ -195,6 +200,14 @@ describe('LoadMoreItem — latch on landed pages, not on the count', () => {
         rerender(row(2))                 // a page landed; count unchanged
         dwellInView()
         expect(onLoadMore).toHaveBeenCalledTimes(2)
+    })
+
+    it('watches the VIEWPORT, so a column scrolled off the canvas never pages itself', () => {
+        // Rooted in the column's own scroller, the observer still "saw" the row
+        // of a column the canvas had scrolled out of view: every off-screen
+        // column on a 56-column view fetched its next page unasked.
+        render(<LoadMoreItem depth={0} parentIsLast={[]} count={400} epoch={1} autoLoad onLoadMore={vi.fn()} />)
+        expect(observerRoot).toBeNull()
     })
 
     it('says a page failed, waits for a click, and never auto-fires meanwhile', () => {

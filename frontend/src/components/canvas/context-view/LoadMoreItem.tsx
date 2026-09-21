@@ -20,8 +20,12 @@
  * - CALLER-GATED: LayerColumn passes `autoLoad=false` in Isolate/Hide
  *   filter modes, where loaded children are filtered out of the tree and
  *   the row would otherwise stay pinned in view and drain the parent.
- * - COLUMN-SCOPED: the observer's root is the column scroller, so only
- *   genuine scrolling in THIS column arms it.
+ * - ON-SCREEN ONLY: the observer is rooted in the VIEWPORT. Intersection is
+ *   still clipped by the column's own scroll area (the spec clips through every
+ *   ancestor), so the row arms only when it is genuinely visible — at the foot
+ *   of its column, in a column the canvas is showing. Rooted in the column's
+ *   scroller instead, a column scrolled off the canvas still "saw" its row, and
+ *   every off-screen column on a 56-column view paged itself unasked.
  */
 import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
@@ -81,7 +85,7 @@ export function LoadMoreItem({
         lastFiredKeyRef.current = latchKey
         onLoadMoreRef.current(true)
       }, 300)
-    }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
+    }, { root: null })
     io.observe(el)
     return () => {
       io.disconnect()

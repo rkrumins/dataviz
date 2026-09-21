@@ -107,11 +107,19 @@ interface CanvasState {
    *  scroll/expand). Cleared by setGraph. Never persisted. */
   childPaging: Record<string, ChildPageState>
   setChildPage: (parentId: string, page: ChildPageState) => void
+  /** Land one child page — its nodes, its edges AND the pager's new position —
+   *  as ONE store update, so a page costs one render, not two. */
+  addChildPage: (parentId: string, page: ChildPageState, nodes: LineageNode[], edges: LineageEdge[]) => void
   /** Entity feeds by key (a type id in an open Context View; '__roots__' /
    *  '__orphans__' in the Hierarchy and Graph views). Cleared by setGraph.
    *  Never persisted. */
   typeFeeds: Record<string, TypeFeedState>
   setTypeFeed: (feedKey: string, feed: TypeFeedState) => void
+  /** Land one feed page (nodes, edges, feed position) as ONE store update. */
+  addFeedPage: (feedKey: string, feed: TypeFeedState, nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Seed many pager and feed positions as ONE store update — every store update
+   *  re-renders the whole canvas, so seeding 56 anchors one by one was 56 renders. */
+  seedPositions: (childPages: Record<string, ChildPageState>, typeFeeds: Record<string, TypeFeedState>) => void
   /** Monotonic counter — incremented on every node/edge mutation. */
   _version: number
   setNodes: (nodes: LineageNode[]) => void
@@ -294,6 +302,26 @@ const withVersion: (
     return config(wrappedSet, get, api)
   }
 
+/** The graph after adding `newNodes`/`newEdges` (deduped by id), or null when
+ *  nothing is new. Shared by addGraph and the page-landing actions. */
+function mergeGraph(
+  state: CanvasState, newNodes: LineageNode[], newEdges: LineageEdge[],
+): Pick<CanvasState, 'nodes' | 'edges' | '_nodeIndex' | '_edgeIndex'> | null {
+  const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
+  const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
+  if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return null
+  const nodeIndex = new Set(state._nodeIndex)
+  const edgeIndex = new Set(state._edgeIndex)
+  uniqueNodes.forEach((n) => nodeIndex.add(n.id))
+  uniqueEdges.forEach((e) => edgeIndex.add(e.id))
+  return {
+    nodes: [...state.nodes, ...uniqueNodes],
+    edges: [...state.edges, ...uniqueEdges],
+    _nodeIndex: nodeIndex,
+    _edgeIndex: edgeIndex,
+  }
+}
+
 export const useCanvasStore = create<CanvasState>()(
   persist(
     withVersion(
@@ -395,25 +423,23 @@ export const useCanvasStore = create<CanvasState>()(
       setChildPage: (parentId, page) => set((state) => ({
         childPaging: { ...state.childPaging, [parentId]: page },
       })),
+      addChildPage: (parentId, page, newNodes, newEdges) => set((state) => ({
+        ...(mergeGraph(state, newNodes, newEdges) ?? {}),
+        childPaging: { ...state.childPaging, [parentId]: page },
+      })),
       typeFeeds: {},
       setTypeFeed: (feedKey, feed) => set((state) => ({
         typeFeeds: { ...state.typeFeeds, [feedKey]: feed },
       })),
-      addGraph: (newNodes, newEdges) => set((state) => {
-        const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
-        const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
-        if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return state
-        const nodeIndex = new Set(state._nodeIndex)
-        const edgeIndex = new Set(state._edgeIndex)
-        uniqueNodes.forEach((n) => nodeIndex.add(n.id))
-        uniqueEdges.forEach((e) => edgeIndex.add(e.id))
-        return {
-          nodes: [...state.nodes, ...uniqueNodes],
-          edges: [...state.edges, ...uniqueEdges],
-          _nodeIndex: nodeIndex,
-          _edgeIndex: edgeIndex,
-        }
-      }),
+      addFeedPage: (feedKey, feed, newNodes, newEdges) => set((state) => ({
+        ...(mergeGraph(state, newNodes, newEdges) ?? {}),
+        typeFeeds: { ...state.typeFeeds, [feedKey]: feed },
+      })),
+      seedPositions: (childPages, typeFeeds) => set((state) => ({
+        childPaging: { ...state.childPaging, ...childPages },
+        typeFeeds: { ...state.typeFeeds, ...typeFeeds },
+      })),
+      addGraph: (newNodes, newEdges) => set((state) => mergeGraph(state, newNodes, newEdges) ?? state),
 
       // Selection
       selectedNodeIds: [],

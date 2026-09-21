@@ -761,6 +761,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // the graph is set (setGraph clears pagers), so the column's
                     // first scroll continues at page 2 instead of re-fetching page 1.
                     const anchorPagers: Array<[string, ChildPageState]> = []
+                    // The prefetch's containment edges go into the FIRST graph write:
+                    // without them an anchored column can't see its children until
+                    // the edge fetch lands, and shows a "load more" row meanwhile.
+                    const anchorEdges: GraphEdge[] = []
                     if (anchorUrns.length > 0) {
                         const loaded = new Set(allNodes.map(n => n.urn))
                         const countOf = new Map(allNodes.map(n => [n.urn, n.childCount ?? 0]))
@@ -791,6 +795,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                 loaded.add(child.urn)
                                 allNodes.push(child)
                             }
+                            anchorEdges.push(...page.containmentEdges)
                             if (page.children.length > 0) {
                                 anchorPagers.push([anchorUrns[i], {
                                     cursor: page.nextCursor ?? null,
@@ -836,13 +841,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Show nodes immediately, then fetch edges
                     setGraph(
                         allNodes.map(n => toCanvasNode(n)),
-                        [],
+                        anchorEdges.map(e => toCanvasEdge(e)),
                     )
-                    // setGraph clears pagers and feeds; both writes below re-seed them.
+                    // setGraph clears pagers and feeds; both writes re-seed them —
+                    // in ONE store update (56 separate ones were 56 full renders).
                     const seedAnchorPagers = () => {
-                        const store = useCanvasStore.getState()
-                        for (const [anchorUrn, page] of anchorPagers) store.setChildPage(anchorUrn, page)
-                        for (const [type, feed] of typeFeedSeeds) store.setTypeFeed(type, feed)
+                        useCanvasStore.getState().seedPositions(
+                            Object.fromEntries(anchorPagers), Object.fromEntries(typeFeedSeeds),
+                        )
                     }
                     seedAnchorPagers()
 
@@ -914,10 +920,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         ['__roots__', nextTypeFeed(null, rootNodes, PER_TYPE_LIMIT, typesToLoad)],
                     ]
                     const pagerSeeds: Array<[string, ChildPageState]> = []
+                    // ONE store update however many roots and feeds there are.
                     const seedPositions = () => {
-                        const store = useCanvasStore.getState()
-                        for (const [key, feed] of feedSeeds) store.setTypeFeed(key, feed)
-                        for (const [urn, page] of pagerSeeds) store.setChildPage(urn, page)
+                        useCanvasStore.getState().seedPositions(
+                            Object.fromEntries(pagerSeeds), Object.fromEntries(feedSeeds),
+                        )
                     }
 
                     // Show roots immediately
@@ -1332,10 +1339,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     const edges = [...incoming, ...lineage, ...adopted]
                         .filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
                     const fresh = page.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
-                    if (fresh.length > 0 || edges.length > 0) {
-                        useCanvasStore.getState().addGraph(fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
-                    }
-                    useCanvasStore.getState().setTypeFeed(feedKey, nextTypeFeed(feed, page, PER_TYPE_LIMIT, feed.entityTypes))
+                    // ONE store update: nodes, edges and the feed's position.
+                    useCanvasStore.getState().addFeedPage(
+                        feedKey, nextTypeFeed(feed, page, PER_TYPE_LIMIT, feed.entityTypes),
+                        fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)),
+                    )
                 } catch (err) {
                     console.error(`[useGraphHydration] Failed to load more of feed ${feedKey}`, err)
                     setFailedNodes(prev => new Set(prev).add(key))
@@ -1489,10 +1497,22 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         ...result.lineageEdges.filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn)),
                     ].map(e => toCanvasEdge(e))
 
-                    // Single atomic commit — nodes and edges arrive together
-                    if (nodesToAdd.length > 0 || edgesToAdd.length > 0) {
-                        useCanvasStore.getState().addGraph(nodesToAdd, edgesToAdd)
+                    const advanced = result.children.length > 0
+                    pos = {
+                        cursor: result.nextCursor ?? null,
+                        delivered: offset + result.children.length,
+                        hasMore: result.hasMore && advanced,
+                        direction,
+                        epoch: pos.epoch + 1,
+                        lastUrn: advanced ? result.children[result.children.length - 1].urn : pos.lastUrn,
+                        childCount,
                     }
+                    // ONE store update: nodes, edges and the pager's position land
+                    // together (every store update re-renders the whole canvas).
+                    // Committed per landed page, so a later page that fails is
+                    // retried from exactly here.
+                    useCanvasStore.getState().addChildPage(parentId, pos, nodesToAdd, edgesToAdd)
+                    added += nodesToAdd.length
 
                     // A revealed child this page actually delivered is now a
                     // normal loaded child — clear the flag so it counts
@@ -1504,21 +1524,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             if (wanted.has(n.id) && n.data?.viaReveal) updateNode(n.id, { viaReveal: false })
                         }
                     }
-
-                    const advanced = result.children.length > 0
-                    pos = {
-                        cursor: result.nextCursor ?? null,
-                        delivered: offset + result.children.length,
-                        hasMore: result.hasMore && advanced,
-                        direction,
-                        epoch: pos.epoch + 1,
-                        lastUrn: advanced ? result.children[result.children.length - 1].urn : pos.lastUrn,
-                        childCount,
-                    }
-                    // Committed per landed page: a later page that fails is
-                    // retried from exactly here.
-                    useCanvasStore.getState().setChildPage(parentId, pos)
-                    added += nodesToAdd.length
 
                     // The facts about this page, for whoever asked for it. Set
                     // only on a page that actually completed — an aborted or

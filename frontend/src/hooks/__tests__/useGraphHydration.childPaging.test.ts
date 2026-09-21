@@ -230,6 +230,17 @@ describe('loadChildren — lossless paging', () => {
     expect(loadedKids().length).toBeGreaterThan(0)
   })
 
+  it('lands a page as ONE store update — every update re-renders the whole canvas', async () => {
+    mockProvider.getChildrenWithEdges.mockImplementation(serve() as never)
+    const { result } = renderHook(() => useGraphHydration())
+    let updates = 0
+    const unsubscribe = useCanvasStore.subscribe(() => { updates += 1 })
+    await act(async () => { await result.current.loadChildren(PARENT) })
+    unsubscribe()
+    expect(loadedKids()).toHaveLength(PAGE)
+    expect(updates).toBe(1)   // nodes, edges and the pager position together
+  })
+
   it('counts landed pages per parent, for callers that latch on progress', async () => {
     mockProvider.getChildrenWithEdges.mockImplementation(serve() as never)
     const { result } = renderHook(() => useGraphHydration())
