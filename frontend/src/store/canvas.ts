@@ -80,13 +80,15 @@ export interface ChildPageState {
 }
 
 /**
- * Where one entity type's feed stands in an open ('all') view: the keyset
- * position after the last page (its maximum (displayName, urn)), the server
- * offset for providers that page by offset, and whether the server has more.
- * `epoch` counts landed pages so a column's end-of-list latch re-arms on
- * progress even when a page's rows render under parents in other columns.
+ * Where one feed of entities-by-type stands: the entity types it queries, the
+ * keyset position after the last page (its maximum (displayName, urn)), the
+ * server offset for providers that page by offset, and whether the server has
+ * more. An open Context View keeps one feed per visible type; the Hierarchy and
+ * Graph views keep a roots feed and an orphans feed. `epoch` counts landed
+ * pages so a consumer's latch re-arms on progress.
  */
 export interface TypeFeedState {
+  entityTypes: string[]
   afterName: string | null
   afterUrn: string | null
   offset: number
@@ -105,9 +107,11 @@ interface CanvasState {
    *  scroll/expand). Cleared by setGraph. Never persisted. */
   childPaging: Record<string, ChildPageState>
   setChildPage: (parentId: string, page: ChildPageState) => void
-  /** Open-scope type feeds by entity type. Cleared by setGraph. Never persisted. */
+  /** Entity feeds by key (a type id in an open Context View; '__roots__' /
+   *  '__orphans__' in the Hierarchy and Graph views). Cleared by setGraph.
+   *  Never persisted. */
   typeFeeds: Record<string, TypeFeedState>
-  setTypeFeed: (entityType: string, feed: TypeFeedState) => void
+  setTypeFeed: (feedKey: string, feed: TypeFeedState) => void
   /** Monotonic counter — incremented on every node/edge mutation. */
   _version: number
   setNodes: (nodes: LineageNode[]) => void
@@ -392,8 +396,8 @@ export const useCanvasStore = create<CanvasState>()(
         childPaging: { ...state.childPaging, [parentId]: page },
       })),
       typeFeeds: {},
-      setTypeFeed: (entityType, feed) => set((state) => ({
-        typeFeeds: { ...state.typeFeeds, [entityType]: feed },
+      setTypeFeed: (feedKey, feed) => set((state) => ({
+        typeFeeds: { ...state.typeFeeds, [feedKey]: feed },
       })),
       addGraph: (newNodes, newEdges) => set((state) => {
         const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))

@@ -10,7 +10,7 @@
  * Pinned here:
  *  - hydration records a feed per type from its first page (hasMore when full);
  *  - an explicit placement beyond the first page is fetched by URN;
- *  - loadMoreOfTypes continues from the page's MAXIMUM (displayName, urn) —
+ *  - loadMoreFeeds continues from the page's MAXIMUM (displayName, urn) —
  *    carried with the server offset — and walks the type to exhaustion with
  *    every entity exactly once;
  *  - a failed page is reported and retried from the same position;
@@ -117,12 +117,12 @@ describe('open-scope type feeds', () => {
     await waitFor(() => expect(hydrating.result.current.hydrationStatus).toBe('ready'))
 
     const canvas = renderHook(() => useGraphHydration())
-    await act(async () => { await canvas.result.current.loadMoreOfTypes(['domain']) })
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['domain']) })
     const second = calls.at(-1)!
     expect(second).toMatchObject({ afterUrn: urn(199), afterDisplayName: 'd0199', offset: 200 })
 
-    await act(async () => { await canvas.result.current.loadMoreOfTypes(['domain']) })
-    await act(async () => { await canvas.result.current.loadMoreOfTypes(['domain']) })   // exhausted: no call
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['domain']) })
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['domain']) })   // exhausted: no call
     const got = domains()
     expect(got).toHaveLength(TOTAL)
     expect(new Set(got).size).toBe(TOTAL)
@@ -135,11 +135,11 @@ describe('open-scope type feeds', () => {
     await waitFor(() => expect(hydrating.result.current.hydrationStatus).toBe('ready'))
 
     const canvas = renderHook(() => useGraphHydration())
-    await act(async () => { await canvas.result.current.loadMoreOfTypes(['domain']) })
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['domain']) })
     expect(canvas.result.current.failedNodes.has('TYPE:domain')).toBe(true)
     expect(useCanvasStore.getState().typeFeeds.domain.afterUrn).toBe(urn(199))
 
-    await act(async () => { await canvas.result.current.loadMoreOfTypes(['domain']) })
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['domain']) })
     expect(calls.at(-1)).toMatchObject({ afterUrn: urn(199), offset: 200 })
     expect(canvas.result.current.failedNodes.has('TYPE:domain')).toBe(false)
     expect(domains().length).toBeGreaterThan(200)
@@ -156,7 +156,7 @@ describe('nextTypeFeed', () => {
       { urn: 'u1', entityType: 't', displayName: '～' },
       { urn: 'u2', entityType: 't', displayName: '\u{1F600}' },
     ]
-    const feed = nextTypeFeed(null, page as never, 2)
+    const feed = nextTypeFeed(null, page as never, 2, ['t'])
     expect(feed.afterUrn).toBe('u2')
     expect(feed.hasMore).toBe(true)
   })

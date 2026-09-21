@@ -2916,7 +2916,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, childPageEpochs, exhaustedParents, loadMoreOfTypes } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, childPageEpochs, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -3030,8 +3030,8 @@ export function ContextViewCanvas({
   const onFeedMore = useCallback((layerId: string) => {
     if (traceWriteLocked()) return
     const types = feedTypesByLayer.get(layerId)
-    if (types && types.length > 0) void loadMoreOfTypes(types)
-  }, [feedTypesByLayer, loadMoreOfTypes, traceWriteLocked])
+    if (types && types.length > 0) void loadMoreFeeds(types)
+  }, [feedTypesByLayer, loadMoreFeeds, traceWriteLocked])
 
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge

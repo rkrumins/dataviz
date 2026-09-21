@@ -29,7 +29,7 @@ import { useProviderHealthStore } from '@/store/providerHealth'
 
 /** Page size for loading entities BY TYPE. An open ('all') view loads the
  *  first page of each visible type on arrival and the rest as that type's
- *  column scrolls (`loadMoreOfTypes`) — a page size, not a ceiling. */
+ *  column scrolls (`loadMoreFeeds`) — a page size, not a ceiling. */
 const PER_TYPE_LIMIT = 200
 
 /** Code-point order — how FalkorDB and Python compare strings. JS `<` compares
@@ -49,7 +49,9 @@ function compareCodePoints(a: string, b: string): number {
 /** Where a type feed stands after `page`: the page's MAXIMUM (displayName, urn)
  *  — not its last row, because the query aggregates and FalkorDB may not keep
  *  row order around an aggregation — plus the server offset and `hasMore`. */
-export function nextTypeFeed(prev: TypeFeedState | null, page: GraphNode[], pageSize: number): TypeFeedState {
+export function nextTypeFeed(
+    prev: TypeFeedState | null, page: GraphNode[], pageSize: number, entityTypes: string[],
+): TypeFeedState {
     let name = prev?.afterName ?? null
     let urn = prev?.afterUrn ?? null
     for (const n of page) {
@@ -62,6 +64,7 @@ export function nextTypeFeed(prev: TypeFeedState | null, page: GraphNode[], page
         }
     }
     return {
+        entityTypes: prev?.entityTypes ?? entityTypes,
         afterName: name,
         afterUrn: urn,
         offset: (prev?.offset ?? 0) + page.length,
@@ -277,8 +280,9 @@ export interface UseGraphHydrationResult {
     childPageEpochs: Map<string, number>
     /** Parents the server says have no further pages. */
     exhaustedParents: Set<string>
-    /** Next page of each open-scope type feed that has more (a column's end). */
-    loadMoreOfTypes: (types: string[]) => Promise<void>
+    /** Next page of each named entity feed that has more (a column's end; a
+     *  Hierarchy/Graph "more" control). */
+    loadMoreFeeds: (feedKeys: string[]) => Promise<void>
     /** Current phase of initial hydration (only meaningful when hydrate=true). */
     hydrationPhase: HydrationPhase
     /** Error message if hydration failed (e.g. provider unavailable/warming). */
@@ -683,7 +687,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
 
                         // Each type is its own lossless feed: its first page lands
-                        // here and the rest as its column scrolls (loadMoreOfTypes).
+                        // here and the rest as its column scrolls (loadMoreFeeds).
                         // PER_TYPE_LIMIT is a page size, not a ceiling.
                         const loadTypePages = async (types: string[]): Promise<GraphNode[]> => {
                             const settled = await mapWithConcurrency(
@@ -697,7 +701,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                     return
                                 }
                                 out.push(...outcome.value)
-                                typeFeedSeeds.push([types[i], nextTypeFeed(null, outcome.value, PER_TYPE_LIMIT)])
+                                typeFeedSeeds.push([types[i], nextTypeFeed(null, outcome.value, PER_TYPE_LIMIT, [types[i]])])
                             })
                             return out
                         }
@@ -890,10 +894,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         return
                     }
 
-                    // Step 1: Fetch root nodes
+                    // Step 1: Fetch root nodes — the first page of the ROOTS feed.
+                    // A "more" control continues it (loadMoreFeeds); PER_TYPE_LIMIT
+                    // is a page size, not a ceiling.
                     setHydrationPhase('roots')
                     const rootNodes = await provider.getNodes({
-                        entityTypes: typesToLoad as any[],
+                        entityTypes: typesToLoad,
                         limit: PER_TYPE_LIMIT,
                     })
                     if (controller.signal.aborted) return
@@ -902,24 +908,73 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         return
                     }
 
+                    // Where the feeds and each root's child pager stand after this
+                    // load; setGraph clears both, so every graph write re-seeds them.
+                    const feedSeeds: Array<[string, TypeFeedState]> = [
+                        ['__roots__', nextTypeFeed(null, rootNodes, PER_TYPE_LIMIT, typesToLoad)],
+                    ]
+                    const pagerSeeds: Array<[string, ChildPageState]> = []
+                    const seedPositions = () => {
+                        const store = useCanvasStore.getState()
+                        for (const [key, feed] of feedSeeds) store.setTypeFeed(key, feed)
+                        for (const [urn, page] of pagerSeeds) store.setChildPage(urn, page)
+                    }
+
                     // Show roots immediately
                     setGraph(
                         rootNodes.map(n => toCanvasNode(n, { randomPosition: true })),
                         [],
                     )
+                    seedPositions()
 
-                    // Step 2: Fetch first-level children for all roots (parallel)
+                    // Step 2: the first page of each root's children. Bounded: one
+                    // request per root fired all at once is a burst the backend sheds
+                    // with 429s. Paged: each root's pager continues at page 2 when it
+                    // is expanded. Honest: a failed page is COUNTED, never read as "no
+                    // children" (expanding that root still loads them).
                     setHydrationPhase('children')
-                    const childrenPromises = rootNodes.map(root =>
-                        provider.getChildren(root.urn, { limit: 100 })
-                            .catch(() => [] as GraphNode[])
+                    const parents = rootNodes.filter(r => (r.childCount ?? 1) > 0)
+                    const settledChildren = await mapWithConcurrency(
+                        parents, HYDRATION_CONCURRENCY,
+                        root => provider.getChildrenWithEdges(root.urn, {
+                            edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
+                            limit: CHILDREN_PAGE_SIZE,
+                            // Edges among everything loaded are fetched in step 4.
+                            includeLineageEdges: false,
+                        }),
                     )
-                    const childrenResults = await Promise.all(childrenPromises)
-                    const allChildren = childrenResults.flat()
                     if (controller.signal.aborted) return
+                    const allChildren: GraphNode[] = []
+                    let failedPages = 0
+                    settledChildren.forEach((outcome, i) => {
+                        if (outcome.status !== 'fulfilled') {
+                            failedPages += 1
+                            return
+                        }
+                        const page = outcome.value
+                        allChildren.push(...page.children)
+                        if (page.children.length > 0) {
+                            pagerSeeds.push([parents[i].urn, {
+                                cursor: page.nextCursor ?? null,
+                                delivered: page.children.length,
+                                hasMore: page.hasMore,
+                                direction: 'asc',
+                                epoch: 1,
+                                lastUrn: page.children[page.children.length - 1].urn,
+                                childCount: parents[i].childCount ?? 0,
+                            }])
+                        }
+                    })
+                    if (failedPages > 0) {
+                        useCanvasStore.getState().noteNodeFetchFailure(failedPages, 0)
+                        console.warn(
+                            `[useGraphHydration] first children page failed for ${failedPages} of ${parents.length} roots — expanding them retries`,
+                        )
+                    }
 
                     // Step 3: Fetch orphaned nodes of child types (nodes without
                     // a parent in our root set, e.g. dataPlatforms without a domain)
+                    // — the first page of the ORPHANS feed.
                     const entityTypeHierarchy = schemaEntityTypes
                     const childTypes = new Set<string>()
                     for (const rootType of typesToLoad) {
@@ -929,10 +984,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     let orphanNodes: GraphNode[] = []
                     if (childTypes.size > 0) {
-                        const childTypeNodes = await provider.getNodes({
-                            entityTypes: [...childTypes] as any[],
-                            limit: PER_TYPE_LIMIT,
-                        }).catch(() => [] as GraphNode[])
+                        const orphanTypes = [...childTypes]
+                        let childTypeNodes: GraphNode[] = []
+                        try {
+                            childTypeNodes = await provider.getNodes({
+                                entityTypes: orphanTypes,
+                                limit: PER_TYPE_LIMIT,
+                            })
+                            feedSeeds.push(['__orphans__', nextTypeFeed(null, childTypeNodes, PER_TYPE_LIMIT, orphanTypes)])
+                        } catch (err) {
+                            useCanvasStore.getState().noteNodeFetchFailure(1, 0)
+                            console.warn('[useGraphHydration] orphan page failed to load', err)
+                        }
                         if (controller.signal.aborted) return
 
                         // Filter out nodes we already have
@@ -949,10 +1012,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         nodeMap.set(n.urn, n)
                     }
                     const uniqueNodes = Array.from(nodeMap.values())
-                    if (uniqueNodes.length === 0) {
-                        markReady()   // empty graph — terminal
-                        return
-                    }
 
                     // Step 4: Fetch edges between ALL loaded nodes
                     setHydrationPhase('edges')
@@ -972,6 +1031,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         uniqueNodes.map(n => toCanvasNode(n, { randomPosition: true })),
                         allEdges.map(e => toCanvasEdge(e)),
                     )
+                    seedPositions()
                 }
 
                 markReady()
@@ -1201,9 +1261,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     }, [loadingNodes, submitRootPage])
 
     /**
-     * The next page of each open-scope type feed in `types` that has more —
-     * what a column asks for as its end nears. One queued task per type
-     * (key `TYPE:<type>`, so a repeat while in flight collapses onto it).
+     * The next page of each feed in `feedKeys` that has more — what a column
+     * asks for as its end nears, or a Hierarchy/Graph "more" control. One
+     * queued task per feed (key `TYPE:<feedKey>`, so a repeat while in flight
+     * collapses onto it).
      *
      * Edges cost what the PAGE costs, never what is loaded: the page's incoming
      * containment (≤ one parent per row — what places a row under its parent),
@@ -1211,19 +1272,19 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
      * type this page's type can contain (a child type paged before its
      * parent's). An edge is kept only once both ends are loaded.
      */
-    const loadMoreOfTypes = useCallback(async (types: string[]) => {
+    const loadMoreFeeds = useCallback(async (feedKeys: string[]) => {
         const feeds = useCanvasStore.getState().typeFeeds
-        const due = [...new Set(types)].filter(t => feeds[t]?.hasMore)
-        await Promise.all(due.map(entityType => {
-            const key = `TYPE:${entityType}`
+        const due = [...new Set(feedKeys)].filter(k => feeds[k]?.hasMore)
+        await Promise.all(due.map(feedKey => {
+            const key = `TYPE:${feedKey}`
             return queueRef.current.submit(key, async (signal) => {
-                const feed = useCanvasStore.getState().typeFeeds[entityType]
+                const feed = useCanvasStore.getState().typeFeeds[feedKey]
                 if (!feed?.hasMore) return
                 setFailedNodes(prev => { const next = new Set(prev); next.delete(key); return next })
                 setLoadingNodes(prev => new Set(prev).add(key))
                 try {
                     const page = await provider.getNodes({
-                        entityTypes: [entityType],
+                        entityTypes: feed.entityTypes,
                         limit: PER_TYPE_LIMIT,
                         // Both, always: FalkorDB seeks by keyset; offset-paging
                         // providers (branch/as-of) use the offset.
@@ -1236,9 +1297,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     const pageUrns = page.map(n => n.urn)
                     const before = useCanvasStore.getState()
-                    const childTypes = new Set(
-                        schemaEntityTypes.find(e => e.id === entityType)?.hierarchy?.canContain ?? [],
-                    )
+                    const childTypes = new Set(feed.entityTypes.flatMap(t =>
+                        schemaEntityTypes.find(e => e.id === t)?.hierarchy?.canContain ?? []))
                     let orphans: string[] = []
                     if (childTypes.size > 0 && containmentEdgeTypes.length > 0) {
                         const parented = new Set<string>()
@@ -1275,9 +1335,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     if (fresh.length > 0 || edges.length > 0) {
                         useCanvasStore.getState().addGraph(fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
                     }
-                    useCanvasStore.getState().setTypeFeed(entityType, nextTypeFeed(feed, page, PER_TYPE_LIMIT))
+                    useCanvasStore.getState().setTypeFeed(feedKey, nextTypeFeed(feed, page, PER_TYPE_LIMIT, feed.entityTypes))
                 } catch (err) {
-                    console.error(`[useGraphHydration] Failed to load more ${entityType}`, err)
+                    console.error(`[useGraphHydration] Failed to load more of feed ${feedKey}`, err)
                     setFailedNodes(prev => new Set(prev).add(key))
                 } finally {
                     setLoadingNodes(prev => { const next = new Set(prev); next.delete(key); return next })
@@ -1534,6 +1594,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         rootsHaveMore,
         childPageEpochs,
         exhaustedParents,
-        loadMoreOfTypes,
+        loadMoreFeeds,
     }
 }

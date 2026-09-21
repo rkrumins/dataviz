@@ -37,6 +37,7 @@ import { AnimatePresence } from 'framer-motion'
 import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
+import { FeedMoreChip } from './FeedMoreChip'
 
 // Node/Edge components
 import { GhostNode } from './nodes/GhostNode'
@@ -285,7 +286,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   // handles visibility by projecting to visible ancestors, not filtering.
 
   // 7. Progressive loading
-  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, loadMoreFeeds } = useGraphHydration()
   useLoadingNotification('graph-children', isLoadingChildren, 'Expanding hierarchy')
   const provider = useGraphProvider()
 
@@ -1474,6 +1475,8 @@ export function GraphCanvas({ className }: { className?: string }) {
           )}
         </ReactFlow>
         {rawNodes.length === 0 && !isHydratingInitial && <BuilderEmptyState />}
+        {/* Roots/orphans beyond the first page — above the stats bar. */}
+        <FeedMoreChip loadingNodes={loadingNodes} failedNodes={failedNodes} onLoadMore={keys => void loadMoreFeeds(keys)} bottomClass="bottom-16" />
       </div>
 
       {/* Stats Bar */}
