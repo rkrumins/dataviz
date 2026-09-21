@@ -232,6 +232,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "opening the view, where the address has always been shown."
         ),
         "category_id": "analytics",
+        "sort_order": 3,
         "type": "boolean",
         # OFF by default. Addresses are already reachable one page over, so this
         # is not the thing protecting them \u2014 but a ranked page that lists several
