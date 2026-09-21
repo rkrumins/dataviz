@@ -379,3 +379,69 @@ export function unionWalkModels(models: readonly LensWalkModel[]): LensWalkModel
         seedCursor: null,
     }
 }
+
+
+/** URN prefix marking a focal that stands for a SELECTION rather than a
+ *  real entity. Nothing in the graph can collide with it. */
+export const SELECTION_FOCUS_PREFIX = 'selection:'
+
+/** The urn for a lens focused on `memberUrns`. Sorted, so the same selection
+ *  is the same focal however it was built — which is what lets the walk cache
+ *  and the lens history recognise it. */
+export function selectionFocusUrn(memberUrns: readonly string[]): string {
+    return SELECTION_FOCUS_PREFIX + [...memberUrns].sort().join('\u0000')
+}
+
+/** The members a selection focal stands for, or null when it is a real urn. */
+export function selectionMembers(urn: string | null): string[] | null {
+    if (!urn || !urn.startsWith(SELECTION_FOCUS_PREFIX)) return null
+    const members = urn.slice(SELECTION_FOCUS_PREFIX.length).split('\u0000').filter(Boolean)
+    return members.length > 0 ? members : null
+}
+
+/**
+ * Give a union model a SYNTHETIC focus that contains the selection.
+ *
+ * The Lens is built around one focal, and everything it computes — hop
+ * numbering, the frontier pills, the orientation sentence — is measured from
+ * the "focus side", which `buildLensSubgraph` derives as the focus plus
+ * everything CONTAINED in it. So a selection becomes a lens focus by being
+ * exactly that: one synthetic node with a containment edge to each selected
+ * entity. Hop 1 is then "anything the selection reaches", by the same rule
+ * that makes a table's columns hop 0 of the table's own lens.
+ *
+ * Nothing downstream needs to know. The synthetic node is a normal
+ * `LensWalkNode`; it simply has no edges of its own, which is true of every
+ * container the lens already draws.
+ */
+export function withSelectionFocus(
+    model: LensWalkModel,
+    memberUrns: readonly string[],
+    label: string,
+): LensWalkModel {
+    const focusUrn = selectionFocusUrn(memberUrns)
+    const present = new Set(model.nodes.map((n) => n.urn))
+    const synthetic: LensWalkNode = {
+        id: focusUrn,
+        position: { x: 0, y: 0 },
+        data: { label, urn: focusUrn, type: 'selection' },
+        urn: focusUrn,
+        displayName: label,
+        entityType: 'selection',
+    } as LensWalkNode
+
+    return {
+        ...model,
+        focusUrn,
+        nodes: [synthetic, ...model.nodes],
+        containmentEdges: [
+            // Only for members the walk actually returned: an edge to a node
+            // the subgraph does not hold would nest nothing and count as a
+            // child that is not there.
+            ...memberUrns
+                .filter((urn) => present.has(urn))
+                .map((urn) => ({ sourceUrn: focusUrn, targetUrn: urn })),
+            ...model.containmentEdges,
+        ],
+    }
+}

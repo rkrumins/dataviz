@@ -126,6 +126,7 @@ import {
 } from './lens/lensHistory'
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
+import { selectionMembers, selectionFocusUrn, unionWalkModels, withSelectionFocus } from './lens/closure-adapter'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
 import { useTraceOverlay, type TraceOverlay } from '@/hooks/useTraceOverlay'
 import { lanesToRenderTrees } from '@/hooks/lib/traceViewModel'
@@ -4307,6 +4308,13 @@ export function ContextViewCanvas({
     setLensHistory({ entries: [nodeId], cursor: 0 })
   }, [])
   const openLens = useCallback((nodeId: string) => openLensAt(nodeId, false), [openLensAt])
+  /** Open the Lens on whatever is selected: the entity itself when one is
+   *  held, or a synthetic focus CONTAINING them when several are. */
+  const openLensForSelection = useCallback((ids: readonly string[]) => {
+    if (ids.length === 0) return
+    if (ids.length === 1) { openLens(ids[0]!) ; return }
+    openLens(selectionFocusUrn(ids.map(id => displayMap.get(id)?.urn ?? id)))
+  }, [openLens, displayMap])
   const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
   const lensBack = useCallback(() => setLensHistory(lensBackward), [])
   const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
@@ -4337,7 +4345,15 @@ export function ContextViewCanvas({
   const lensInitialDepth = initialLensShare && (initialLensShare.v === 2 || initialLensShare.v === 3) && lensFocal === initialLensShare.entries[initialLensShare.cursor]
     ? initialLensShare.depth
     : userLensInitialDepth
-  const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth, lensFullWalk)
+  // A selection focal is synthetic — there is nothing at that urn to walk.
+  // Its MEMBERS are what the server is asked about; the union of their walks
+  // then gets the synthetic focus spliced in below.
+  const lensMembers = useMemo(() => selectionMembers(lensFocal), [lensFocal])
+  const lensSeeds = useMemo(
+    () => lensMembers ?? (lensFocal ? [lensFocal] : []),
+    [lensMembers, lensFocal],
+  )
+  const lensWalk = useLensWalk(lensSeeds, provider, lensInitialDepth, lensFullWalk)
   // The rest of a restored exploration — applied once, inside the lens,
   // to the same focal the depth override above targets.
   const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
@@ -4371,7 +4387,29 @@ export function ContextViewCanvas({
     [lensExtend, lensPage, lensRetryWalk, lensPageSeeds],
   )
   const { walkFor: lensWalkFor } = lensWalk
-  const lensWalkEntry = lensFocal ? lensWalkFor(lensFocal) : null
+  const lensWalkEntry = useMemo(() => {
+    if (!lensFocal) return null
+    if (!lensMembers) return lensWalkFor(lensFocal)
+    // Several entities: union their walks, then give the result a synthetic
+    // focus that CONTAINS them, so the lens measures hops from the selection
+    // exactly as it measures them from a container's contents.
+    const entries = lensMembers.map(lensWalkFor).filter((e): e is NonNullable<typeof e> => e !== null)
+    if (entries.length === 0) return null
+    const model = unionWalkModels(entries.map((e) => e.model))
+    if (!model) return null
+    const label = `${lensMembers.length} selected entities`
+    return {
+      model: withSelectionFocus(model, lensMembers, label),
+      status: entries.some((e) => e.status === 'loading')
+        ? 'loading' as const
+        : entries.some((e) => e.status === 'error')
+          ? 'error' as const
+          : 'done' as const,
+      error: entries.find((e) => e.error)?.error ?? null,
+      extendStatus: new Map(entries.flatMap((e) => [...e.extendStatus])),
+      depth: Math.max(...entries.map((e) => e.depth)),
+    }
+  }, [lensFocal, lensMembers, lensWalkFor])
   const { loadAllChildren: loadLensAllChildren, loadChildrenOf: loadLensChildrenOf } = lensChildren
   useEffect(() => {
     focusLensRef.current = () => {
@@ -4784,7 +4822,7 @@ export function ContextViewCanvas({
         traceActive={traceActive}
         canTrace={selectedNodeIds.length > 0}
         traceSeedCount={selectedNodeIds.length}
-        canOpenLens={selectedNodeIds.length === 1}
+        canOpenLens={selectedNodeIds.length > 0}
         onStartTrace={() => { if (selectedNodeIds.length > 0) startCanvasTrace(selectedNodeIds) }}
         onExitTrace={exitCanvasTrace}
         lineageReady={hydrationPhase === 'complete'}
@@ -4794,7 +4832,7 @@ export function ContextViewCanvas({
         onResumeTraceHistory={resumeTraceHistory}
         onClearTraceHistory={clearTraceHistory}
         onCopyTraceHistoryLink={traceHistoryLink}
-        onOpenLens={() => { if (selectedNodeIds[0]) openLens(selectedNodeIds[0]) }}
+        onOpenLens={() => openLensForSelection(selectedNodeIds)}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,
           // no refetch (the walk holds the whole flow in memory).
@@ -5168,6 +5206,7 @@ export function ContextViewCanvas({
             onRemove={(id) => selectNode(id, true)}
             onClear={clearSelection}
             onTrace={() => startCanvasTrace(selectedNodeIds)}
+            onOpenLens={() => openLensForSelection(selectedNodeIds)}
           />
         )}
 

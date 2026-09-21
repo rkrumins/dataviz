@@ -40,6 +40,8 @@ export interface SelectionBarProps {
   onClear: () => void
   /** Trace every held entity (the union of their lineage). */
   onTrace: () => void
+  /** Open the Focus Lens on the selection as a whole. */
+  onOpenLens: () => void
 }
 
 export function SelectionBar({
@@ -48,6 +50,7 @@ export function SelectionBar({
   onRemove,
   onClear,
   onTrace,
+  onOpenLens,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
@@ -139,9 +142,21 @@ export function SelectionBar({
 
           {/* What will happen. */}
           <div className="flex items-center gap-2 ml-auto shrink-0">
-            <span className="hidden lg:inline text-[11px] text-ink-muted whitespace-nowrap">
-              Focus Lens takes one entity
-            </span>
+            <button
+              type="button"
+              onClick={onOpenLens}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                'text-teal-700 dark:text-teal-300',
+                'bg-teal-500/10 border border-teal-500/35',
+                'hover:bg-teal-500/20 hover:border-teal-400/55',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/40',
+                'transition-colors duration-150',
+              )}
+            >
+              <LucideIcons.Focus className="w-3.5 h-3.5" strokeWidth={2.2} />
+              Focus all {count}
+            </button>
             <button
               type="button"
               onClick={onTrace}

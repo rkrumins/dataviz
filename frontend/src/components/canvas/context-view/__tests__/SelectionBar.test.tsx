@@ -21,6 +21,7 @@ function renderBar(nodeIds: string[], over: Partial<Parameters<typeof SelectionB
     onRemove: vi.fn(),
     onClear: vi.fn(),
     onTrace: vi.fn(),
+    onOpenLens: vi.fn(),
     ...over,
   }
   render(<SelectionBar {...props} />)
@@ -70,10 +71,12 @@ describe('SelectionBar', () => {
 
 
 
-  it('explains the Lens instead of leaving a dead button', () => {
-    renderBar(['a', 'b'])
-    expect(screen.queryByRole('button', { name: /^focus$/i })).not.toBeInTheDocument()
-    expect(screen.getByText(/focus lens takes one entity/i)).toBeInTheDocument()
+  it('opens the Lens on the whole selection', async () => {
+    const user = userEvent.setup()
+    const { onOpenLens } = renderBar(['a', 'b', 'c'])
+
+    await user.click(screen.getByRole('button', { name: /focus all 3/i }))
+    expect(onOpenLens).toHaveBeenCalled()
   })
 
   it('clears the whole selection', async () => {
