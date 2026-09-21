@@ -140,3 +140,76 @@ describe('flattenRows', () => {
         ])
     })
 })
+
+
+// ---------------------------------------------------------------------------
+// Why the list needs a scroll anchor
+// ---------------------------------------------------------------------------
+
+/**
+ * These pin the two ways an appended page moves rows that are ALREADY on
+ * screen. Neither is a defect in the grouping — a page has to land
+ * somewhere, and column order is the order users read. They are why
+ * `VirtualizedHitList` anchors the viewport; if either of these stops
+ * being true, the anchor can be reconsidered, and until then it must stay.
+ */
+describe('an appended page moves rows that are already on screen', () => {
+    const rowIndexOf = (rows: ReturnType<typeof flattenRows>, urn: string) =>
+        rows.findIndex((r) => r.kind === 'hit' && r.hit.node.urn === urn)
+
+    it('pushes a visible row down when a later page fills a column to its LEFT', () => {
+        // Page 1 lands only in the right-hand column.
+        const page1 = [hit('c', 'C2')]
+        const before = flattenRows(
+            groupHitsByLayer(page1, resolveLayer, new Map(), LAYERS),
+            new Set(),
+        )
+        const wasAt = rowIndexOf(before, 'c')
+
+        // Page 2 adds a hit in the LEFT column, which sorts ahead of it.
+        const page2 = [...page1, hit('a', 'C1')]
+        const after = flattenRows(
+            groupHitsByLayer(page2, resolveLayer, new Map(), LAYERS),
+            new Set(),
+        )
+
+        expect(rowIndexOf(after, 'c')).toBeGreaterThan(wasAt)
+    })
+
+    it('pushes a visible row down when a later page adds a sibling ABOVE it', () => {
+        // 'c' sits under C2; page 2 adds another hit under C1, which is
+        // already above it.
+        const page1 = [hit('a', 'C1'), hit('c', 'C2')]
+        const before = flattenRows(
+            groupHitsByLayer(page1, resolveLayer, new Map(), LAYERS),
+            new Set(),
+        )
+        const wasAt = rowIndexOf(before, 'c')
+
+        const page2 = [...page1, hit('b', 'C1')]
+        const after = flattenRows(
+            groupHitsByLayer(page2, resolveLayer, new Map(), LAYERS),
+            new Set(),
+        )
+
+        expect(rowIndexOf(after, 'c')).toBe(wasAt + 1)
+    })
+
+    it('keeps every row key stable across the append, so only POSITION moves', () => {
+        const page1 = [hit('a', 'C1'), hit('c', 'C2')]
+        const before = flattenRows(
+            groupHitsByLayer(page1, resolveLayer, new Map(), LAYERS),
+            new Set(),
+        )
+        const page2 = [...page1, hit('b', 'C1')]
+        const after = flattenRows(
+            groupHitsByLayer(page2, resolveLayer, new Map(), LAYERS),
+            new Set(),
+        )
+
+        const keyOf = (rows: typeof before, urn: string) =>
+            rows.find((r) => r.kind === 'hit' && r.hit.node.urn === urn)?.key
+
+        expect(keyOf(after, 'c')).toBe(keyOf(before, 'c'))
+    })
+})

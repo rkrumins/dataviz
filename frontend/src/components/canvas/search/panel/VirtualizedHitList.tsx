@@ -23,6 +23,16 @@
  *     (~64px); the virtualizer measures the actual painted row and
  *     refines from there.
  *
+ * It also keeps the viewport STILL while pages land. "Load all" walks the
+ * cursor to the end, and each committed page re-derives the grouping —
+ * groups sort by the canvas's column order rather than by arrival, and a hit
+ * for a container already on screen is appended inside it. Both insert rows
+ * above the fold, which slid the list down under whoever was reading it. The
+ * list pins itself to the first visible row and puts it back (see
+ * ``scrollAnchor``), twice: once when the rows change, and again after the
+ * new rows have been measured, since a row above the fold is an estimate
+ * until it has been painted.
+ *
  * It also serves a second, GROUPED caller. ``HitsByLayer`` flattens its
  * layer › container tree into one row list — headers and hits together —
  * and passes it as ``rows`` with a per-kind size and its own painter.
@@ -30,13 +40,23 @@
  * per group would mean a scroll element per group, and rendering the
  * headers outside the window would put the O(N) mount cost back.
  */
-import { type FC, type ReactNode, type RefObject, useRef } from 'react'
+import {
+    type FC,
+    type ReactNode,
+    type RefObject,
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+} from 'react'
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 
 import type { AncestorRef, SearchHit } from '@/types/search'
 
 import { SearchHitRow } from '../SearchHitRow'
+import { captureAnchor, restoreScrollTop, type ScrollAnchor } from './scrollAnchor'
 
 
 export interface VirtualizedHitListProps {
@@ -92,6 +112,64 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
 
     const items = virtualizer.getVirtualItems()
     const totalSize = virtualizer.getTotalSize()
+
+    // ---- Scroll anchoring -------------------------------------------------
+    // Latest-value refs so the scroll listener never closes over a stale
+    // window, and is bound once instead of on every paint.
+    const itemsRef = useRef(items)
+    itemsRef.current = items
+    const anchorRef = useRef<ScrollAnchor | null>(null)
+    // Set when the rows change; survives one measurement pass so the
+    // correction can run again once newly-inserted rows have real heights.
+    const pendingRef = useRef(false)
+
+    const rowKeys = rows ?? hits
+    const indexOfKey = useMemo(() => {
+        const map = new Map<string, number>()
+        if (rows) rows.forEach((r, i) => map.set(String(r.key), i))
+        else hits?.forEach((h, i) => map.set(String(h.node.urn), i))
+        return map
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rowKeys])
+
+    useEffect(() => {
+        const el = scrollElementRef.current
+        if (!el) return
+        const onScroll = () => {
+            anchorRef.current = captureAnchor(itemsRef.current, el.scrollTop)
+        }
+        el.addEventListener('scroll', onScroll, { passive: true })
+        return () => el.removeEventListener('scroll', onScroll)
+    }, [scrollElementRef])
+
+    const applyAnchor = useCallback(() => {
+        const el = scrollElementRef.current
+        if (!el) return
+        const next = restoreScrollTop(anchorRef.current, (key) => {
+            const index = indexOfKey.get(key)
+            if (index === undefined) return null
+            return virtualizer.getOffsetForIndex(index, 'start')?.[0] ?? null
+        })
+        // A sub-pixel difference is not worth a scroll event of its own —
+        // assigning scrollTop re-enters the listener above.
+        if (next !== null && Math.abs(next - el.scrollTop) > 0.5) el.scrollTop = next
+    }, [scrollElementRef, indexOfKey, virtualizer])
+
+    // Rows changed (a page landed): put the anchored row back before paint.
+    useLayoutEffect(() => {
+        pendingRef.current = true
+        applyAnchor()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rowKeys])
+
+    // ...and once more after the inserted rows have been measured, since
+    // until then their contribution to the offset was only an estimate.
+    useLayoutEffect(() => {
+        if (!pendingRef.current) return
+        pendingRef.current = false
+        applyAnchor()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [totalSize])
 
     return (
         <div

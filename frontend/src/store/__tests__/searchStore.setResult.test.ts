@@ -124,3 +124,72 @@ describe('searchStore — pendingSearchSeed removed', () => {
         expect('consumePendingSearchSeed' in s).toBe(false)
     })
 })
+
+
+// ---------------------------------------------------------------------------
+// Keeping the user's place while pages land
+// ---------------------------------------------------------------------------
+
+/**
+ * "Load all" walks the cursor to the end and republishes the merged match
+ * set after EVERY page. Clearing the focused match on each of those wiped
+ * the row the user had just picked — reported as results "jumping away, as
+ * if they disappear". A continuation is not a new query, and `queryHash`
+ * is what tells the two apart.
+ */
+describe('searchStore.setResult — the focused match survives pagination', () => {
+    const publish = (matchUrns: string[], queryHash: string) =>
+        useSearchStore.getState().setResult({
+            viewId: 'view-1',
+            matchUrns,
+            ancestorPaths: [],
+            ancestorCounts: undefined,
+            queryHash,
+        })
+
+    it('keeps the focused match when a later page extends the same query', () => {
+        publish(['a', 'b', 'c'], 'q1')
+        useSearchStore.getState().setFocusedMatchIndex(1) // 'b'
+
+        publish(['a', 'b', 'c', 'd', 'e'], 'q1')
+
+        const s = useSearchStore.getState()
+        expect(s.orderedMatchUrns[s.focusedMatchIndex!]).toBe('b')
+    })
+
+    it('follows the focused URN when the page changes its position', () => {
+        publish(['a', 'b'], 'q1')
+        useSearchStore.getState().setFocusedMatchIndex(1) // 'b'
+
+        // A continuation whose ordering puts new urns ahead of 'b'.
+        publish(['x', 'y', 'a', 'b'], 'q1')
+
+        const s = useSearchStore.getState()
+        expect(s.orderedMatchUrns[s.focusedMatchIndex!]).toBe('b')
+    })
+
+    it('drops the focus when a NEW query replaces the results', () => {
+        publish(['a', 'b', 'c'], 'q1')
+        useSearchStore.getState().setFocusedMatchIndex(1)
+
+        publish(['p', 'q'], 'q2')
+
+        expect(useSearchStore.getState().focusedMatchIndex).toBeNull()
+    })
+
+    it('drops the focus when the focused match is no longer in the results', () => {
+        publish(['a', 'b', 'c'], 'q1')
+        useSearchStore.getState().setFocusedMatchIndex(1) // 'b'
+
+        publish(['a', 'c'], 'q1')
+
+        expect(useSearchStore.getState().focusedMatchIndex).toBeNull()
+    })
+
+    it('leaves an unfocused list unfocused', () => {
+        publish(['a', 'b'], 'q1')
+        publish(['a', 'b', 'c'], 'q1')
+
+        expect(useSearchStore.getState().focusedMatchIndex).toBeNull()
+    })
+})
