@@ -5987,6 +5987,7 @@ export function ContextViewCanvas({
             onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
             onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
             onFocusNode={revealOnCanvas}
+            onRevealPath={revealSearchHit}
             onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
         )}

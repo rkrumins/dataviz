@@ -39,7 +39,9 @@ import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 import { useLensLineage, EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { useLensWalk } from '@/hooks/useLensWalk'
-import { partnersFromWalk, partnerName, type SidePartners } from '@/lib/lineagePartnerTree'
+import { useCoarseLineage } from '@/hooks/useCoarseLineage'
+import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
+import { partnersFromRollups, partnersFromWalk, partnerName, withFields, type PartnerSide, type SidePartners } from '@/lib/lineagePartnerTree'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
@@ -50,11 +52,14 @@ import { formatUnitCount, unitMeaning, unitNoun } from '@/components/canvas/cont
 import { resolveEntityName } from '@/lib/entityDisplayName'
 import { EmptyState, SortMenu, type SortMode } from './lineageListParts'
 import { PartnerTreeDetail } from './LineagePartnerTree'
+import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
+import type { AncestorRef } from '@/types/search'
+import { useNotificationStore } from '@/components/ui/notifications'
 
 /**
- * Where the drawer's walk parks. The drawer opens on every selection and
- * only COUNTS, so it does not walk a giant container unasked: past this it
- * says "at least" and offers to count the rest. The Lens keeps its own,
+ * Where the drawer's raw walk parks. It only runs once the reader asks for
+ * columns, and it does not then walk a giant container unasked: past this
+ * it says "at least" and offers to count the rest. The Lens keeps its own,
  * larger checkpoint. One 10,000-node page answers a table of 600 columns
  * (measured: 2,892 nodes, one second).
  */
@@ -72,38 +77,73 @@ interface LineageNeighborsProps {
    *  Used by the multi-select action bar. Implementations may run each
    *  reveal in parallel; the drawer doesn't swap when this fires. */
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  /** Open the canvas down a KNOWN containment path — any depth — and select
+   *  what it lands on (which swaps the drawer to it). The partner tree
+   *  knows every partner's path from the walk, so a column five levels
+   *  down opens exactly its own spine. */
+  onRevealPath?: RevealSearchHit
 }
 
 type Direction = NeighborDirection
 
-export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageNeighborsProps) {
+/** One direction as the drawer shows it. A finished walk is the truth, cell
+ *  staleness and all; until then the rollups carry the counts, with
+ *  whatever columns have landed grafted under their entities. */
+function lineageSide(
+  side: PartnerSide,
+  coarseModel: LensWalkModel | null,
+  fineModel: LensWalkModel | null,
+  fineDone: boolean,
+): SidePartners | null {
+  const rolled = coarseModel ? partnersFromRollups(coarseModel, side) : null
+  const raw = fineModel ? partnersFromWalk(fineModel, side) : null
+  if (raw && fineDone) return raw
+  if (rolled) return raw ? withFields(rolled, raw, fineDone) : rolled
+  return raw
+}
+
+export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPath }: LineageNeighborsProps) {
   const rawEdges = useCanvasStore((s) => s.edges)
   const visibleEdges = useCanvasStore((s) => s.visibleEdges)
   const nodes = useCanvasStore((s) => s.nodes)
 
-  // THE WALK — the Focus Lens's own (`useLensWalk`): the server walk from
-  // this entity, completed page by page until nothing is owed, so the
-  // drawer and the Lens hold ONE answer. Its counts and its list come from
-  // the same model. They used not to: the count was one capped page (747
-  // where the data holds 932) and the list was the canvas's own edges —
+  // THE LINEAGE, A LEVEL AT A TIME — from the Focus Lens's own closure
+  // answers, never the canvas's edges, so the drawer and the Lens agree and
+  // the count and the list agree. They used not to: the count was one capped
+  // page (747 where the data holds 932) and the list was the canvas's edges —
   // "No flows in this direction" under that 747 whenever the partners were
   // not loaded, and every partner folded into the one collapsed root the
   // canvas drew when they were.
+  //
+  // Opening the drawer asks for ONE thing: the rollup cells (~80 ms) — which
+  // entities feed this one and how many flows each carries. The columns a
+  // flow joins come from the raw walk (`useLensWalk`), asked for when the
+  // reader opens an entity, and once. A leaf's own flows ARE its lineage (its
+  // walk is one small page, and its cells name coarser partners, not its
+  // neighbours), so a leaf walks at once — as does anything the rollups
+  // cannot answer: no rollup lane, no cells, or a failed read.
   const provider = useGraphProviderIfAvailable()
   const walkCapable = typeof provider?.traceClosure === 'function'
-  const lensWalk = useLensWalk(
-    walkCapable && nodeId ? nodeId : null,
-    walkCapable ? provider ?? null : null,
-    1,
-    false,
-    DRAWER_WALK_CHECKPOINT,
+  const focalChildCount = useMemo(
+    () => nodes.find((n) => n.id === nodeId)?.data?.childCount as number | undefined,
+    [nodes, nodeId],
   )
-  const walkEntry = walkCapable && nodeId ? lensWalk.walkFor(nodeId) : null
-  const walkProgress = walkCapable && nodeId ? lensWalk.walkProgressFor(nodeId) : null
-  // A provider that cannot walk, or a walk that failed outright, falls back
-  // to what the canvas holds — and says so.
-  const walkFailed = walkEntry?.status === 'error' || walkEntry?.status === 'unsupported'
-  const walkMode = walkCapable && !walkFailed
+  const isLeafFocal = focalChildCount === 0
+  const coarse = useCoarseLineage(walkCapable && nodeId && !isLeafFocal ? nodeId : null, walkCapable ? provider : null)
+  const coarseHasCells = coarse.status === 'done' && !coarse.servedFine
+    && (coarse.model?.lineageEdges.some((e) => e.kind === 'rollup') ?? false)
+  const coarseCannotAnswer = coarse.status === 'error' || coarse.status === 'unsupported'
+    || (coarse.status === 'done' && !coarseHasCells)
+  /** The focal the reader asked for columns on — a new focal starts closed. */
+  const [fineAskedFor, setFineAskedFor] = useState<string | null>(null)
+  const fineOn = walkCapable && !!nodeId && (isLeafFocal || coarseCannotAnswer || fineAskedFor === nodeId)
+  const lensWalk = useLensWalk(fineOn ? nodeId : null, fineOn ? provider ?? null : null, 1, false, DRAWER_WALK_CHECKPOINT)
+  const walkEntry = fineOn ? lensWalk.walkFor(nodeId) : null
+  const walkProgress = fineOn ? lensWalk.walkProgressFor(nodeId) : null
+  const fineFailed = walkEntry?.status === 'error' || walkEntry?.status === 'unsupported'
+  // The tree answers whenever either grain can. Only when neither can does
+  // the drawer fall back to what the canvas holds — and say so.
+  const walkMode = walkCapable && !(fineFailed && !coarseHasCells)
 
   // The canvas-edge path, for when there is no walk: the store's edges plus
   // a bounded per-node fetch. Idle while the walk answers.
@@ -202,38 +242,102 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   // endpoint IS the focal — so a container, which carries no edges of its
   // own, reported almost nothing while the Lens reported what its contents
   // reach.
-  const phase = walkProgress?.phase ?? (walkMode ? 'loading' : null)
-  const walkDone = phase === 'done'
-  /** Still fetching pages: every number so far is a floor. */
-  const counting = walkMode && (phase === 'loading' || phase === 'seeding' || phase === 'walking')
-  const walkModel = walkEntry?.model ?? null
-  const upSide = useMemo<SidePartners | null>(
-    () => (walkMode && walkModel ? partnersFromWalk(walkModel, 'up', { fineSettled: walkDone }) : null),
-    [walkMode, walkModel, walkDone],
+  const phase = fineOn ? (walkProgress?.phase ?? 'loading') : null
+  const fineDone = phase === 'done'
+  /** The raw walk is still arriving (or was asked for and has not started). */
+  const drilling = fineOn && !fineDone && phase !== 'checkpoint' && phase !== 'error'
+  const fineModel = walkEntry?.model ?? null
+  const coarseModel = coarseHasCells ? coarse.model : null
+  const upSide = useMemo(
+    () => (walkMode ? lineageSide('up', coarseModel, fineModel, fineDone) : null),
+    [walkMode, coarseModel, fineModel, fineDone],
   )
-  const downSide = useMemo<SidePartners | null>(
-    () => (walkMode && walkModel ? partnersFromWalk(walkModel, 'down', { fineSettled: walkDone }) : null),
-    [walkMode, walkModel, walkDone],
+  const downSide = useMemo(
+    () => (walkMode ? lineageSide('down', coarseModel, fineModel, fineDone) : null),
+    [walkMode, coarseModel, fineModel, fineDone],
   )
   const walkNameOf = useMemo(() => {
-    const byUrn = new Map((walkModel?.nodes ?? []).map((n) => [n.urn, n]))
+    const byUrn = new Map([...(coarseModel?.nodes ?? []), ...(fineModel?.nodes ?? [])].map((n) => [n.urn, n]))
     return (urn: string) => {
       const n = byUrn.get(urn)
-      return n ? resolveEntityName(n.data, 'business', partnerName({ urn, node: n, partners: 0, flows: 0, isPartner: false, via: [], children: [] })) : urn
+      return n ? resolveEntityName(n.data, 'business', partnerName({ urn, node: n })) : urn
     }
-  }, [walkModel])
-  /** The walk has not finished: its numbers are floors. */
-  const walkFloor = walkMode && !walkDone
+  }, [coarseModel, fineModel])
+  /** The headline is not in yet: the cells are loading, or — with no cells
+   *  to rest on — the walk is still counting. */
+  const counting = walkMode && (coarseHasCells
+    ? false
+    : coarse.status === 'loading' || (fineOn && !fineDone && phase !== 'checkpoint' && phase !== 'error'))
+  /** The headline is a floor: the cells were cut at the page ceiling, or it
+   *  rests on a walk that has not finished. */
+  const walkFloor = walkMode && (coarseHasCells ? coarse.truncated : !fineDone)
+  /** Ask for columns — the first entity the reader opens. */
+  const askForContents = () => { if (nodeId) setFineAskedFor(nodeId) }
+
+  /** A partner's containment path, outermost first — from the answers the
+   *  tree was built from, so no request is needed to know it. */
+  const pathOf = useMemo(() => {
+    const parentOf = new Map<string, string>()
+    const byUrn = new Map<string, { displayName?: string; entityType?: string }>()
+    for (const m of [fineModel, coarseModel]) {
+      if (!m) continue
+      for (const e of m.containmentEdges) if (!parentOf.has(e.targetUrn)) parentOf.set(e.targetUrn, e.sourceUrn)
+      for (const n of m.nodes) if (!byUrn.has(n.urn)) byUrn.set(n.urn, n)
+    }
+    return (urn: string): AncestorRef[] => {
+      const chain: string[] = []
+      const seen = new Set([urn])
+      let c = parentOf.get(urn)
+      while (c !== undefined && !seen.has(c)) {
+        seen.add(c)
+        chain.push(c)
+        c = parentOf.get(c)
+      }
+      return chain.reverse().map((u) => ({
+        urn: u,
+        displayName: byUrn.get(u)?.displayName ?? u,
+        entityType: byUrn.get(u)?.entityType ?? '',
+      }) as AncestorRef)
+    }
+  }, [fineModel, coarseModel])
+
+  /** Clicking a partner in the tree: open the canvas down that partner's
+   *  own path, however deep, and land the drawer on it. A reveal that stops
+   *  short lands on the deepest level it could open — and says so. */
+  const handlePartnerClick = async (urn: string) => {
+    setUnreachable(null)
+    if (!onRevealPath) return handleNeighborClick(urn)
+    const name = walkNameOf(urn)
+    try {
+      const outcome = await withTimeout(onRevealPath(urn, pathOf(urn)), TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.revealPath')
+      if (outcome.landedOn === 'hit') return
+      if (!outcome.urn) {
+        setUnreachable(urn)
+        return
+      }
+      useNotificationStore.getState().add({
+        type: 'warning',
+        message: `Opened as far as ${outcome.displayName} — ${name} isn't drawn in this view. Trace or the Focus Lens will walk to it.`,
+      })
+    } catch (err) {
+      if (!(err instanceof TimeoutError)) throw err
+    }
+  }
+  const drillError = fineOn && (walkEntry?.status === 'error' || phase === 'error')
+  const retryDrill = () => {
+    if (walkEntry?.status === 'error') lensWalk.retry(nodeId)
+    else lensWalk.retryWalk(nodeId)
+  }
 
   // The fallback counts CONNECTED ENTITIES, not records: a partner reached
   // by two kinds of flow is one connected entity either way.
   const localIncoming = new Set(incomingRecords.map((r) => r.neighborId)).size
   const localOutgoing = new Set(outgoingRecords.map((r) => r.neighborId)).size
 
-  const incomingCount = walkMode ? (upSide?.partners ?? 0) : localIncoming
-  const outgoingCount = walkMode ? (downSide?.partners ?? 0) : localOutgoing
+  const incomingCount = walkMode ? (upSide?.peers.length ?? 0) : localIncoming
+  const outgoingCount = walkMode ? (downSide?.peers.length ?? 0) : localOutgoing
   const totalCount = walkMode
-    ? new Set([...(upSide?.partnerUrns ?? []), ...(downSide?.partnerUrns ?? [])]).size
+    ? new Set([...(upSide?.peers ?? []), ...(downSide?.peers ?? [])]).size
     : incomingCount + outgoingCount
 
   // Same grain split as the Lens header, so the two surfaces can never
@@ -324,26 +428,20 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
 
   /** "Upstream · 932 underlying flows in Web Analytics". */
   const walkSubLabel = (side: SidePartners | null, dirWord: 'Upstream' | 'Downstream') => {
-    if (!side || side.partners === 0) return `${dirWord} ${unitNoun(0, 'neighbors')}`
+    if (!side || side.peers.length === 0) return `${dirWord} ${unitNoun(0, 'neighbors')}`
     let text = `${dirWord} · ${formatUnitCount(side.flows, 'flows')}`
     if (side.roots.length === 1) text += ` in ${walkNameOf(side.roots[0].urn)}`
     else if (side.roots.length > 1) text += ` across ${side.roots.length.toLocaleString()} systems`
-    if (side.coarse) text += ' — estimating'
     return text
   }
 
-  /** "Show all on canvas" brings in the partners at the focal's OWN level
-   *  — the tables beside a table — not every column a table's columns
-   *  reach, which would expand hundreds of containers one by one. */
-  const showAllProps = (urns: string[] | undefined, side: SidePartners | null) => {
+  /** "Show all on canvas" brings in the entities the drawer counts — the
+   *  tables beside a table — never every column a table's columns reach,
+   *  which would expand hundreds of containers one by one. */
+  const showAllProps = (urns: string[] | undefined, _side: SidePartners | null) => {
     if (!onLocateMany || !urns || urns.length === 0) return {}
     const n = urns.length
-    return {
-      onShowAll: () => onLocateMany(urns),
-      showAllLabel: side && n !== side.partners
-        ? `Show their ${n.toLocaleString()} ${n === 1 ? 'entity' : 'entities'} on canvas`
-        : `Show all ${n.toLocaleString()} on canvas`,
-    }
+    return { onShowAll: () => onLocateMany(urns), showAllLabel: `Show all ${n.toLocaleString()} on canvas` }
   }
 
   return (
@@ -381,7 +479,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
 
       {/* Walk narration — a walk that parked, or lost a page, is SAID: its
           numbers are floors, never totals. */}
-      {walkMode && phase === 'checkpoint' && (
+      {fineOn && phase === 'checkpoint' && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
           <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
           <span className="min-w-0">
@@ -396,7 +494,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           </button>
         </div>
       )}
-      {walkMode && phase === 'error' && (
+      {fineOn && phase === 'error' && coarseHasCells === false && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
           <span className="min-w-0">Part of this lineage didn&apos;t load, so these counts are floors.</span>
@@ -410,7 +508,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           </button>
         </div>
       )}
-      {walkEntry?.status === 'error' && (
+      {walkEntry?.status === 'error' && !coarseHasCells && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
           <span className="min-w-0">Couldn&apos;t walk this entity&apos;s lineage in the data source — showing only what&apos;s loaded on the canvas.</span>
@@ -477,7 +575,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           count={incomingCount}
           floor={walkFloor}
           records={incomingRecords}
-          fetchState={walkMode ? (counting ? 'loading' : walkDone ? 'done' : undefined) : fetchState}
+          fetchState={walkMode ? (counting ? 'loading' : coarseHasCells || fineDone ? 'done' : undefined) : fetchState}
           expanded={expanded === 'incoming'}
           onToggle={() => toggle('incoming')}
           onNeighborClick={handleNeighborClick}
@@ -489,11 +587,15 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
               side={upSide}
               direction="incoming"
               nameOf={walkNameOf}
-              onNeighborClick={handleNeighborClick}
+              onNeighborClick={handlePartnerClick}
               selectionEnabled={!!onLocateMany}
               selectedIds={selectedIds}
               setSelectedIds={setSelectedIds}
               counting={counting}
+              onAskForContents={askForContents}
+              contentsLoading={drilling}
+              contentsError={drillError}
+              onRetryContents={retryDrill}
             />
           ) : undefined}
           {...showAllProps(walkMode ? upSide?.peers : incomingRecords.map((r) => r.neighborId), walkMode ? upSide : null)}
@@ -505,7 +607,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           count={outgoingCount}
           floor={walkFloor}
           records={outgoingRecords}
-          fetchState={walkMode ? (counting ? 'loading' : walkDone ? 'done' : undefined) : fetchState}
+          fetchState={walkMode ? (counting ? 'loading' : coarseHasCells || fineDone ? 'done' : undefined) : fetchState}
           expanded={expanded === 'outgoing'}
           onToggle={() => toggle('outgoing')}
           onNeighborClick={handleNeighborClick}
@@ -517,11 +619,15 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
               side={downSide}
               direction="outgoing"
               nameOf={walkNameOf}
-              onNeighborClick={handleNeighborClick}
+              onNeighborClick={handlePartnerClick}
               selectionEnabled={!!onLocateMany}
               selectedIds={selectedIds}
               setSelectedIds={setSelectedIds}
               counting={counting}
+              onAskForContents={askForContents}
+              contentsLoading={drilling}
+              contentsError={drillError}
+              onRetryContents={retryDrill}
             />
           ) : undefined}
           {...showAllProps(walkMode ? downSide?.peers : outgoingRecords.map((r) => r.neighborId), walkMode ? downSide : null)}

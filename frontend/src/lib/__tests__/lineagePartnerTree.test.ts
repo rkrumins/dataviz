@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { emptyWalkModel, type LensWalkModel, type LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
-import { partnersFromWalk, partnerName } from '../lineagePartnerTree'
+import { partnersFromRollups, partnersFromWalk, partnerName, withFields } from '../lineagePartnerTree'
 
 const node = (urn: string, name = urn): LensWalkNode =>
   ({ id: urn, urn, displayName: name, entityType: 'Node', position: { x: 0, y: 0 }, data: { label: name, urn, type: 'Node' } }) as unknown as LensWalkNode
 
+const contain = (parent: string, ...kids: string[]) => kids.map(k => ({ sourceUrn: parent, targetUrn: k }))
+
 // Payment Gateway ⊃ Accounts (the focal) ⊃ acct_1, acct_2
 // Web Analytics ⊃ Customers ⊃ cust_1, cust_2 ; Web Analytics ⊃ Orders ⊃ ord_1
 // HR System ⊃ Staff ⊃ staff_1
-function model(over: Partial<LensWalkModel> = {}): LensWalkModel {
-  const contain = (parent: string, ...kids: string[]) => kids.map(k => ({ sourceUrn: parent, targetUrn: k }))
+function walk(over: Partial<LensWalkModel> = {}): LensWalkModel {
   return {
     ...emptyWalkModel('accounts'),
     nodes: ['pg', 'accounts', 'acct_1', 'acct_2', 'wa', 'customers', 'cust_1', 'cust_2', 'orders', 'ord_1', 'hr', 'staff', 'staff_1'].map(u => node(u)),
@@ -33,49 +34,80 @@ function model(over: Partial<LensWalkModel> = {}): LensWalkModel {
   }
 }
 
-describe('partnersFromWalk — a container focal', () => {
-  it('counts the partners the walk found, and the flows that reach them', () => {
-    const up = partnersFromWalk(model(), 'up')
-    expect(up.partners).toBe(3)
-    expect(up.flows).toBe(4)
-    expect(up.coarse).toBe(false)
-  })
+/** The coarse page for the same focal: partner entities and their rollup
+ *  weights — no column at all. */
+function rollups(over: Partial<LensWalkModel> = {}): LensWalkModel {
+  return {
+    ...emptyWalkModel('accounts'),
+    nodes: ['pg', 'accounts', 'wa', 'customers', 'orders', 'hr', 'staff'].map(u => node(u)),
+    containmentEdges: [...contain('pg', 'accounts'), ...contain('wa', 'customers', 'orders'), ...contain('hr', 'staff')],
+    lineageEdges: [
+      { id: 'r1', sourceUrn: 'customers', targetUrn: 'accounts', edgeType: 'AGGREGATED', kind: 'rollup', weight: 3 },
+      { id: 'r2', sourceUrn: 'orders', targetUrn: 'accounts', edgeType: 'AGGREGATED', kind: 'rollup', weight: 1 },
+      { id: 'r3', sourceUrn: 'accounts', targetUrn: 'staff', edgeType: 'AGGREGATED', kind: 'rollup', weight: 1 },
+    ],
+    coarseUpstreamUrns: new Set(['customers', 'orders']),
+    coarseDownstreamUrns: new Set(['staff']),
+    ...over,
+  }
+}
 
-  it('groups them under their systems, then the entities that hold them', () => {
-    const up = partnersFromWalk(model(), 'up')
+describe('partnersFromRollups — what opening the drawer loads', () => {
+  it('counts the entities that feed it and the flows each carries, with no column fetched', () => {
+    const up = partnersFromRollups(rollups(), 'up')
+    expect(up.coarse).toBe(true)
+    expect(up.peers.sort()).toEqual(['customers', 'orders'])
+    expect(up.flows).toBe(4)
     expect(up.roots.map(partnerName)).toEqual(['wa'])
     const wa = up.roots[0]
-    expect(wa.partners).toBe(3)
-    // Most partners first.
-    expect(wa.children.map(partnerName)).toEqual(['customers', 'orders'])
-    const customers = wa.children[0]
-    expect(customers.partners).toBe(2)
-    expect(customers.flows).toBe(3)
-    expect(customers.children.map(c => [c.urn, c.isPartner, c.flows])).toEqual([
-      ['cust_2', true, 2],
-      ['cust_1', true, 1],
+    expect(wa.peers).toBe(2)
+    expect(wa.children.map(c => [partnerName(c), c.flows, c.isPeer, c.contentsLoaded])).toEqual([
+      ['customers', 3, true, false],
+      ['orders', 1, true, false],
     ])
   })
 
-  it('says which of the focal\'s own fields each partner meets', () => {
-    const cust2 = partnersFromWalk(model(), 'up').roots[0].children[0].children[0]
-    expect(cust2.via.sort()).toEqual(['acct_1', 'acct_2'])
+  it('keeps the two directions apart', () => {
+    expect(partnersFromRollups(rollups(), 'down').peers).toEqual(['staff'])
   })
 
-  it('peers are the partners at the focal\'s own level — the tables beside a table', () => {
-    expect(partnersFromWalk(model(), 'up').peers.sort()).toEqual(['customers', 'orders'])
-    expect(partnersFromWalk(model(), 'down').peers).toEqual(['staff'])
+  it('inner-first: a system-level cell restating its tables\' flows is not a partner too', () => {
+    const m = rollups({
+      lineageEdges: [
+        ...rollups().lineageEdges,
+        { id: 'r0', sourceUrn: 'wa', targetUrn: 'accounts', edgeType: 'AGGREGATED', kind: 'rollup', weight: 4 },
+      ],
+    })
+    const up = partnersFromRollups(m, 'up')
+    expect(up.peers.sort()).toEqual(['customers', 'orders'])
+    expect(up.flows).toBe(4)
+  })
+})
+
+describe('partnersFromWalk — what opening an entity loads', () => {
+  it('counts the same entities, and the columns and flows under them', () => {
+    const up = partnersFromWalk(walk(), 'up')
+    expect(up.coarse).toBe(false)
+    expect(up.peers.sort()).toEqual(['customers', 'orders'])
+    expect(up.partnerUrns.sort()).toEqual(['cust_1', 'cust_2', 'ord_1'])
+    expect(up.flows).toBe(4)
   })
 
-  it('peers are measured along the flow, not from the top — hierarchies nest differently', () => {
+  it('nests them system → entity → column, and says which focal columns each feeds', () => {
+    const wa = partnersFromWalk(walk(), 'up').roots[0]
+    expect(partnerName(wa)).toBe('wa')
+    expect([wa.peers, wa.partners, wa.flows]).toEqual([2, 3, 4])
+    const customers = wa.children[0]
+    expect([partnerName(customers), customers.isPeer, customers.partners, customers.flows]).toEqual(['customers', true, 2, 3])
+    expect(customers.children.map(c => [c.urn, c.flows])).toEqual([['cust_2', 2], ['cust_1', 1]])
+    expect(customers.children[0].via.sort()).toEqual(['acct_1', 'acct_2'])
+  })
+
+  it('measures a peer along the flow, not from the root — hierarchies nest differently', () => {
     // A top-level table (no parent) whose column is fed by
     // Web Analytics › Customers › cust_1: Customers sits beside it.
-    const m = model({
-      containmentEdges: [
-        { sourceUrn: 'accounts', targetUrn: 'acct_1' },
-        { sourceUrn: 'wa', targetUrn: 'customers' },
-        { sourceUrn: 'customers', targetUrn: 'cust_1' },
-      ],
+    const m = walk({
+      containmentEdges: [...contain('accounts', 'acct_1'), ...contain('wa', 'customers'), ...contain('customers', 'cust_1')],
       upstreamUrns: new Set(['cust_1']),
       downstreamUrns: new Set(),
     })
@@ -83,60 +115,50 @@ describe('partnersFromWalk — a container focal', () => {
   })
 
   it('never counts lineage inside the focal as a partner', () => {
-    const m = model({ upstreamUrns: new Set(['cust_1', 'acct_1']) })
-    expect(partnersFromWalk(m, 'up').partners).toBe(1)
-  })
-})
-
-describe('partnersFromWalk — before the raw pages land', () => {
-  const coarseModel = () => model({
-    upstreamUrns: new Set(),
-    downstreamUrns: new Set(),
-    coarseUpstreamUrns: new Set(['customers', 'orders']),
-    lineageEdges: [
-      { id: 'r1', sourceUrn: 'customers', targetUrn: 'accounts', edgeType: 'AGGREGATED', kind: 'rollup', weight: 3 },
-      { id: 'r2', sourceUrn: 'orders', targetUrn: 'accounts', edgeType: 'AGGREGATED', kind: 'rollup', weight: 1 },
-    ],
+    const up = partnersFromWalk(walk({ upstreamUrns: new Set(['cust_1', 'acct_1']) }), 'up')
+    expect(up.partnerUrns).toEqual(['cust_1'])
   })
 
-  it('reads the rollup cells: partner containers and the flows each summarises', () => {
-    const up = partnersFromWalk(coarseModel(), 'up')
-    expect(up.coarse).toBe(true)
-    expect(up.partners).toBe(2)
-    expect(up.flows).toBe(4)
-    expect(up.roots[0].children.map(c => [partnerName(c), c.flows])).toEqual([['customers', 3], ['orders', 1]])
-  })
-
-  it('once the raw pages have settled, an empty raw set is the answer', () => {
-    const up = partnersFromWalk(coarseModel(), 'up', { fineSettled: true })
-    expect(up.coarse).toBe(false)
-    expect(up.partners).toBe(0)
-    expect(up.roots).toEqual([])
-  })
-})
-
-describe('partnersFromWalk — a leaf focal', () => {
-  it('partners are its direct neighbours, and peers are the same things', () => {
-    const m = model({
-      focusUrn: 'acct_2',
-      upstreamUrns: new Set(['cust_2', 'ord_1']),
-      downstreamUrns: new Set(['staff_1']),
-    })
-    const up = partnersFromWalk(m, 'up')
-    expect(up.partners).toBe(2)
-    expect(up.flows).toBe(2)
+  it('a leaf focal\'s peers are its direct neighbours', () => {
+    const up = partnersFromWalk(walk({ focusUrn: 'acct_2', upstreamUrns: new Set(['cust_2', 'ord_1']), downstreamUrns: new Set(['staff_1']) }), 'up')
     expect(up.peers.sort()).toEqual(['cust_2', 'ord_1'])
+    expect(up.flows).toBe(2)
   })
 
   it('a manual model\'s flows authored as rollups still count once each', () => {
-    const m = model({
+    const up = partnersFromWalk(walk({
       focusUrn: 'acct_2',
       upstreamUrns: new Set(['ord_1']),
       downstreamUrns: new Set(),
       lineageEdges: [{ id: 'm1', sourceUrn: 'ord_1', targetUrn: 'acct_2', edgeType: 'AGGREGATED', kind: 'rollup', weight: null }],
-    })
-    const up = partnersFromWalk(m, 'up')
-    expect(up.partners).toBe(1)
-    expect(up.flows).toBe(1)
+    }), 'up')
+    expect([up.peers.length, up.flows]).toEqual([1, 1])
+  })
+})
+
+describe('withFields — the columns land under the tree the reader holds', () => {
+  it('grafts each entity\'s columns under the coarse entity, keeping the coarse counts', () => {
+    const merged = withFields(partnersFromRollups(rollups(), 'up'), partnersFromWalk(walk(), 'up'), true)
+    expect(merged.coarse).toBe(true)
+    expect(merged.flows).toBe(4)
+    const customers = merged.roots[0].children.find(c => c.urn === 'customers')!
+    expect(customers.contentsLoaded).toBe(true)
+    expect(customers.children.map(c => c.urn).sort()).toEqual(['cust_1', 'cust_2'])
+  })
+
+  it('columns from an unfinished walk show, but the entity is not called loaded', () => {
+    // A first page holding 3 of a table's 10 feeding columns must not read
+    // as the whole answer.
+    const merged = withFields(partnersFromRollups(rollups(), 'up'), partnersFromWalk(walk(), 'up'), false)
+    const customers = merged.roots[0].children.find(c => c.urn === 'customers')!
+    expect(customers.children.length).toBe(2)
+    expect(customers.contentsLoaded).toBe(false)
+  })
+
+  it('an entity the walk has not reached yet stays closed-but-openable', () => {
+    const partial = partnersFromWalk(walk({ upstreamUrns: new Set(['cust_1']) }), 'up')
+    const merged = withFields(partnersFromRollups(rollups(), 'up'), partial)
+    const orders = merged.roots[0].children.find(c => c.urn === 'orders')!
+    expect(orders.contentsLoaded).toBe(false)
   })
 })

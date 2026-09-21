@@ -1,8 +1,9 @@
 /**
  * The entity drawer's lineage partners as a tree: the systems they sit in,
  * then the entities inside, then the fields a flow actually joins — each
- * level opened in place (`lineagePartnerTree.ts` builds it from the Focus
- * Lens's walk).
+ * level opened in place, and LOADED when it is opened: the systems and
+ * entities come with the drawer (one rollup request), the fields when the
+ * reader first opens an entity (`lineagePartnerTree.ts`).
  *
  * A flat list could only show what the canvas had loaded, rolled up to what
  * it drew: 736 upstream fields read as one row, "Reporting Layer", because
@@ -47,6 +48,13 @@ interface PartnerTreeDetailProps {
   setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>
   /** Still counting: an empty tree is not an answer yet. */
   counting: boolean
+  /** Ask for the entities' contents — the first time one is opened. */
+  onAskForContents?: () => void
+  /** Contents asked for and still arriving. */
+  contentsLoading?: boolean
+  /** Contents asked for and not delivered. */
+  contentsError?: boolean
+  onRetryContents?: () => void
 }
 
 export function PartnerTreeDetail({
@@ -58,6 +66,10 @@ export function PartnerTreeDetail({
   selectedIds,
   setSelectedIds,
   counting,
+  onAskForContents,
+  contentsLoading = false,
+  contentsError = false,
+  onRetryContents,
 }: PartnerTreeDetailProps) {
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('default')
@@ -92,13 +104,17 @@ export function PartnerTreeDetail({
     return keep
   }, [q, side.roots])
 
+  /** An entity can open when it has rows to show — or contents not loaded
+   *  yet, which opening it asks for. */
+  const canOpen = (n: PartnerTreeNode) => n.children.length > 0 || !n.contentsLoaded
   const isOpen = (n: PartnerTreeNode) => {
-    if (n.children.length === 0 || closed.has(n.urn)) return false
+    if (!canOpen(n) || closed.has(n.urn)) return false
     if (opened.has(n.urn)) return true
     return kept !== null && n.children.some(c => kept.has(c.urn))
   }
   const toggle = (n: PartnerTreeNode) => {
     const open = isOpen(n)
+    if (!open && !n.contentsLoaded) onAskForContents?.()
     setOpened(prev => {
       const next = new Set(prev)
       if (open) next.delete(n.urn)
@@ -169,6 +185,15 @@ export function PartnerTreeDetail({
                 onToggleSelected={() => toggleOne(n.urn)}
               />
               {open && level(n.children, depth + 1, n.urn)}
+              {open && !n.contentsLoaded && (
+                <ContentsStatus
+                  depth={depth + 1}
+                  loading={contentsLoading}
+                  error={contentsError}
+                  onRetry={onRetryContents}
+                  more={n.children.length > 0}
+                />
+              )}
             </Fragment>
           )
         })}
@@ -212,7 +237,7 @@ export function PartnerTreeDetail({
             </button>
           )}
         </div>
-        {side.partners > 1 && <SortMenu value={sortMode} onChange={setSortMode} />}
+        {side.peers.length > 1 && <SortMenu value={sortMode} onChange={setSortMode} />}
         {selectionEnabled && peersInView.length > 0 && (
           <button
             type="button"
@@ -253,6 +278,28 @@ export function PartnerTreeDetail({
 
 const indent = (depth: number) => 8 + depth * 16
 
+/** Under an opened entity whose contents are on their way — or failed. */
+function ContentsStatus({ depth, loading, error, onRetry, more = false }: { depth: number; loading: boolean; error: boolean; onRetry?: () => void; more?: boolean }) {
+  return (
+    <div className="flex items-center gap-2 py-1.5 pr-2 text-[11px] text-ink-muted" style={{ paddingLeft: indent(depth) + 22 }}>
+      {error ? (
+        <>
+          <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0 text-amber-500" />
+          <span>Couldn&apos;t load what flows here.</span>
+          {onRetry && (
+            <button type="button" onClick={onRetry} className="font-semibold text-accent-lineage hover:underline">Retry</button>
+          )}
+        </>
+      ) : (
+        <>
+          <LucideIcons.Loader2 className={cn('w-3 h-3 flex-shrink-0', loading && 'animate-spin')} />
+          <span>{more ? 'Loading more…' : 'Loading its columns…'}</span>
+        </>
+      )}
+    </div>
+  )
+}
+
 function PartnerRow({
   node,
   depth,
@@ -284,25 +331,33 @@ function PartnerRow({
   const entityType = schema?.entityTypes.find((t) => t.id === type)
   const color = entityType?.visual.color ?? generateColorFromType(type || 'entity')
   const label = labelOf(node)
-  const container = node.children.length > 0
+  const container = node.children.length > 0 || !node.contentsLoaded
   const isIncoming = direction === 'incoming'
   const accent = isIncoming ? 'text-lineage-in' : 'text-lineage-out'
+  const flowWord = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'flow' : 'flows'}`
 
-  // A container says how much sits inside it; a partner says which of the
-  // focal's own fields its flows meet.
+  // A grouping (a system) says how many entities sit inside it; an entity
+  // how many flows reach it and, once loaded, how many of its columns; a
+  // column which of the focal's own columns it meets.
   let secondary: string
-  if (container) {
+  if (!node.isPeer && node.peers > 0) {
+    secondary = `${node.peers.toLocaleString()} ${node.peers === 1 ? 'entity' : 'entities'} · ${flowWord(node.flows)}`
+  } else if (node.isPeer && container) {
     const noun = isIncoming ? (node.partners === 1 ? 'source' : 'sources') : (node.partners === 1 ? 'consumer' : 'consumers')
-    secondary = `${node.partners.toLocaleString()} ${noun}`
-    if (node.flows !== node.partners) secondary += ` · ${node.flows.toLocaleString()} flows`
+    secondary = node.contentsLoaded && node.partners > 0
+      ? `${node.partners.toLocaleString()} ${noun} · ${flowWord(node.flows)}`
+      : flowWord(node.flows)
   } else {
     const verb = isIncoming ? 'feeds' : 'fed by'
     const names = node.via.slice(0, 2).map(nameOf)
     const more = node.via.length - names.length
     secondary = names.length > 0
       ? `${verb} ${names.join(', ')}${more > 0 ? ` +${more.toLocaleString()}` : ''}`
-      : (node.flows > 0 ? `${node.flows.toLocaleString()} ${node.flows === 1 ? 'flow' : 'flows'}` : '')
+      : (node.flows > 0 ? flowWord(node.flows) : '')
   }
+  /** The number a row leads with: entities for a grouping, flows for an
+   *  entity. */
+  const count = !node.isPeer && node.peers > 0 ? node.peers : node.isPeer && container ? node.flows : null
 
   const open_ = async () => {
     if (busy) return
@@ -369,9 +424,9 @@ function PartnerRow({
             <span className="block truncate text-[10.5px] leading-tight text-ink-muted">{secondary}</span>
           )}
         </span>
-        {container && (
+        {count !== null && (
           <span className={cn('flex-shrink-0 text-[11px] font-semibold tabular-nums', accent)}>
-            {node.partners.toLocaleString()}
+            {count.toLocaleString()}
           </span>
         )}
         {busy ? (

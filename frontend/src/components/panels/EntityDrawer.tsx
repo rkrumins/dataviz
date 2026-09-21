@@ -63,6 +63,7 @@ import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Section } from './DrawerSection'
+import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 
 // ============================================
 // Types
@@ -92,6 +93,11 @@ interface EntityDrawerProps {
   /** Reveal a set of neighbors at once and fit the canvas around them.
    *  Used by the LineageNeighbors multi-select action bar. */
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  /** Open the canvas down a KNOWN containment path to an entity at any
+   *  depth — the reveal search uses. The lineage list knows every partner's
+   *  path, so a column five levels down opens exactly its own spine instead
+   *  of paging every level for it. */
+  onRevealPath?: RevealSearchHit
   /** External link URL builder */
   getExternalUrl?: (urn: string) => string | null
   /** Entities the surface is DRAWING that the canvas store does not hold —
@@ -115,6 +121,7 @@ export function EntityDrawer({
   onFullTrace,
   onFocusNode,
   onLocateMany,
+  onRevealPath,
   getExternalUrl,
   resolveNode,
 }: EntityDrawerProps) {
@@ -780,6 +787,7 @@ export function EntityDrawer({
               copiedUrn={copiedUrn}
               onFocusNode={onFocusNode}
               onLocateMany={onLocateMany}
+              onRevealPath={onRevealPath}
               wsId={historyWsId}
               graphId={historyGraphId}
               mainBranchId={historyMainBranch}
@@ -1288,6 +1296,7 @@ interface ViewModeContentProps {
    *  the walk finished and the entity is still not there. */
   onFocusNode?: (nodeId: string) => void | Promise<unknown>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  onRevealPath?: RevealSearchHit
   wsId?: string
   graphId?: string | null
   mainBranchId?: string | null
@@ -1305,6 +1314,7 @@ function ViewModeContent({
   copiedUrn,
   onFocusNode,
   onLocateMany,
+  onRevealPath,
   wsId,
   graphId,
   mainBranchId,
@@ -1381,6 +1391,7 @@ function ViewModeContent({
         nodeId={nodeId}
         onFocusNode={onFocusNode}
         onLocateMany={onLocateMany}
+        onRevealPath={onRevealPath}
       />
 
       {/* History — real per-entity revision history (main line). Hidden when version control is off. */}
