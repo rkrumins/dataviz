@@ -2043,7 +2043,7 @@ export function ContextViewCanvas({
   // with the flow overlay off is a contradiction — tracing IS asking to
   // see the flow — and entering one collapses the sticky drawer once, so
   // the flow opens unobstructed (clicking a node re-opens it as usual).
-  const beginTrace = useCallback((urn: string) => {
+  const beginTrace = useCallback((urn: string | readonly string[]) => {
     setShowLineageFlow(true)
     useCanvasStore.getState().closeNodeDrawer()
     // Lock writes NOW, not on the next commit: the reader can click a browse
@@ -2066,8 +2066,18 @@ export function ContextViewCanvas({
   // switching mode afterwards is instant. Re-tracing the SAME node with
   // a different direction just flips the view — the walk cache stays,
   // and the history records ONE entry per focal (the flip updates it).
-  const startCanvasTrace = useCallback((nodeId: string, direction: 'up' | 'down' | 'both' = 'both') => {
-    const urn = displayMap.get(nodeId)?.urn ?? nodeId
+  const startCanvasTrace = useCallback((
+    nodeId: string | readonly string[],
+    direction: 'up' | 'down' | 'both' = 'both',
+  ) => {
+    // A bulk trace walks every selected entity and the overlay draws their
+    // UNION. History, re-centre and the "already tracing this" check are all
+    // about a single focal, so they follow the FIRST seed — which for an
+    // ordinary one-entity trace is the only one, and nothing changes.
+    const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
+    if (nodeIds.length === 0) return
+    const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
+    const urn = urns[0]!
     const view = {
       showUpstream: direction !== 'down',
       showDownstream: direction !== 'up',
@@ -2087,8 +2097,8 @@ export function ContextViewCanvas({
     setTraceDepthDown(view.depthDown)
     // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
     flushExpansionRecord()
-    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeId, view, timestamp: Date.now() }))
-    beginTrace(urn)
+    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
+    beginTrace(urns)
   }, [displayMap, beginTrace, flushExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
@@ -4757,8 +4767,10 @@ export function ContextViewCanvas({
         lineageRenderMode={lineageRenderMode}
         onSetLineageRenderMode={setLineageRenderMode}
         traceActive={traceActive}
-        canTrace={selectedNodeIds.length === 1 && !selectedNodeIds[0].startsWith('logical:')}
-        onStartTrace={() => { if (selectedNodeIds[0]) startCanvasTrace(selectedNodeIds[0]) }}
+        canTrace={selectedNodeIds.length > 0}
+        traceSeedCount={selectedNodeIds.length}
+        canOpenLens={selectedNodeIds.length === 1}
+        onStartTrace={() => { if (selectedNodeIds.length > 0) startCanvasTrace(selectedNodeIds) }}
         onExitTrace={exitCanvasTrace}
         lineageReady={hydrationPhase === 'complete'}
         traceUpstreamDepth={traceDepthUp}

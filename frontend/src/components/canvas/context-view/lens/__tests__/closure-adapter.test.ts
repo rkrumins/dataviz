@@ -596,8 +596,8 @@ describe('unionWalkModels', () => {
 
     it('keeps what any seed still owes on the frontier', () => {
         const u = unionWalkModels([
-            model('a', { frontierUp: [{ urn: 'f1', totalCount: 3, nextCursor: null, reason: 'cut' }] }),
-            model('b', { frontierUp: [{ urn: 'f2', totalCount: 1, nextCursor: null, reason: 'depth' }] }),
+            model('a', { frontierUp: [{ urn: 'f1', totalCount: 3, nextCursor: null }] }),
+            model('b', { frontierUp: [{ urn: 'f2', totalCount: 1, nextCursor: null }] }),
         ])!
         expect(u.frontierUp.map(f => f.urn).sort()).toEqual(['f1', 'f2'])
     })
