@@ -37,6 +37,10 @@ interface FlatTreeItemProps {
   layer: ViewLayerConfig
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   isSelected: boolean
+  /** This row is one of SEVERAL selected. A single selection is already
+   *  obvious (the drawer opens on it); a bulk one has to be countable at a
+   *  glance, so these rows carry an explicit mark rather than a tint. */
+  isBulkSelected?: boolean
   isExpanded: boolean
   isLoading?: boolean
   isSearchResult: boolean
@@ -100,6 +104,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   layer,
   schema,
   isSelected,
+  isBulkSelected = false,
   isExpanded,
   isLoading = false,
   isSearchResult,
@@ -415,7 +420,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:to-transparent",
         "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
-        isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        // One of several: the row has to be findable while scanning a column,
+        // so the ring is a full 2px in the accent rather than a 30% hairline.
+        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgba(var(--accent-lineage-rgb),0.7)]",
         // Search result highlight — direct match (advanced search or quick search)
         isSearchResult && !isSelected && cn(
             "bg-gradient-to-r from-amber-500/15 to-transparent",
@@ -630,6 +638,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           ...(isLogical && { border: `1px dashed ${nodeColor}50` }),
         }}
       >
+        {/* One of several selected. A positive mark, not a tint: the row has
+            to answer "did I pick this one?" without the reader comparing
+            shades across a scrolling column. */}
+        {isBulkSelected && (
+          <span
+            className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-accent-lineage flex items-center justify-center ring-2 ring-canvas shadow-sm"
+            aria-hidden
+          >
+            <LucideIcons.Check className="w-2.5 h-2.5 text-white" strokeWidth={3.5} />
+          </span>
+        )}
         <DynamicIcon
           name={logicalIcon ?? visual?.icon ?? 'Box'}
           className={cn(iconSize, "transition-transform duration-200")}
@@ -856,12 +875,16 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
       {/* Hover indicator line */}
       <motion.div
-        className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full"
-        style={{ backgroundColor: nodeColor }}
+        className="absolute left-0 top-1/2 -translate-y-1/2 rounded-r-full"
+        // Selection speaks in the accent, not in the entity's type colour:
+        // a rail tinted per type reads as decoration, and a column of them
+        // cannot be scanned for "what did I pick?".
+        style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
         initial={false}
         animate={{
-          height: isSelected ? '70%' : isHovered ? '50%' : '0%',
-          opacity: isSelected ? 1 : isHovered ? 0.6 : 0
+          width: isBulkSelected ? 4 : 3,
+          height: isSelected ? '85%' : isHovered ? '50%' : '0%',
+          opacity: isSelected ? 1 : isHovered ? 0.6 : 0,
         }}
         transition={{ duration: 0.2 }}
       />

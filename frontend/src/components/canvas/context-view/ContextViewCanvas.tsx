@@ -50,6 +50,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
+import { SelectionBar } from './SelectionBar'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
@@ -357,6 +358,8 @@ export function ContextViewCanvas({
   const setSelection = useCanvasStore((s) => s.setSelection)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
+  // Set form for the columns, which ask "is this row selected?" per row.
+  const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
@@ -1548,6 +1551,12 @@ export function ContextViewCanvas({
       return
     }
     if (!selectedNodeId) return
+    // A MULTI-selection is never auto-scrolled. This slides ONE node's column
+    // into view, and the "one" is whichever happens to be first — so picking a
+    // second entity in another column yanked the viewport off the rows the
+    // user was still choosing from. Building a selection across columns is
+    // exactly when the ground must stay put.
+    if (selectedNodeIds.length > 1) return
     if (lastAutoScrolledForSelectionRef.current === selectedNodeId) return
 
     const layerId = effectiveAssignments.get(selectedNodeId)?.layerId
@@ -1605,7 +1614,7 @@ export function ContextViewCanvas({
       // change left redraws queued against a scroll that had been superseded.
       if (settleTimer != null) clearTimeout(settleTimer)
     }
-  }, [selectedNodeId, isEdgePanelOpen, effectiveAssignments])
+  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments])
 
   const handleLayerScroll = useCallback(() => {
     if (triggerEdgeRedrawRef.current) {
@@ -1871,6 +1880,12 @@ export function ContextViewCanvas({
   // ends and the OVERLAY (below) draws the result. Nothing is merged into
   // the canvas store, so leaving a trace restores the canvas for free.
   const canvasTrace = useCanvasTraceWalk(provider)
+  // Every seed of a bulk trace, as canvas node ids — all of them read as
+  // focus nodes, and their number is what tells a column not to centre.
+  const traceFocusIdSet = useMemo(
+    () => new Set(canvasTrace.tracedUrns.map((u) => urnToIdMap.get(u) ?? u)),
+    [canvasTrace.tracedUrns, urnToIdMap],
+  )
   const traceActive = canvasTrace.isTracing
   // RENDER-TIME twin of `traceWriteLocked()`, which reads refs and so must not
   // be called during render. `overlay.active` implies `traceActive`, so the
@@ -5143,6 +5158,19 @@ export function ContextViewCanvas({
             and takes the Data loads header with it: the one control that closes
             Data loads, unreachable. The cap excludes the bottom offset, or a
             raised dock overflows the top by exactly the trace dock's height. */}
+        {/* What the canvas is holding, and what the actions will do with it.
+            Hidden during a trace: the trace dock is then the thing being read,
+            and the selection has already been spent on it. */}
+        {!traceActive && (
+          <SelectionBar
+            nodeIds={selectedNodeIds}
+            labelFor={(id) => displayMap.get(id)?.name || id}
+            onRemove={(id) => selectNode(id, true)}
+            onClear={clearSelection}
+            onTrace={() => startCanvasTrace(selectedNodeIds)}
+          />
+        )}
+
         <div
           ref={edgeLegendRef}
           // z-40, the floating-chrome tier (trace dock, lens pills): the
@@ -5402,7 +5430,7 @@ export function ContextViewCanvas({
           // dock, layer strip, edge legend) so a column's last row can always scroll
           // clear of it — and be clicked. Both variables are published by
           // the chrome itself and are 0 when it is not rendered.
-          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px)))' }}
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px), var(--selection-bar-height, 0px)))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
@@ -5531,6 +5559,7 @@ export function ContextViewCanvas({
                 searchResults={advancedMatchUrns}
                 onSelect={selectNode}
                 onSelectRange={setSelection}
+                selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
@@ -5544,6 +5573,7 @@ export function ContextViewCanvas({
                 traceFocusId={traceActive && canvasTrace.tracedUrn
                   ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
                   : trace.focusId}
+                traceFocusIds={traceFocusIdSet}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
                 isTracing={overlay.active}

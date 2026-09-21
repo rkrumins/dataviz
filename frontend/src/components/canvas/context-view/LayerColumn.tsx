@@ -47,6 +47,11 @@ interface LayerColumnProps {
   nodes: HierarchyNode[]
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   selectedNodeId: string | null
+  /** Every selected row. `selectedNodeId` stays the ONE row the keyboard and
+   *  the drawer reason about; this is what the rows paint from, so a
+   *  multi-selection does not render as one highlighted row and four that
+   *  look untouched. Omitted = just `selectedNodeId`. */
+  selectedNodeIds?: ReadonlySet<string>
   expandedNodes: Set<string>
   searchResults: ReadonlySet<string>
   onSelect: (id: string, multi?: boolean) => void
@@ -75,6 +80,10 @@ interface LayerColumnProps {
   /** Right-click on empty space in this layer column (draft/authoring mode). */
   onLayerContextMenu?: (e: React.MouseEvent, layerId: string) => void
   traceFocusId: string | null
+  /** Every seed of the current trace. A bulk trace has several, and all of
+   *  them are focus nodes; `traceFocusId` remains the ONE the column would
+   *  centre on. Omitted = just `traceFocusId`. */
+  traceFocusIds?: ReadonlySet<string>
   traceNodes: Set<string>
   traceContextSet: Set<string>
   isTracing?: boolean
@@ -202,6 +211,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   nodes,
   schema,
   selectedNodeId,
+  selectedNodeIds,
   expandedNodes,
   searchResults,
   onSelect,
@@ -216,6 +226,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onBeginConnect,
   onLayerContextMenu,
   traceFocusId,
+  traceFocusIds,
   traceNodes: _traceNodes,
   traceContextSet,
   isTracing = false,
@@ -645,7 +656,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     const isVisibleNode = (n: HierarchyNode): boolean => {
       // Selection always wins so the user can never accidentally
       // make their inspected row vanish.
-      if (selectedNodeId === n.id) return true
+      if (selectedNodeId === n.id || selectedNodeIds?.has(n.id)) return true
       const key = n.urn ?? n.id
       const isMatch = matchUrnSet.has(key)
       const onSpine = (ancestorMatchCounts.get(key) ?? 0) > 0
@@ -951,6 +962,10 @@ export const LayerColumn = React.memo(function LayerColumn({
       return
     }
     if (lastCenteredFocusRef.current === traceFocusId) return
+    // A BULK trace has no single focus to centre on. Centring the first seed
+    // scrolled the canvas off every other one the user had just picked — so
+    // when there are several, the viewport stays where they left it.
+    if ((traceFocusIds?.size ?? 0) > 1) return
     const flatIndex = nodeToFlatIndexMap.get(traceFocusId)
     if (flatIndex === undefined) return
     const targetId = traceFocusId
@@ -971,7 +986,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       })
     }, 100)
     return () => clearTimeout(timer)
-  }, [traceFocusId, nodeToFlatIndexMap, virtualizer])
+  }, [traceFocusId, traceFocusIds, nodeToFlatIndexMap, virtualizer])
 
   // ── Expansion reveal ────────────────────────────────────────────────
   // When a node is expanded, its subtree materializes BELOW it — if the
@@ -2308,12 +2323,13 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentIsLast={parentIsLast}
                         layer={layer}
                         schema={schema}
-                        isSelected={selectedNodeId === node.id}
+                        isSelected={selectedNodeIds ? selectedNodeIds.has(node.id) : selectedNodeId === node.id}
+                        isBulkSelected={(selectedNodeIds?.size ?? 0) > 1 && !!selectedNodeIds?.has(node.id)}
                         isExpanded={expandedNodes.has(node.id)}
                         isLoading={loadingNodes?.has(node.id) ?? false}
                         isSearchResult={searchResults.has(node.id)}
                         isHighlighted={traceContextSet.has(node.id)}
-                        isFocusNode={traceFocusId === node.id}
+                        isFocusNode={traceFocusIds ? traceFocusIds.has(node.id) : traceFocusId === node.id}
                         isTracing={isTracing}
                         isClickHighlighted={isHighlightActive && !isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
                         isHoverHighlighted={isHighlightActive && isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
