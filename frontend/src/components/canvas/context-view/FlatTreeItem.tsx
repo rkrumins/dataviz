@@ -407,14 +407,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // hover-revealed grip below); everything else keeps the pointer.
         reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
         paddingClass,
-        // Subtle backdrop-blur on the card body — visually invisible
-        // (matches the glassy translucent design) but blurs anything
-        // painted behind so cross-column edges don't read as solid lines
-        // bleeding through the node. Same technique the layer header uses
-        // (`backdrop-blur-xl` at LayerColumn.tsx:508). The bg tint is kept
-        // near-zero so the airy feel of the original cards is preserved;
-        // hover / selected gradients below paint over this without conflict.
-        "bg-canvas-elevated/10 backdrop-blur-sm",
+        // The card's surface: solid (lines pass cleanly under it) or, by the
+        // reader's choice, frosted — see `.nx-row-card` in globals.css. The
+        // hover / selected gradients below paint over either.
+        "nx-row-card",
         // Base hover state with gradient.
         //
         // This was `from-white/[0.06]` alone — 6% white, which over a near-white

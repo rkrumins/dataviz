@@ -1,9 +1,13 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
-import { sameRows } from './rowEquality'
+import { sameRow, sameRows } from './rowEquality'
 import { edgeDashArray } from './edgeDash'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
+import { routeLine } from './lineRoute'
+import { lineDash, nextRenderTier, type RenderTier } from './lineDensity'
+import type { LineMotion } from './lineMotion'
+import { LineMotionLayer } from './LineMotionLayer'
 
 /**
  * Keep the previous viewport object when neither number moved.
@@ -38,23 +42,23 @@ import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
 
-// Same-column edges route through a left lane. Lane `index`'s leftmost
-// control point sits at node.left - SAME_COLUMN_LANE_START - (BASE +
-// index * STEP) from the container left edge. These are exported so the
-// canvas can reserve a matching scroll-content gutter (see
-// EXTREMITY_EDGE_GUTTER_PX) and the two stay in sync.
-export const SAME_COLUMN_LANE_START = 6
-export const SAME_COLUMN_LANE_BASE = 24
-export const SAME_COLUMN_LANE_STEP = 8
-// Horizontal gutter reserved on each side of the layer columns so the
-// outermost same-column lanes (and the rightmost columns' outgoing-edge
-// starts) aren't clipped by the overflow-auto scroll container. Sized to
-// keep the first 4 lanes unclipped (≈ 62px).
-export const EXTREMITY_EDGE_GUTTER_PX =
-  SAME_COLUMN_LANE_START + SAME_COLUMN_LANE_BASE + SAME_COLUMN_LANE_STEP * 4
+// Line routing — and the same-column lane geometry the canvas reserves its
+// gutters from — lives in lineRoute.ts; re-exported for existing importers.
+export {
+  SAME_COLUMN_LANE_START,
+  SAME_COLUMN_LANE_BASE,
+  SAME_COLUMN_LANE_STEP,
+  EXTREMITY_EDGE_GUTTER_PX,
+} from './lineRoute'
 
 /** How far a PORTAL chip sits in from the viewport's edge (see ghostCues). */
 const PORTAL_INSET = 10
+
+/** A row counts as visible this far above or below the canvas's view. */
+const VISIBLE_MARGIN_PX = 100
+/** ...and ANY distance sideways (see the visibility observer): past every
+ *  canvas a view could be laid out on. */
+const SIDEWAYS_REACH_PX = 100_000
 
 export function LineageFlowOverlay({
   nodes,
@@ -72,6 +76,7 @@ export function LineageFlowOverlay({
   resolveEdgeStrokeStyle,
   onEdgeDoubleClick,
   showDirection = true,
+  motion = 'focus',
   expandingEdgeIds,
   geometryRegistry,
   onRevealNode,
@@ -100,8 +105,11 @@ export function LineageFlowOverlay({
   resolveEdgeStrokeStyle?: (edgeType: string) => 'solid' | 'dashed' | 'dotted',
   /** Double-click handler — used for AGGREGATED-edge drill-down. */
   onEdgeDoubleClick?: (edgeId: string) => void,
-  /** When true, render arrowheads + animated mid-edge chevron flow. */
+  /** When true, render arrowheads. */
   showDirection?: boolean,
+  /** Which lines move (lineMotion.ts) — already resolved against calm mode
+   *  and the system's reduce-motion setting by the caller. */
+  motion?: LineMotion,
   /** Edge ids whose drill-down is in flight — pulses them via `.nx-edge-expanding`. */
   expandingEdgeIds?: Set<string>,
   /** Per-column geometry APIs (keyed by layer id) — estimated row rects
@@ -365,6 +373,36 @@ export function LineageFlowOverlay({
       return null
     }
 
+    // Per-pass caches for the overflow branch. A visible row's lines to
+    // partners scrolled out of its column can number in the hundreds, and
+    // a column scroll re-runs this pass every frame: read each row's rect
+    // (and walk to its column's clip) once, and place each off-screen
+    // partner once, rather than once per line. Measured on a 145-line board
+    // with 3,490 such lines: ~9ms a frame, spent almost entirely here.
+    const anchorCache = new Map<string, { rect: DOMRect } | null>()
+    const overflowAnchor = (domId: string): { rect: DOMRect } | null => {
+      let hit = anchorCache.get(domId)
+      if (hit !== undefined) return hit
+      const el = getEl(domId)
+      if (!el || el.hasAttribute('data-fold-anchor')) {
+        hit = null
+      } else {
+        const rect = el.getBoundingClientRect()
+        hit = isCenterClipped(el, rect) ? null : { rect }
+      }
+      anchorCache.set(domId, hit)
+      return hit
+    }
+    const partnerRects = new Map<string, { top: number; height: number; left: number; right: number } | null>()
+    const partnerRect = (nodeId: string) => {
+      let hit = partnerRects.get(nodeId)
+      if (hit === undefined) {
+        hit = getEl(`layer-node-${nodeId}`)?.getBoundingClientRect() ?? estimateNodeRect(nodeId)
+        partnerRects.set(nodeId, hit)
+      }
+      return hit
+    }
+
     // ── Anchor Rail collection (focus-scoped) ───────────────────────────
     // Edges incident to the SELECTED node whose partner row is scrolled
     // out of its column dock that partner as a proxy chip. Aggregation is
@@ -419,63 +457,22 @@ export function LineageFlowOverlay({
         if (sourceEl && targetEl) {
           const sRect = sourceEl.getBoundingClientRect()
           const tRect = targetEl.getBoundingClientRect()
+          // Both ends out of sight on the SAME side: the line never crosses
+          // the view, so it costs a path and paints nothing.
+          if ((sRect.right < viewportRect.left && tRect.right < viewportRect.left)
+            || (sRect.left > viewportRect.right && tRect.left > viewportRect.right)) return
 
-          let sx = sRect.right - containerRect.left + 6
-          let sy = sRect.top + sRect.height / 2 - containerRect.top
-          let tx = tRect.left - containerRect.left - 8
-          let ty = tRect.top + tRect.height / 2 - containerRect.top
-
+          const box = (r: DOMRect) => ({
+            left: r.left - containerRect.left,
+            right: r.right - containerRect.left,
+            top: r.top - containerRect.top,
+            height: r.height,
+          })
+          const { pathD, sx, sy, tx, ty } = routeLine(
+            box(sRect), box(tRect), edge.groupIndex || 0, edge.source === edge.target,
+          )
           const minY = Math.min(sy, ty)
           const maxY = Math.max(sy, ty)
-
-          let pathD = ''
-          const isSameColumn = Math.abs(sRect.left - tRect.left) < 50
-          const isSelf = edge.source === edge.target
-          const index = edge.groupIndex || 0
-          // Sibling case: same row band, different columns. The default
-          // Bézier would cut through whatever node sits between the
-          // endpoints. Route through a dedicated lane above (downstream)
-          // or below (upstream) the row band instead.
-          const ROW_OVERLAP_PX = Math.min(sRect.height, tRect.height) * 0.5
-          const isSibling = !isSelf
-            && !isSameColumn
-            && Math.abs(sRect.top - tRect.top) < ROW_OVERLAP_PX
-
-          // Same-column branch — route through the LEFT gutter (instead of
-          // the right-margin fan that visually collides with cross-layer
-          // outgoing edges in the column gap). Every edge stays visible —
-          // lineage tools must show every connection by default; rolling
-          // up intra-column edges into a chip hides what the user came to see.
-          if (isSameColumn && !isSelf) {
-            sx = sRect.left - containerRect.left - SAME_COLUMN_LANE_START
-            tx = tRect.left - containerRect.left - SAME_COLUMN_LANE_START
-            const curveDist = -(SAME_COLUMN_LANE_BASE + index * SAME_COLUMN_LANE_STEP)  // negative = leftward
-            pathD = `M ${sx} ${sy} C ${sx + curveDist} ${sy}, ${tx + curveDist} ${ty}, ${tx} ${ty}`
-          } else if (isSibling) {
-            // Direction: left-to-right (downstream) → route ABOVE the row band.
-            // Right-to-left (upstream) → route BELOW. Separating directions
-            // into different lanes prevents above/below collisions on the
-            // same row.
-            const downstream = tx > sx
-            const laneOffset = (downstream ? -1 : 1) * (28 + index * 6)
-            // Anchor entry/exit slightly off-centre toward the lane direction.
-            // Tightened from ±30% to ±18% so the edge enters the node a hair
-            // off-centre rather than at the top/bottom corner — reads cleaner
-            // with the gradient stroke.
-            const quadrantSign = downstream ? -1 : 1
-            sy = sRect.top + sRect.height / 2 - containerRect.top + (quadrantSign * sRect.height * 0.18)
-            ty = tRect.top + tRect.height / 2 - containerRect.top + (quadrantSign * tRect.height * 0.18)
-            // Control points pulled vertically off the row band.
-            const cx1 = sx + Math.max(40, Math.abs(tx - sx) * 0.3)
-            const cx2 = tx - Math.max(40, Math.abs(tx - sx) * 0.3)
-            const cy1 = sy + laneOffset
-            const cy2 = ty + laneOffset
-            pathD = `M ${sx} ${sy} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${tx} ${ty}`
-          } else {
-            const dist = Math.abs(tx - sx)
-            const spread = Math.max(dist * 0.5, 24)
-            pathD = `M ${sx} ${sy} C ${sx + spread} ${sy}, ${tx - spread} ${ty}, ${tx} ${ty}`
-          }
 
           const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
           const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
@@ -551,23 +548,6 @@ export function LineageFlowOverlay({
             dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
           }
 
-          // Reverse-flow geometric reroute only — no visual styling change.
-          // The edge points back upstream (target layer < source layer);
-          // routing it through a deeper sub-row arc keeps the forward
-          // flow uncluttered (no zigzag through other rows). Visually it
-          // reads identically to forward edges: same type color, same
-          // gradient fade, same chevron animation, same arrowhead. Only
-          // the path geometry differs.
-          let isRev = false
-          if ((edge as any).isReverseFlow) {
-            isRev = true
-            const dist = Math.abs(tx - sx)
-            const arcDepth = Math.max(60, dist * 0.35)
-            const cx1 = sx + Math.max(40, dist * 0.25)
-            const cx2 = tx - Math.max(40, dist * 0.25)
-            pathD = `M ${sx} ${sy} C ${cx1} ${sy + arcDepth}, ${cx2} ${ty + arcDepth}, ${tx} ${ty}`
-          }
-
           newComputedEdges.push({
             id: edge.id,
             source: edge.source,
@@ -584,7 +564,7 @@ export function LineageFlowOverlay({
             confidence: edge.confidence || 0,
             isTraceEdge,
             isFocusIncident,
-            isReverseFlow: isRev,
+            isReverseFlow: !!edge.isReverseFlow,
             isBrowseBundle: !!(edge as any).isBrowseBundle,
             isBidirectional: !!(edge as any).isBidirectional,
           })
@@ -611,18 +591,15 @@ export function LineageFlowOverlay({
       // legitimate overflow when geometry isn't wired.)
       if (geometryRegistry && !findOwningLayer(offscreenRawId)) return
 
-      const visibleEl = getEl(visibleNodeId)
-      if (!visibleEl) return
       // A spine already marks every line it holds with a pin; a stub or a
-      // badge hung off it as well would be the same fact twice.
-      if (visibleEl.hasAttribute('data-fold-anchor')) return
-
-      const vRect = visibleEl.getBoundingClientRect()
-      // Row mostly hidden by its column's clip — its stubs/badges would
-      // anchor to a card the user can't see. Active edges are exempt
-      // (they bridge real cards and carry scroll continuity); these
-      // single-row decorations are not.
-      if (isCenterClipped(visibleEl, vRect)) return
+      // badge hung off it as well would be the same fact twice. A row mostly
+      // hidden by its column's clip is skipped too — its stubs/badges would
+      // anchor to a card the user can't see. Active edges are exempt (they
+      // bridge real cards and carry scroll continuity); these single-row
+      // decorations are not.
+      const anchor = overflowAnchor(visibleNodeId)
+      if (!anchor) return
+      const vRect = anchor.rect
       const gutterX = sourceVisible
         ? vRect.right - containerRect.left + GUTTER_HALF
         : vRect.left - containerRect.left - GUTTER_HALF
@@ -635,8 +612,7 @@ export function LineageFlowOverlay({
       // horizontal scrolling gets left/right badges instead of a
       // meaningless up/down.
       const partnerId = offscreenNodeId.slice('layer-node-'.length)
-      const offscreenEl = getEl(offscreenNodeId)
-      const pRect = offscreenEl?.getBoundingClientRect() ?? estimateNodeRect(partnerId)
+      const pRect = partnerRect(partnerId)
       let direction: OverflowDirection
       if (pRect) {
         const px = (pRect.left + pRect.right) / 2
@@ -1048,6 +1024,17 @@ export function LineageFlowOverlay({
       }
     })
 
+    // VISIBLE = in view VERTICALLY, anywhere sideways. The root is the canvas
+    // scroller with an unbounded sideways margin, so a row in a column
+    // scrolled out of sight sideways still counts: it is mounted, its rect is
+    // real, and the line to it is drawn exactly — running off the edge of the
+    // view toward it, as a line does in any diagram. Measured against the
+    // WINDOW, as this was, every such row dropped out, and scrolling sideways
+    // cut every line to a column the moment it left the view (it became a
+    // portal chip instead). Vertically nothing changes: IntersectionObserver
+    // clips through every ancestor up to its root, so a row scrolled out of
+    // its own column is still out.
+    const scroller = container.parentElement || container
     // Fresh IntersectionObserver per effect lifecycle (no stale singleton)
     const visibilityObserver = new IntersectionObserver((entries) => {
       let changed = false
@@ -1068,8 +1055,8 @@ export function LineageFlowOverlay({
       })
       if (changed) scheduleUpdate()
     }, {
-      root: null,
-      rootMargin: '100px',
+      root: scroller,
+      rootMargin: `${VISIBLE_MARGIN_PX}px ${SIDEWAYS_REACH_PX}px`,
       threshold: 0,
     })
 
@@ -1115,20 +1102,20 @@ export function LineageFlowOverlay({
     // IntersectionObserver callbacks would leave the edge layer BLANK for
     // a frame or more on every rebuild (visible as edges blinking on
     // graph updates). The IO then confirms/corrects the seeded state.
-    const seedVisibility = (el: Element) => {
+    const seedVisibility = (el: Element, box: DOMRect) => {
       if (!el.id || globalVisibleNodes.has(el.id)) return
       const r = el.getBoundingClientRect()
       if (
-        r.bottom >= -100 && r.top <= window.innerHeight + 100 &&
-        r.right >= -100 && r.left <= window.innerWidth + 100 &&
+        r.bottom >= box.top - VISIBLE_MARGIN_PX && r.top <= box.bottom + VISIBLE_MARGIN_PX &&
         (r.width > 0 || r.height > 0)
       ) {
         globalVisibleNodes.add(el.id)
       }
     }
     const scanAndObserve = () => {
+      const box = scroller.getBoundingClientRect()
       observeRoot.querySelectorAll('[id^="layer-node-"]').forEach(el => {
-        seedVisibility(el)
+        seedVisibility(el, box)
         observeElement(el)
       })
     }
@@ -1329,25 +1316,22 @@ export function LineageFlowOverlay({
     return () => setDrawn(0)
   }, [visibleEdges.length, setDrawn])
 
-  // ── Density-adaptive render tier ───────────────────────────────────────
+  // ── Density-adaptive render tier (lineDensity.ts) ─────────────────────
   //
-  // Premium  (≤ 200 visible)    — full treatment: per-edge gradient,
-  //                                animated chevron flow, particles, glow.
-  // Standard (201 – 800)        — drop animated chevron + particles unless
-  //                                edge is hovered or focus-incident; pool
-  //                                gradient defs by color (~10 vs N).
-  // Coalesced (> 800)           — strip everything except the core stroke +
-  //                                shared color gradient + arrowhead. Hover
-  //                                still reads through the hit layer (now
-  //                                gated to ≤1200 edges in Part 3).
+  // Premium  (≤ 200 visible)    — per-edge gradient, dashed roll-ups.
+  // Standard (201 – 800)        — solid colour strokes.
+  // Coalesced (> 800)           — the same; hit paths go focus-only.
   //
-  // Premium feel concentrates on the user's focus. The hovered / focus-
-  // incident subset always gets the Premium treatment regardless of tier
-  // (`focus + context` fisheye, Part 5).
-  const renderTier: 'premium' | 'standard' | 'coalesced' =
-    visibleEdges.length <= 200 ? 'premium'
-    : visibleEdges.length <= 800 ? 'standard'
-    : 'coalesced'
+  // Sticky by 10% at each boundary, so a count landing in batches around
+  // one does not flip the board's look per batch. The hovered, selected and
+  // trace-focus lines keep the premium treatment in every tier. What MOVES
+  // is decided separately (LineMotionLayer).
+  const [renderTier, setRenderTier] = useState<RenderTier>('premium')
+  const nextTier = nextRenderTier(visibleEdges.length, renderTier)
+  if (nextTier !== renderTier) setRenderTier(nextTier)
+  // "Always" moves every line only while the board is sparse; past that it
+  // is the flicker this setting exists to prevent, so it falls back to focus.
+  const lineMotion: LineMotion = motion === 'all' && renderTier !== 'premium' ? 'focus' : motion
 
   // ── Shared SVG defs — one marker per unique color, one gradient per color+direction ──
   // Avoids creating 500+ <marker> and 200+ <linearGradient> elements per render.
@@ -1440,16 +1424,6 @@ export function LineageFlowOverlay({
         <defs>
           <style>
             {`
-              @keyframes dashFlow {
-                from { stroke-dashoffset: 400; }
-                to { stroke-dashoffset: 0; }
-              }
-              .flow-particles {
-                animation: dashFlow 20s linear infinite;
-              }
-              .flow-particles-ghost {
-                animation: dashFlow 40s linear infinite;
-              }
               @keyframes edgeFlow {
                 to { stroke-dashoffset: -28; }
               }
@@ -1466,7 +1440,7 @@ export function LineageFlowOverlay({
                 transition: opacity 220ms ease;
               }
               @media (prefers-reduced-motion: reduce) {
-                .flow-particles, .flow-particles-ghost, .edge-direction-flow, .lineage-stub-flow {
+                .edge-direction-flow, .lineage-stub-flow {
                   animation: none;
                 }
               }
@@ -1591,233 +1565,41 @@ export function LineageFlowOverlay({
         ))}
 
         {visibleEdges.map(edge => {
-          const isHovered = hoveredEdgeId === edge.id
-          const isSourceHovered = hoveredEdgeId === edge.source
-          const isTargetHovered = hoveredEdgeId === edge.target
+          const isThisEdgeHovered = hoveredEdgeId === edge.id
+          const isConnectedToSelected = !!(isHighlightActive && highlightedEdges?.has(edge.id))
           // Highlight on hover OR when connected to the selected node
-          const isHighlighted = isHovered || isSourceHovered || isTargetHovered || (isHighlightActive && highlightedEdges?.has(edge.id))
-          const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, dashArray, sx, sy, tx, ty } = edge
-          // Staged-change marker — colored halo around the edge if there's a pending change.
-          const stagedEdgeColor: string | undefined = stagedEdgeColorByEdgeId.get(edge.id)
-
+          const isHighlighted = isThisEdgeHovered
+            || hoveredEdgeId === edge.source || hoveredEdgeId === edge.target
+            || isConnectedToSelected
           // Spotlight focus modes:
           // - Click-highlight (a node is selected): edges connected to it stay
           //   full, others fade to 8%.
           // - Edge hover: the hovered edge stays full, others fade to 8%.
           // - Otherwise: nothing dims.
           // Click-highlight wins over edge-hover when both are active.
-          const isConnectedToSelected = isHighlightActive && highlightedEdges?.has(edge.id)
-          const isEdgeHoverSpotlight = !isHighlightActive && hoveredEdgeId !== null
-          const isThisEdgeHovered = hoveredEdgeId === edge.id
           const groupOpacity = isHighlightActive
             ? (isConnectedToSelected ? 1 : 0.08)
-            : isEdgeHoverSpotlight
+            : hoveredEdgeId !== null
               ? (isThisEdgeHovered ? 1 : 0.08)
               : 1
-
-          // Per-edge gradient id — direction is encoded in the stroke itself.
-          // Fades from a soft tint of the type color at the source to full
-          // saturation at the target. The arrowhead is the confirming cue.
-          //
-          // Tier policy: only Premium tier (and the focus-incident /
-          // hovered subset in any tier) gets the per-edge gradient. Other
-          // edges fall back to the solid color stroke — direction is still
-          // unmistakable via the arrowhead. Eliminates N <linearGradient>
-          // defs per render at high density.
-          const isPremiumLook =
-            renderTier === 'premium' || isHighlighted || edge.isFocusIncident
-          const gradId = `edge-grad-${edge.id.replace(/[^a-zA-Z0-9]/g, '')}`
-          const coreOpacity = isHighlighted ? Math.min(0.95, edgeOpacity * 1.2) : edgeOpacity
-
-          const isExpanding = expandingEdgeIds?.has(edge.id) ?? false
-          const edgeClasses = [
-            edge.isTraceEdge ? 'nx-edge-trace' : null,
-            isExpanding ? 'nx-edge-expanding' : null,
-          ].filter(Boolean).join(' ') || undefined
+          const detailed = renderTier === 'premium' || isHighlighted
           return (
-            <g
+            <EdgeLine
               key={edge.id}
-              data-edge-id={edge.id}
-              data-edge-src={edge.source}
-              data-edge-tgt={edge.target}
-              className={edgeClasses}
-              style={{ opacity: groupOpacity, transition: 'opacity 0.12s ease' }}
-            >
-              {/* Per-edge directional gradient. `userSpaceOnUse` with start/
-                  end at the path's source/target endpoints aligns the gradient
-                  vector to the actual edge direction — approximate for curves
-                  but visually correct. Source stop at 35% of edge opacity gives
-                  the soft-tint start; target stop at full edge opacity.
-                  Skipped for non-premium-look edges to keep DOM count down. */}
-              {isPremiumLook && (
-                <defs>
-                  <linearGradient
-                    id={gradId}
-                    gradientUnits="userSpaceOnUse"
-                    x1={sx}
-                    y1={sy}
-                    x2={tx}
-                    y2={ty}
-                  >
-                    <stop offset="0%" stopColor={color} stopOpacity={coreOpacity * 0.35} />
-                    <stop offset="100%" stopColor={color} stopOpacity={coreOpacity} />
-                  </linearGradient>
-                </defs>
-              )}
-
-              {/* SUBTLE GLOW — only on highlight, thin halo */}
-              {isHighlighted && (
-                <path
-                  d={pathD}
-                  style={{
-                    stroke: color,
-                    strokeWidth: dynamicStrokeWidth + 2,
-                    fill: 'none',
-                    strokeOpacity: edgeOpacity * 0.2,
-                    strokeLinecap: 'round',
-                    transition: 'all 0.3s ease',
-                  }}
-                  className="pointer-events-none"
-                />
-              )}
-
-              {/* STAGED-CHANGE HALO — visible whenever this edge has a pending change */}
-              {stagedEdgeColor && (
-                <path
-                  d={pathD}
-                  style={{
-                    stroke: stagedEdgeColor,
-                    strokeWidth: dynamicStrokeWidth + 4,
-                    fill: 'none',
-                    strokeOpacity: 0.55,
-                    strokeLinecap: 'round',
-                    strokeDasharray: '4 3',
-                  }}
-                  className="pointer-events-none"
-                />
-              )}
-
-              {/* CORE LINE — stroke uses the per-edge gradient so direction
-                  is encoded in the line itself (faded at source, full at
-                  target). strokeOpacity is intentionally 1 when the gradient
-                  carries opacity in its stops; a fixed opacity is used when
-                  the solid-color fallback runs. Reverse-flow edges use the
-                  same styling as forward — only their path geometry differs. */}
-              <path
-                d={pathD}
-                style={{
-                  stroke: isPremiumLook ? `url(#${gradId})` : color,
-                  strokeWidth: dynamicStrokeWidth,
-                  fill: 'none',
-                  strokeOpacity: isPremiumLook ? 1 : coreOpacity,
-                  strokeDasharray: dashArray,
-                  strokeLinecap: 'round',
-                  transition: 'stroke-width 0.2s ease',
-                }}
-                markerEnd={showDirection ? `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})` : undefined}
-                markerStart={showDirection && edge.isBidirectional ? `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})` : undefined}
-                className="pointer-events-none"
-              />
-
-              {/* DIRECTION FLOW — animated chevron flowing source → target.
-                  Renders for ALL edges in Premium tier; in Standard /
-                  Coalesced tiers we limit it to the focus + context subset
-                  (hovered, focus-incident) so density doesn't melt the
-                  paint pipeline. Reverse-flow edges follow the same rules
-                  as forward — chevron animates along their downward arc. */}
-              {showDirection && isPremiumLook && (
-                <>
-                  {/* White underlay — gives the colored dashes contrast against any background */}
-                  <path
-                    d={pathD}
-                    style={{
-                      stroke: 'white',
-                      strokeWidth: Math.max(2.5, dynamicStrokeWidth * 1.2),
-                      fill: 'none',
-                      strokeOpacity: isGhost ? 0.10 : 0.18,
-                      strokeLinecap: 'round',
-                      strokeDasharray: '10 18',
-                      strokeDashoffset: 4,
-                    }}
-                    className="pointer-events-none edge-direction-flow"
-                  />
-                  {/* Foreground colored chevron — bright, opaque, marches forward */}
-                  <path
-                    d={pathD}
-                    style={{
-                      stroke: color,
-                      strokeWidth: Math.max(2, dynamicStrokeWidth * 1.05),
-                      fill: 'none',
-                      strokeOpacity: isGhost ? 0.7 : 0.95,
-                      strokeLinecap: 'round',
-                      strokeDasharray: '10 18',
-                    }}
-                    className="pointer-events-none edge-direction-flow"
-                  />
-                </>
-              )}
-
-              {/* ANIMATED PARTICLES — only on hover/highlight, minimal */}
-              {!isGhost && isHighlighted && (
-                <path
-                  d={pathD}
-                  style={{
-                    stroke: color,
-                    strokeWidth: Math.max(0.75, dynamicStrokeWidth * 0.35),
-                    fill: 'none',
-                    strokeOpacity: 0.6,
-                    strokeLinecap: 'round',
-                    strokeDasharray: '2 18',
-                  }}
-                  className="pointer-events-none flow-particles"
-                />
-              )}
-              {isGhost && (
-                <path
-                  d={pathD}
-                  style={{
-                    stroke: color,
-                    strokeWidth: Math.max(0.75, dynamicStrokeWidth * 0.35),
-                    fill: 'none',
-                    strokeOpacity: isHighlighted ? 0.5 : 0.25,
-                    strokeLinecap: 'round',
-                    strokeDasharray: '4 10',
-                  }}
-                  className="pointer-events-none flow-particles-ghost"
-                />
-              )}
-
-              {/* Bundle count — minimal pill, BROWSE only: a trace keeps its
-                  wires bare (the cards say "N on this lineage"). Only when
-                  the line stands for MORE than one hop: a re-anchored single
-                  hop is still one flow, and a "1" on it reads as noise. */}
-              {!isTracing && isBundled && edge.edgeCount > 1 && (
-                <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
-                  <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
-                  <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">
-                    {edge.edgeCount}
-                  </text>
-                </g>
-              )}
-
-              {/* Source terminal dot */}
-              {!isGhost && (
-                <circle cx={sx} cy={sy} r={isHighlighted ? 3 : 2.5} fill={color} style={{ opacity: edgeOpacity * 0.8, transition: 'r 0.2s ease' }} />
-              )}
-
-              {/* Endpoint rings — only on the spotlight-hovered edge. Visually
-                  pin the focus by ringing both anchor points. r=14 sized to
-                  hug the node edge-anchor area; pointer-events off so they
-                  don't capture hits. */}
-              {isThisEdgeHovered && (
-                <>
-                  <circle cx={sx} cy={sy} r={14} fill="none" stroke={color} strokeWidth={1.2} strokeOpacity={0.6} className="pointer-events-none" />
-                  <circle cx={tx} cy={ty} r={14} fill="none" stroke={color} strokeWidth={1.2} strokeOpacity={0.6} className="pointer-events-none" />
-                </>
-              )}
-
-              <title>{edge.source} → {edge.target} {isBundled ? `(${edge.edgeCount} bundled logs)` : ''}</title>
-            </g>
+              edge={edge}
+              groupOpacity={groupOpacity}
+              isHighlighted={isHighlighted}
+              isHovered={isThisEdgeHovered}
+              premiumLook={detailed || !!edge.isFocusIncident}
+              dash={lineDash(edge, detailed)}
+              showDirection={showDirection}
+              stagedColor={stagedEdgeColorByEdgeId.get(edge.id)}
+              isExpanding={expandingEdgeIds?.has(edge.id) ?? false}
+              // The bundle count, on the lines being looked at only: on every
+              // line, the counts of a fan stacked into columns of numbers.
+              // A trace keeps its wires bare (the cards say "N on this lineage").
+              showCount={!isTracing && isHighlighted && edge.isBundled && edge.edgeCount > 1}
+            />
           )
         })}
 
@@ -1859,6 +1641,12 @@ export function LineageFlowOverlay({
           </g>
         ))}
       </svg>
+      <LineMotionLayer
+        lines={visibleEdges}
+        mode={lineMotion}
+        hoveredEdgeId={hoveredEdgeId}
+        highlighted={isHighlightActive ? highlightedEdges ?? null : null}
+      />
 
       {/* Edge hover panel rendered via Portal — escapes the canvas's z-[5]
           stacking context so it always sits above the column content (z-10)
@@ -2185,6 +1973,149 @@ export function LineageFlowOverlay({
     </>
   )
 }
+
+/**
+ * One drawn line — still. What moves is LineMotionLayer's.
+ *
+ * Memoised by VALUE: every measure pass builds fresh ComputedEdge objects, so
+ * identity says nothing, and while one column scrolls most lines on the board
+ * have not moved. Only the ones that did re-render.
+ */
+interface EdgeLineProps {
+  edge: ComputedEdge
+  groupOpacity: number
+  isHighlighted: boolean
+  isHovered: boolean
+  premiumLook: boolean
+  dash: string
+  showDirection: boolean
+  stagedColor: string | undefined
+  isExpanding: boolean
+  showCount: boolean
+}
+
+const EdgeLine = React.memo(function EdgeLine({
+  edge, groupOpacity, isHighlighted, isHovered, premiumLook, dash, showDirection,
+  stagedColor, isExpanding, showCount,
+}: EdgeLineProps) {
+  const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, sx, sy, tx, ty } = edge
+  // Per-edge gradient id — direction is encoded in the stroke itself. Fades
+  // from a soft tint of the type color at the source to full saturation at
+  // the target. Only premium-look edges get one; the rest take the solid
+  // colour (the arrowhead still gives the direction).
+  const gradId = `edge-grad-${edge.id.replace(/[^a-zA-Z0-9]/g, '')}`
+  const coreOpacity = isHighlighted ? Math.min(0.95, edgeOpacity * 1.2) : edgeOpacity
+  const marker = `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})`
+  const edgeClasses = [
+    edge.isTraceEdge ? 'nx-edge-trace' : null,
+    isExpanding ? 'nx-edge-expanding' : null,
+  ].filter(Boolean).join(' ') || undefined
+  return (
+    <g
+      data-edge-id={edge.id}
+      data-edge-src={edge.source}
+      data-edge-tgt={edge.target}
+      className={edgeClasses}
+      style={{ opacity: groupOpacity, transition: 'opacity 0.12s ease' }}
+    >
+      {/* `userSpaceOnUse` from the source to the target end aligns the
+          gradient to the edge's direction — approximate on a curve, right
+          to the eye. */}
+      {premiumLook && (
+        <defs>
+          <linearGradient id={gradId} gradientUnits="userSpaceOnUse" x1={sx} y1={sy} x2={tx} y2={ty}>
+            <stop offset="0%" stopColor={color} stopOpacity={coreOpacity * 0.35} />
+            <stop offset="100%" stopColor={color} stopOpacity={coreOpacity} />
+          </linearGradient>
+        </defs>
+      )}
+
+      {/* SUBTLE GLOW — only on highlight, thin halo */}
+      {isHighlighted && (
+        <path
+          d={pathD}
+          style={{
+            stroke: color,
+            strokeWidth: dynamicStrokeWidth + 2,
+            fill: 'none',
+            strokeOpacity: edgeOpacity * 0.2,
+            strokeLinecap: 'round',
+            transition: 'all 0.3s ease',
+          }}
+          className="pointer-events-none"
+        />
+      )}
+
+      {/* STAGED-CHANGE HALO — visible whenever this edge has a pending change */}
+      {stagedColor && (
+        <path
+          d={pathD}
+          style={{
+            stroke: stagedColor,
+            strokeWidth: dynamicStrokeWidth + 4,
+            fill: 'none',
+            strokeOpacity: 0.55,
+            strokeLinecap: 'round',
+            strokeDasharray: '4 3',
+          }}
+          className="pointer-events-none"
+        />
+      )}
+
+      {/* CORE LINE — the gradient carries the opacity in its stops; a fixed
+          opacity is used when the solid-colour fallback runs. */}
+      <path
+        d={pathD}
+        style={{
+          stroke: premiumLook ? `url(#${gradId})` : color,
+          strokeWidth: dynamicStrokeWidth,
+          fill: 'none',
+          strokeOpacity: premiumLook ? 1 : coreOpacity,
+          strokeDasharray: dash,
+          strokeLinecap: 'round',
+          transition: 'stroke-width 0.2s ease',
+        }}
+        markerEnd={showDirection ? marker : undefined}
+        markerStart={showDirection && edge.isBidirectional ? marker : undefined}
+        className="pointer-events-none"
+      />
+
+      {showCount && (
+        <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
+          <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
+          <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">
+            {edge.edgeCount}
+          </text>
+        </g>
+      )}
+
+      {/* Source terminal dot */}
+      {!isGhost && (
+        <circle cx={sx} cy={sy} r={isHighlighted ? 3 : 2.5} fill={color} style={{ opacity: edgeOpacity * 0.8, transition: 'r 0.2s ease' }} />
+      )}
+
+      {/* Endpoint rings — only on the spotlight-hovered edge, pinning both
+          anchor points. */}
+      {isHovered && (
+        <>
+          <circle cx={sx} cy={sy} r={14} fill="none" stroke={color} strokeWidth={1.2} strokeOpacity={0.6} className="pointer-events-none" />
+          <circle cx={tx} cy={ty} r={14} fill="none" stroke={color} strokeWidth={1.2} strokeOpacity={0.6} className="pointer-events-none" />
+        </>
+      )}
+    </g>
+  )
+}, (a, b) =>
+  a.groupOpacity === b.groupOpacity
+  && a.isHighlighted === b.isHighlighted
+  && a.isHovered === b.isHovered
+  && a.premiumLook === b.premiumLook
+  && a.dash === b.dash
+  && a.showDirection === b.showDirection
+  && a.stagedColor === b.stagedColor
+  && a.isExpanding === b.isExpanding
+  && a.showCount === b.showCount
+  && sameRow(a.edge, b.edge),
+)
 
 const HIT_DENSITY_LIMIT = 1200
 

@@ -179,6 +179,9 @@ interface LayerColumnProps {
   isFolded?: boolean
   /** A spine's width, px — one width for every spine on the canvas. */
   spineWidth?: number
+  /** Changes whenever ANY column's fold changes, so a neighbour slides into
+   *  the room a fold opens instead of jumping (see `layoutDependency`). */
+  foldEpoch?: string
   /** Folded only: this layer's rows with a line to an OPEN layer, and how
    *  many lines arrive at (`in`) and leave (`out`) each — where the lineage
    *  lands on the spine. */
@@ -300,6 +303,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   anchorIssue,
   isFolded = false,
   spineWidth = SPINE_MAX_WIDTH_PX,
+  foldEpoch = '',
   foldPorts,
   foldUndrawnLines = 0,
   onFoldChange,
@@ -1384,6 +1388,12 @@ export const LayerColumn = React.memo(function LayerColumn({
         ? { width: spineWidth, minWidth: spineWidth, maxWidth: spineWidth }
         : { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 }}
       layout
+      // Measure for a layout animation only when the column's box can have
+      // moved: its fold, width or place — or any other column's fold. Left
+      // to itself framer measures after EVERY render, and the virtualizer
+      // renders the column on every scroll frame: `measureScroll` alone was
+      // ~120ms of a 3s column scroll, forcing layout each frame.
+      layoutDependency={`${isCollapsed}|${spineWidth}|${effectiveWidth}|${layer.order}|${foldEpoch}`}
     >
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />

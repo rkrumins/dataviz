@@ -31,6 +31,13 @@ export const CANVAS_ZOOM_STEP = 0.05
  */
 export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
 
+/**
+ * Which lineage lines move (the chevrons marching along a line) — see
+ * `lineMotion.ts`. 'focus': the lines being looked at; 'all': every line
+ * while the board is sparse; 'off': none.
+ */
+export type LineageMotion = 'focus' | 'all' | 'off'
+
 export interface NodeStyleConfig {
   color: string
   icon?: string
@@ -144,10 +151,22 @@ interface PreferencesState {
    * Flow ribbons: in Adaptive mode above the edge budget, draw one
    * Sankey-style band per (source layer → target layer) pair whose
    * thickness encodes TOTAL edge volume — the macro flow stays legible
-   * while individual curves are budgeted. User-toggleable.
+   * while individual curves are budgeted. Opt-in (off by default).
    */
   showFlowRibbons: boolean
   toggleFlowRibbons: () => void
+  /** Which lineage lines move. Calm mode and the system's reduce-motion
+   *  setting override it to 'off'. */
+  lineageMotion: LineageMotion
+  setLineageMotion: (motion: LineageMotion) => void
+  /**
+   * Entity cards on the canvas: solid by default, so a line passes cleanly
+   * under a card — or frosted glass, where lines show softly through. Frosted
+   * re-samples what lies under every card on each scroll frame, which is why
+   * it is the choice rather than the default.
+   */
+  frostedCards: boolean
+  toggleFrostedCards: () => void
   /**
    * "N on this lineage" pills on the cards of a trace — how much of what is
    * inside a closed card the lineage runs through. On by default; lives
@@ -356,9 +375,13 @@ export const usePreferencesStore = create<PreferencesState>()(
       externalLineagePreview: false,
       toggleExternalLineagePreview: () =>
         set((state) => ({ externalLineagePreview: !state.externalLineagePreview })),
-      showFlowRibbons: true,
+      showFlowRibbons: false,
       toggleFlowRibbons: () =>
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
+      lineageMotion: 'focus',
+      setLineageMotion: (lineageMotion) => set({ lineageMotion }),
+      frostedCards: false,
+      toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
@@ -492,7 +515,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       // v8 (2026-09-21): `canvasFoldLayers` is opt-in. A pre-release build
       // shipped it ON by default, so a stored `true` is that default, not a
       // choice anyone made — reset it.
-      version: 8,
+      // v9 (2026-09-21): flow ribbons are opt-in. They float at the middle of
+      // the view across columns they do not connect; a stored `true` is the
+      // old default, not a choice — reset it.
+      version: 9,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -505,6 +531,7 @@ export const usePreferencesStore = create<PreferencesState>()(
           state = next
         }
         if (version < 8) state = { ...state, canvasFoldLayers: false }
+        if (version < 9) state = { ...state, showFlowRibbons: false }
         return state
       },
     }

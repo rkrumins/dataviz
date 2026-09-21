@@ -627,6 +627,28 @@
     @apply bg-black/5 dark:bg-white/10 rounded border border-black/10 dark:border-white/10;
     @apply text-ink-secondary;
   }
+
+  /* === Entity cards on the Context View canvas (FlatTreeItem) ===
+   * The lineage lines are drawn UNDER the cards. Solid by default: the card
+   * is the canvas's own colour, so it looks exactly as a bare row did, and a
+   * line crossing a column passes cleanly beneath its cards.
+   *
+   * Frosted is the reader's choice (Display > Lineage > Appearance, which
+   * sets `data-frosted-cards` on the canvas scroller): lines show softly
+   * through the card. It was the only look before, on a card whose tint class
+   * emitted no colour at all, so the blur was the whole surface — dense
+   * dashed lines behind it smeared into what read as a pixelated canvas, and
+   * a blur inside a scroller re-samples what lies under every card on each
+   * scroll frame. State tints (hover, selected, search) are background
+   * IMAGES and paint over either surface. */
+  .nx-row-card {
+    background-color: var(--nx-bg-canvas);
+  }
+  [data-frosted-cards] .nx-row-card {
+    background-color: transparent;
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+  }
 }
 
 @layer components {

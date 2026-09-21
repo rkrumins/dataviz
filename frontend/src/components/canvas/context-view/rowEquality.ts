@@ -20,7 +20,8 @@
  * optimisation, so failing open is the right direction.
  */
 
-function sameRow<T extends object>(a: T, b: T): boolean {
+/** True when two rows carry the same values — also the overlay's per-line memo test. */
+export function sameRow<T extends object>(a: T, b: T): boolean {
   if (a === b) return true
   const keys = Object.keys(a) as Array<keyof T>
   if (keys.length !== Object.keys(b).length) return false

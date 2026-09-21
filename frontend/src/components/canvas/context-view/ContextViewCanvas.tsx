@@ -14,7 +14,7 @@
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import {
   useSchemaStore,
@@ -413,7 +413,14 @@ export function ContextViewCanvas({
   // Missing-link alerts are optional: Views are subsets of a Data Source,
   // so links to out-of-view entities can be expected rather than a problem.
   const showMissingConnectionIndicators = usePreferencesStore((s) => s.showMissingConnectionIndicators) ?? true
-  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? true
+  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? false
+  // Which lineage lines move, and whether cards are frosted — Display ›
+  // Lineage › Appearance. Calm mode (MotionConfig 'always') and the system's
+  // reduce-motion setting both read as "reduce" here, and then no line moves.
+  const lineageMotionPref = usePreferencesStore((s) => s.lineageMotion) ?? 'focus'
+  const reduceMotion = useReducedMotionConfig() ?? false
+  const lineageMotion = reduceMotion ? 'off' : lineageMotionPref
+  const frostedCards = usePreferencesStore((s) => s.frostedCards) ?? false
   const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'spacious'
   const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
   const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
@@ -4290,6 +4297,13 @@ export function ContextViewCanvas({
     return { ports, undrawn }
   }, [layerFold.folded, effectiveLineageEdges, renderLayerOf])
 
+  // Which layers are folded, as one value — every column re-measures its box
+  // when it changes (LayerColumn's `layoutDependency`).
+  const foldEpoch = useMemo(
+    () => [...layerFold.folded].sort().join(','),
+    [layerFold.folded],
+  )
+
   // A portal chip names the layer its lineage leads into.
   const layerNameById = useMemo(
     () => new Map(sortedLayers.map(layer => [layer.id, layer.name])),
@@ -5659,6 +5673,8 @@ export function ContextViewCanvas({
           // clientHeight, so a percentage-height child inside already stops
           // above it and the columns still end at the visible edge.
           className="flex-1 min-h-0 overflow-auto relative scroll-smooth custom-scrollbar"
+          // Row cards read this for their surface (`.nx-row-card`, globals.css).
+          data-frosted-cards={frostedCards || undefined}
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
           // dock, layer strip, edge legend) so a column's last row can always scroll
@@ -5688,6 +5704,7 @@ export function ContextViewCanvas({
               resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
+              motion={lineageMotion}
               expandingEdgeIds={expandingEdgeIds}
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
@@ -5869,6 +5886,7 @@ export function ContextViewCanvas({
                 onResizeLayer={isDraft ? resizeLayer : undefined}
                 isFolded={layerFold.folded.has(layer.id)}
                 spineWidth={layerFold.spineWidth}
+                foldEpoch={foldEpoch}
                 foldPorts={foldLineage.ports.get(layer.id)}
                 foldUndrawnLines={foldLineage.undrawn.get(layer.id)}
                 onFoldChange={layerFold.setLayerFolded}
