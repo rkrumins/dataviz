@@ -31,6 +31,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider, TraceClosureRequest } from '@/providers/GraphDataProvider'
+import { RELEASE_MEMORY_EVENT } from '@/lib/memoryEvents'
 import {
     toLensClosure,
     mergeClosures,
@@ -63,8 +64,21 @@ export const WALK_PAGE_NODES = 10_000
  *  hands-free continuations above take the big pages from there. */
 export const WALK_FIRST_PAGE_NODES = 600
 /** The one-time memory checkpoint: past this many nodes the walk parks ONCE
- *  and asks; `continuePastCheckpoint` lifts it for the focal for good. */
-export const TRACE_CHECKPOINT_NODES = 50_000
+ *  and asks; `continuePastCheckpoint` lifts it for the focal for good.
+ *
+ *  20,000, not 50,000. On a dense graph a full-flow walk reaches the old
+ *  ceiling in under a minute while the board still shows ~100 cards — every
+ *  page past a few thousand nodes lands in bundles the reader cannot see,
+ *  and each one re-derived the board over the whole model (measured
+ *  2026-09-21: ~7 GB allocated per twenty seconds at 50k, a 3–5 GB tab). The
+ *  reader who wants the rest still gets it, one click away. */
+export const TRACE_CHECKPOINT_NODES = 20_000
+/** Walked focals kept besides the ones being driven. A focal's model can
+ *  hold the checkpoint's worth of nodes, and every focal the reader visited
+ *  used to stay for the whole session; the least-recently visited beyond
+ *  this many are released — stepping back to one walks it again, answered
+ *  from the server's cache. */
+export const KEEP_WALKED_FOCALS = 4
 /** Failsafe against a frontier that never converges (every request either
  *  drains what it named or advances a cursor, so this should be
  *  unreachable). Reached, it is reported as an ERROR, never as silence. */
@@ -252,6 +266,31 @@ export function useLensWalk(
     const stateRef = useRef(state)
     useEffect(() => { stateRef.current = state }, [state])
 
+    // Recency of walked focals (cache keys, oldest first), and the ones being
+    // driven now — never evicted.
+    const recentRef = useRef<string[]>([])
+    const drivenKeysRef = useRef<ReadonlySet<string>>(new Set())
+    /** Release the least-recently visited walked focals beyond `keep` (never
+     *  one being driven): their models, their bookkeeping, and their
+     *  started-mark — so a return walks afresh. */
+    const releaseStaleFocals = useCallback((visited: string | null, keep: number = KEEP_WALKED_FOCALS) => {
+        if (visited !== null) recentRef.current = [...recentRef.current.filter(k => k !== visited), visited]
+        const driven = drivenKeysRef.current
+        const idle = recentRef.current.filter(k => !driven.has(k) && k !== visited)
+        if (idle.length <= keep) return
+        const release = new Set(idle.slice(0, idle.length - keep))
+        recentRef.current = recentRef.current.filter(k => !release.has(k))
+        for (const k of release) startedRef.current.delete(k)
+        const without = <V,>(prev: Map<string, V>): Map<string, V> => {
+            if (![...release].some(k => prev.has(k))) return prev
+            const next = new Map(prev)
+            for (const k of release) next.delete(k)
+            return next
+        }
+        setState(without)
+        setWalkMeta(without)
+    }, [])
+
     const bumpRequests = useCallback((cacheKey: string, n: number) => {
         setWalkMeta(prev => {
             const meta = prev.get(cacheKey) ?? EMPTY_META
@@ -267,6 +306,8 @@ export function useLensWalk(
         const effectiveDepth = fullWalk ? Math.max(initialDepth, FULL_WALK_INITIAL_DEPTH) : initialDepth
         const cacheKey = cacheKeyFor(provider, urn)
         if (startedRef.current.has(cacheKey)) return
+        // A new focal is about to hold a model: release the stalest ones.
+        releaseStaleFocals(cacheKey)
 
         if (typeof provider?.traceClosure !== 'function') {
             startedRef.current.add(cacheKey)
@@ -348,7 +389,7 @@ export function useLensWalk(
             }))
         }
         await coarseLeg
-    }, [provider, initialDepth, fullWalk, bumpRequests])
+    }, [provider, initialDepth, fullWalk, bumpRequests, releaseStaleFocals])
 
     /** Shared by every continuation op: fetch one further page and merge it
      *  into the CURRENT focal's model — `focusUrn` is captured here at call
@@ -659,13 +700,22 @@ export function useLensWalk(
         })
     }, [provider])
 
+    // "Free memory" (the memory gauge): every walked focal not being driven
+    // goes; a return walks it again.
+    useEffect(() => {
+        const onRelease = () => releaseStaleFocals(null, 0)
+        window.addEventListener(RELEASE_MEMORY_EVENT, onRelease)
+        return () => window.removeEventListener(RELEASE_MEMORY_EVENT, onRelease)
+    }, [releaseStaleFocals])
+
     // Initial fetch on focal change — one per focal. `runFetch` is guarded
     // by `startedRef`, so a focal already walked this session is a cache hit
     // and never refetched (which is what makes adding a seed to a selection
     // cost only the new seed).
     useEffect(() => {
+        drivenKeysRef.current = new Set(focusUrns.map(u => cacheKeyFor(provider, u)))
         for (const urn of focusUrns) void runFetch(urn)
-    }, [focusUrns, runFetch])
+    }, [focusUrns, runFetch, provider])
 
     // Session lifecycle: clear everything when the lens closes so a new
     // session starts from the data source, not from a stale picture — and

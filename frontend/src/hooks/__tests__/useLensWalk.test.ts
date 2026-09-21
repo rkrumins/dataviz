@@ -18,6 +18,7 @@ import {
   WALK_REQUEST_FAILSAFE,
   WALK_PAGE_NODES,
   WALK_FIRST_PAGE_NODES,
+  KEEP_WALKED_FOCALS,
 } from '../useLensWalk'
 import type { GraphDataProvider, TraceV2Result, LensClosureExtras, GraphNode } from '@/providers/GraphDataProvider'
 
@@ -905,5 +906,30 @@ describe('useLensWalk — several focals', () => {
 
     rerender({ focals: [] })
     await waitFor(() => expect(result.current.walkFor('a')).toBeNull())
+  })
+})
+
+describe('useLensWalk — walked focals are released, least recent first', () => {
+  it('keeps the focal being walked and the most recent ones; a released focal walks afresh', async () => {
+    const { provider, traceClosure } = makeProvider()
+    const focals = Array.from({ length: KEEP_WALKED_FOCALS + 3 }, (_, i) => `f${i}`)
+    const { result, rerender } = renderHook(({ focus }) => useLensWalk(focus, provider), { initialProps: { focus: focals[0] } })
+    for (const f of focals) {
+      rerender({ focus: f })
+      await waitFor(() => expect(result.current.walkFor(f)?.status).toBe('done'))
+    }
+    const last = focals[focals.length - 1]
+    // The current focal and the KEEP most recent before it are held…
+    expect(result.current.walkFor(last)).not.toBeNull()
+    for (const f of focals.slice(-1 - KEEP_WALKED_FOCALS, -1)) expect(result.current.walkFor(f)).not.toBeNull()
+    // …the oldest are released.
+    expect(result.current.walkFor(focals[0])).toBeNull()
+    expect(result.current.walkFor(focals[1])).toBeNull()
+
+    // Stepping back to a released focal walks it again.
+    const before = fineCalls(traceClosure).length
+    rerender({ focus: focals[0] })
+    await waitFor(() => expect(result.current.walkFor(focals[0])?.status).toBe('done'))
+    expect(fineCalls(traceClosure).length).toBe(before + 1)
   })
 })
