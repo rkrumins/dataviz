@@ -742,7 +742,7 @@ describe('LineageNeighbors — counts agree with the Focus Lens', () => {
  * looked like nothing happened at all.
  */
 describe('LineageNeighbors — clicking a partner that is not on the canvas', () => {
-  it('seeds it into the store so the drawer has something to open on', async () => {
+  it('reveals it first, then opens the drawer on it', async () => {
     const user = userEvent.setup()
     useCanvasStore.setState({
       nodes: [makeNode('focal-y', 'dataset', 'Focal Y')],
@@ -769,11 +769,14 @@ describe('LineageNeighbors — clicking a partner that is not on the canvas', ()
       const row = await screen.findByText('Far Away')
       await user.click(row)
 
-      await waitFor(() => {
-        expect(useCanvasStore.getState().nodes.some(n => n.id === 'far-away')).toBe(true)
-      })
-      expect(useCanvasStore.getState().drawerNodeId).toBe('far-away')
-      expect(onFocusNode).toHaveBeenCalledWith('far-away')
+      // The REVEAL is what loads it — the panel must not seed a lean copy,
+      // because addGraph keeps the first version of a node id it is given and
+      // a copy without childCount would permanently shadow the real one,
+      // leaving the container with no children and no way to expand.
+      await waitFor(() => expect(onFocusNode).toHaveBeenCalledWith('far-away'))
+      expect(useCanvasStore.getState().nodes.some(n => n.id === 'far-away')).toBe(false)
+      // And the drawer still swaps, once the reveal has had its turn.
+      await waitFor(() => expect(useCanvasStore.getState().drawerNodeId).toBe('far-away'))
     } finally {
       mockProviderHolder.current = null
     }

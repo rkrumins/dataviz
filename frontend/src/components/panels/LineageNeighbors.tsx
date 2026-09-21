@@ -203,30 +203,30 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
 
   const handleNeighborClick = async (neighborId: string) => {
     // THE PARTNER MAY NOT BE ON THE CANVAS. `useLensLineage` fetches partners
-    // lens-locally and deliberately writes nothing to the canvas store, so a
-    // partner inside a container that was never expanded exists here and
-    // nowhere else. The drawer resolves its entity FROM THE STORE and closes
-    // when it cannot — so clicking such a row looked like nothing happened.
+    // lens-locally and writes nothing to the canvas store, so a partner inside
+    // a container that was never expanded exists here and nowhere else. The
+    // drawer resolves its entity FROM THE STORE and closes when it cannot —
+    // so clicking such a row looked like nothing happened.
     //
-    // Seed it first, marked `viaReveal` exactly as a search reveal marks the
-    // spine it primes, so the drawer has something to open on immediately and
-    // the reveal below only has to bring it into view.
-    if (!useCanvasStore.getState()._nodeIndex.has(neighborId)) {
-      const known = sourceFetch.supplementalNodes.get(neighborId)
-      if (known) {
-        useCanvasStore.getState().addGraph(
-          [{ ...known, data: { ...known.data, viaReveal: true } }],
-          [],
-        )
-      }
+    // The reveal is what LOADS it properly: ancestors fetched, each level's
+    // children paged in, containment wired. So when the store has never seen
+    // this entity, the reveal goes FIRST and the drawer opens on what it
+    // brought back.
+    //
+    // It must not be short-cut by seeding a lean copy from the lens fetch:
+    // `addGraph` keeps the FIRST version of a node id it is given, so a copy
+    // without childCount would permanently shadow the real one — the
+    // container renders with no children and no way to expand it.
+    const known = useCanvasStore.getState()._nodeIndex.has(neighborId)
+    if (known) {
+      // Instant swap: the entity is already there to show.
+      openNodeDrawer(neighborId)
+      selectNode(neighborId)
     }
-    // Drawer-swap first (instant, no awaiting). selectNode so the canvas's
-    // selection-driven highlight (useHighlightState in GraphCanvas, the
-    // selectedNodeId styling in ContextView) lights up the target after the
-    // reveal pans to it.
-    openNodeDrawer(neighborId)
-    selectNode(neighborId)
-    if (!onFocusNode) return
+    if (!onFocusNode) {
+      if (!known) { openNodeDrawer(neighborId); selectNode(neighborId) }
+      return
+    }
     // Wrap the canvas reveal in a hard timeout. The drawer is already
     // showing the target's data via openNodeDrawer above; if the canvas
     // pan stalls (provider slow, layout solving stuck), we give up on
@@ -236,7 +236,20 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
       if (result && typeof (result as Promise<void>).then === 'function') {
         await withTimeout(result as Promise<void>, TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.focusNode')
       }
+      // Swapped only once the reveal has landed it, for an entity the store
+      // did not hold. Opening earlier would point the drawer at nothing.
+      if (!known) {
+        openNodeDrawer(neighborId)
+        selectNode(neighborId)
+      }
     } catch (err) {
+      // The swap still happens on a timeout: the reveal may simply be slow,
+      // and a drawer that never opens is worse than one that opens on an
+      // entity the canvas is still bringing into view.
+      if (!known) {
+        openNodeDrawer(neighborId)
+        selectNode(neighborId)
+      }
       if (!(err instanceof TimeoutError)) throw err
       // Swallow the timeout silently — the drawer swap already happened
       // and the user can re-click the neighbor row to retry the reveal.
