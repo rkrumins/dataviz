@@ -30,6 +30,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
+  usePreferencesStore,
   CANVAS_ZOOM_MAX,
   CANVAS_ZOOM_MIN,
   CANVAS_ZOOM_STEP,
@@ -72,12 +73,15 @@ export function isDefaultState(props: {
   canvasDensity: CanvasDensity
   showTypeBadge: boolean
   subtleTreeLines: boolean
+  /** Absent reads as the default (shown). */
+  showEntityIcons?: boolean
 }): boolean {
   return (
     Math.abs(props.canvasZoom - 1) < 0.001 &&
     props.canvasDensity === 'spacious' &&
     props.showTypeBadge === true &&
-    props.subtleTreeLines === false
+    props.subtleTreeLines === false &&
+    props.showEntityIcons !== false
   )
 }
 
@@ -144,7 +148,8 @@ export function DisplaySettingsPopover({
     }
   }, [open])
 
-  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines })
+  const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
+  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons })
   const zoomPct = formatZoom(canvasZoom)
 
   return (
@@ -269,7 +274,11 @@ export function DisplaySettingsSections({
   const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
   const canZoomIn = canvasZoom < CANVAS_ZOOM_MAX - 0.001
   const densityLabel = DENSITY_OPTIONS.find(o => o.mode === canvasDensity)?.label ?? 'Spacious'
-  const togglesOn = [showTypeBadge, subtleTreeLines].filter(Boolean).length
+  // The icon toggle lives in the preferences store and is read here rather
+  // than threaded through the header's four layers of props.
+  const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
+  const toggleEntityIcons = usePreferencesStore((s) => s.toggleCanvasEntityIcons)
+  const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines].filter(Boolean).length
 
   return (
     <>
@@ -378,6 +387,14 @@ export function DisplaySettingsSections({
         summary={`${togglesOn} on`}
       >
         <div className="pt-1.5 space-y-1.5">
+        <ToggleRow
+          label="Show entity icons"
+          description={showEntityIcons ? 'Each row shows its type\'s icon' : 'Names only — no icons'}
+          icon={showEntityIcons ? Eye : EyeOff}
+          active={showEntityIcons}
+          onClick={toggleEntityIcons}
+          accent="cyan"
+        />
         <ToggleRow
           label="Show entity type badge"
           description={showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}

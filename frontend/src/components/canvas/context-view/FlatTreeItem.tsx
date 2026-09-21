@@ -254,6 +254,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `?? default` covers users whose persisted state predates these fields.
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
+  const showEntityIcon = usePreferencesStore(s => s.showCanvasEntityIcons) ?? true
   const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
 
   // Business/Technical. `node.name` is the business-facing name the hierarchy
@@ -634,8 +635,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </button>
 
-      {/* Entity Icon - Glass morphism container */}
+      {/* Entity Icon - Glass morphism container. The reader can turn the
+          ontology's icons off (Display > Display options): the row is then
+          its name alone — but a bulk-selected row keeps its check, the one
+          positive "you picked this" mark, in the icon's place. */}
+      {!showEntityIcon && isBulkSelected && (
+        <span
+          className="w-4 h-4 flex-shrink-0 rounded-full bg-accent-lineage flex items-center justify-center shadow-sm"
+          aria-hidden
+        >
+          <LucideIcons.Check className="w-2.5 h-2.5 text-white" strokeWidth={3.5} />
+        </span>
+      )}
+      {showEntityIcon && (
       <div
+        data-entity-icon
         className={cn(
           "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm relative",
           iconContainerSize,
@@ -665,6 +679,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           style={{ color: nodeColor }}
         />
       </div>
+      )}
 
       {/* Name + type — the text region IS the row's primary payload.
           ``min-w-0`` keeps the flex child from forcing the row to

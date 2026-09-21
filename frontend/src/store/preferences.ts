@@ -223,6 +223,10 @@ interface PreferencesState {
   setCanvasDensity: (density: CanvasDensity) => void
   showCanvasTypeBadge: boolean
   toggleCanvasTypeBadge: () => void
+  /** Each row's entity-type icon, from the ontology. Off, a row is its
+   *  name alone — the reader's choice for a quieter, text-first canvas. */
+  showCanvasEntityIcons: boolean
+  toggleCanvasEntityIcons: () => void
   subtleCanvasTreeLines: boolean
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
@@ -463,12 +467,15 @@ export const usePreferencesStore = create<PreferencesState>()(
       setCanvasDensity: (canvasDensity) => set({ canvasDensity }),
       showCanvasTypeBadge: true,
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
+      showCanvasEntityIcons: true,
+      toggleCanvasEntityIcons: () => set((s) => ({ showCanvasEntityIcons: !(s.showCanvasEntityIcons ?? true) })),
       subtleCanvasTreeLines: false,
       toggleSubtleCanvasTreeLines: () => set((s) => ({ subtleCanvasTreeLines: !s.subtleCanvasTreeLines })),
       resetCanvasDisplaySettings: () => set({
         canvasZoom: 1,
         canvasDensity: 'spacious',
         showCanvasTypeBadge: true,
+        showCanvasEntityIcons: true,
         subtleCanvasTreeLines: false,
       }),
 
