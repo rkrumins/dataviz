@@ -69,10 +69,7 @@ const edgeWeight = (e: LineageEdge): number => {
  *      kept as-is, because between coarse entities it is often the ONLY
  *      evidence that a connection exists.
  */
-function collapseRecords(
-  records: NeighborRecord[],
-  grain?: GrainContext,
-): NeighborRecord[] {
+function collapseRecords(records: NeighborRecord[]): NeighborRecord[] {
   if (records.length < 2) return records
 
   // 1. Exact repeats, insertion order preserved. These are ONE
@@ -109,25 +106,7 @@ function collapseRecords(
     // record already standing for the most of them (ties by type name,
     // so the output is stable across hydration orders).
     const host = concreteByNeighbor.get(r.neighborId)
-    if (!host) {
-      // 3. A rollup to a COARSER partner than the focal, while a concrete
-      //    record exists in this direction, is the same flow restated one
-      //    grain up — the aggregation worker materialises a cell at every
-      //    level above the real one. Listing them as peers showed ONE flow
-      //    four times: the partner field, its dataset, its container and
-      //    its platform, which is the "5 in / 4 out on a column with two
-      //    real neighbours" the closure strips server-side.
-      //
-      //    Dropped only when something concrete is there to stand for the
-      //    flow. Between coarse entities a rollup is often the ONLY
-      //    evidence a connection exists, and that case is kept.
-      if (grain && concreteByNeighbor.size > 0
-        && isCoarserGrain(grain.closure, r.neighborNode?.data?.type as string | undefined, grain.focalType)) {
-        continue
-      }
-      out.push(r)
-      continue
-    }
+    if (!host) { out.push(r); continue }
     // max, not sum: the rollup is evidence ABOUT the same flows the
     // concrete edge stands for, not additional flows.
     host.bundledCount = Math.max(host.bundledCount, r.bundledCount)
@@ -214,22 +193,11 @@ export function isCoarserGrain(
   return closure.get(partnerType.toUpperCase())?.has(baseType.toUpperCase()) ?? false
 }
 
-/** What the caller knows about grain, so a rollup can be recognised as a
- *  coarser restatement of a flow already represented. Optional: without it
- *  the derivation behaves exactly as it did. */
-export interface GrainContext {
-  /** From {@link buildCanContainClosure}. */
-  closure: Map<string, Set<string>>
-  /** The focal entity's own type. */
-  focalType: string
-}
-
 export function deriveNeighborRecords(
   nodeId: string,
   edges: LineageEdge[],
   nodeMap: Map<string, LineageNode>,
   containmentEdgeTypes: string[],
-  grain?: GrainContext,
 ): { incomingRecords: NeighborRecord[]; outgoingRecords: NeighborRecord[] } {
   const incoming: NeighborRecord[] = []
   const outgoing: NeighborRecord[] = []
@@ -256,7 +224,7 @@ export function deriveNeighborRecords(
   // Collapsed per direction: the same entity legitimately appears on
   // both sides of a focal, and those are two different connections.
   return {
-    incomingRecords: collapseRecords(incoming, grain),
-    outgoingRecords: collapseRecords(outgoing, grain),
+    incomingRecords: collapseRecords(incoming),
+    outgoingRecords: collapseRecords(outgoing),
   }
 }
