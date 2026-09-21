@@ -152,6 +152,15 @@ interface CanvasState {
   drawerNodeId: string | null
   openNodeDrawer: (id: string) => void
   closeNodeDrawer: () => void
+  /**
+   * The drawer's own back/forward trail. Following lineage from the drawer —
+   * a consumer, then its consumer, then back — is a WALK, and a walk you
+   * cannot retrace is one people stop taking. `cursor` indexes `entries`;
+   * -1 is an empty trail.
+   */
+  drawerHistory: { entries: string[]; cursor: number }
+  drawerBack: () => void
+  drawerForward: () => void
 
   // Viewport
   viewport: Viewport
@@ -389,7 +398,13 @@ export const useCanvasStore = create<CanvasState>()(
         // Single-select of a real entity opens (or swaps) the sticky drawer.
         // Toggle-off keeps it open — only the X button closes it. Logical
         // groupings and multi-select never touch the drawer.
-        ...(!multi && !id.startsWith('logical:') ? { drawerNodeId: id } : {}),
+        // A single-select click opens the drawer on that entity, so it is a
+        // move like any other — otherwise Back would skip the steps taken on
+        // the canvas. A multi-selection never touches the drawer, so it is
+        // not a move.
+        ...(!multi && !id.startsWith('logical:')
+          ? { drawerNodeId: id, drawerHistory: pushDrawerHistory(state.drawerHistory, id) }
+          : {}),
       })),
       selectEdge: (id, multi = false) => set((state) => ({
         selectedEdgeIds: multi
@@ -421,8 +436,28 @@ export const useCanvasStore = create<CanvasState>()(
 
       // Sticky entity drawer
       drawerNodeId: null,
-      openNodeDrawer: (id) => set({ drawerNodeId: id }),
-      closeNodeDrawer: () => set({ drawerNodeId: null }),
+      drawerHistory: { entries: [], cursor: -1 },
+      openNodeDrawer: (id) => set((state) => ({
+        drawerNodeId: id,
+        drawerHistory: pushDrawerHistory(state.drawerHistory, id),
+      })),
+      closeNodeDrawer: () => set({ drawerNodeId: null, drawerHistory: { entries: [], cursor: -1 } }),
+      drawerBack: () => set((state) => {
+        const cursor = state.drawerHistory.cursor - 1
+        if (cursor < 0) return {}
+        return {
+          drawerNodeId: state.drawerHistory.entries[cursor]!,
+          drawerHistory: { ...state.drawerHistory, cursor },
+        }
+      }),
+      drawerForward: () => set((state) => {
+        const cursor = state.drawerHistory.cursor + 1
+        if (cursor >= state.drawerHistory.entries.length) return {}
+        return {
+          drawerNodeId: state.drawerHistory.entries[cursor]!,
+          drawerHistory: { ...state.drawerHistory, cursor },
+        }
+      }),
 
       // Viewport
       viewport: { x: 0, y: 0, zoom: 1 },
@@ -572,6 +607,18 @@ export const useCanvasStore = create<CanvasState>()(
     }
   )
 )
+
+/** Record a drawer move. A move from the middle of the trail drops whatever
+ *  was ahead of it, the way every back/forward history does; re-opening the
+ *  entity already shown is not a move. */
+function pushDrawerHistory(
+  history: { entries: string[]; cursor: number },
+  id: string,
+): { entries: string[]; cursor: number } {
+  if (history.entries[history.cursor] === id) return history
+  const entries = [...history.entries.slice(0, history.cursor + 1), id]
+  return { entries, cursor: entries.length - 1 }
+}
 
 /** A logical grouping (`logical:<id>`) is a visual container the view config
  *  declares, not an entity in the graph. It has no urn to trace, expand or

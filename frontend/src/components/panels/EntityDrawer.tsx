@@ -123,6 +123,24 @@ export function EntityDrawer({
   const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const drawerBackStep = useCanvasStore((s) => s.drawerBack)
+  const drawerForwardStep = useCanvasStore((s) => s.drawerForward)
+  const canDrawerBack = useCanvasStore((s) => s.drawerHistory.cursor > 0)
+  const canDrawerForward = useCanvasStore(
+    (s) => s.drawerHistory.cursor < s.drawerHistory.entries.length - 1)
+  // Retracing is a move on the CANVAS too: the drawer showing an entity the
+  // board is not looking at is how people lose their place. Select it (so the
+  // canvas highlight follows) and reveal it, exactly as clicking a neighbour
+  // row does — the reveal is best-effort and never blocks the panel swap.
+  const stepDrawer = useCallback((step: () => void) => {
+    step()
+    const target = useCanvasStore.getState().drawerNodeId
+    if (!target) return
+    useCanvasStore.getState().selectNode(target)
+    void onFocusNode?.(target)
+  }, [onFocusNode])
+  const drawerBack = useCallback(() => stepDrawer(drawerBackStep), [stepDrawer, drawerBackStep])
+  const drawerForward = useCallback(() => stepDrawer(drawerForwardStep), [stepDrawer, drawerForwardStep])
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
@@ -511,6 +529,47 @@ export function EntityDrawer({
           {/* Type Badge & Close */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
+              {/* The trail. Following lineage from here is a WALK — a
+                  consumer, then its consumer — and a walk you cannot retrace
+                  is one people stop taking. Rendered only once there is
+                  somewhere to go, so a drawer opened on one entity carries no
+                  dead controls. */}
+              {(canDrawerBack || canDrawerForward) && (
+                <div className="flex items-center gap-0.5 mr-0.5">
+                  <button
+                    type="button"
+                    onClick={drawerBack}
+                    disabled={!canDrawerBack}
+                    aria-label="Back to the previous entity"
+                    title="Back"
+                    className={cn(
+                      'p-1.5 rounded-lg transition-colors duration-150',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canDrawerBack
+                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
+                        : 'text-ink-muted opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    <LucideIcons.ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={drawerForward}
+                    disabled={!canDrawerForward}
+                    aria-label="Forward to the next entity"
+                    title="Forward"
+                    className={cn(
+                      'p-1.5 rounded-lg transition-colors duration-150',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canDrawerForward
+                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
+                        : 'text-ink-muted opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    <LucideIcons.ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
               <span
                 className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide"
                 style={{ backgroundColor: colors.bg, color: colors.text }}

@@ -16,7 +16,7 @@
  * center the canvas (onFocusNode prop).
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
@@ -24,7 +24,9 @@ import {
   useSchemaStore,
   useContainmentEdgeTypes,
   useEntityTypeHierarchyMap,
+  normalizeEdgeType,
 } from '@/store/schema'
+import { isContainmentEdgeType } from '@/store/schema'
 import {
   deriveNeighborRecords,
   mergeSupplementalEdges,
@@ -137,6 +139,22 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   // Lineage-only neighbors. Containment edges (structural parent ↔ child) are
   // filtered out — the section is about flow lineage. Shared derivation with
   // the canvas Lineage Lens so both surfaces always agree.
+  // WHICH PARENT each partner sits in. `useLensLineage` already fetches the
+  // containment edges POINTING AT the partners for exactly this reason — a
+  // field name without its parent dataset is not identifying information,
+  // and three partners all called `account_id` are indistinguishable without
+  // it. The Lens shows that path; this panel showed a raw URN instead.
+  const parentLabelOf = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const e of edges) {
+      if (!isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) continue
+      if (map.has(e.target)) continue
+      const parent = nodeMap.get(e.source)
+      if (parent) map.set(e.target, resolveEntityName(parent.data, 'business', e.source))
+    }
+    return map
+  }, [edges, nodeMap, containmentEdgeTypes])
+
   const { incomingRecords, outgoingRecords } = useMemo(
     () => deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes),
     [edges, nodeMap, nodeId, containmentEdgeTypes],
@@ -270,6 +288,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
       )}
 
 
+      <ParentLabelContext.Provider value={parentLabelOf}>
       <div className="space-y-2">
         <DirectionCard
           direction="incoming"
@@ -300,6 +319,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           setSelectedIds={setSelectedIds}
         />
       </div>
+      </ParentLabelContext.Provider>
 
       {/* Sticky action bar at the panel level (outside the DirectionCards'
           overflow-hidden wrappers) so it can anchor to the drawer scroll
@@ -1237,6 +1257,12 @@ function EntityTypeGroup({
   )
 }
 
+/** Partner → its containing entity's name. A cross-cutting lookup rather
+ *  than a structural prop: it would otherwise be drilled through the
+ *  direction card, the filter rows and the type group to reach one line of
+ *  one row. Empty by default, so a row simply falls back to the urn. */
+const ParentLabelContext = createContext<ReadonlyMap<string, string>>(new Map())
+
 function NeighborRow({
   record,
   direction,
@@ -1261,6 +1287,7 @@ function NeighborRow({
 }) {
   const [busy, setBusy] = useState(false)
   const { neighborNode, edgeTypeNorm, neighborId, alsoTypes } = record
+  const parentLabel = useContext(ParentLabelContext).get(neighborId)
   const isIncoming = direction === 'incoming'
   const accent = isIncoming ? 'text-blue-500' : 'text-green-500'
   const accentBg = isIncoming ? 'bg-blue-500/10' : 'bg-green-500/10'
@@ -1275,7 +1302,9 @@ function NeighborRow({
   // mapper ever writes and no backend field defines, so the URN was already what
   // rendered here; the dead branch is gone, the output is unchanged.)
   const label = resolveEntityName(data, 'business', neighborId)
-  const secondary = data?.urn ?? neighborId
+  // The parent first — it is what tells two identically-named fields apart.
+  // The urn stays as the fallback for a partner whose parent never arrived.
+  const secondary = parentLabel ?? data?.urn ?? neighborId
   const showSecondary = secondary && secondary !== label
 
   // Reveal lifecycle: while the parent's `onClick` (the canvas's reveal
