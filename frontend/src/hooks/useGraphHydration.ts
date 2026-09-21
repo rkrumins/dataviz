@@ -780,11 +780,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (controller.signal.aborted) return
                         settled.forEach((outcome, i) => {
                             if (outcome.status !== 'fulfilled') {
-                                // One anchor's children missing is a partial load,
-                                // not a dead view — the others still render.
-                                batchErrors.push(outcome.reason)
+                                // Left to the COLUMN, not the view: with no pager
+                                // seeded, its load-more row asks for the first page
+                                // again when it comes into view, and says so with a
+                                // Retry if that fails too. As a view-level failure
+                                // it re-ran every query and replaced the whole graph
+                                // on each retry — forever, for a failure that stays.
                                 console.warn(
-                                    `[useGraphHydration] children of anchored column ${anchorUrns[i]} failed to load`,
+                                    `[useGraphHydration] children of anchored column ${anchorUrns[i]} failed to load — the column retries them`,
                                     outcome.reason,
                                 )
                                 return
