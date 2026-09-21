@@ -14,9 +14,14 @@
  *
  * The throwaway profile is set to draw EVERY line: the product default
  * ('stubs') draws lines only for the hovered or selected entity, which on a
- * probe with nothing selected is no lines at all. Requires the dev stack up.
+ * probe with nothing selected is no lines at all.
+ *
+ * Folding is a preview behind `canvasLayerFoldEnabled`, which ships OFF, and
+ * even then each reader opts in. The flag is switched on for THIS browser
+ * only (`overrideFeatures`), and folding is turned on the way a person would:
+ * the Fold button in the layer strip. Requires the dev stack up.
  */
-import { connect, login, helpers, APP_ORIGIN } from './app-probe.mjs'
+import { connect, login, helpers, overrideFeatures, APP_ORIGIN } from './app-probe.mjs'
 
 const argv = process.argv.slice(2)
 const openFlag = argv.indexOf('--open')
@@ -74,14 +79,18 @@ const STATE = `return (() => {
   return { overflow: scroller.scrollWidth - scroller.clientWidth, lines: ends.length, cols }
 })()`
 
-const { cdp, evalJs, goto, shot, waitForCanvas, close } = await connect()
+const conn = await connect()
+const { cdp, evalJs, goto, shot, waitForCanvas, close } = conn
 try {
+  await overrideFeatures(conn, { canvasLayerFoldEnabled: true })
   await login(evalJs, goto)
   await evalJs(`
     const raw = localStorage.getItem('nexus-preferences')
     const p = raw ? JSON.parse(raw) : { state: {}, version: 7 }
     p.state.lineageRenderMode = 'raw'
-    p.state.canvasFoldLayers = true
+    // A run ends folded ("Fold" folds them again), and the choice persists:
+    // start every run from the default rather than from the last run's end.
+    p.state.canvasFoldLayers = false
     p.state.canvasZoom = 1
     localStorage.setItem('nexus-preferences', JSON.stringify(p))
     localStorage.removeItem('nx-layer-widths')
@@ -95,6 +104,13 @@ try {
 
   let s = await evalJs(STATE)
   const folded = () => s.cols.filter(c => c.folded)
+  // Opt-in: with the flag on the Fold button is offered, and nothing is
+  // folded until someone presses it.
+  const offered = await evalJs(`const b = document.querySelector('[data-fold-toggle]'); return b ? b.getAttribute('aria-pressed') : null`)
+  check('folding is offered, and starts off', offered === 'false' && folded().length === 0, `button: ${offered}`)
+  await evalJs(`document.querySelector('[data-fold-toggle]')?.click(); return true`)
+  await settle(1500)
+  s = await evalJs(STATE)
   check('some layers fold to fit', folded().length > 0, s.cols.map(c => c.folded ? `|${c.width}|` : `[${c.width}]`).join(' '))
   check('every layer is on screen — nothing scrolls sideways', s.overflow <= 1 && s.cols.every(c => c.onScreen), `overflow ${s.overflow}px`)
   check('spines share one width', new Set(folded().map(c => c.width)).size <= 1)

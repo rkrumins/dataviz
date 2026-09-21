@@ -30,6 +30,10 @@ import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
+import { OffCanvasStub } from './OffCanvasStub'
+import { unitNoun } from './connections/connectionUnits'
+import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -48,6 +52,9 @@ export const SAME_COLUMN_LANE_STEP = 8
 // keep the first 4 lanes unclipped (≈ 62px).
 export const EXTREMITY_EDGE_GUTTER_PX =
   SAME_COLUMN_LANE_START + SAME_COLUMN_LANE_BASE + SAME_COLUMN_LANE_STEP * 4
+
+/** How far a PORTAL chip sits in from the viewport's edge (see ghostCues). */
+const PORTAL_INSET = 10
 
 export function LineageFlowOverlay({
   nodes,
@@ -71,6 +78,9 @@ export function LineageFlowOverlay({
   flowRibbons,
   focusNodeId,
   onAnchorProxies,
+  offCanvasLineage,
+  onBringInOffCanvas,
+  layerNames,
 }: {
   nodes: any[],
   edges: any[],
@@ -110,6 +120,13 @@ export function LineageFlowOverlay({
   /** Rail payload per layer id — called only when the rail content
    *  actually changes (the compute pass runs per frame). */
   onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
+  /** Per row: lineage whose far end is not on the canvas at all (never
+   *  loaded) — drawn as a stub beside the row. See ghostCues. */
+  offCanvasLineage?: ReadonlyMap<string, OffCanvasLineage>,
+  /** A stub's click: bring that row's off-canvas partners in. */
+  onBringInOffCanvas?: (nodeId: string, side: 'in' | 'out') => void,
+  /** Layer display names by id — a portal chip names where lineage goes. */
+  layerNames?: ReadonlyMap<string, string>,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -145,6 +162,17 @@ export function LineageFlowOverlay({
   const [proxyEdges, setProxyEdges] = useState<Array<{
     id: string; source: string; target: string; pathD: string; color: string
   }>>([])
+  // Ghost lines — from a row to the PORTAL chip at the viewport edge for its
+  // partners scrolled out of sight sideways. One per row and side, level with
+  // the row, ending under a chip that is really rendered: measured geometry.
+  const [ghostLines, setGhostLines] = useState<Array<{ key: string; pathD: string; color: string }>>([])
+  // Off-canvas stubs — viewport coordinates, like the badges.
+  const [offCanvasStubs, setOffCanvasStubs] = useState<Array<{
+    key: string; nodeId: string; side: 'in' | 'out'; x: number; y: number; count: number
+  }>>([])
+  // Latest off-canvas map for updateFlow, which must not take it as a
+  // dependency (its identity changes whenever the projection does).
+  const offCanvasRef = useRef(offCanvasLineage)
   // Rail bookkeeping — refs so updateFlow never needs new dependencies.
   // dockedProxyIds bounds per-frame DOM lookups to chips that actually
   // exist (≤ rail cap per column), regardless of the focus node's fan.
@@ -226,6 +254,11 @@ export function LineageFlowOverlay({
     onAnchorProxiesRef.current = onAnchorProxies
   }, [onAnchorProxies])
 
+  useEffect(() => {
+    offCanvasRef.current = offCanvasLineage
+    scheduleUpdate()
+  }, [offCanvasLineage, scheduleUpdate])
+
   // Clear periphery summaries when the overlay unmounts (lineage flow
   // toggled off) so columns never show stale connection counts.
   useEffect(() => () => { useColumnPeripheryStore.getState().clear() }, [])
@@ -274,7 +307,7 @@ export function LineageFlowOverlay({
     // partners into up/down/left/right.
     const viewportRect = containerRef.current.parentElement?.getBoundingClientRect() ?? containerRect
 
-    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string>, layerId: string | null }>()
+    const buckets = new Map<string, { gutterXs: number[], ys: number[], direction: OverflowDirection, colors: string[], edgeCount: number, partnerIds: string[], partnerSet: Set<string>, layerId: string | null, partnerLayerIds: Set<string>, ghostStarts: Map<string, { sx: number; sy: number; color: string }> }>()
 
     // Helper: look up or cache a DOM element. A cached element that has
     // DETACHED (expand/collapse and the virtualizer remount rows under
@@ -708,7 +741,7 @@ export function LineageFlowOverlay({
           )
         : gutterX
       if (!buckets.has(bucketKey)) {
-        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [], partnerSet: new Set(), layerId: partnerLayer })
+        buckets.set(bucketKey, { gutterXs: [], ys: [], direction, colors: [], edgeCount: 0, partnerIds: [], partnerSet: new Set(), layerId: partnerLayer, partnerLayerIds: new Set(), ghostStarts: new Map() })
       }
       const bucket = buckets.get(bucketKey)!
       bucket.gutterXs.push(badgeX)
@@ -722,13 +755,23 @@ export function LineageFlowOverlay({
         bucket.partnerIds.push(partnerId)
       }
 
-      // Off-screen lineage is conveyed by the directional BADGES built
-      // above (and the column periphery summaries) — NOT by per-edge
-      // trailing stubs. Those stubs ran from every visible row to a
-      // shared viewport-edge exit point, so a column of 160+ rows fanned
-      // into a moiré of vertical dashed lines that read as ghost/offset
-      // edges and never felt tied to a card. Removed entirely; the badge
-      // is the single, honest off-screen indicator.
+      // Sideways: the badge becomes a PORTAL that names where the lineage
+      // goes, and the row gets ONE ghost line to it — per row and side, not
+      // per edge, and level with the row. The per-edge trailing stubs this
+      // file once had ran every row to a SHARED exit point on the edge, so a
+      // tall column fanned into a moiré that never felt tied to a card; a
+      // line per row at the row's own height cannot fan.
+      if (isHorizontal) {
+        const owner = findOwningLayer(partnerId)
+        if (owner) bucket.partnerLayerIds.add(owner)
+        if (!bucket.ghostStarts.has(visibleNodeId)) {
+          bucket.ghostStarts.set(visibleNodeId, {
+            sx: direction === 'right' ? vRect.right - containerRect.left + 6 : vRect.left - containerRect.left - 8,
+            sy,
+            color,
+          })
+        }
+      }
     })
 
     // Keep the previous array when nothing moved — see rowEquality.ts. A scroll
@@ -763,6 +806,7 @@ export function LineageFlowOverlay({
     // can't be attributed to a column: all horizontal (left/right)
     // directions plus the rare unresolvable-partner vertical fallback.
     const badges: OverflowBadge[] = []
+    const ghostLinesNext: Array<{ key: string; pathD: string; color: string }> = []
     const peripherySummaries: Record<string, ColumnPeripherySummary> = {}
     buckets.forEach((bucket) => {
       const horizontal = bucket.direction === 'left' || bucket.direction === 'right'
@@ -794,9 +838,28 @@ export function LineageFlowOverlay({
       const viewX = (x: number) => x + containerRect.left - viewportRect.left
       const viewY = (y: number) => y + containerRect.top - viewportRect.top
       const avgY = bucket.ys.reduce((a, b) => a + b, 0) / bucket.ys.length
+      if (horizontal) {
+        // The portal chip hugs the edge (see the badge layer); its ghost
+        // lines end just inside it, under the chip, so each reads as
+        // running INTO it.
+        const ex = bucket.direction === 'right'
+          ? viewportRect.right - containerRect.left - PORTAL_INSET - 4
+          : viewportRect.left - containerRect.left + PORTAL_INSET + 4
+        bucket.ghostStarts.forEach((start, rowId) => {
+          const reach = ex - start.sx
+          // A row that itself runs past the edge (its column is the one the
+          // edge cuts) is already AT the portal — a line would run backwards.
+          if ((bucket.direction === 'right' ? reach : -reach) < 12) return
+          ghostLinesNext.push({
+            key: `${bucket.direction}:${rowId}`,
+            pathD: `M ${start.sx} ${start.sy} C ${start.sx + reach * 0.45} ${start.sy}, ${ex - reach * 0.2} ${avgY}, ${ex} ${avgY}`,
+            color: start.color,
+          })
+        })
+      }
       badges.push({
         gutterX: horizontal
-          ? (bucket.direction === 'left' ? 30 : viewportRect.width - 30)
+          ? (bucket.direction === 'left' ? PORTAL_INSET : viewportRect.width - PORTAL_INSET)
           : viewX(bucket.gutterXs.reduce((a, b) => a + b, 0) / bucket.gutterXs.length),
         y: horizontal
           ? viewY(avgY)
@@ -806,9 +869,44 @@ export function LineageFlowOverlay({
         color: bucket.colors[0] || '#3b82f6',
         partnerIds: bucket.partnerIds,
         partnerTotal: bucket.partnerSet.size,
+        partnerLayerIds: [...bucket.partnerLayerIds],
       })
     })
     setOverflowBadges(prev => (sameRows(prev, badges) ? prev : badges))
+    setGhostLines(prev => (sameRows(prev, ghostLinesNext) ? prev : ghostLinesNext))
+
+    // ── Off-canvas stubs — lineage whose far end was never loaded ─────────
+    // Per visible row, beside its card and inside the viewport only: the
+    // badge layer is pinned to the viewport, and anything placed past its
+    // edge would widen the scrollable area (the bug the badge layer's
+    // sticky pin exists to prevent).
+    const stubsNext: Array<{ key: string; nodeId: string; side: 'in' | 'out'; x: number; y: number; count: number }> = []
+    const offCanvas = offCanvasRef.current
+    if (offCanvas && offCanvas.size > 0) {
+      globalVisibleNodes.forEach(domId => {
+        const nodeId = domId.slice('layer-node-'.length)
+        const lineage = offCanvas.get(nodeId)
+        if (!lineage) return
+        const el = getEl(domId)
+        if (!el || el.hasAttribute('data-fold-anchor')) return
+        const r = el.getBoundingClientRect()
+        if (isCenterClipped(el, r)) return
+        // In the row's upper third, not on its centre line: the centre is
+        // where the column's own same-column lanes attach, in the same half
+        // of the gap, and a count sitting on them reads as theirs.
+        const y = r.top + r.height * 0.3 - viewportRect.top
+        if (y < 0 || y > viewportRect.height) return
+        const right = r.right - viewportRect.left
+        const left = r.left - viewportRect.left
+        if (lineage.out > 0 && right >= 0 && right + OFF_CANVAS_STUB_WIDTH <= viewportRect.width) {
+          stubsNext.push({ key: `${nodeId}:out`, nodeId, side: 'out', x: right, y, count: lineage.out })
+        }
+        if (lineage.in > 0 && left - OFF_CANVAS_STUB_WIDTH >= 0 && left <= viewportRect.width) {
+          stubsNext.push({ key: `${nodeId}:in`, nodeId, side: 'in', x: left, y, count: lineage.in })
+        }
+      })
+    }
+    setOffCanvasStubs(prev => (sameRows(prev, stubsNext) ? prev : stubsNext))
     setProxyEdges(prev => (sameRows(prev, proxyEdgesNext) ? prev : proxyEdgesNext))
 
     // Periphery emission — through the dedicated store so only the
@@ -1730,6 +1828,23 @@ export function LineageFlowOverlay({
             Anchor Rail chips. The chip is real rendered DOM, so this is
             measured geometry. Solid and near-full opacity: these ARE the
             focused node's flows, each with a named destination. ── */}
+        {/* Ghost lines to the portal chips — dashed and faint: they say
+            where lineage goes, not what it is. Under the columns like every
+            line, so a row they pass reads above them. */}
+        {ghostLines.map(g => (
+          <path
+            key={g.key}
+            data-ghost-line={g.key}
+            d={g.pathD}
+            stroke={g.color}
+            strokeWidth={1.3}
+            strokeDasharray="4 5"
+            fill="none"
+            opacity={0.5}
+            strokeLinecap="round"
+            className="pointer-events-none"
+          />
+        ))}
         {proxyEdges.map(pe => (
           <g key={pe.id} data-edge-id={pe.id} data-edge-src={pe.source} data-edge-tgt={pe.target}>
             <path
@@ -1764,6 +1879,76 @@ export function LineageFlowOverlay({
     <div className="sticky top-0 left-0 z-40 h-0 w-0 overflow-visible pointer-events-none">
       {overflowBadges.map((badge, i) => {
         const isHorizontal = badge.direction === 'left' || badge.direction === 'right'
+        if (isHorizontal) {
+          // A PORTAL: where the lineage goes, named — the entity and its
+          // layer, or how many and in which layers — hugging the edge it
+          // leaves by. The dashed border is the ghost: this is a way out of
+          // the view, not something in it.
+          const names = badge.partnerIds.map(id => nodeNameById.get(id) ?? id)
+          const layers = badge.partnerLayerIds.map(id => layerNames?.get(id) ?? id)
+          const label = portalLabel(names, badge.partnerTotal, layers)
+          const toRight = badge.direction === 'right'
+          const extra = badge.partnerTotal - badge.partnerIds.length
+          return (
+            <div
+              key={`portal-${i}`}
+              className="absolute pointer-events-none"
+              style={{
+                left: badge.gutterX,
+                top: badge.y,
+                transform: toRight ? 'translate(-100%, -50%)' : 'translate(0, -50%)',
+              }}
+            >
+              <InfoTooltip
+                side={toRight ? 'left' : 'right'}
+                content={
+                  <div>
+                    <p className="font-semibold mb-1">
+                      {badge.count} {unitNoun(badge.count, 'lines')} out of sight, {toRight ? 'to the right' : 'to the left'}
+                    </p>
+                    {names.map((name, j) => (
+                      <div key={j} className="flex items-center gap-1.5 min-w-0">
+                        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: badge.color }} />
+                        <span className="truncate text-ink-muted">{name}</span>
+                      </div>
+                    ))}
+                    {extra > 0 && <p className="text-ink-muted mt-0.5">+{extra} more {extra === 1 ? 'entity' : 'entities'}</p>}
+                    <p className="mt-1.5 text-ink-muted italic">Click to scroll there</p>
+                  </div>
+                }
+              >
+                <button
+                  type="button"
+                  data-canvas-interactive
+                  data-portal={badge.direction}
+                  aria-label={`${label} — ${badge.count} ${unitNoun(badge.count, 'lines')} out of sight ${toRight ? 'to the right' : 'to the left'}. Scroll there`}
+                  className="pointer-events-auto flex items-center gap-1 max-w-[10rem] px-2 py-[3px] rounded-full border border-dashed shadow-sm cursor-pointer hover:scale-[1.03] active:scale-95 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  style={{
+                    color: badge.color,
+                    borderColor: `${badge.color}80`,
+                    backgroundColor: 'color-mix(in srgb, var(--nx-bg-elevated) 92%, transparent)',
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleBadgeClick(badge)
+                  }}
+                >
+                  {!toRight && (
+                    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" className="flex-shrink-0" aria-hidden>
+                      <path d="M8.5 3L4.5 7L8.5 11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                  <span className="truncate text-[10.5px] font-medium">{label}</span>
+                  {toRight && (
+                    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" className="flex-shrink-0" aria-hidden>
+                      <path d="M5.5 3L9.5 7L5.5 11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </button>
+              </InfoTooltip>
+            </div>
+          )
+        }
         const rotation = badge.direction === 'up' ? undefined
           : badge.direction === 'down' ? 'rotate(180deg)'
           : badge.direction === 'left' ? 'rotate(-90deg)'
@@ -1845,6 +2030,16 @@ export function LineageFlowOverlay({
           </div>
         )
       })}
+      {offCanvasStubs.map(stub => (
+        <OffCanvasStub
+          key={stub.key}
+          side={stub.side}
+          count={stub.count}
+          x={stub.x}
+          y={stub.y}
+          onBringIn={onBringInOffCanvas ? () => onBringInOffCanvas(stub.nodeId, stub.side) : undefined}
+        />
+      ))}
     </div>
     {hoveredEdgeId && hoverMousePos && (() => {
       const edge = computedEdges.find(e => e.id === hoveredEdgeId)

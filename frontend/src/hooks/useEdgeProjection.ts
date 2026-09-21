@@ -195,6 +195,26 @@ function buildFullAncestorMap(
   return map
 }
 
+/**
+ * Lineage from a row ON the canvas to entities that are NOT: its far ends
+ * were never loaded. Per direction, as seen from the row — `in` flows arrive
+ * at it, `out` flows leave it — counted in UNDERLYING flows (a roll-up edge
+ * contributes every flow it stands for, as it does on a line), with the far
+ * ends (capped) so a click can bring them in.
+ */
+export interface OffCanvasLineage {
+  in: number
+  out: number
+  inPartners: ReadonlySet<string>
+  outPartners: ReadonlySet<string>
+}
+
+/** Far ends kept per row and direction — enough for a click to bring in a
+ *  first batch; the counts stay exact beyond it. */
+const OFF_CANVAS_PARTNER_CAP = 500
+
+const NO_OFF_CANVAS: ReadonlyMap<string, OffCanvasLineage> = new Map()
+
 // ============================================
 // Hook
 // ============================================
@@ -223,7 +243,7 @@ export function useEdgeProjection({
   nodeLayerIndexMap,
   hiddenEdgeTypes,
   ancestorChains,
-}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number } {
+}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
   // user-facing count itself is returned from the projection memo (no ref —
@@ -353,7 +373,7 @@ export function useEdgeProjection({
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
   // This memo only re-runs when edges or the ancestorMap actually change.
   const projection = useMemo(() => {
-    if (!showLineageFlow) return { edges: [], unresolvedCount: 0, hiddenInsideCount: 0 }
+    if (!showLineageFlow) return { edges: [], unresolvedCount: 0, hiddenInsideCount: 0, offCanvas: NO_OFF_CANVAS }
 
     const edgeGroups = new Map<string, any[]>()
 
@@ -378,6 +398,46 @@ export function useEdgeProjection({
         if (anchor) return anchor
       }
       return undefined
+    }
+
+    // How many underlying relationships ONE member stands for. A raw edge is
+    // itself, so it weighs one; a roll-up arrives carrying the real total and
+    // must contribute ALL of it. Counting members instead reported a rollup
+    // summarising 4,300 table-level flows as `1`, which then sorted below any
+    // pair holding two raw edges when the adaptive budget culls.
+    //
+    // Two shapes, one meaning: the collapsed aggregate built in section A puts
+    // the total on `data.edgeCount`, while a MATERIALIZED `:AGGREGATED` graph
+    // edge arrives through ordinary hydration with the worker's `weight` mapped
+    // onto `data.sourceEdgeCount` (`toCanvasEdge`). Reading only the first
+    // weighed the second as 1, so the drawer — whose `edgeWeight` reads both —
+    // said 4,300 about the very line this panel said 1 about.
+    const memberWeight = (e: { data?: { isAggregated?: boolean, edgeCount?: number, sourceEdgeCount?: number } }): number => {
+      const d = e.data
+      if (!d?.isAggregated) return 1
+      const n = d.edgeCount ?? d.sourceEdgeCount
+      return typeof n === 'number' && n > 0 ? n : 1
+    }
+
+    // An edge with ONE end on canvas: the row it resolves to carries it as
+    // off-canvas lineage (see OffCanvasLineage). A type the reader hid is
+    // hidden here too — a stub must not count what the lines would not draw.
+    const offCanvas = new Map<string, { in: number; out: number; inPartners: Set<string>; outPartners: Set<string> }>()
+    const noteOffCanvas = (sId: string | null | undefined, tId: string | null | undefined,
+      source: string, target: string, types: readonly string[], weight: number) => {
+      if ((sId && tId) || (!sId && !tId)) return
+      if (hiddenEdgeTypes && hiddenEdgeTypes.size > 0 && types.length > 0
+        && types.every(t => hiddenEdgeTypes.has(t.toUpperCase()))) return
+      const anchor = (sId ?? tId)!
+      let entry = offCanvas.get(anchor)
+      if (!entry) { entry = { in: 0, out: 0, inPartners: new Set(), outPartners: new Set() }; offCanvas.set(anchor, entry) }
+      if (sId) {
+        entry.out += weight
+        if (entry.outPartners.size < OFF_CANVAS_PARTNER_CAP) entry.outPartners.add(target)
+      } else {
+        entry.in += weight
+        if (entry.inPartners.size < OFF_CANVAS_PARTNER_CAP) entry.inPartners.add(source)
+      }
     }
 
     // A. Aggregated Edges
@@ -417,6 +477,9 @@ export function useEdgeProjection({
           // just the both-unresolved case, so the surfaced hidden-count
           // matches what the user actually can't see.
           unresolvedThisPass++
+          noteOffCanvas(sId, tId, agg.sourceUrn, agg.targetUrn,
+            Array.isArray(agg.edgeTypes) && agg.edgeTypes.length > 0 ? agg.edgeTypes : ['AGGREGATED'],
+            memberWeight({ data: { isAggregated: true, edgeCount: agg.edgeCount } }))
         }
       })
 
@@ -513,6 +576,7 @@ export function useEdgeProjection({
           // Endpoint resolves to nothing on canvas (unloaded or unassigned
           // entity) — the edge is hidden, and counted.
           unresolvedThisPass++
+          noteOffCanvas(sId, tId, edge.source, edge.target, [normalizeEdgeType(edge)], memberWeight(edge))
         } else {
           // sId === tId: a legitimate self-rollup, but not a non-event.
           // Counted separately so the canvas can offer to open the
@@ -545,6 +609,7 @@ export function useEdgeProjection({
           }, edge.edgeType, lifted)
         } else if (!sId || !tId) {
           unresolvedThisPass++
+          noteOffCanvas(sId, tId, edge.sourceUrn, edge.targetUrn, edge.edgeType ? [edge.edgeType] : [], 1)
         }
       })
 
@@ -648,25 +713,6 @@ export function useEdgeProjection({
       if (!Array.isArray(arr) || arr.length === 0) return own
       if (arr.length > 1 && e.data?.isAggregated && own.length > 0) return own
       return arr
-    }
-
-    // How many underlying relationships ONE member stands for. A raw edge is
-    // itself, so it weighs one; a roll-up arrives carrying the real total and
-    // must contribute ALL of it. Counting members instead reported a rollup
-    // summarising 4,300 table-level flows as `1`, which then sorted below any
-    // pair holding two raw edges when the adaptive budget culls.
-    //
-    // Two shapes, one meaning: the collapsed aggregate built in section A puts
-    // the total on `data.edgeCount`, while a MATERIALIZED `:AGGREGATED` graph
-    // edge arrives through ordinary hydration with the worker's `weight` mapped
-    // onto `data.sourceEdgeCount` (`toCanvasEdge`). Reading only the first
-    // weighed the second as 1, so the drawer — whose `edgeWeight` reads both —
-    // said 4,300 about the very line this panel said 1 about.
-    const memberWeight = (e: { data?: { isAggregated?: boolean, edgeCount?: number, sourceEdgeCount?: number } }): number => {
-      const d = e.data
-      if (!d?.isAggregated) return 1
-      const n = d.edgeCount ?? d.sourceEdgeCount
-      return typeof n === 'number' && n > 0 ? n : 1
     }
 
     // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
@@ -812,8 +858,9 @@ export function useEdgeProjection({
       }
     })
 
-    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass }
-    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass }
+    const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
+    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
+    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
   }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains])
 
   const projectedEdges = projection.edges
@@ -894,5 +941,6 @@ export function useEdgeProjection({
     hiddenInsideCollapsedCount: projection.hiddenInsideCount,
     // Legacy alias — same value; kept for existing consumers.
     unresolvedAggregatedCount: projection.unresolvedCount,
+    offCanvasByNode: projection.offCanvas,
   }
 }

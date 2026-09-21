@@ -115,6 +115,7 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
+import { BRING_IN_BATCH } from './ghostCues'
 import { shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -3997,9 +3998,11 @@ export function ContextViewCanvas({
   // is still showing BROWSE and must keep its wires and its honest count.
   // Where the lineage endpoints the canvas never loaded live, so their lines
   // roll up to a container on screen rather than read as leaving the view.
-  // Browse only, for the same reason as the projection below.
-  const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge)
-  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
+  // A preview behind `canvasLineageRollupEnabled` (off by default: a roll-up
+  // trades detail for coverage). Browse only, as the projection below.
+  const lineageRollup = useFeature('canvasLineageRollupEnabled')
+  const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge)
+  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
     nodesByLayer: renderByLayer, expandedNodes,
@@ -4021,7 +4024,9 @@ export function ContextViewCanvas({
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
-    ancestorChains,
+    // Chains already fetched stay cached, so switching the flag off must
+    // also stop them being USED.
+    ancestorChains: lineageRollup ? ancestorChains : undefined,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -4233,6 +4238,9 @@ export function ContextViewCanvas({
     })
     return map
   }, [traceRender, nodeLayerMap])
+  // Folding is offered only while `canvasLayerFoldEnabled` is on, and even
+  // then each reader opts in (`canvasFoldLayers`, off by default).
+  const layerFoldOffered = useFeature('canvasLayerFoldEnabled')
   const foldLayersEnabled = usePreferencesStore((s) => s.canvasFoldLayers)
   const setFoldLayersEnabled = usePreferencesStore((s) => s.setCanvasFoldLayers)
   const layerFold = useLayerFold({
@@ -4242,7 +4250,7 @@ export function ContextViewCanvas({
     // The wrapper's two edge gutters and, in draft, the add-layer column
     // (`w-64`) with the gap before it.
     reservedWidth: 2 * EXTREMITY_EDGE_GUTTER_PX + (isDraft ? COLUMN_GAP_PX + 256 : 0),
-    enabled: foldLayersEnabled,
+    enabled: layerFoldOffered && foldLayersEnabled,
     layerOf: (nodeId) => renderLayerOf.get(nodeId),
     revealTarget,
     selectedNodeId: selectedNodeIds.length === 1 ? selectedNodeId : null,
@@ -4281,6 +4289,50 @@ export function ContextViewCanvas({
     }
     return { ports, undrawn }
   }, [layerFold.folded, effectiveLineageEdges, renderLayerOf])
+
+  // A portal chip names the layer its lineage leads into.
+  const layerNameById = useMemo(
+    () => new Map(sortedLayers.map(layer => [layer.id, layer.name])),
+    [sortedLayers],
+  )
+
+  // An off-canvas stub's click: bring that row's partners onto the canvas, a
+  // batch at a time — the stub's count drops as they land, so the next click
+  // brings the next batch. Each is the drawer's reveal (its ancestors walked
+  // open) without the per-row scroll "Show all" does: a hundred scrolls in a
+  // row is a slideshow, not a reveal.
+  const bringInOffCanvas = useCallback(async (nodeId: string, side: 'in' | 'out') => {
+    const lineage = offCanvasByNode.get(nodeId)
+    const batch = lineage ? [...(side === 'out' ? lineage.outPartners : lineage.inPartners)].slice(0, BRING_IN_BATCH) : []
+    if (batch.length === 0) return
+    let next = 0
+    const worker = async () => {
+      while (next < batch.length) {
+        const id = batch[next++]
+        try { await revealOnCanvas(id, { skipFocus: true }) } catch { /* counted below */ }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(6, batch.length) }, worker))
+    const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+    const landed = batch.filter(id => loaded.has(id))
+    if (landed.length < batch.length) {
+      useNotificationStore.getState().add({
+        type: landed.length === 0 ? 'error' : 'warning',
+        message: landed.length === 0
+          ? `Couldn't bring any of those ${batch.length} entities onto the canvas`
+          : `Brought ${landed.length} of ${batch.length} entities onto the canvas — the rest could not be placed`,
+      })
+    }
+    // Show where they went only when none of them landed in sight: the
+    // batch can take seconds, and a scroll that arrives after the reader has
+    // moved on takes them somewhere they did not ask to go.
+    const box = horizontalScrollRef.current?.getBoundingClientRect()
+    const inSight = box && landed.some(id => {
+      const r = paintedRow(id)?.getBoundingClientRect()
+      return r && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right
+    })
+    if (landed[0] && !inSight) scrollHitIntoView(landed[0])
+  }, [offCanvasByNode, revealOnCanvas, scrollHitIntoView])
 
   // The panel reads the SAME array the overlay is handed, so "in view"
   // means post-budget and the drawn set is a subset of the model.
@@ -5510,7 +5562,7 @@ export function ContextViewCanvas({
               step: layerFold.step,
               canStep: layerFold.canStep,
             } : undefined}
-            foldToggle={layerFold.overflows ? {
+            foldToggle={layerFoldOffered && layerFold.overflows ? {
               enabled: foldLayersEnabled,
               onToggle: () => setFoldLayersEnabled(!foldLayersEnabled),
             } : undefined}
@@ -5642,6 +5694,11 @@ export function ContextViewCanvas({
               flowRibbons={flowRibbons}
               focusNodeId={railFocusId}
               onAnchorProxies={handleAnchorProxies}
+              offCanvasLineage={overlay.active ? undefined : offCanvasByNode}
+              // During a trace the reveal itself refuses to write the store
+              // (revealOnCanvas), so the click is safe to offer throughout.
+              onBringInOffCanvas={(nodeId, side) => { void bringInOffCanvas(nodeId, side) }}
+              layerNames={layerNameById}
             />
           )}
 

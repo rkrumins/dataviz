@@ -67,6 +67,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "traceEnabled":
         "Lineage tracing is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "canvasLineageRollupEnabled":
+        "Rolling lineage up to entities that are not loaded is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "editModeEnabled":
         "Editing is turned off for this deployment, so views are read-only. "
         "An administrator can enable it under Admin → Features.",
@@ -732,6 +735,58 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "safe to toggle at any time; users can always skip or replay it."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "canvasLayerFoldEnabled",
+        "name": "Fold distant layers",
+        "description": (
+            "Offer a Fold button on the Context View: layers outside the part of the canvas being "
+            "read fold into slim spines, so a wide view fits on screen and a line into a folded "
+            "layer lands on its spine instead of scrolling away."
+        ),
+        "impact_when_off": (
+            "The Fold button disappears and every layer stays at full width; a wide view scrolls "
+            "sideways, and lines to layers out of sight show as ghosts at the canvas edge. Folding "
+            "one layer by hand from its header keeps working. This is a preview; it ships off "
+            "until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Worth turning on for views with many layers. Each person still chooses whether to fold "
+            "— this only offers the button. Client-side only and safe to toggle at any time."
+        ),
+        "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "canvasLineageRollupEnabled",
+        "name": "Roll up lineage to unloaded entities",
+        "description": (
+            "When a line's far end is an entity the canvas has not loaded — inside a collapsed "
+            "container, say — draw it to the nearest container that is on screen, as a dashed "
+            "roll-up, instead of leaving it undrawn."
+        ),
+        "impact_when_off": (
+            "No roll-ups: every line on the canvas joins two entities exactly. A row whose lineage "
+            "reaches entities that are not loaded shows a ghost stub with the count, and a click "
+            "brings those entities in. This is a preview; it ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Roll-ups trade detail for coverage: one line between two containers can stand for "
+            "hundreds of flows between what they hold. Useful on sources whose aggregation has not "
+            "run; switch off where exact lines matter more."
+        ),
+        "sort_order": 2,
         "deprecated": False,
     },
 ]

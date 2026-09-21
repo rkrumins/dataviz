@@ -89,13 +89,22 @@ export async function connect() {
   let id = 0
   const pending = new Map()
   const events = []
+  const listeners = new Map()
   ws.onmessage = (m) => {
     const msg = JSON.parse(m.data)
     if (msg.id && pending.has(msg.id)) {
       const { resolve, reject } = pending.get(msg.id)
       pending.delete(msg.id)
       msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result)
-    } else if (msg.method) events.push(msg)
+    } else if (msg.method) {
+      events.push(msg)
+      for (const fn of listeners.get(msg.method) ?? []) fn(msg.params)
+    }
+  }
+  /** React to a CDP event as it arrives (`events` only records them). */
+  const on = (method, fn) => {
+    if (!listeners.has(method)) listeners.set(method, [])
+    listeners.get(method).push(fn)
   }
 
   const cdp = (method, params = {}) => new Promise((resolve, reject) => {
@@ -159,7 +168,33 @@ export async function connect() {
     throw new Error('canvas never painted a row')
   }
 
-  return { cdp, evalJs, goto, shot, waitForCanvas, close: () => ws.close(), events }
+  return { cdp, on, evalJs, goto, shot, waitForCanvas, close: () => ws.close(), events }
+}
+
+/**
+ * Serve feature flags as a deployment with them switched on would — to THIS
+ * browser only. The probe's browser reads `/api/v1/features/values` like any
+ * client; the response is rewritten in flight. Flipping the flag through the
+ * admin API instead would change the deployment for everyone using it.
+ * Call before navigating.
+ */
+export async function overrideFeatures({ cdp, on }, values) {
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: '*/api/v1/features/values*', requestStage: 'Response' }] })
+  on('Fetch.requestPaused', async (p) => {
+    try {
+      const { body, base64Encoded } = await cdp('Fetch.getResponseBody', { requestId: p.requestId })
+      const json = JSON.parse(base64Encoded ? Buffer.from(body, 'base64').toString('utf8') : body)
+      json.values = { ...(json.values ?? {}), ...values }
+      await cdp('Fetch.fulfillRequest', {
+        requestId: p.requestId,
+        responseCode: p.responseStatusCode ?? 200,
+        responseHeaders: p.responseHeaders,
+        body: Buffer.from(JSON.stringify(json)).toString('base64'),
+      })
+    } catch {
+      await cdp('Fetch.continueRequest', { requestId: p.requestId }).catch(() => {})
+    }
+  })
 }
 
 /**

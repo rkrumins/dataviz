@@ -80,7 +80,8 @@ interface PreferencesState {
 
   // Context View: when the layers do not all fit, the ones outside the open
   // window fold into spines, so every layer — and every flow into it — stays
-  // on screen. Off, the canvas scrolls sideways instead.
+  // on screen. Opt-in (and only offered while `canvasLayerFoldEnabled` is on):
+  // off, every layer keeps its full width and the canvas scrolls sideways.
   canvasFoldLayers: boolean
   setCanvasFoldLayers: (fold: boolean) => void
 
@@ -315,7 +316,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       canvasDockMinimized: false,
       setCanvasDockMinimized: (canvasDockMinimized) => set({ canvasDockMinimized }),
 
-      canvasFoldLayers: true,
+      canvasFoldLayers: false,
       setCanvasFoldLayers: (canvasFoldLayers) => set({ canvasFoldLayers }),
 
       // Entity drawer sections
@@ -488,7 +489,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       // columns and this preference are removed, so the key is dropped
       // rather than migrated. A state written before v5 no longer needs
       // its 'list' → 'graph' step either; nothing reads the field.
-      version: 7,
+      // v8 (2026-09-21): `canvasFoldLayers` is opt-in. A pre-release build
+      // shipped it ON by default, so a stored `true` is that default, not a
+      // choice anyone made — reset it.
+      version: 8,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -500,6 +504,7 @@ export const usePreferencesStore = create<PreferencesState>()(
           delete next.lensViewMode
           state = next
         }
+        if (version < 8) state = { ...state, canvasFoldLayers: false }
         return state
       },
     }

@@ -7,6 +7,7 @@ although the partner sat inside it. The chain is what lets the canvas file
 such an end under the container the reader can see — without loading it.
 """
 import asyncio
+import time
 from typing import List
 
 import pytest
@@ -14,6 +15,7 @@ from httpx import AsyncClient
 
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.feature_flags import feature_flags
 from backend.common.models.graph import GraphNode
 
 from backend.tests.test_api_graph import _BaseWithoutClosure, _StubProvider
@@ -44,6 +46,20 @@ class _BulkStub(_ChainStub):
 
     async def get_ancestor_chains(self, urns: List[str]):
         return {u: ["urn:bulk:parent"] for u in urns}
+
+
+def _rollup(on: bool) -> None:
+    """The route answers only while `canvasLineageRollupEnabled` is on — an
+    experimental flag, seeded OFF. Primed in the cache, which is the path the
+    gate reads in production (see conftest's `signup_enabled`)."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "canvasLineageRollupEnabled": on}
+    feature_flags._cache_ts = time.monotonic()
+
+
+@pytest.fixture(autouse=True)
+def rollup_on():
+    _rollup(True)
+    yield
 
 
 async def _post(client: AsyncClient, engine: ContextEngine, body):
@@ -101,6 +117,14 @@ async def test_a_reader_with_no_containment_walk_says_so(test_client: AsyncClien
     overlay = DraftOverlayProvider(_BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1")
     resp = await _post(test_client, ContextEngine(provider=overlay), {"urns": [LEAF]})
     assert resp.status_code == 501
+
+
+async def test_the_route_is_closed_while_the_rollup_is_off(test_client: AsyncClient):
+    """Off means off: the canvas stops asking, and anyone who knows the URL is
+    refused too — a flag that only hides a button is a lie."""
+    _rollup(False)
+    resp = await _post(test_client, ContextEngine(provider=_ChainStub()), {"urns": [LEAF]})
+    assert resp.status_code == 403
 
 
 def test_falkordb_answers_from_its_bulk_chain_path():
