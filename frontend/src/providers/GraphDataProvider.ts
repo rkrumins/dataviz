@@ -828,6 +828,10 @@ export interface GraphDataProvider {
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
             sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
+            /** Far end of the lineage leg: 'page' (default) = among the parent and this
+             *  page; 'siblings' = between this page and the parent or ANY of its children,
+             *  loaded or not. A pager uses 'siblings' so cross-page edges arrive per page. */
+            lineageScope?: 'page' | 'siblings'
         }
     ): Promise<{
         children: GraphNode[]

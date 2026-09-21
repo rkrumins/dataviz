@@ -9,8 +9,12 @@
  * failure modes structurally:
  *
  * - LATCH ON PROGRESS, NOT RENDERS: the sentinel fires at most once per
- *   `count` value, held in a ref — prop-identity churn can never re-arm it.
- *   It only re-fires after a page actually LANDS (count changed).
+ *   (`count`, `epoch`) pair, held in a ref — prop-identity churn can never
+ *   re-arm it. It only re-fires after a page actually LANDS: the count moved,
+ *   or `epoch` (pages landed for this parent) did — the latter covers a page
+ *   whose rows render in another column and leave the count unchanged.
+ * - A FAILED page does not re-arm it either: the row says the page failed and
+ *   waits for a click, rather than hammering a server that is failing.
  * - DWELL BEFORE FIRING (300ms): scrubbing past the row never pages; only
  *   pausing on it does.
  * - CALLER-GATED: LayerColumn passes `autoLoad=false` in Isolate/Hide
@@ -32,6 +36,8 @@ export function LoadMoreItem({
   isLoading = false,
   onLoadMore,
   autoLoad = false,
+  epoch,
+  failed = false,
 }: {
   parentId?: string
   depth: number
@@ -44,17 +50,22 @@ export function LoadMoreItem({
   onLoadMore: (auto?: boolean) => void
   /** One-page-ahead auto-load when the row scrolls into view. */
   autoLoad?: boolean
+  /** Pages landed for this parent so far; part of the latch key. */
+  epoch?: number
+  /** The last page for this parent failed — offer a retry, don't auto-fire. */
+  failed?: boolean
 }) {
   const indentWidth = depth * 16
   const nextPage = Math.min(CHILDREN_PAGE_SIZE, count)
 
   const rowRef = useRef<HTMLDivElement>(null)
-  const lastFiredCountRef = useRef<number | null>(null)
+  const lastFiredKeyRef = useRef<string | null>(null)
+  const latchKey = `${count}:${epoch ?? 0}`
   const onLoadMoreRef = useRef(onLoadMore)
   useEffect(() => { onLoadMoreRef.current = onLoadMore }, [onLoadMore])
 
   useEffect(() => {
-    if (!autoLoad || isLoading) return
+    if (!autoLoad || isLoading || failed) return
     const el = rowRef.current
     if (!el || typeof IntersectionObserver === 'undefined') return
     let dwell: ReturnType<typeof setTimeout> | null = null
@@ -63,10 +74,10 @@ export function LoadMoreItem({
         if (dwell !== null) { clearTimeout(dwell); dwell = null }
         return
       }
-      if (lastFiredCountRef.current === count) return
+      if (lastFiredKeyRef.current === latchKey) return
       dwell = setTimeout(() => {
         dwell = null
-        lastFiredCountRef.current = count
+        lastFiredKeyRef.current = latchKey
         onLoadMoreRef.current(true)
       }, 300)
     }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
@@ -75,7 +86,7 @@ export function LoadMoreItem({
       io.disconnect()
       if (dwell !== null) clearTimeout(dwell)
     }
-  }, [autoLoad, count, isLoading])
+  }, [autoLoad, latchKey, isLoading, failed])
 
   return (
     <motion.div
@@ -110,7 +121,9 @@ export function LoadMoreItem({
           if (!isLoading) onLoadMore()
         }}
         disabled={isLoading}
-        aria-label={`Load ${nextPage} more of ${count.toLocaleString()} remaining`}
+        aria-label={failed
+          ? `Couldn't load the next ${nextPage}. Retry`
+          : `Load ${nextPage} more of ${count.toLocaleString()} remaining`}
         className={cn(
           'flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           'bg-black/[0.02] border-black/[0.08] dark:bg-white/[0.03] dark:border-white/[0.08] text-ink-muted',
@@ -123,6 +136,14 @@ export function LoadMoreItem({
           <>
             <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" />
             <span className="tracking-wide">Loading…</span>
+          </>
+        ) : failed ? (
+          <>
+            <LucideIcons.RotateCw className="w-3.5 h-3.5" />
+            <span className="tracking-wide">
+              Couldn't load the next {nextPage}
+              <span className="text-ink-muted"> · Retry</span>
+            </span>
           </>
         ) : (
           <>

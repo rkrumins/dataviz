@@ -2519,13 +2519,16 @@ class GraphVersioningService:
         lineage_edge_types: Optional[Sequence[str]] = None, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, include_lineage_edges: bool = True,
         include_child_count: bool = True, limit: int = 100, offset: int = 0,
+        lineage_scope: str = "page",
     ) -> Dict[str, object]:
         """Branch/as-of-aware children-with-edges — the draft/as-of counterpart of the
         provider's ``get_children_with_edges``. One bounded round trip: the parent's OUT
         containment edges give the children (in = ancestors), then the page children's
         cross-edges give the lineage edges within {parent} ∪ children. Bounded by the
         parent's and the page's degree (ix_ev_source/target); mirrors ChildrenWithEdgesResult.
-        Edge-type classification is the graph's ontology sets, matched case-insensitively."""
+        Edge-type classification is the graph's ontology sets, matched case-insensitively.
+        ``lineage_scope="siblings"`` widens the far end from this page to EVERY child
+        of the parent (the incident scan is still over the page only)."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
         empty = {"children": [], "containmentEdges": [], "lineageEdges": [],
@@ -2557,6 +2560,8 @@ class GraphVersioningService:
             child_cc: Dict[str, int] = {}
             if page_ids and (include_lineage_edges or include_child_count):
                 scope = page_ids | {parent}
+                if lineage_scope == "siblings":
+                    scope = scope | set(cont_edge)
                 # One incident scan over the page serves both the lineage edges and each child's
                 # OUT-containment count (so an expanded child shows its own chevron) — no extra query.
                 for eid, p in (await self._incident_live_edges(s, graph_id, branch_id, page_ids, as_of_seq)).items():

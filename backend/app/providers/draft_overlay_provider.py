@@ -249,13 +249,14 @@ class DraftOverlayProvider:
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
-        sort_direction: str = "asc",
+        sort_direction: str = "asc", lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
         base = await self._base.get_children_with_edges(
             parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, offset=offset, limit=limit,
             include_lineage_edges=include_lineage_edges, sort_property=sort_property, cursor=cursor,
-            sort_direction=sort_direction)
+            sort_direction=sort_direction, **scope_kw)
         d = await self._delta_()
         if d.empty:
             return base
@@ -283,7 +284,15 @@ class DraftOverlayProvider:
             seen = {e.id for e in lineage}
             scope = present | {parent_urn}
             for e in d.lineage_added:
-                if e.id not in seen and e.source_urn in scope and e.target_urn in scope:
+                if e.id in seen:
+                    continue
+                if lineage_scope == "siblings":
+                    # The far end may sit on a page not loaded yet; the delta is
+                    # small, so hand over every draft edge touching this page and
+                    # let the client keep it once both ends are loaded.
+                    if e.source_urn in present or e.target_urn in present:
+                        lineage.append(e)
+                elif e.source_urn in scope and e.target_urn in scope:
                     lineage.append(e)
         return ChildrenWithEdgesResult(
             children=children, containmentEdges=cont, lineageEdges=lineage,

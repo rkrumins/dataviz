@@ -162,11 +162,16 @@ class GraphDataProvider(ABC):
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
         sort_direction: str = "asc",
+        lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         """Get children with containment and optionally lineage edges in one round-trip.
 
         Default implementation delegates to get_children + get_edges.
         Providers may override with an optimized single-query implementation.
+
+        ``lineage_scope="siblings"`` asks for lineage between this page and EVERY
+        child of the parent (see FalkorDBProvider). This generic fallback answers
+        page scope for either value; providers that serve paged canvases override it.
         """
         from ..models.graph import EdgeQuery
         children = await self.get_children(

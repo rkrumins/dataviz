@@ -613,6 +613,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             sortProperty?: string | null
             cursor?: string | null
             sortDirection?: 'asc' | 'desc'
+            lineageScope?: 'page' | 'siblings'
         }
     ): Promise<{
         children: GraphNode[]
@@ -623,6 +624,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         nextCursor?: string | null
     }> {
         const params = new URLSearchParams()
+        if (options?.lineageScope === 'siblings') params.append('lineageScope', 'siblings')
         if (options?.offset) params.append('offset', String(options.offset))
         if (options?.limit) params.append('limit', String(options.limit))
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)

@@ -86,6 +86,11 @@ interface LayerColumnProps {
   onRevealSearchHit?: (urn: string, ancestorPath: AncestorRef[]) => void
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
+  /** Pages landed per parent — the load-more latch re-arms on these. */
+  childPageEpochs?: Map<string, number>
+  /** Parents the server says have no further pages: no load-more row, even
+   *  when some of their children render in other columns. */
+  exhaustedParents?: Set<string>
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
@@ -222,6 +227,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   onRevealSearchHit,
   loadingNodes,
   failedNodes,
+  childPageEpochs,
+  exhaustedParents,
   onScroll,
   onAssignToLayer,
   onRenameLayer,
@@ -570,6 +577,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
         const hasMore = !isTracing && node.children.length < childCount && !activeQuery
+          && !(exhaustedParents?.has(node.id) ?? false)
 
         // What the session found INSIDE this container, at any depth — the
         // half of the answer that is NOT already on the canvas. These rows
@@ -621,7 +629,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -2248,6 +2256,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentIsLast={item.parentIsLast}
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
+                        epoch={childPageEpochs?.get(item.node.id) ?? 0}
+                        failed={(failedNodes?.has(item.node.id) ?? false) && !(loadingNodes?.has(item.node.id) ?? false)}
                         onLoadMore={(auto) => handleLoadMore(item.node.id, auto)}
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are

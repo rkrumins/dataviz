@@ -6479,14 +6479,22 @@ class FalkorDBProvider(GraphDataProvider):
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
         sort_direction: str = "asc",
+        lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         """Optimized single-roundtrip: children + containment edges + cross-child lineage edges.
 
         Supports cursor-based pagination for O(log N) performance at any page depth.
         When `cursor` is provided, it takes precedence over `offset`.
+
+        ``lineage_scope`` sets the far end of the lineage leg. ``"page"`` (default)
+        returns lineage among {parent} ∪ this page. ``"siblings"`` returns lineage
+        between this page and {parent} ∪ EVERY child of the parent, loaded or not —
+        so a client paging a large container gets its cross-page sibling edges at
+        a cost proportional to the page, instead of re-sending every loaded sibling.
         """
         await self._ensure_connected()
         sort_direction = _validate_sort_direction(sort_direction)
+        siblings_scope = lineage_scope == "siblings"
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
         target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
@@ -6581,11 +6589,14 @@ class FalkorDBProvider(GraphDataProvider):
                 # Build containment edge from the matched relationship
                 containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
 
-        # --- Step 2: Fetch cross-child lineage edges (scoped to current page only) ---
-        # Only use the current page's child URNs + parent, NOT cumulative URNs.
-        # This keeps the query O(pageSize²) instead of O(totalLoaded²).
+        # --- Step 2: Fetch cross-child lineage edges ---
+        # Page scope: the current page's child URNs + parent, NOT cumulative URNs —
+        # O(pageSize²) instead of O(totalLoaded²). Siblings scope widens only the
+        # FAR end (to every child of the parent); the near end stays this page, so
+        # it is still bounded by the page and its degree. A one-child page matters
+        # there: its edges to earlier siblings arrive with it.
         lineage_edges_list: List[GraphEdge] = []
-        if include_lineage_edges and len(child_urns) >= 2:
+        if include_lineage_edges and len(child_urns) >= (1 if siblings_scope else 2):
             page_urns = [parent_urn] + child_urns
             exclude_types = list(target_edge_types) + ["AGGREGATED"]
 
@@ -6633,13 +6644,52 @@ class FalkorDBProvider(GraphDataProvider):
                     logger.warning("children page-lineage query failed: %s", exc)
                     return []
 
-            lineage_rows = await asyncio.gather(*[
-                _lineage_for(label, bucket)
-                for label, bucket in await self._label_buckets(page_urns)
-            ])
+            # Siblings scope: the page is the near end in BOTH directions; the far
+            # end must be the parent or share it (pattern predicate over the same
+            # containment alternation step 1 used).
+            async def _sibling_lineage_for(label: str, bucket: List[str], outgoing: bool) -> list:
+                a_anchor = f"(a:{label})" if label else "(a)"
+                hop = f"{a_anchor}-{lr_pattern}->(b)" if outgoing else f"(b)-{lr_pattern}->{a_anchor}"
+                ret = "a.urn, b.urn" if outgoing else "b.urn, a.urn"
+                try:
+                    res = await self._ro_query(
+                        f"MATCH {p_anchor} WHERE p.urn = $parent "
+                        f"MATCH {hop} "
+                        f"WHERE a.urn IN $bucketUrns {lineage_where}"
+                        f"AND (b = p OR (p)-[:{rel_alt}]->(b)) "
+                        f"RETURN {ret}, type(lr), properties(lr)",
+                        params={**lineage_params, "bucketUrns": bucket, "parent": parent_urn},
+                        timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
+                        op="children.lineage.siblings",
+                    )
+                    return res.result_set or []
+                except Exception as exc:
+                    logger.warning("children sibling-lineage query failed: %s", exc)
+                    return []
+
+            if siblings_scope:
+                buckets = await self._label_buckets(child_urns)
+                lineage_rows = await asyncio.gather(*[
+                    _sibling_lineage_for(label, bucket, outgoing)
+                    for label, bucket in buckets
+                    for outgoing in (True, False)
+                ])
+            else:
+                lineage_rows = await asyncio.gather(*[
+                    _lineage_for(label, bucket)
+                    for label, bucket in await self._label_buckets(page_urns)
+                ])
+            # An edge between two children of this page matches both directional
+            # sibling queries; keep one.
+            seen_lineage: Set[Tuple[str, str, str, str]] = set()
             for rows in lineage_rows:
                 for row in rows:
-                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+                    props = row[3] or {}
+                    key = (row[0], row[1], str(row[2]).upper(), str(props.get("id", "")))
+                    if key in seen_lineage:
+                        continue
+                    seen_lineage.add(key)
+                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], props))
 
         has_more = len(children) >= limit
         total = offset + len(children) + (1 if has_more else 0)

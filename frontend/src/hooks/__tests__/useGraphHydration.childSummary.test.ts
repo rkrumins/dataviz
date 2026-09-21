@@ -89,6 +89,8 @@ function seedCanvas(childCount: number, loaded: number) {
     edges,
     _nodeIndex: new Set(nodes.map((n) => n.id)),
     _edgeIndex: new Set(edges.map((e) => e.id)),
+    // Seeds bypass setGraph, so clear what it clears: no pager survives a reseed.
+    childPaging: {},
     visibleEdges: [],
   })
 }

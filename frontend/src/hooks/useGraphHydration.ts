@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { useCanvasStore, type ChildPageState, type LineageNode } from '@/store/canvas'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useActiveView,
@@ -238,6 +238,11 @@ export interface UseGraphHydrationResult {
     rootsLoaded: number
     /** Heuristic: the last root page was full, so more likely exist. */
     rootsHaveMore: boolean
+    /** Pages landed per parent. A "load more" row latches on this, not on its
+     *  remaining count — a page whose rows render elsewhere must still re-arm it. */
+    childPageEpochs: Map<string, number>
+    /** Parents the server says have no further pages. */
+    exhaustedParents: Set<string>
     /** Current phase of initial hydration (only meaningful when hydrate=true). */
     hydrationPhase: HydrationPhase
     /** Error message if hydration failed (e.g. provider unavailable/warming). */
@@ -681,13 +686,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     const anchorUrns = allNodes
                         .filter(n => declaredAnchors.has(n.urn) && (n.childCount ?? 0) > 0)
                         .map(n => n.urn)
+                    // Where each anchor's first page leaves its pager — seeded once
+                    // the graph is set (setGraph clears pagers), so the column's
+                    // first scroll continues at page 2 instead of re-fetching page 1.
+                    const anchorPagers: Array<[string, ChildPageState]> = []
                     if (anchorUrns.length > 0) {
                         const loaded = new Set(allNodes.map(n => n.urn))
+                        const countOf = new Map(allNodes.map(n => [n.urn, n.childCount ?? 0]))
                         const settled = await mapWithConcurrency(
                             anchorUrns, HYDRATION_CONCURRENCY,
-                            urn => provider.getChildren(urn, {
+                            urn => provider.getChildrenWithEdges(urn, {
                                 edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
                                 limit: CHILDREN_PAGE_SIZE,
+                                // Edges among everything loaded are fetched below.
+                                includeLineageEdges: false,
                             }),
                         )
                         if (controller.signal.aborted) return
@@ -702,10 +714,22 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                 )
                                 return
                             }
-                            for (const child of outcome.value) {
+                            const page = outcome.value
+                            for (const child of page.children) {
                                 if (loaded.has(child.urn)) continue
                                 loaded.add(child.urn)
                                 allNodes.push(child)
+                            }
+                            if (page.children.length > 0) {
+                                anchorPagers.push([anchorUrns[i], {
+                                    cursor: page.nextCursor ?? null,
+                                    delivered: page.children.length,
+                                    hasMore: page.hasMore,
+                                    direction: 'asc',
+                                    epoch: 1,
+                                    lastUrn: page.children[page.children.length - 1].urn,
+                                    childCount: countOf.get(anchorUrns[i]) ?? 0,
+                                }])
                             }
                         })
                     }
@@ -743,6 +767,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allNodes.map(n => toCanvasNode(n)),
                         [],
                     )
+                    // setGraph clears pagers; both writes below re-seed the anchors'.
+                    const seedAnchorPagers = () => {
+                        for (const [anchorUrn, page] of anchorPagers) {
+                            useCanvasStore.getState().setChildPage(anchorUrn, page)
+                        }
+                    }
+                    seedAnchorPagers()
 
                     // Fetch edges between all loaded nodes. Pass the backend
                     // hard maximum so the user's assigned set is never
@@ -770,6 +801,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allNodes.map(n => toCanvasNode(n)),
                         allEdges.map(e => toCanvasEdge(e)),
                     )
+                    seedAnchorPagers()
 
                     console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
                     if (partial) {
@@ -1135,31 +1167,55 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const childCount = (nodeData.childCount as number) ?? (nodeData.metadata?.childCount as number) ?? 0
         if (childCount === 0) return
 
-        const existingNodeIds = new Set(nodes.map(n => n.id))
-        // Optimistic, unsaved children aren't part of the backend's `childCount` and have no
-        // server page — counting them would skew the pagination offset (skipping a real child)
-        // and trip the "all loaded" short-circuit. Tally only SAVED children here.
-        const pendingNodeIds = new Set(
-            nodes.filter(n => (n.data as any)?.isPending === 'create').map(n => n.id),
-        )
-        // A child primed out of band by a search reveal (`useRevealSearchHit`)
-        // belongs to some later page — counting it would skew the offset the
-        // same way, skipping a real sibling. Same rule as optimistic children.
-        const revealedNodeIds = new Set(
-            nodes.filter(n => n.data?.viaReveal).map(n => n.id),
-        )
+        // Where this parent's pager resumes. A live pager (same direction, its
+        // last delivered child still in the store) resumes at its cursor and
+        // server offset, and it alone says when the parent is exhausted — the
+        // server's `hasMore`, never a client count. Otherwise (first expand, a
+        // graph replaced under it, a flipped sort) resume after the SAVED
+        // children the store already holds, exactly as before — so this store
+        // scan runs once per parent, not once per page.
+        const direction = options?.sortDirection ?? 'asc'
+        const { _nodeIndex, childPaging } = useCanvasStore.getState()
+        const live = childPaging[parentId]
+        let start: ChildPageState | null =
+            live && live.direction === direction && live.childCount === childCount
+                && (live.lastUrn === null || _nodeIndex.has(live.lastUrn))
+                ? live
+                : null
+        if (start && !start.hasMore) return
+        if (!start) {
+            const existingNodeIds = new Set(nodes.map(n => n.id))
+            // Optimistic, unsaved children aren't part of the backend's `childCount` and have no
+            // server page — counting them would skew the pagination offset (skipping a real child)
+            // and trip the "all loaded" short-circuit. Tally only SAVED children here.
+            const pendingNodeIds = new Set(
+                nodes.filter(n => (n.data as any)?.isPending === 'create').map(n => n.id),
+            )
+            // A child primed out of band by a search reveal (`useRevealSearchHit`)
+            // belongs to some later page — counting it would skew the offset the
+            // same way, skipping a real sibling. Same rule as optimistic children.
+            const revealedNodeIds = new Set(
+                nodes.filter(n => n.data?.viaReveal).map(n => n.id),
+            )
 
-        // Count loaded SAVED children via containment edges (ontology-driven)
-        const currentChildrenCount = edges.filter(e => {
-            if (e.source !== parentId) return false
-            if (!existingNodeIds.has(e.target)) return false
-            if (e.data?.isPending === 'create' || pendingNodeIds.has(e.target)) return false
-            if (revealedNodeIds.has(e.target)) return false
-            return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
-        }).length
+            // Count loaded SAVED children via containment edges (ontology-driven)
+            const currentChildrenCount = edges.filter(e => {
+                if (e.source !== parentId) return false
+                if (!existingNodeIds.has(e.target)) return false
+                if (e.data?.isPending === 'create' || pendingNodeIds.has(e.target)) return false
+                if (revealedNodeIds.has(e.target)) return false
+                return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
+            }).length
 
-        // If we have all children, don't refetch
-        if (currentChildrenCount >= childCount && childCount > 0) return
+            // If we have all children, don't refetch
+            if (currentChildrenCount >= childCount && childCount > 0) return
+            start = {
+                cursor: null, delivered: currentChildrenCount, hasMore: true, direction,
+                // Monotonic across restarts, so a latch keyed on it always re-arms.
+                epoch: live?.epoch ?? 0, lastUrn: null, childCount,
+            }
+        }
+        const resumeAt: ChildPageState = start
 
         let summary: ChildLoadSummary | undefined
         await queueRef.current.submit(parentId, async (signal) => {
@@ -1168,96 +1224,107 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             try {
                 const urn = (parentNode.data.urn as string) || parentId
                 const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
+                let pos = resumeAt
+                let added = 0
 
-                // Single round-trip: children + containment edges + lineage edges
-                const result = await provider.getChildrenWithEdges(urn, {
-                    edgeTypes: fetchTypes,
-                    lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
-                    limit: CHILDREN_PAGE_SIZE,
-                    offset: currentChildrenCount,
-                    includeLineageEdges: true,
-                    sortDirection: options?.sortDirection,
-                })
+                // One call makes progress or proves there is none. A page whose
+                // rows are already held (search reveals, a prefetch without a
+                // cursor) brings nothing new; stopping there would leave the "load
+                // more" row's count unchanged and its latch would never re-arm — a
+                // silent stall. Bounded by the pages this parent can have.
+                const maxPages = Math.ceil(childCount / CHILDREN_PAGE_SIZE) + 2
+                for (let page = 0; page < maxPages; page++) {
+                    const offset = pos.delivered
+                    // Single round-trip: children + containment edges + lineage edges
+                    const result = await provider.getChildrenWithEdges(urn, {
+                        edgeTypes: fetchTypes,
+                        lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
+                        limit: CHILDREN_PAGE_SIZE,
+                        // Both, always: FalkorDB takes the cursor (lossless over
+                        // duplicate names); the branch/as-of path pages by offset.
+                        offset,
+                        cursor: pos.cursor,
+                        includeLineageEdges: true,
+                        // Cross-page sibling lineage arrives WITH each page — cost
+                        // proportional to the page, where the old supplement
+                        // re-sent every loaded sibling (quadratic per parent).
+                        lineageScope: 'siblings',
+                        sortDirection: options?.sortDirection,
+                    })
 
-                // User collapsed mid-load — drop the result silently
-                if (signal.aborted) return
+                    // User collapsed mid-load — drop the result silently
+                    if (signal.aborted) return
 
-                if (result.children.length > 0) {
-                    const currentExistingNodeIds = new Set(
-                        useCanvasStore.getState().nodes.map(n => n.id)
-                    )
-
+                    const held = useCanvasStore.getState()._nodeIndex
                     const nodesToAdd: LineageNode[] = []
                     const newIds = new Set<string>()
-
-                    result.children.forEach(child => {
-                        if (!currentExistingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
+                    const reDelivered: string[] = []
+                    for (const child of result.children) {
+                        if (held.has(child.urn)) reDelivered.push(child.urn)
+                        else if (!newIds.has(child.urn)) {
                             nodesToAdd.push(toCanvasNode(child))
                             newIds.add(child.urn)
                         }
-                    })
+                    }
 
+                    // An edge whose far end is not loaded yet is held back — it
+                    // comes again with that sibling's own page — so nothing is
+                    // lost and the store never holds a dangling edge.
+                    const isLoaded = (u: string) => u === parentId || u === urn || held.has(u) || newIds.has(u)
                     const edgesToAdd = [
                         ...result.containmentEdges,
-                        ...result.lineageEdges,
+                        ...result.lineageEdges.filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn)),
                     ].map(e => toCanvasEdge(e))
 
                     // Single atomic commit — nodes and edges arrive together
-                    const { addGraph: addGraphFresh, updateNode } = useCanvasStore.getState()
-                    addGraphFresh(nodesToAdd, edgesToAdd)
+                    if (nodesToAdd.length > 0 || edgesToAdd.length > 0) {
+                        useCanvasStore.getState().addGraph(nodesToAdd, edgesToAdd)
+                    }
 
                     // A revealed child this page actually delivered is now a
                     // normal loaded child — clear the flag so it counts
-                    // toward the next page's offset.
-                    result.children.forEach(child => {
-                        if (revealedNodeIds.has(child.urn)) updateNode(child.urn, { viaReveal: false })
-                    })
-
-                    // Cross-page sibling lineage: getChildrenWithEdges only
-                    // returns lineage among [parent + this page's children],
-                    // so an edge between a page-1 child and a page-2 child
-                    // never arrives through it. For page ≥ 2, supplement
-                    // with one bounded edges-between call over ALL loaded
-                    // children of this parent; the store dedupes by id.
-                    if (currentChildrenCount > 0) {
-                        const fresh = useCanvasStore.getState()
-                        const loadedIds = new Set(fresh.nodes.map(n => n.id))
-                        const siblingUrns = fresh.edges
-                            .filter(e =>
-                                e.source === parentId
-                                && loadedIds.has(e.target)
-                                && isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes))
-                            .map(e => e.target)
-                        const crossPageEdges = await provider.getEdgesBetween(
-                            [...new Set([urn, ...siblingUrns])],
-                            lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
-                        ).catch((err: unknown) => {
-                            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
-                            return [] as GraphEdge[]
-                        })
-                        if (signal.aborted) return
-                        if (crossPageEdges.length > 0) {
-                            useCanvasStore.getState().addGraph([], crossPageEdges.map(e => toCanvasEdge(e)))
+                    // toward a fresh pager's offset.
+                    if (reDelivered.length > 0) {
+                        const wanted = new Set(reDelivered)
+                        const { nodes: now, updateNode } = useCanvasStore.getState()
+                        for (const n of now) {
+                            if (wanted.has(n.id) && n.data?.viaReveal) updateNode(n.id, { viaReveal: false })
                         }
                     }
 
-                    console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
+                    const advanced = result.children.length > 0
+                    pos = {
+                        cursor: result.nextCursor ?? null,
+                        delivered: offset + result.children.length,
+                        hasMore: result.hasMore && advanced,
+                        direction,
+                        epoch: pos.epoch + 1,
+                        lastUrn: advanced ? result.children[result.children.length - 1].urn : pos.lastUrn,
+                        childCount,
+                    }
+                    // Committed per landed page: a later page that fails is
+                    // retried from exactly here.
+                    useCanvasStore.getState().setChildPage(parentId, pos)
+                    added += nodesToAdd.length
+
+                    // The facts about this page, for whoever asked for it. Set
+                    // only on a page that actually completed — an aborted or
+                    // failed load has nothing true to say.
+                    summary = {
+                        // `|| urn`, not `?? ''`: a container whose backend
+                        // displayName is "" would otherwise be announced as
+                        // " · 5 datasets" — a message with no subject.
+                        parentLabel: String(parentNode.data.label || urn),
+                        parentType: parentNode.data.type as string | undefined,
+                        arrived: result.children.length,
+                        offset,
+                        total: childCount,
+                        childTypes: [...new Set(result.children.map(c => c.entityType).filter(Boolean))],
+                    }
+                    if (nodesToAdd.length > 0 || !pos.hasMore) break
                 }
 
-                // The facts about this page, for whoever asked for it. Set
-                // only on a page that actually completed — an aborted or
-                // failed load has nothing true to say.
-                summary = {
-                    // `|| urn`, not `?? ''`: a container whose backend
-                    // displayName is "" would otherwise be announced as
-                    // " · 5 datasets" — a message with no subject.
-                    parentLabel: String(parentNode.data.label || urn),
-                    parentType: parentNode.data.type as string | undefined,
-                    arrived: result.children.length,
-                    offset: currentChildrenCount,
-                    total: childCount,
-                    childTypes: [...new Set(result.children.map(c => c.entityType).filter(Boolean))],
-                }
+                if (added > 0) console.log(`[useGraphHydration] Loaded ${added} children for ${parentId}`)
             } catch (err) {
                 console.error(`[useGraphHydration] Failed to load children for ${parentId}`, err)
                 setFailedNodes(prev => new Set(prev).add(parentId))
@@ -1282,6 +1349,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
      * yet) but its data is discarded. Safe to call when the parent is
      * not loading — no-op in that case.
      */
+    // Pager progress, from the store so every instance of this hook agrees.
+    const childPaging = useCanvasStore(s => s.childPaging)
+    const childPageEpochs = useMemo(
+        () => new Map(Object.entries(childPaging).map(([id, p]) => [id, p.epoch])),
+        [childPaging],
+    )
+    const exhaustedParents = useMemo(
+        () => new Set(Object.entries(childPaging).filter(([, p]) => !p.hasMore).map(([id]) => id)),
+        [childPaging],
+    )
+
     const cancelChildLoad = useCallback((parentId: string) => {
         queueRef.current.cancel(parentId)
     }, [])
@@ -1301,5 +1379,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         loadMoreRoots,
         rootsLoaded,
         rootsHaveMore,
+        childPageEpochs,
+        exhaustedParents,
     }
 }

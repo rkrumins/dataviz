@@ -154,3 +154,61 @@ describe('LoadMoreItem', () => {
         expect(onLoadMore).not.toHaveBeenCalled()
     })
 })
+
+describe('LoadMoreItem — latch on landed pages, not on the count', () => {
+    let fire: ((entries: { isIntersecting: boolean }[]) => void) | null = null
+
+    beforeEach(() => {
+        vi.useFakeTimers()
+        fire = null
+        vi.stubGlobal('IntersectionObserver', class {
+            constructor(cb: (entries: { isIntersecting: boolean }[]) => void) { fire = cb }
+            observe() {}
+            unobserve() {}
+            disconnect() {}
+            takeRecords() { return [] }
+        })
+    })
+    afterEach(() => { vi.useRealTimers() })
+
+    const dwellInView = () => {
+        act(() => { fire!([{ isIntersecting: true }]) })
+        act(() => { vi.advanceTimersByTime(300) })
+    }
+
+    it('re-arms when a page lands even though the remaining count did not move', () => {
+        // A page whose rows render in ANOTHER column leaves this parent's count
+        // unchanged. Latched on the count alone, the row would never fire again
+        // and the parent would silently stop paging.
+        const onLoadMore = vi.fn()
+        const row = (epoch: number) => (
+            <LoadMoreItem depth={1} parentIsLast={[false]} count={400} epoch={epoch} autoLoad onLoadMore={onLoadMore} />
+        )
+        const { rerender } = render(row(1))
+        dwellInView()
+        expect(onLoadMore).toHaveBeenCalledTimes(1)
+
+        rerender(row(1))                 // same count, same epoch — no page landed
+        dwellInView()
+        expect(onLoadMore).toHaveBeenCalledTimes(1)
+
+        rerender(row(2))                 // a page landed; count unchanged
+        dwellInView()
+        expect(onLoadMore).toHaveBeenCalledTimes(2)
+    })
+
+    it('says a page failed, waits for a click, and never auto-fires meanwhile', () => {
+        const onLoadMore = vi.fn()
+        render(
+            <LoadMoreItem depth={1} parentIsLast={[false]} count={400} epoch={3} failed autoLoad onLoadMore={onLoadMore} />,
+        )
+        // Not merely unfired: no observer is armed at all while the page is failed.
+        expect(fire).toBeNull()
+        act(() => { vi.advanceTimersByTime(1000) })
+        expect(onLoadMore).not.toHaveBeenCalled()
+
+        const button = screen.getByRole('button', { name: /couldn't load the next 100\. retry/i })
+        fireEvent.click(button)
+        expect(onLoadMore).toHaveBeenCalledWith()
+    })
+})

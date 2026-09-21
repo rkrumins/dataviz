@@ -59,12 +59,37 @@ export interface LineageEdge extends Edge {
   }
 }
 
+/**
+ * Where one parent's child pager stands. `delivered` is the number of rows the
+ * SERVER has returned in this sequence — the offset the branch/as-of path pages
+ * by — and `cursor` is FalkorDB's keyset; every page sends both. `epoch` counts
+ * landed pages, so a "load more" row can re-arm on progress even when a page's
+ * rows render elsewhere. `lastUrn` is the last child delivered: if it is no longer
+ * in the store, the graph was replaced under the pager and it restarts. So does a
+ * pager whose parent's `childCount` has since changed — an "exhausted" verdict from
+ * an empty page must not outlive children that appeared later.
+ */
+export interface ChildPageState {
+  cursor: string | null
+  delivered: number
+  hasMore: boolean
+  direction: 'asc' | 'desc'
+  epoch: number
+  lastUrn: string | null
+  childCount: number
+}
+
 interface CanvasState {
   // Nodes and Edges
   nodes: LineageNode[]
   edges: LineageEdge[]
   _nodeIndex: Set<string>
   _edgeIndex: Set<string>
+  /** Child pagers by parent id — one source of truth for every
+   *  useGraphHydration instance (hydration seeds anchors; the canvas pages on
+   *  scroll/expand). Cleared by setGraph. Never persisted. */
+  childPaging: Record<string, ChildPageState>
+  setChildPage: (parentId: string, page: ChildPageState) => void
   /** Monotonic counter — incremented on every node/edge mutation. */
   _version: number
   setNodes: (nodes: LineageNode[]) => void
@@ -338,8 +363,15 @@ export const useCanvasStore = create<CanvasState>()(
           edges: dedupedEdges,
           _nodeIndex: seenNodes,
           _edgeIndex: seenEdges,
+          // A new graph invalidates every pager position.
+          childPaging: {},
         }
       }),
+
+      childPaging: {},
+      setChildPage: (parentId, page) => set((state) => ({
+        childPaging: { ...state.childPaging, [parentId]: page },
+      })),
       addGraph: (newNodes, newEdges) => set((state) => {
         const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
         const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))

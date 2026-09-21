@@ -1577,6 +1577,14 @@ async def get_children_with_edges(
         "asc", alias="sortDirection", pattern="^(asc|desc)$",
         description="Sort direction on sortProperty. Cursors are direction-bound.",
     ),
+    lineage_scope: str = Query(
+        "page", alias="lineageScope", pattern="^(page|siblings)$",
+        description=(
+            "Far end of the lineage leg. 'page': lineage among the parent and this page. "
+            "'siblings': lineage between this page and the parent or ANY of its children, "
+            "so a client paging a large container gets cross-page edges per page."
+        ),
+    ),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get children with containment and lineage edges in a single round-trip."""
@@ -1590,6 +1598,7 @@ async def get_children_with_edges(
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
             sort_direction=sort_direction,
+            lineage_scope=lineage_scope,
         )
 
     scope = _cache_scope(engine)
@@ -1611,6 +1620,12 @@ async def get_children_with_edges(
                 "cursor": cursor,
                 "includeLineageEdges": include_lineage_edges,
                 "sortDirection": sort_direction,
+                # A cached page-scope answer must never be served to a
+                # siblings-scope request (it would drop edges) — so a widened
+                # scope is part of the key. Only when widened: every existing
+                # key stays byte-identical, so a deploy doesn't cold-miss the
+                # whole children cache at once.
+                **({"lineageScope": lineage_scope} if lineage_scope != "page" else {}),
             },
             compute=_bounded_compute(engine, compute),
             model_cls=ChildrenWithEdgesResult,
