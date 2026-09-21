@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useActiveView,
@@ -1205,6 +1206,28 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Single atomic commit — nodes and edges arrive together
                     const { addGraph: addGraphFresh, updateNode } = useCanvasStore.getState()
                     addGraphFresh(nodesToAdd, edgesToAdd)
+
+                    // The page's lineage to the REST of the canvas. The server
+                    // answers this request with cross-child lineage only —
+                    // edges between the children it returned, deliberately, to
+                    // keep that query O(pageSize²) — so a row from "Load 13
+                    // more" arrived with no flow to anything already on screen.
+                    // Fired after the commit so the rows paint immediately and
+                    // their wires follow; a failure costs those rows their
+                    // flows, not the page.
+                    if (nodesToAdd.length > 0) {
+                        void primeLineageFor(
+                            provider,
+                            nodesToAdd.map((n) => n.id),
+                            lineageEdgeTypes,
+                        ).then((extra) => {
+                            if (extra.length > 0 && !signal.aborted) {
+                                useCanvasStore.getState().addGraph([], extra)
+                            }
+                        }).catch((e) => {
+                            console.warn('[children] lineage priming failed', e)
+                        })
+                    }
 
                     // A revealed child this page actually delivered is now a
                     // normal loaded child — clear the flag so it counts
