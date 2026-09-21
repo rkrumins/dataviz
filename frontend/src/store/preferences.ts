@@ -78,6 +78,12 @@ interface PreferencesState {
   canvasDockMinimized: boolean
   setCanvasDockMinimized: (minimized: boolean) => void
 
+  // Context View: when the layers do not all fit, the ones outside the open
+  // window fold into spines, so every layer — and every flow into it — stays
+  // on screen. Off, the canvas scrolls sideways instead.
+  canvasFoldLayers: boolean
+  setCanvasFoldLayers: (fold: boolean) => void
+
   // Entity drawer — which sections the user has folded away, by section
   // key. A key absent from the map is OPEN: the default is open, so a new
   // section never arrives hidden and an older stored map never hides one.
@@ -308,6 +314,9 @@ export const usePreferencesStore = create<PreferencesState>()(
 
       canvasDockMinimized: false,
       setCanvasDockMinimized: (canvasDockMinimized) => set({ canvasDockMinimized }),
+
+      canvasFoldLayers: true,
+      setCanvasFoldLayers: (canvasFoldLayers) => set({ canvasFoldLayers }),
 
       // Entity drawer sections
       drawerSectionsCollapsed: {},

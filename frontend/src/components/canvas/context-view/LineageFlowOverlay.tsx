@@ -377,6 +377,12 @@ export function LineageFlowOverlay({
         const sourceEl = getEl(sourceId)
         const targetEl = getEl(targetId)
 
+        // Two FOLDED layers (LayerColumn's fold anchors): the reader is not
+        // looking at either, and a line between two spines is a tangle 6px
+        // long. Lines between a spine and an open column are what the fold
+        // is for, and draw below as usual.
+        if (sourceEl?.hasAttribute('data-fold-anchor') && targetEl?.hasAttribute('data-fold-anchor')) return
+
         if (sourceEl && targetEl) {
           const sRect = sourceEl.getBoundingClientRect()
           const tRect = targetEl.getBoundingClientRect()
@@ -574,6 +580,9 @@ export function LineageFlowOverlay({
 
       const visibleEl = getEl(visibleNodeId)
       if (!visibleEl) return
+      // A spine already marks every line it holds with a pin; a stub or a
+      // badge hung off it as well would be the same fact twice.
+      if (visibleEl.hasAttribute('data-fold-anchor')) return
 
       const vRect = visibleEl.getBoundingClientRect()
       // Row mostly hidden by its column's clip — its stubs/badges would
@@ -1844,8 +1853,12 @@ export function LineageFlowOverlay({
       // already has the rendered node refs.
       const sourceEl = document.getElementById(`layer-node-${edge.source}`)
       const targetEl = document.getElementById(`layer-node-${edge.target}`)
-      const sourceName = sourceEl?.querySelector('.line-clamp-2')?.textContent?.trim() || edge.source
-      const targetName = targetEl?.querySelector('.line-clamp-2')?.textContent?.trim() || edge.target
+      // A line into a folded layer ends on a fold anchor, which carries the
+      // row's name as `data-label` (LayerColumn) instead of the row's text.
+      const sourceName = sourceEl?.querySelector('.line-clamp-2')?.textContent?.trim()
+        || sourceEl?.getAttribute('data-label') || edge.source
+      const targetName = targetEl?.querySelector('.line-clamp-2')?.textContent?.trim()
+        || targetEl?.getAttribute('data-label') || edge.target
       const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
       const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
 

@@ -112,7 +112,8 @@ import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
-import { computeFitZoom } from './fitZoom'
+import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
+import { useLayerFold } from './useLayerFold'
 import { shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -341,6 +342,17 @@ const measureLegendHeader = (el: HTMLElement): number => {
   const headers = [...el.querySelectorAll<HTMLElement>('[data-dock-header]')]
   if (headers.length === 0) return 0
   return headers.reduce((sum, h) => sum + h.offsetHeight, 0) + (headers.length - 1) * DOCK_GAP_PX
+}
+
+/**
+ * A node's painted ROW, by id. A folded layer carries an anchor with the
+ * same `layer-node-<id>` for every row that has a line into it (LayerColumn's
+ * fold anchors) — a point on a spine, which nobody can see or click — so an
+ * anchor is not a located row.
+ */
+function paintedRow(nodeId: string): HTMLElement | null {
+  const el = document.getElementById(`layer-node-${nodeId}`)
+  return el && !el.hasAttribute('data-fold-anchor') ? el : null
 }
 
 export function ContextViewCanvas({
@@ -1800,9 +1812,9 @@ export function ContextViewCanvas({
   const nodeSortingEnabled = useFeature('nodeSortingEnabled')
 
   // Fit-to-width: intrinsic width from state (scrollWidth lies under the
-  // 100/zoom% compensation). Column collapse state is LayerColumn-local,
-  // so v1 assumes all columns expanded — a safe over-estimate that only
-  // makes the fitted zoom slightly smaller.
+  // 100/zoom% compensation). Every column counts as open: Fit is the way
+  // back to seeing every layer at full width, so what happens to be folded
+  // right now does not shrink the run it fits.
   const handleFitToWidth = useCallback(() => {
     const viewport = horizontalScrollRef.current?.clientWidth ?? 0
     setCanvasZoom(computeFitZoom(sortedLayers.length, 0, viewport))
@@ -3317,7 +3329,9 @@ export function ContextViewCanvas({
   const locateManyOnCanvas = useLocateManyOnCanvas({
     revealAndFocus: revealOnCanvas,
     scrollHitIntoView,
-    getElementById: (id) => document.getElementById(`layer-node-${id}`),
+    // A target in a folded layer is not located until its layer opens —
+    // which its reveal pulse does (useLayerFold).
+    getElementById: paintedRow,
     getScrollContainer: () => horizontalScrollRef.current,
     notify: (type, message) => { useNotificationStore.getState().add({ type, message }) },
   })
@@ -3387,12 +3401,18 @@ export function ContextViewCanvas({
       const el =
         document.getElementById(`layer-node-${urn}`) ??
         document.querySelector<HTMLElement>(`[id^="layer-node-"][data-urn="${CSS.escape(urn)}"]`)
+      // In a folded layer: the reveal pulse opens the layer and scrolls its
+      // column to the row, which scrolling to the spine could not.
+      if (el?.hasAttribute('data-fold-anchor')) {
+        scrollHitIntoView(el.id.slice('layer-node-'.length))
+        return
+      }
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
         return
       }
     }
-  }, [])
+  }, [scrollHitIntoView])
 
   // Hydration phase mirrored into the canvas store by CanvasRouter — drives
   // the ghost-card stack in empty layers and the GhostLineageOverlay.
@@ -4190,6 +4210,71 @@ export function ContextViewCanvas({
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
+
+  // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
+  // The layer each RENDERED row lives in: the browse map, or in trace mode
+  // the lanes' own — a trace draws cards the browse tree does not hold.
+  const renderLayerOf = useMemo(() => {
+    if (!traceRender) return nodeLayerMap
+    const map = new Map<string, string>()
+    traceRender.byLayer.forEach((roots, layerId) => {
+      const stack = [...roots]
+      while (stack.length > 0) {
+        const node = stack.pop()!
+        map.set(node.id, layerId)
+        stack.push(...node.children)
+      }
+    })
+    return map
+  }, [traceRender, nodeLayerMap])
+  const foldLayersEnabled = usePreferencesStore((s) => s.canvasFoldLayers)
+  const setFoldLayersEnabled = usePreferencesStore((s) => s.setCanvasFoldLayers)
+  const layerFold = useLayerFold({
+    layers: sortedLayers,
+    scrollRef: horizontalScrollRef,
+    zoom: canvasZoom,
+    // The wrapper's two edge gutters and, in draft, the add-layer column
+    // (`w-64`) with the gap before it.
+    reservedWidth: 2 * EXTREMITY_EDGE_GUTTER_PX + (isDraft ? COLUMN_GAP_PX + 256 : 0),
+    enabled: foldLayersEnabled,
+    layerOf: (nodeId) => renderLayerOf.get(nodeId),
+    revealTarget,
+    selectedNodeId: selectedNodeIds.length === 1 ? selectedNodeId : null,
+  })
+  // What each folded layer holds of the lineage on screen:
+  //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
+  //     anchors and pins: these lines are drawn, onto the spine;
+  //   * `undrawn` — lines to another folded layer, or inside this one. Not
+  //     drawn (LineageFlowOverlay: a line between two spines is a tangle),
+  //     but still counted on the spine — a folded layer whose only lineage
+  //     runs to other folded layers must not read as having none.
+  const foldLineage = useMemo(() => {
+    const ports = new Map<string, Map<string, { in: number; out: number }>>()
+    const undrawn = new Map<string, number>()
+    if (layerFold.folded.size === 0) return { ports, undrawn }
+    const land = (layerId: string, nodeId: string, side: 'in' | 'out') => {
+      let layerPorts = ports.get(layerId)
+      if (!layerPorts) { layerPorts = new Map(); ports.set(layerId, layerPorts) }
+      const port = layerPorts.get(nodeId) ?? { in: 0, out: 0 }
+      port[side] += 1
+      layerPorts.set(nodeId, port)
+    }
+    for (const edge of effectiveLineageEdges) {
+      // Drawn by the overlay as nothing (a finer edge stands in for it).
+      if (edge.isDelegated) continue
+      const sourceLayer = renderLayerOf.get(edge.source)
+      const targetLayer = renderLayerOf.get(edge.target)
+      if (!sourceLayer || !targetLayer) continue
+      const sourceFolded = layerFold.folded.has(sourceLayer)
+      const targetFolded = layerFold.folded.has(targetLayer)
+      if (sourceFolded && targetFolded) {
+        undrawn.set(sourceLayer, (undrawn.get(sourceLayer) ?? 0) + 1)
+        if (targetLayer !== sourceLayer) undrawn.set(targetLayer, (undrawn.get(targetLayer) ?? 0) + 1)
+      } else if (sourceFolded) land(sourceLayer, edge.source, 'out')
+      else if (targetFolded) land(targetLayer, edge.target, 'in')
+    }
+    return { ports, undrawn }
+  }, [layerFold.folded, effectiveLineageEdges, renderLayerOf])
 
   // The panel reads the SAME array the overlay is handed, so "in view"
   // means post-budget and the drawn set is a subset of the model.
@@ -5413,6 +5498,16 @@ export function ContextViewCanvas({
               el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
             } : undefined}
             onFit={handleFitToWidth}
+            fold={layerFold.active ? {
+              openIds: layerFold.openIds,
+              focusLayer: layerFold.focusLayer,
+              step: layerFold.step,
+              canStep: layerFold.canStep,
+            } : undefined}
+            foldToggle={layerFold.overflows ? {
+              enabled: foldLayersEnabled,
+              onToggle: () => setFoldLayersEnabled(!foldLayersEnabled),
+            } : undefined}
           />
         )}
 
@@ -5593,8 +5688,11 @@ export function ContextViewCanvas({
               (EXTREMITY_EDGE_GUTTER_PX) so the two stay in sync. The overlay
               SVG spans the full viewport, so insetting the columns keeps
               those curves within the visible box at the scroll extremes. */}
+          {/* Two neighbouring spines (folded layers) sit SPINE_GAP_PX apart,
+              not a column gap: no line runs between them, so the room a
+              line needs to curve would only push layers off screen. */}
           <div
-            className="flex h-full min-h-0 relative z-30 gap-12 pointer-events-none"
+            className="flex h-full min-h-0 relative z-30 gap-12 pointer-events-none [&>[data-folded]+[data-folded]]:-ml-[42px]"
             style={{
               paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
               paddingRight: EXTREMITY_EDGE_GUTTER_PX,
@@ -5706,6 +5804,11 @@ export function ContextViewCanvas({
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? loadMoreRootsGuarded : undefined}
                 onResizeLayer={isDraft ? resizeLayer : undefined}
+                isFolded={layerFold.folded.has(layer.id)}
+                spineWidth={layerFold.spineWidth}
+                foldPorts={foldLineage.ports.get(layer.id)}
+                foldUndrawnLines={foldLineage.undrawn.get(layer.id)}
+                onFoldChange={layerFold.setLayerFolded}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
