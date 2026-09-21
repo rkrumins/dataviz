@@ -1689,6 +1689,17 @@ class ContextEngine:
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         return await self.provider.get_ancestors(urn, limit=limit, offset=offset)
 
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """See ``GraphDataProvider.get_ancestor_chains``. The draft and
+        versioned-branch readers carry no containment walk at all, and say
+        so the way their other unsupported reads do (a 501 at the route)."""
+        chains = getattr(self.provider, "get_ancestor_chains", None)
+        if not callable(chains):
+            raise NotImplementedError(
+                f"ancestor chains are not available on {type(self.provider).__name__}"
+            )
+        return await chains(urns)
+
     async def get_descendants(
         self, 
         urn: str, 

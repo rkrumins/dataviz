@@ -453,6 +453,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    async getAncestorChains(urns: string[]): Promise<Record<string, string[]>> {
+        // Absent = unknown, [] = a root: see GraphDataProvider.
+        const res = await this.fetch<{ chains: Record<string, string[]> }>('/nodes/ancestor-chains', {
+            method: 'POST',
+            body: JSON.stringify({ urns }),
+        })
+        return res.chains
+    }
+
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {
         return await this.fetch<GraphNode[]>('/search', {
             method: 'POST',

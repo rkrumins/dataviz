@@ -59,6 +59,7 @@ import {
   openedViewMessage, openingViewMessage,
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
+import { useAncestorChains } from '@/hooks/useAncestorChains'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
@@ -3994,6 +3995,10 @@ export function ContextViewCanvas({
   //
   // Keyed on `overlay.active`, not `traceActive`: during the walk the canvas
   // is still showing BROWSE and must keep its wires and its honest count.
+  // Where the lineage endpoints the canvas never loaded live, so their lines
+  // roll up to a container on screen rather than read as leaving the view.
+  // Browse only, for the same reason as the projection below.
+  const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge)
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -4016,6 +4021,7 @@ export function ContextViewCanvas({
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
+    ancestorChains,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation

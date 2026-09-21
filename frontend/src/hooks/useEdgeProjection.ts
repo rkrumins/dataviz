@@ -97,6 +97,15 @@ export interface UseEdgeProjectionOptions {
    * hidden types disappears and a mixed bundle keeps a reduced edgeCount.
    */
   hiddenEdgeTypes?: ReadonlySet<string>
+  /**
+   * Containment chains (parent first, root last) for lineage endpoints the
+   * canvas never loaded — useAncestorChains. An endpoint that resolves to
+   * nothing on canvas is filed under the nearest ancestor that does, so its
+   * line rolls up to the container the reader can see instead of being
+   * counted as leading outside the view. Consulted only when the endpoint
+   * itself does not resolve.
+   */
+  ancestorChains?: ReadonlyMap<string, readonly string[]>
 }
 
 // ============================================
@@ -213,6 +222,7 @@ export function useEdgeProjection({
   browseBundleFanInThreshold = 1,
   nodeLayerIndexMap,
   hiddenEdgeTypes,
+  ancestorChains,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -356,6 +366,20 @@ export function useEdgeProjection({
       edgeGroups.get(groupKey)!.push({ ...edge, source: sourceId, target: targetId, originalType: type, _lifted: lifted })
     }
 
+    // An endpoint the canvas never loaded, filed under its nearest ancestor
+    // that IS on canvas (see `ancestorChains`). Undefined when nothing on its
+    // chain is — then it really does lead somewhere this view does not show.
+    const viaChain = (urn: string): string | undefined => {
+      const chain = ancestorChains?.get(urn)
+      if (!chain) return undefined
+      for (const ancestor of chain) {
+        const id = urnToIdMap.get(ancestor) ?? ancestor
+        const anchor = ancestorMap.get(id) ?? (displayMap.has(id) ? id : undefined)
+        if (anchor) return anchor
+      }
+      return undefined
+    }
+
     // A. Aggregated Edges
     let unresolvedThisPass = 0
     // Both endpoints rolled up to the SAME anchor — a connection that lives
@@ -373,8 +397,8 @@ export function useEdgeProjection({
         if (isTracing && suppressedAggEdgeKeys?.has(`${agg.sourceUrn}->${agg.targetUrn}`)) return
         let sId = displayMap.has(agg.sourceUrn) ? agg.sourceUrn : ancestorMap.get(agg.sourceUrn)
         let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
-        if (!sId) sId = urnToIdMap.get(agg.sourceUrn)
-        if (!tId) tId = urnToIdMap.get(agg.targetUrn)
+        if (!sId) sId = urnToIdMap.get(agg.sourceUrn) ?? viaChain(agg.sourceUrn)
+        if (!tId) tId = urnToIdMap.get(agg.targetUrn) ?? viaChain(agg.targetUrn)
         if (sId && tId && sId !== tId) {
           addEdgeToGroup(sId, tId, {
             id: agg.id,
@@ -452,7 +476,9 @@ export function useEdgeProjection({
       .filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
       .forEach(edge => {
         let sId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
+          || viaChain(edge.source) || null
         let tId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
+          || viaChain(edge.target) || null
 
         if (sId && tId && bundleEnabled) {
           // Apply the trace-level rollup. Result endpoints are always at
@@ -501,14 +527,18 @@ export function useEdgeProjection({
       .filter(e => e.state === 'expanded')
       .flatMap(e => e.detailedEdges)
       .forEach(edge => {
-        const sId = ancestorMap.get(edge.sourceUrn)
-        const tId = ancestorMap.get(edge.targetUrn)
+        const directS = ancestorMap.get(edge.sourceUrn)
+        const directT = ancestorMap.get(edge.targetUrn)
+        const sId = directS ?? viaChain(edge.sourceUrn)
+        const tId = directT ?? viaChain(edge.targetUrn)
         if (sId && tId && sId !== tId) {
           // Endpoints here are urns — compare against the node each urn owns,
-          // not the urn itself. An unknown urn never asserts "lifted".
+          // not the urn itself. An unknown urn never asserts "lifted" on its
+          // own — but one filed under an ancestor by its chain always is.
           const ownS = urnToIdMap.get(edge.sourceUrn)
           const ownT = urnToIdMap.get(edge.targetUrn)
           const lifted = (ownS !== undefined && ownS !== sId) || (ownT !== undefined && ownT !== tId)
+            || directS === undefined || directT === undefined
           addEdgeToGroup(sId, tId, {
             id: edge.id,
             data: { edgeType: edge.edgeType, relationship: edge.edgeType, confidence: edge.confidence }
@@ -784,7 +814,7 @@ export function useEdgeProjection({
 
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains])
 
   const projectedEdges = projection.edges
 
