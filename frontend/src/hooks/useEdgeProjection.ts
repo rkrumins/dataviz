@@ -31,8 +31,6 @@ export interface UseEdgeProjectionOptions {
   isTracing: boolean
   traceContextSet: Set<string>
   isContainmentEdge: (edgeType: string) => boolean
-  /** Currently hovered node — expanded parents show edges on hover */
-  hoveredNodeId?: string | null
   /**
    * URN-pair keys (`${sourceUrn}->${targetUrn}`) for parent AGGREGATED edges
    * that have been drilled into and currently have at least one finer-level
@@ -231,7 +229,6 @@ export function useEdgeProjection({
   isTracing,
   traceContextSet,
   isContainmentEdge,
-  hoveredNodeId,
   suppressedAggEdgeKeys,
   traceAddedEdgeIds,
   traceBundleParentMap,
@@ -865,8 +862,7 @@ export function useEdgeProjection({
 
   const projectedEdges = projection.edges
 
-  // ── Delegation context — hover-INDEPENDENT so the per-hover pass below
-  // stays a single O(E) map. expandedParentInfo: expanded parents with
+  // ── Delegation context. expandedParentInfo: expanded parents with
   // loaded children (+ partial-load flag). coveredPairs: delegation
   // coverage — a rolled-up parent-level edge may only be hidden
   // (isDelegated) when finer child-level edges actually exist for the
@@ -903,10 +899,14 @@ export function useEdgeProjection({
     return { expandedParentInfo, coveredPairs }
   }, [projectedEdges, expandedNodes, displayMap, browseBundleParentMap, traceBundleParentMap])
 
-  // ── Edge delegation — separate memo so hoveredNodeId changes are O(E) not O(expensive) ──
+  // ── Edge delegation ──
   //
-  // The heavy edge projection above doesn't re-run on hover. This cheap pass
-  // stamps isDelegated/isResidual on the already-projected edges.
+  // Stamps isDelegated/isResidual on the already-projected edges: a line from
+  // an open container whose children's lines cover the same pair stands aside
+  // for them (delegated — not drawn), or, while the children are only partly
+  // loaded, draws faintly (residual). Hovering one of its ends brings it
+  // back; that is the overlay's to do (LineageFlowOverlay), so a hover never
+  // re-runs this pass — nor re-renders the canvas that holds it.
   const visibleLineageEdgesWithDelegation = useMemo(() => {
     if (projectedEdges.length === 0) return projectedEdges
     const { expandedParentInfo, coveredPairs } = delegationContext
@@ -923,16 +923,15 @@ export function useEdgeProjection({
       const hasFinerCoverage = coveredPairs.has(`${edge.source}->${edge.target}`)
       if (!hasFinerCoverage) return edge
 
-      const isEndpointHovered = hoveredNodeId === edge.source || hoveredNodeId === edge.target
-      const anyPartial = sourceExpanded?.isPartiallyLoaded || targetExpanded?.isPartiallyLoaded
+      const anyPartial = !!(sourceExpanded?.isPartiallyLoaded || targetExpanded?.isPartiallyLoaded)
 
       return {
         ...edge,
-        isDelegated: anyPartial ? false : !isEndpointHovered,
-        isResidual: anyPartial ? !isEndpointHovered : false,
+        isDelegated: !anyPartial,
+        isResidual: anyPartial,
       }
     })
-  }, [projectedEdges, delegationContext, hoveredNodeId])
+  }, [projectedEdges, delegationContext])
 
   return {
     lineageEdges,

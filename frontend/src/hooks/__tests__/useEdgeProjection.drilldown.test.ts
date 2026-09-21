@@ -91,7 +91,6 @@ function project(
         isTracing: false,
         traceContextSet: new Set(),
         isContainmentEdge: () => false,
-        hoveredNodeId: null,
       })
     },
     { initialProps: { roots, expanded } },

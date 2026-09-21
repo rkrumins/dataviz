@@ -26,7 +26,7 @@ import {
   useMatchUrnSet,
 } from '@/store/searchStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
-import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
+import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type RowSelectModifiers } from './FlatTreeItem'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
@@ -38,6 +38,7 @@ import { SPINE_MAX_WIDTH_PX } from './layerFold'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import { useAnchorRailStore } from '@/store/anchorRail'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
 import { matchesQuick } from '../search/session/quickPredicate'
@@ -90,7 +91,6 @@ interface LayerColumnProps {
   isTracing?: boolean
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
-  isHoverHighlight?: boolean
   onAnimationComplete?: () => void
   onLoadMore?: (parentId: string, auto?: boolean) => void
   /** Walk a search hit's ancestors open and scroll to it. The inline hit
@@ -153,9 +153,6 @@ interface LayerColumnProps {
   showLineageIndicators?: boolean
   /** Show the flow-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
-  /** Anchor Rail — the selected node's off-screen partners that live in
-   *  THIS column, docked as proxy chips the edge overlay anchors to. */
-  anchorProxies?: AnchorProxyGroup
   /** Chip click — scroll the real row into view (per-partner Frame). */
   onProxyReveal?: (nodeId: string) => void
   /** "+N more" overflow — open the Lineage Lens for the full list. */
@@ -265,7 +262,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   isTracing = false,
   highlightedNodes,
   isHighlightActive = false,
-  isHoverHighlight = false,
   onAnimationComplete: _onAnimationComplete,
   onLoadMore,
   onRevealSearchHit,
@@ -294,7 +290,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   externalCue,
   showLineageIndicators = false,
   showDensityGutter = false,
-  anchorProxies,
   onProxyReveal,
   onProxyMore,
   onEndReached,
@@ -1222,6 +1217,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   // ("↑ 97 rows · 306 lines") instead of two unlabeled numbers in
   // different units floating near each other.
   const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
+  // Anchor Rail — the focused entity's off-screen partners that live in THIS
+  // column, docked as proxy chips the edge overlay anchors to. A store read,
+  // so the rail following the pointer re-renders only the columns it moves in.
+  const anchorProxies = useAnchorRailStore(s => s.groups.get(layer.id))
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in
@@ -2513,8 +2512,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isHighlighted={traceContextSet.has(node.id)}
                         isFocusNode={traceFocusIds ? traceFocusIds.has(node.id) : traceFocusId === node.id}
                         isTracing={isTracing}
-                        isClickHighlighted={isHighlightActive && !isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
-                        isHoverHighlighted={isHighlightActive && isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
+                        isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
                         isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                         isFocused={focusIndex >= 0 && navIdx === focusIndex}
                         onSelect={handleRowSelect}

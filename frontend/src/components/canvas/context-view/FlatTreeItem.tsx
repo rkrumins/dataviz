@@ -47,7 +47,6 @@ interface FlatTreeItemProps {
   isHighlighted: boolean
   isFocusNode: boolean
   isClickHighlighted?: boolean
-  isHoverHighlighted?: boolean
   isDimmedByHighlight?: boolean
   /** A multi-selection is active and this row is not in it. Dimmed more
    *  gently than the search spotlight: the reader is still PICKING, so the
@@ -115,7 +114,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isHighlighted,
   isFocusNode,
   isClickHighlighted = false,
-  isHoverHighlighted = false,
   isDimmedByHighlight = false,
   isDimmedBySelection = false,
   isFocused = false,
@@ -362,6 +360,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     <div
       ref={itemRef}
       id={`layer-node-${node.id}`}
+      // The hover spotlight's glow never replaces a selected row's own.
+      data-selected={isSelected || undefined}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       onDragOver={(e) => {
@@ -448,8 +448,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         (isHighlighted || isOnLineage) && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
-        // Hover-highlight: lighter ephemeral glow on connected nodes
-        isHoverHighlighted && !isSelected && !isClickHighlighted && "bg-gradient-to-r from-blue-500/[0.05] to-transparent ring-1 ring-blue-400/15 dark:from-blue-400/[0.06] dark:ring-blue-400/12",
+        // Hover-highlight (the lighter glow on a hovered entity's connections,
+        // and the dim on everything else) is the edge overlay's, applied as
+        // CSS — `.nx-row-card` under `[data-row-spotlight]`, globals.css.
         // Keyboard focus ring (4.5)
         isFocused && !isSelected && "ring-2 ring-accent-lineage/40 bg-gradient-to-r from-accent-lineage/[0.06] to-transparent",
         // Staged-change row treatment — full-row color tint per change type

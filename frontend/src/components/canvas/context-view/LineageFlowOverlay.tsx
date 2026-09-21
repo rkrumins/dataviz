@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
+import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
 import { sameRow, sameRows } from './rowEquality'
 import { edgeDashArray } from './edgeDash'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
 import { routeLine } from './lineRoute'
-import { lineDash, nextRenderTier, type RenderTier } from './lineDensity'
+import { bySignificance, lineDash, nextRenderTier, type RenderTier } from './lineDensity'
+import { delegatedLineState, hoverSpotlight, type Spotlight } from './hoverSpotlight'
 import type { LineMotion } from './lineMotion'
 import { LineMotionLayer } from './LineMotionLayer'
 
@@ -29,6 +30,7 @@ function nextViewport(
 import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
 import type { AnchorProxyCandidate } from './anchorRail'
 import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPeriphery'
+import { useAnchorRailStore } from '@/store/anchorRail'
 import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -60,6 +62,28 @@ const VISIBLE_MARGIN_PX = 100
  *  canvas a view could be laid out on. */
 const SIDEWAYS_REACH_PX = 100_000
 
+/** The rail follows a hovered entity after this long on it... */
+const RAIL_DWELL_MS = 250
+/** ...and keeps its chips this long after the hover ends. */
+const RAIL_LINGER_MS = 1500
+
+const EMPTY_CHILD_MAP: ReadonlyMap<string, readonly string[]> = new Map()
+
+function* concat<T>(a: Iterable<T>, b: Iterable<T>): Iterable<T> {
+  yield* a
+  yield* b
+}
+
+/** A projected line as the hover pool holds it: what ranking and drawing read. */
+type PoolLine = {
+  id: string
+  source: string
+  target: string
+  bundleSize?: number
+  edgeCount?: number
+  confidence?: number
+}
+
 export function LineageFlowOverlay({
   nodes,
   edges,
@@ -82,7 +106,9 @@ export function LineageFlowOverlay({
   onRevealNode,
   flowRibbons,
   focusNodeId,
-  onAnchorProxies,
+  childMap,
+  hoverPool,
+  hoverBudget = 500,
   offCanvasLineage,
   onBringInOffCanvas,
   layerNames,
@@ -122,12 +148,19 @@ export function LineageFlowOverlay({
   /** Macro flow bands per (layer → layer) pair — rendered beneath the
    *  edge layer in Adaptive's summarized state. */
   flowRibbons?: FlowRibbon[],
-  /** The SELECTED node driving the Anchor Rail — its off-screen partners
-   *  dock as proxy chips in their owning columns. */
+  /** The SELECTED node, driving the Anchor Rail at once — its off-screen
+   *  partners dock as proxy chips in their owning columns. A hovered node
+   *  drives it after a short dwell, which this overlay times itself; the
+   *  chips reach the columns through the anchor-rail store. */
   focusNodeId?: string | null,
-  /** Rail payload per layer id — called only when the rail content
-   *  actually changes (the compute pass runs per frame). */
-  onAnchorProxies?: (groups: Map<string, AnchorProxyGroup>, focusId: string | null) => void,
+  /** Loaded containment children by parent — what a hover on an open
+   *  container lights up (hoverSpotlight). */
+  childMap?: ReadonlyMap<string, readonly string[]>,
+  /** In On Hover / Adaptive: every line the canvas COULD draw. A hovered
+   *  entity's lines come from here, strongest first, up to `hoverBudget` —
+   *  drawn by this overlay rather than by a canvas re-render per hover. */
+  hoverPool?: readonly PoolLine[],
+  hoverBudget?: number,
   /** Per row: lineage whose far end is not on the canvas at all (never
    *  loaded) — drawn as a stub beside the row. See ghostCues. */
   offCanvasLineage?: ReadonlyMap<string, OffCanvasLineage>,
@@ -184,8 +217,12 @@ export function LineageFlowOverlay({
   // Rail bookkeeping — refs so updateFlow never needs new dependencies.
   // dockedProxyIds bounds per-frame DOM lookups to chips that actually
   // exist (≤ rail cap per column), regardless of the focus node's fan.
+  // The rail's focus: the selection at once, else a hovered node after a
+  // dwell (`railTimerRef`) — `focusNodeIdRef` is whichever holds.
   const focusNodeIdRef = useRef<string | null>(null)
-  const onAnchorProxiesRef = useRef(onAnchorProxies)
+  const selectedFocusRef = useRef<string | null>(null)
+  const dwellFocusRef = useRef<string | null>(null)
+  const railTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const railFingerprintRef = useRef('')
   const dockedProxyIdsRef = useRef<Set<string>>(new Set())
   // Column periphery emission gate (see the summary block in updateFlow).
@@ -202,6 +239,11 @@ export function LineageFlowOverlay({
   const [hoverMousePos, setHoverMousePos] = useState<{ x: number; y: number } | null>(null)
   // Persistent element cache — survives across updateFlow calls, cleared on node changes
   const elementCacheRef = useRef(new Map<string, HTMLElement>())
+  // The hover spotlight (see "Hover spotlight" below) and the row elements it
+  // has marked lit — read by the row observer too, which marks lit rows the
+  // virtualizer mounts mid-hover.
+  const spotlightRef = useRef<Spotlight | null>(null)
+  const litRowsRef = useRef<HTMLElement[]>([])
 
   // Expand/collapse signal for the observer effects. The SET REFERENCE
   // (not its .size) — every expand/collapse mint a fresh Set upstream, so
@@ -259,28 +301,63 @@ export function LineageFlowOverlay({
   }, [])
 
   useEffect(() => {
-    onAnchorProxiesRef.current = onAnchorProxies
-  }, [onAnchorProxies])
-
-  useEffect(() => {
     offCanvasRef.current = offCanvasLineage
     scheduleUpdate()
   }, [offCanvasLineage, scheduleUpdate])
 
-  // Clear periphery summaries when the overlay unmounts (lineage flow
-  // toggled off) so columns never show stale connection counts.
-  useEffect(() => () => { useColumnPeripheryStore.getState().clear() }, [])
+  // Clear periphery summaries and the rail when the overlay unmounts (lineage
+  // flow toggled off) so columns never show stale counts or chips.
+  useEffect(() => () => {
+    useColumnPeripheryStore.getState().clear()
+    useAnchorRailStore.getState().clear()
+  }, [])
 
   // Selection changes redraw the overlay so the rail recomputes; the
   // ref keeps updateFlow's identity stable.
   useEffect(() => {
-    focusNodeIdRef.current = focusNodeId ?? null
+    selectedFocusRef.current = focusNodeId ?? null
+    focusNodeIdRef.current = focusNodeId ?? dwellFocusRef.current
     scheduleUpdate()
   }, [focusNodeId, scheduleUpdate])
+
+  // A hovered entity's lines, in On Hover / Adaptive — indexed by end once
+  // per pool, ranked and capped once per hovered entity.
+  const hoverPoolIndex = useMemo(() => {
+    if (!hoverPool) return null
+    const byEnd = new Map<string, PoolLine[]>()
+    for (const line of hoverPool) {
+      for (const end of line.source === line.target ? [line.source] : [line.source, line.target]) {
+        let list = byEnd.get(end)
+        if (!list) { list = []; byEnd.set(end, list) }
+        list.push(line)
+      }
+    }
+    return byEnd
+  }, [hoverPool])
+  const hoverLinesMemo = useRef<{ index: unknown; hovered: string | null; budget: number; lines: readonly PoolLine[] }>(
+    { index: null, hovered: null, budget: 0, lines: [] },
+  )
+  const hoverLinesFor = useCallback((hovered: string | null): readonly PoolLine[] => {
+    if (!hovered || !hoverPoolIndex) return []
+    const memo = hoverLinesMemo.current
+    if (memo.index !== hoverPoolIndex || memo.hovered !== hovered || memo.budget !== hoverBudget) {
+      const all = hoverPoolIndex.get(hovered) ?? []
+      hoverLinesMemo.current = {
+        index: hoverPoolIndex,
+        hovered,
+        budget: hoverBudget,
+        lines: all.length > hoverBudget ? [...all].sort(bySignificance).slice(0, hoverBudget) : all,
+      }
+    }
+    return hoverLinesMemo.current.lines
+  }, [hoverPoolIndex, hoverBudget])
 
   // Update paths function with optimizations
   const updateFlow = useCallback(() => {
     if (!containerRef.current) return
+    // Read from the DOM, where the rows write it — never canvas state, so a
+    // hover costs this pass and not a canvas re-render (hoverSpotlight.ts).
+    const hovered = document.documentElement.dataset.hoveredNode ?? null
 
     const containerRect = containerRef.current.getBoundingClientRect()
     // Find scroll parent once
@@ -436,6 +513,7 @@ export function LineageFlowOverlay({
       const fromTgt = edgeIndex.byTarget.get(nodeId)
       if (fromTgt) for (const e of fromTgt) candidateEdges.add(e)
     })
+    for (const e of hoverLinesFor(hovered)) candidateEdges.add(e)
 
     candidateEdges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
@@ -542,8 +620,9 @@ export function LineageFlowOverlay({
 
           if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
 
-          if (edge.isDelegated) return
-          if (edge.isResidual) {
+          const delegation = delegatedLineState(edge, hovered)
+          if (delegation === 'hidden') return
+          if (delegation === 'faint') {
             edgeOpacity = 0.15
             dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
           }
@@ -917,7 +996,7 @@ export function LineageFlowOverlay({
       dockedProxyIdsRef.current = new Set(
         Array.from(railGroups.values()).flatMap(g => g.proxies.map(p => p.nodeId)),
       )
-      onAnchorProxiesRef.current?.(railFp === '' ? new Map() : railGroups, focusId)
+      useAnchorRailStore.getState().publish(railFp === '' ? new Map() : railGroups, railFp === '' ? null : focusId)
     }
 
     // Flow ribbons — one gradient band per (layer → layer) pair, stacked
@@ -966,7 +1045,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1068,6 +1147,12 @@ export function LineageFlowOverlay({
       observedElements.add(el)
       resizeObserver.observe(el)
       visibilityObserver.observe(el)
+      // A lit row the virtualizer mounts mid-hover arrives lit.
+      const spot = spotlightRef.current
+      if (spot && el instanceof HTMLElement && spot.rows.has(el.id.slice('layer-node-'.length))) {
+        el.setAttribute('data-spot-lit', '')
+        litRowsRef.current.push(el)
+      }
     }
 
     const unobserveElement = (el: Element) => {
@@ -1237,62 +1322,134 @@ export function LineageFlowOverlay({
     }
   }, [updateFlow, scheduleUpdate, expandedNodesFingerprint])
 
-  // ── 4.2 Hover Preview ────────────────────────────────────────────────────────
+  // ── 4.2 Hover spotlight ─────────────────────────────────────────────────────
   //
-  // Still pure DOM/CSS — no React re-render on hover — but event-driven and
-  // O(edges touching the hovered node) rather than what this used to be: an
-  // unconditional `requestAnimationFrame` recursion running for the overlay's
-  // entire lifetime, polling `document.documentElement.dataset.hoveredNode` 60
-  // times a second whether or not anything was hovered, and on each change
-  // walking EVERY edge <g> to write an inline `opacity`.
+  // Hovering an entity lights it, its lines and the entities at their far
+  // ends, and dims the rest (hoverSpotlight.ts). All of it is applied here,
+  // straight to the DOM, so a hover re-renders nothing:
   //
-  // Two things are different now:
+  //  * lines — `data-flow-hover` on this container and `data-edge-hot` on the
+  //    lit lines; globals.css dims the others;
+  //  * rows — `data-row-spotlight` on the canvas scroller dims every card and
+  //    `data-spot-lit` keeps the lit ones lit. A row the virtualizer mounts
+  //    mid-hover is marked as it arrives (the row observer below). Marks,
+  //    not a generated stylesheet: rewriting a <style> restyled all ~4,600
+  //    elements on the page per hover (26–40 ms each, measured); a mark
+  //    restyles the rows it touches;
+  //  * the drawn set — a hover can ADD lines (the hovered entity's own in On
+  //    Hover / Adaptive, an open container's own it stood aside for): one
+  //    measure pass here;
+  //  * the Anchor Rail — follows a hovered entity after a dwell, lingers after.
   //
-  //  * A `MutationObserver` on the one attribute replaces the poll, so an idle
-  //    board schedules no frames at all.
-  //  * The dimming is expressed in CSS off `data-flow-hover` on the container
-  //    plus `data-edge-hot` on the few edges that actually touch the hovered
-  //    node (see globals.css). Only the matching edges are touched, and only
-  //    the previously-matching ones are cleared.
+  // It used to be canvas state: every change of the hovered row re-rendered
+  // ContextViewCanvas, every column, row and line — 100–180 ms of main thread
+  // per row the pointer crossed (measured 2026-09-21).
   //
-  // The effect deliberately has NO dependency array: it re-runs after every
-  // render so the marks are re-applied to elements React has just re-created.
-  // The old version could not do that — it kept `lastNode` in a closure, saw no
-  // change, and left the freshly-rendered edges undimmed until the pointer moved
-  // again, which is the highlight "flickering" on and off.
+  // A `MutationObserver` on the one attribute the rows write drives it — no
+  // polling. No spotlight during a trace, or while a selection's own
+  // highlight is on: a click highlight wins over hover, as it always has.
   const hotEdgesRef = useRef<SVGGElement[]>([])
+  const spotlightScrollerRef = useRef<HTMLElement | null>(null)
+  // Latest inputs for the observer callback, which is bound once. Synced
+  // before the recompute effect below, which reads them.
+  const spotlightInputs = useRef({ edges, childMap, allowed: true, hoverLinesFor })
   useEffect(() => {
-    const applyHover = () => {
-      const container = containerRef.current
-      if (!container) return
-      // Detached nodes (React re-rendered under us) ignore this harmlessly.
-      for (const g of hotEdgesRef.current) g.removeAttribute('data-edge-hot')
-      hotEdgesRef.current = []
+    spotlightInputs.current = { edges, childMap, allowed: !isTracing && !isHighlightActive, hoverLinesFor }
+  })
 
-      const hovered = document.documentElement.dataset.hoveredNode
-      if (!hovered) {
-        container.removeAttribute('data-flow-hover')
-        return
-      }
-      container.setAttribute('data-flow-hover', '')
-      const id = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(hovered) : hovered
-      const hot = Array.from(
-        container.querySelectorAll<SVGGElement>(`g[data-edge-src="${id}"], g[data-edge-tgt="${id}"]`),
-      )
-      for (const g of hot) g.setAttribute('data-edge-hot', '')
-      hotEdgesRef.current = hot
+  /** Mark the lit lines. Re-run after every render too: React may have
+   *  re-created the <g> elements. O(drawn lines), only while a spotlight is on. */
+  const markHotLines = useCallback(() => {
+    const container = containerRef.current
+    if (!container) return
+    // Detached nodes (React re-rendered under us) ignore this harmlessly.
+    for (const g of hotEdgesRef.current) g.removeAttribute('data-edge-hot')
+    hotEdgesRef.current = []
+    const spot = spotlightRef.current
+    if (!spot) {
+      container.removeAttribute('data-flow-hover')
+      return
     }
+    container.setAttribute('data-flow-hover', '')
+    const hot: SVGGElement[] = []
+    container.querySelectorAll<SVGGElement>('g[data-edge-id]').forEach(g => {
+      if (spot.lines.has(g.getAttribute('data-edge-id') ?? '')) {
+        g.setAttribute('data-edge-hot', '')
+        hot.push(g)
+      }
+    })
+    hotEdgesRef.current = hot
+  }, [])
+  useEffect(() => { markHotLines() })
 
-    applyHover()
+  const applySpotlight = useCallback(() => {
+    const scroller = containerRef.current?.parentElement
+    if (!scroller) return
+    const hovered = document.documentElement.dataset.hoveredNode ?? null
+    const { edges: lines, childMap: children, allowed, hoverLinesFor: linesOf } = spotlightInputs.current
+    const spot = allowed && hovered
+      ? hoverSpotlight(hovered, children ?? EMPTY_CHILD_MAP, concat(lines, linesOf(hovered)))
+      : null
+    spotlightRef.current = spot
+    for (const el of litRowsRef.current) el.removeAttribute('data-spot-lit')
+    litRowsRef.current = []
+    if (spot) {
+      for (const id of spot.rows) {
+        const el = document.getElementById(`layer-node-${id}`)
+        if (el) {
+          el.setAttribute('data-spot-lit', '')
+          litRowsRef.current.push(el)
+        }
+      }
+    }
+    scroller.toggleAttribute('data-row-spotlight', spot !== null)
+    spotlightScrollerRef.current = scroller
+    markHotLines()
+  }, [markHotLines])
 
+  // The board under a hover changed (lines, the selection's highlight, a
+  // trace starting): the spotlight follows.
+  useEffect(() => {
+    applySpotlight()
+  }, [edges, childMap, isTracing, isHighlightActive, hoverLinesFor, applySpotlight])
+
+  useEffect(() => {
     if (typeof MutationObserver === 'undefined') return
-    const observer = new MutationObserver(applyHover)
+    const onHover = () => {
+      applySpotlight()
+      const hovered = document.documentElement.dataset.hoveredNode ?? null
+      // The rail follows a hovered entity only once the pointer DWELLS (a
+      // drive-by must not flash chips), and when the hover ends it LINGERS
+      // long enough for the pointer to travel to a chip — a rail that
+      // dismissed itself en route could never be used.
+      if (railTimerRef.current) clearTimeout(railTimerRef.current)
+      railTimerRef.current = setTimeout(() => {
+        railTimerRef.current = null
+        dwellFocusRef.current = hovered
+        const next = selectedFocusRef.current ?? hovered
+        if (next !== focusNodeIdRef.current) {
+          focusNodeIdRef.current = next
+          scheduleUpdate()
+        }
+      }, hovered ? RAIL_DWELL_MS : RAIL_LINGER_MS)
+      // A hover can add lines — its own, and an open container's own.
+      scheduleUpdate()
+    }
+    const observer = new MutationObserver(onHover)
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['data-hovered-node'],
     })
-    return () => observer.disconnect()
-  })
+    return () => {
+      observer.disconnect()
+      if (railTimerRef.current) clearTimeout(railTimerRef.current)
+    }
+  }, [applySpotlight, scheduleUpdate])
+
+  useEffect(() => () => {
+    for (const el of litRowsRef.current) el.removeAttribute('data-spot-lit')
+    spotlightScrollerRef.current?.removeAttribute('data-row-spotlight')
+  }, [])
 
   const VIEWPORT_MARGIN = 400
   // VERY FAST Virtualization Filter: Only render edges that intersect the scroll
@@ -1994,6 +2151,8 @@ interface EdgeLineProps {
   showCount: boolean
 }
 
+const LINE_TRANSITION = { transition: 'opacity 0.12s ease' }
+
 const EdgeLine = React.memo(function EdgeLine({
   edge, groupOpacity, isHighlighted, isHovered, premiumLook, dash, showDirection,
   stagedColor, isExpanding, showCount,
@@ -2016,7 +2175,11 @@ const EdgeLine = React.memo(function EdgeLine({
       data-edge-src={edge.source}
       data-edge-tgt={edge.target}
       className={edgeClasses}
-      style={{ opacity: groupOpacity, transition: 'opacity 0.12s ease' }}
+      // Opacity inline ONLY when this line is dimmed: an inline `opacity: 1`
+      // outranks the stylesheet, and the hover spotlight dims lines from
+      // there (`[data-flow-hover]`, globals.css) — it never could while every
+      // line carried one.
+      style={groupOpacity === 1 ? LINE_TRANSITION : { opacity: groupOpacity, transition: LINE_TRANSITION.transition }}
     >
       {/* `userSpaceOnUse` from the source to the target end aligns the
           gradient to the edge's direction — approximate on a curve, right

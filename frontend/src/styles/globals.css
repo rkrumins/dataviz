@@ -649,6 +649,29 @@
     -webkit-backdrop-filter: blur(4px);
     backdrop-filter: blur(4px);
   }
+
+  /* Hover spotlight (LineageFlowOverlay, hoverSpotlight.ts). While a hover
+   * lights an entity's connections, every other card dims; the overlay marks
+   * the lit ones `data-spot-lit`, which restores them and adds this glow.
+   * Marks rather than React so a hover re-renders no row. */
+  [data-row-spotlight] {
+    --nx-spotlight-tint: linear-gradient(to right, rgb(59 130 246 / 0.05), transparent);
+    --nx-spotlight-ring: 0 0 0 1px rgb(96 165 250 / 0.15);
+  }
+  .dark [data-row-spotlight] {
+    --nx-spotlight-tint: linear-gradient(to right, rgb(96 165 250 / 0.06), transparent);
+    --nx-spotlight-ring: 0 0 0 1px rgb(96 165 250 / 0.12);
+  }
+  [data-row-spotlight] .nx-row-card {
+    opacity: 0.4;
+  }
+  [data-row-spotlight] .nx-row-card[data-spot-lit] {
+    opacity: 1;
+  }
+  [data-row-spotlight] .nx-row-card[data-spot-lit]:not([data-selected]) {
+    background-image: var(--nx-spotlight-tint);
+    box-shadow: var(--nx-spotlight-ring);
+  }
 }
 
 @layer components {

@@ -37,3 +37,22 @@ export function nextRenderTier(count: number, current: RenderTier): RenderTier {
 export function lineDash(line: { isGhost: boolean; dashArray: string }, detailed: boolean): string {
   return line.isGhost && !detailed ? 'none' : line.dashArray
 }
+
+/**
+ * The order every line budget rations room by: how many lines this one
+ * replaces (`bundleSize`), NOT `edgeCount`, the weight the bundle stands for.
+ *
+ * Those diverge on a roll-up: a "Combined flow" can speak for thousands of
+ * table-level flows while occupying exactly one line. Ranking on the weight
+ * let such a roll-up outrank, and therefore evict, the raw edges a user had
+ * just expanded a container to see — lineage vanishing at the moment they
+ * asked for more of it. `edgeCount` remains the weight everywhere it is read
+ * for display; only the budget's ordering uses this.
+ */
+export function bySignificance(
+  a: { bundleSize?: number; edgeCount?: number; confidence?: number },
+  b: { bundleSize?: number; edgeCount?: number; confidence?: number },
+): number {
+  return ((b.bundleSize ?? b.edgeCount ?? 1) - (a.bundleSize ?? a.edgeCount ?? 1))
+    || ((b.confidence || 0) - (a.confidence || 0))
+}

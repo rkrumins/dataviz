@@ -107,7 +107,7 @@ import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
-import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
+import { useHighlightState } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
@@ -221,7 +221,8 @@ const EMPTY_LAYER_NODES: HierarchyNode[] = []
 const TRACE_EXPANSION_RECORD_MS = 250
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
-import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
+import type { ColumnGeometryApi } from './types'
+import { useAnchorRailStore } from '@/store/anchorRail'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
@@ -230,6 +231,7 @@ import * as assignmentOps from './assignmentMutations'
 import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
+import { bySignificance } from './lineDensity'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
@@ -3961,8 +3963,12 @@ export function ContextViewCanvas({
   // `traceContextSet` now comes directly from useTraceFilteredHierarchy above
   // (single source of truth for both filtering and edge projection).
 
-  // Hovered node — needed by both edge projection (delegation) and hover highlight
-  const hoveredNodeId = useHoveredNodeId()
+  // NO hover state here. What a hover changes — lit and dimmed rows and
+  // lines, a hovered entity's own lines in On Hover / Adaptive, an open
+  // container's lines it stood aside for, the Anchor Rail — is the overlay's
+  // to draw (hoverSpotlight.ts). As canvas state, every row the pointer
+  // crossed re-rendered this component, every column and every row:
+  // 100–180 ms of main thread each (measured 2026-09-21).
 
   // Layer-index map: nodeId → layer ordinal (Source=0, Staging=1, …).
   // Drives reverse-flow detection — projected edges where target.layerIdx <
@@ -4016,7 +4022,6 @@ export function ContextViewCanvas({
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: overlay.active,
     traceContextSet, isContainmentEdge,
-    hoveredNodeId,
     suppressedAggEdgeKeys,
     // Browse-mode bundling: kicks in only outside trace mode and only when
     // edge density would otherwise overload the canvas. Walks endpoints up
@@ -4160,22 +4165,8 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Significance ranking for the AMBIENT BUDGET, which rations room on the
-  // board. It ranks on `bundleSize` — how many lines this one line replaces —
-  // NOT on `edgeCount`, which is the weight the bundle stands for.
-  //
-  // Those diverge on a roll-up: a "Combined flow" can speak for thousands of
-  // table-level flows while occupying exactly one line. Ranking on the weight
-  // let such a roll-up outrank, and therefore evict, the raw edges a user had
-  // just expanded a container to see — lineage vanishing at the moment they
-  // asked for more of it. `edgeCount` remains the weight everywhere it is
-  // read for display; only the budget's ordering changed.
-  const bySignificance = (
-    a: { bundleSize?: number; edgeCount?: number; confidence?: number },
-    b: { bundleSize?: number; edgeCount?: number; confidence?: number },
-  ) =>
-    ((b.bundleSize ?? b.edgeCount ?? 1) - (a.bundleSize ?? a.edgeCount ?? 1))
-    || ((b.confidence || 0) - (a.confidence || 0))
+  // The ambient budget ranks by `bySignificance` (lineDensity.ts): how many
+  // lines a line replaces, never the weight it stands for.
 
   // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
   // instead of cliffing (old behavior: all ambient edges vanished at
@@ -4191,11 +4182,12 @@ export function ContextViewCanvas({
   }, [isStubsMode, lineageRenderMode, visibleLineageEdges, autoStubThreshold])
 
   // Effective edge set passed to the renderer, plus the shown/total
-  // bookkeeping the status chips surface. Focus (hover / selection /
-  // trace anchor) materializes incident edges in every stub-y mode, but
-  // a hub's fan is ALSO capped at the strongest `autoStubThreshold` —
-  // 650 curves at once is noise; the Lineage Lens enumerates the full
-  // fan properly and the chip points there.
+  // bookkeeping the status chips surface. Focus (selection / trace anchor)
+  // materializes incident edges in every stub-y mode, but a hub's fan is
+  // ALSO capped at the strongest `autoStubThreshold` — 650 curves at once is
+  // noise; the Lineage Lens enumerates the full fan properly and the chip
+  // points there. A HOVERED entity's lines follow the same rule, drawn by
+  // the overlay from `hoverPool` so a hover never re-renders the canvas.
   const edgePresentation = useMemo(() => {
     if (!isStubsMode) {
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
@@ -4203,7 +4195,6 @@ export function ContextViewCanvas({
     const ambient = rankedAmbientEdges ?? []
     const ambientTotal = lineageRenderMode === 'auto' ? visibleLineageEdges.length : 0
     const focusIds = new Set<string>()
-    if (hoveredNodeId) focusIds.add(hoveredNodeId)
     if (selectedNodeId) focusIds.add(selectedNodeId)
     if (overlay.active && canvasTrace.tracedUrn) focusIds.add(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     if (focusIds.size === 0) {
@@ -4226,7 +4217,7 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
@@ -4706,35 +4697,13 @@ export function ContextViewCanvas({
     }
   }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
 
-  const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
-  const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
-    setAnchorProxyGroups(groups)
-  }, [])
-
-  // Rail focus: selection wins instantly; hover engages after a short
-  // DWELL (so drive-by mouse movement doesn't flash chips) and, when the
-  // hover ends with nothing selected, the rail LINGERS long enough for
-  // the pointer to travel to a chip — the reason a naive hover-scoped
-  // rail is unusable (it dismisses itself en route). Timers are
-  // effect-scoped; every transition cancels the previous one.
-  const [railFocusId, setRailFocusId] = useState<string | null>(null)
-  useEffect(() => {
-    if (selectedNodeId) {
-      const raf = requestAnimationFrame(() => setRailFocusId(selectedNodeId))
-      return () => cancelAnimationFrame(raf)
-    }
-    if (hoveredNodeId) {
-      const t = setTimeout(() => setRailFocusId(hoveredNodeId), 250)
-      return () => clearTimeout(t)
-    }
-    const t = setTimeout(() => setRailFocusId(null), 1500)
-    return () => clearTimeout(t)
-  }, [selectedNodeId, hoveredNodeId])
-
+  // The Anchor Rail — the focused entity's off-screen partners as chips in
+  // their columns — is decided by the overlay (the selection at once, a
+  // hovered entity after a dwell) and read by each column from its store.
   const handleProxyMore = useCallback(() => {
-    const target = railFocusId ?? selectedNodeId
+    const target = useAnchorRailStore.getState().focusId ?? selectedNodeId
     if (target) openLens(target)
-  }, [railFocusId, selectedNodeId, openLens])
+  }, [selectedNodeId, openLens])
 
   // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
   // Never auto-scrolls: business users hate surprise camera moves. The
@@ -4801,19 +4770,11 @@ export function ContextViewCanvas({
     isTracing: traceActive, displayMap, childMap,
   })
 
-  // Hover highlight: same visual effect on hover (lighter), defers to click-highlight
-  const { hoverHighlight, isHoverActive } = useHoverHighlight({
-    hoveredNodeId,
-    visibleLineageEdges: effectiveLineageEdges,
-    isTracing: traceActive,
-    displayMap, childMap,
-    isClickHighlightActive,
-  })
-
-  // Merge: click takes priority, hover used when no click selection
-  const isHighlightActive = isClickHighlightActive || isHoverActive
-  const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
-  const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
+  // The HOVER highlight (lighter, deferring to this one) is the overlay's,
+  // applied to the DOM — see hoverSpotlight.ts.
+  const isHighlightActive = isClickHighlightActive
+  const mergedHighlightNodes = highlightState.nodes
+  const mergedHighlightEdges = highlightState.edges
 
   // The Connections panel's highlight is a deliberate gesture on the panel,
   // so while it is active it wins over hover/click — on the OVERLAY only.
@@ -5468,7 +5429,7 @@ export function ContextViewCanvas({
           focusShown={edgePresentation.focusShown}
           focusTotal={edgePresentation.focusTotal}
           onOpenFocusLens={() => {
-            const target = selectedNodeId ?? hoveredNodeId ?? drawerNodeId
+            const target = selectedNodeId ?? document.documentElement.dataset.hoveredNode ?? drawerNodeId
             if (target) openLens(target)
           }}
         />
@@ -5709,8 +5670,11 @@ export function ContextViewCanvas({
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
               flowRibbons={flowRibbons}
-              focusNodeId={railFocusId}
-              onAnchorProxies={handleAnchorProxies}
+              focusNodeId={selectedNodeId}
+              childMap={childMap}
+              // On Hover / Adaptive draw a hovered entity's lines from here.
+              hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
+              hoverBudget={autoStubThreshold}
               offCanvasLineage={overlay.active ? undefined : offCanvasByNode}
               // During a trace the reveal itself refuses to write the store
               // (revealOnCanvas), so the click is safe to offer throughout.
@@ -5838,7 +5802,6 @@ export function ContextViewCanvas({
                 isTracing={overlay.active}
                 highlightedNodes={mergedHighlightNodes}
                 isHighlightActive={isHighlightActive}
-                isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadMoreChildren}
                 // The row box's inline hit rows are pointers into the
@@ -5879,7 +5842,6 @@ export function ContextViewCanvas({
                 externalCue={externalCueByNode}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
-                anchorProxies={anchorProxyGroups.get(layer.id)}
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? loadMoreRootsGuarded : undefined}

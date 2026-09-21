@@ -67,7 +67,6 @@ function run(roots: HierarchyNode[], edges: ReturnType<typeof edge>[], expanded:
       isTracing: false,
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
-      hoveredNodeId: null,
     }),
   )
   return result.current

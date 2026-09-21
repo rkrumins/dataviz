@@ -53,10 +53,13 @@ describe('the Connections panel is wired into the Context View', () => {
     // occupying exactly one line. Ranking on weight let such a roll-up outrank
     // and therefore EVICT the raw edges a user had just expanded a container to
     // see — lineage disappearing at the moment they asked for more of it.
-    // `edgeCount` stays the weight everywhere it is read for display.
-    expect(source).toMatch(
+    // `edgeCount` stays the weight everywhere it is read for display. The
+    // ranking lives in lineDensity.ts, shared with the overlay's hover budget.
+    const density = readFileSync(resolve(__dirname, '../../lineDensity.ts'), 'utf8')
+    expect(density).toMatch(
       /\(b\.bundleSize \?\? b\.edgeCount \?\? 1\) - \(a\.bundleSize \?\? a\.edgeCount \?\? 1\)/
     )
+    expect(source).toContain("import { bySignificance } from './lineDensity'")
     expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, autoStubThreshold\)/)
   })
 
