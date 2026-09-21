@@ -227,6 +227,10 @@ interface PreferencesState {
    *  name alone — the reader's choice for a quieter, text-first canvas. */
   showCanvasEntityIcons: boolean
   toggleCanvasEntityIcons: () => void
+  /** Keep the memory gauge on screen. It shows itself anyway once the tab's
+   *  script heap passes 1 GB. */
+  showMemoryUsage: boolean
+  toggleMemoryUsage: () => void
   subtleCanvasTreeLines: boolean
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
@@ -469,6 +473,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
       showCanvasEntityIcons: true,
       toggleCanvasEntityIcons: () => set((s) => ({ showCanvasEntityIcons: !(s.showCanvasEntityIcons ?? true) })),
+      showMemoryUsage: false,
+      toggleMemoryUsage: () => set((s) => ({ showMemoryUsage: !s.showMemoryUsage })),
       subtleCanvasTreeLines: false,
       toggleSubtleCanvasTreeLines: () => set((s) => ({ subtleCanvasTreeLines: !s.subtleCanvasTreeLines })),
       resetCanvasDisplaySettings: () => set({

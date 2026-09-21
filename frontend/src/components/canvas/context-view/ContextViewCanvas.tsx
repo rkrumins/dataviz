@@ -74,6 +74,7 @@ import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
+import { MemoryGauge } from './MemoryGauge'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation, useViewportReservation } from './useBandReservation'
@@ -5387,6 +5388,9 @@ export function ContextViewCanvas({
             maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
+          {/* The tab's memory — shows itself once it is heavy, or always
+              when the reader asks (Display options). */}
+          <MemoryGauge />
           {/* Minimized: one slim strip instead of two headers, so the
               columns get their width and height back. Both counts stay
               readable — minimizing must not hide what the panels were

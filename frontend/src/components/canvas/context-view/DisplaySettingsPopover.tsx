@@ -27,6 +27,7 @@ import {
   Settings2,
   Sparkles,
   ZoomIn,
+  MemoryStick,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -278,7 +279,9 @@ export function DisplaySettingsSections({
   // than threaded through the header's four layers of props.
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
   const toggleEntityIcons = usePreferencesStore((s) => s.toggleCanvasEntityIcons)
-  const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines].filter(Boolean).length
+  const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
+  const toggleMemoryUsage = usePreferencesStore((s) => s.toggleMemoryUsage)
+  const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines, showMemoryUsage].filter(Boolean).length
 
   return (
     <>
@@ -402,6 +405,14 @@ export function DisplaySettingsSections({
           active={showTypeBadge}
           onClick={onToggleTypeBadge}
           accent="cyan"
+        />
+        <ToggleRow
+          label="Show memory usage"
+          description={showMemoryUsage ? 'Always shown, bottom right' : 'Shown only when the tab is heavy'}
+          icon={MemoryStick}
+          active={showMemoryUsage}
+          onClick={toggleMemoryUsage}
+          accent="purple"
         />
         <ToggleRow
           label="Subtle tree lines"
