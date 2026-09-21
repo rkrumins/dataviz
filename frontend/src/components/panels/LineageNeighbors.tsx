@@ -137,9 +137,18 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   // Lineage-only neighbors. Containment edges (structural parent ↔ child) are
   // filtered out — the section is about flow lineage. Shared derivation with
   // the canvas Lineage Lens so both surfaces always agree.
+  // The grain closure has to be built BEFORE the derivation now: a rollup to
+  // a coarser partner, while a concrete flow is present, is that same flow
+  // restated one level up, and the derivation needs to know which partners
+  // are coarser than this entity to fold them away.
+  const hierarchyMap = useEntityTypeHierarchyMap()
+  const grainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
+  const focalType = (nodeMap.get(nodeId)?.data?.type as string) ?? 'entity'
+
   const { incomingRecords, outgoingRecords } = useMemo(
-    () => deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes),
-    [edges, nodeMap, nodeId, containmentEdgeTypes],
+    () => deriveNeighborRecords(nodeId, edges, nodeMap, containmentEdgeTypes,
+      { closure: grainClosure, focalType }),
+    [edges, nodeMap, nodeId, containmentEdgeTypes, grainClosure, focalType],
   )
 
   // THE COUNT IS THE WALK'S, not ours.
@@ -167,9 +176,6 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   // Same grain split as the Lens header, so the two surfaces can never
   // disagree: coarser-grain partners (their type can transitively
   // contain this node's type) are summaries, counted separately.
-  const hierarchyMap = useEntityTypeHierarchyMap()
-  const grainClosure = useMemo(() => buildCanContainClosure(hierarchyMap), [hierarchyMap])
-  const focalType = (nodeMap.get(nodeId)?.data?.type as string) ?? 'entity'
   let rollupTotal = 0
   for (const r of incomingRecords) {
     if (isCoarserGrain(grainClosure, r.neighborNode?.data?.type as string | undefined, focalType)) rollupTotal++
