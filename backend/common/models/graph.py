@@ -81,6 +81,11 @@ class NodeQuery(BaseModel):
     include_child_count: bool = Field(True, alias="includeChildCount")
     offset: Optional[int] = 0
     limit: Optional[int] = 100
+    # Keyset position for paging by entity type: return rows strictly after
+    # (after_display_name, after_urn) in (displayName, urn) order. A paging
+    # client sends it WITH `offset` — providers that page by offset ignore it.
+    after_display_name: Optional[str] = Field(None, alias="afterDisplayName")
+    after_urn: Optional[str] = Field(None, alias="afterUrn")
 
     class Config:
         populate_by_name = True

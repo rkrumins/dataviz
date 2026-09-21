@@ -79,6 +79,21 @@ export interface ChildPageState {
   childCount: number
 }
 
+/**
+ * Where one entity type's feed stands in an open ('all') view: the keyset
+ * position after the last page (its maximum (displayName, urn)), the server
+ * offset for providers that page by offset, and whether the server has more.
+ * `epoch` counts landed pages so a column's end-of-list latch re-arms on
+ * progress even when a page's rows render under parents in other columns.
+ */
+export interface TypeFeedState {
+  afterName: string | null
+  afterUrn: string | null
+  offset: number
+  hasMore: boolean
+  epoch: number
+}
+
 interface CanvasState {
   // Nodes and Edges
   nodes: LineageNode[]
@@ -90,6 +105,9 @@ interface CanvasState {
    *  scroll/expand). Cleared by setGraph. Never persisted. */
   childPaging: Record<string, ChildPageState>
   setChildPage: (parentId: string, page: ChildPageState) => void
+  /** Open-scope type feeds by entity type. Cleared by setGraph. Never persisted. */
+  typeFeeds: Record<string, TypeFeedState>
+  setTypeFeed: (entityType: string, feed: TypeFeedState) => void
   /** Monotonic counter — incremented on every node/edge mutation. */
   _version: number
   setNodes: (nodes: LineageNode[]) => void
@@ -363,14 +381,19 @@ export const useCanvasStore = create<CanvasState>()(
           edges: dedupedEdges,
           _nodeIndex: seenNodes,
           _edgeIndex: seenEdges,
-          // A new graph invalidates every pager position.
+          // A new graph invalidates every pager and feed position.
           childPaging: {},
+          typeFeeds: {},
         }
       }),
 
       childPaging: {},
       setChildPage: (parentId, page) => set((state) => ({
         childPaging: { ...state.childPaging, [parentId]: page },
+      })),
+      typeFeeds: {},
+      setTypeFeed: (entityType, feed) => set((state) => ({
+        typeFeeds: { ...state.typeFeeds, [entityType]: feed },
       })),
       addGraph: (newNodes, newEdges) => set((state) => {
         const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))

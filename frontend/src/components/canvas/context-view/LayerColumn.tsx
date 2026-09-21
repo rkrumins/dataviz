@@ -88,6 +88,11 @@ interface LayerColumnProps {
   failedNodes?: Set<string>
   /** Pages landed per parent — the load-more latch re-arms on these. */
   childPageEpochs?: Map<string, number>
+  /** Open scope: this column's type feeds still have more (present only then).
+   *  Drawn as a column-level row that auto-loads while the column GROWS and
+   *  offers a click when a page lands elsewhere — never an unattended drain. */
+  feedMore?: { loading: boolean; failed: boolean }
+  onFeedMore?: (layerId: string) => void
   /** Parents the server says have no further pages: no load-more row, even
    *  when some of their children render in other columns. */
   exhaustedParents?: Set<string>
@@ -229,6 +234,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   failedNodes,
   childPageEpochs,
   exhaustedParents,
+  feedMore,
+  onFeedMore,
   onScroll,
   onAssignToLayer,
   onRenameLayer,
@@ -433,11 +440,33 @@ export const LayerColumn = React.memo(function LayerColumn({
     // Iterative flat-tree builder using explicit stack
     type FrameItem =
       | { kind: 'node'; node: HierarchyNode; depth: number; isLast: boolean; parentIsLast: boolean[] }
-      | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number }
+      | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number | null; feed?: boolean }
       | { kind: 'searchHits'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]
           rows: InlineSearchHitRow[]; overflow: number; endsTheGroup: boolean }
 
     const stack: FrameItem[] = []
+    // Open scope: the column's type feeds have more. Pushed FIRST so the LIFO
+    // stack emits it LAST — the very foot of the column, below any anchor row.
+    if (feedMore && !localFocusId) {
+      stack.push({
+        kind: 'loadMore',
+        parent: {
+          id: `feed:${layer.id}`,
+          urn: `feed:${layer.id}`,
+          name: layer.name,
+          typeId: '',
+          data: {},
+          children: [],
+          depth: 0,
+          entityTypeOption: '',
+          tags: [],
+        } as HierarchyNode,
+        depth: 0,
+        parentIsLast: [],
+        count: null,
+        feed: true,
+      })
+    }
     // An ANCHORED column draws the anchor's children as its roots, so the
     // anchor row that would normally carry "Load more" is not on screen. Give
     // the COLUMN one instead, standing in for the anchor: LoadMoreItem keys off
@@ -481,6 +510,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           parentIsLast: frame.parentIsLast,
           isLoadMore: true,
           loadMoreCount: frame.count,
+          isFeedMore: frame.feed === true,
         })
         continue
       }
@@ -629,7 +659,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents, feedMore, layer.id, layer.name])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -2254,11 +2284,24 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentId={item.node.id}
                         depth={item.depth}
                         parentIsLast={item.parentIsLast}
-                        count={item.loadMoreCount!}
-                        isLoading={loadingNodes?.has(item.node.id) ?? false}
-                        epoch={childPageEpochs?.get(item.node.id) ?? 0}
-                        failed={(failedNodes?.has(item.node.id) ?? false) && !(loadingNodes?.has(item.node.id) ?? false)}
-                        onLoadMore={(auto) => handleLoadMore(item.node.id, auto)}
+                        count={item.loadMoreCount ?? null}
+                        {...(item.isFeedMore
+                          // A type page's rows may render under parents in OTHER
+                          // columns, so this row re-arms only when THIS column
+                          // grows (latch on its row count) — never an unattended
+                          // drain of the whole type.
+                          ? {
+                            isLoading: feedMore?.loading ?? false,
+                            failed: (feedMore?.failed ?? false) && !(feedMore?.loading ?? false),
+                            epoch: visibleCount,
+                            onLoadMore: () => onFeedMore?.(layer.id),
+                          }
+                          : {
+                            isLoading: loadingNodes?.has(item.node.id) ?? false,
+                            epoch: childPageEpochs?.get(item.node.id) ?? 0,
+                            failed: (failedNodes?.has(item.node.id) ?? false) && !(loadingNodes?.has(item.node.id) ?? false),
+                            onLoadMore: (auto?: boolean) => handleLoadMore(item.node.id, auto),
+                          })}
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are
                         // filtered out of the tree and the pinned row

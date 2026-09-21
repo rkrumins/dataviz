@@ -5997,6 +5997,18 @@ class FalkorDBProvider(GraphDataProvider):
         params["skip"] = offset
         params["limit"] = limit
 
+        # Keyset continuation when paging by type (label-union path): rows strictly
+        # after (displayName, urn), seeked inside each branch. It replaces SKIP, so a
+        # row deleted before the reader's position can't shift another out of reach.
+        # `offset` still arrives alongside, for providers that page by offset.
+        keyset = use_label_union and query.after_urn is not None
+        if keyset:
+            params["afterName"] = query.after_display_name or ""
+            params["afterUrn"] = query.after_urn
+            shared_conditions.append(
+                "(n.displayName > $afterName OR (n.displayName = $afterName AND n.urn > $afterUrn))"
+            )
+
         # Child count: only compute when needed (skip for bulk lineage fetches)
         include_child_count = query.include_child_count
 
@@ -6089,7 +6101,10 @@ class FalkorDBProvider(GraphDataProvider):
             for t in types:
                 safe_label = _sanitize_label(t)
                 union_branches.append(f"MATCH (n:{safe_label}){where_suffix} RETURN n")
-            # Wrap in subquery pattern: UNION all branches, then paginate + child count
+            # Wrap in subquery pattern: UNION all branches, then paginate + child count.
+            # (displayName, urn) is a TOTAL order: tied names can't split differently
+            # between two page queries, so no row is skipped or repeated at a boundary.
+            page_clause = "" if keyset else " SKIP $skip"
             inner = " UNION ".join(union_branches)
             if include_child_count:
                 containment = list(self._get_containment_edge_types())
@@ -6097,20 +6112,20 @@ class FalkorDBProvider(GraphDataProvider):
                 if containment_rel_types:
                     cypher = (
                         f"CALL {{ {inner} }} "
-                        f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                        f"WITH n ORDER BY n.displayName, n.urn{page_clause} LIMIT $limit "
                         f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child) "
                         f"RETURN n, count(child) as childCount"
                     )
                 else:
                     cypher = (
                         f"CALL {{ {inner} }} "
-                        f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                        f"WITH n ORDER BY n.displayName, n.urn{page_clause} LIMIT $limit "
                         f"RETURN n, 0 as childCount"
                     )
             else:
                 cypher = (
                     f"CALL {{ {inner} }} "
-                    f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                    f"WITH n ORDER BY n.displayName, n.urn{page_clause} LIMIT $limit "
                     f"RETURN n"
                 )
         else:

@@ -452,6 +452,12 @@ export interface NodeQuery {
 
     /** Pagination limit */
     limit?: number
+
+    /** Keyset position when paging by type: rows strictly after
+     *  (afterDisplayName, afterUrn) in (displayName, urn) order. Sent WITH
+     *  `offset` — providers that page by offset ignore it. */
+    afterDisplayName?: string
+    afterUrn?: string
 }
 
 export interface EdgeQuery {

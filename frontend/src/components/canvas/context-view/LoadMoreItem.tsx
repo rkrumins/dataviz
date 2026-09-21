@@ -42,8 +42,9 @@ export function LoadMoreItem({
   parentId?: string
   depth: number
   parentIsLast: boolean[]
-  /** Children not yet loaded for this parent. */
-  count: number
+  /** Children not yet loaded for this parent — `null` when the remainder is
+   *  unknown (a type feed): the row then offers the next page without a number. */
+  count: number | null
   isLoading?: boolean
   /** `auto` is true only for the sentinel's one-page-ahead fetch — the caller
    *  announces the CLICK and stays quiet about the prefetch. */
@@ -56,11 +57,11 @@ export function LoadMoreItem({
   failed?: boolean
 }) {
   const indentWidth = depth * 16
-  const nextPage = Math.min(CHILDREN_PAGE_SIZE, count)
+  const nextPage = count === null ? CHILDREN_PAGE_SIZE : Math.min(CHILDREN_PAGE_SIZE, count)
 
   const rowRef = useRef<HTMLDivElement>(null)
   const lastFiredKeyRef = useRef<string | null>(null)
-  const latchKey = `${count}:${epoch ?? 0}`
+  const latchKey = `${count ?? '?'}:${epoch ?? 0}`
   const onLoadMoreRef = useRef(onLoadMore)
   useEffect(() => { onLoadMoreRef.current = onLoadMore }, [onLoadMore])
 
@@ -123,7 +124,9 @@ export function LoadMoreItem({
         disabled={isLoading}
         aria-label={failed
           ? `Couldn't load the next ${nextPage}. Retry`
-          : `Load ${nextPage} more of ${count.toLocaleString()} remaining`}
+          : count === null
+            ? 'Load more'
+            : `Load ${nextPage} more of ${count.toLocaleString()} remaining`}
         className={cn(
           'flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           'bg-black/[0.02] border-black/[0.08] dark:bg-white/[0.03] dark:border-white/[0.08] text-ink-muted',
@@ -150,10 +153,14 @@ export function LoadMoreItem({
             <span className="flex items-center justify-center w-5 h-5 rounded-full bg-black/[0.04] group-hover/item:bg-black/[0.06] dark:bg-white/[0.05] dark:group-hover/item:bg-white/[0.08] transition-colors">
               <LucideIcons.Plus className="w-3.5 h-3.5 text-ink-muted/70" />
             </span>
-            <span className="tracking-wide">
-              Load {nextPage} more
-              <span className="text-ink-muted/50"> · {count.toLocaleString()} remaining</span>
-            </span>
+            {count === null ? (
+              <span className="tracking-wide">Load more</span>
+            ) : (
+              <span className="tracking-wide">
+                Load {nextPage} more
+                <span className="text-ink-muted/50"> · {count.toLocaleString()} remaining</span>
+              </span>
+            )}
           </>
         )}
       </button>
