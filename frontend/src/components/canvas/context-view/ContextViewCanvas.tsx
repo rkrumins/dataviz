@@ -354,6 +354,7 @@ export function ContextViewCanvas({
   const removeStoreEdges = useCanvasStore((s) => s.removeEdges)
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
+  const setSelection = useCanvasStore((s) => s.setSelection)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
@@ -5517,6 +5518,7 @@ export function ContextViewCanvas({
                 expandedNodes={expandedForRender}
                 searchResults={advancedMatchUrns}
                 onSelect={selectNode}
+                onSelectRange={setSelection}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}

@@ -19,6 +19,7 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
+import { useCanvasStore } from '@/store/canvas'
 import {
   useAncestorMatchCounts,
   useCanvasFilterMode,
@@ -26,7 +27,7 @@ import {
 } from '@/store/searchStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
-import { FlatTreeItem } from './FlatTreeItem'
+import { FlatTreeItem, type RowSelectModifiers } from './FlatTreeItem'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -48,7 +49,10 @@ interface LayerColumnProps {
   selectedNodeId: string | null
   expandedNodes: Set<string>
   searchResults: ReadonlySet<string>
-  onSelect: (id: string) => void
+  onSelect: (id: string, multi?: boolean) => void
+  /** Shift-range result: the visible rows from the last-clicked one to the
+   *  clicked one, resolved HERE because this column owns the visible order. */
+  onSelectRange: (ids: string[]) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
@@ -201,6 +205,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   expandedNodes,
   searchResults,
   onSelect,
+  onSelectRange,
   onToggle,
   onContextMenu,
   onDoubleClick,
@@ -749,6 +754,29 @@ export const LayerColumn = React.memo(function LayerColumn({
     navigableItems.forEach((item, idx) => map.set(item.node.id, idx))
     return map
   }, [navigableItems])
+
+  // Row click → selection. Cmd/Ctrl toggles; Shift takes everything between
+  // the last-clicked row and this one, in the order the column is DRAWN
+  // (navigableItems, so a collapsed subtree contributes nothing — a range is
+  // what the user can see, not what the tree happens to hold).
+  //
+  // The anchor is the store's lastNodeClick, which bumps on every click. When
+  // it names a row in another column — or nothing has been clicked yet — a
+  // shift-click falls through to a plain select rather than silently doing
+  // nothing.
+  const handleRowSelect = useCallback((id: string, modifiers: RowSelectModifiers) => {
+    if (modifiers.range) {
+      const anchorId = useCanvasStore.getState().lastNodeClick.nodeId
+      const from = anchorId ? navigableIndexMap.get(anchorId) : undefined
+      const to = navigableIndexMap.get(id)
+      if (from !== undefined && to !== undefined) {
+        const [lo, hi] = from <= to ? [from, to] : [to, from]
+        onSelectRange(navigableItems.slice(lo, hi + 1).map((item) => item.node.id))
+        return
+      }
+    }
+    onSelect(id, modifiers.multi)
+  }, [navigableItems, navigableIndexMap, onSelect, onSelectRange])
 
   // O(1) lookup: node ID → flatTree index (for virtualizer.scrollToIndex)
   const nodeToFlatIndexMap = useMemo(() => {
@@ -2291,7 +2319,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isHoverHighlighted={isHighlightActive && isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
                         isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                         isFocused={focusIndex >= 0 && navIdx === focusIndex}
-                        onSelect={onSelect}
+                        onSelect={handleRowSelect}
                         onToggle={onToggle}
                         onContextMenu={onContextMenu}
                         onDoubleClick={onDoubleClick}

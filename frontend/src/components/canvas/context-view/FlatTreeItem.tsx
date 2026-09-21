@@ -21,6 +21,14 @@ import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
 
+/** Which modifier keys were held when a row was clicked. */
+export interface RowSelectModifiers {
+  /** Cmd/Ctrl — add or remove this row without disturbing the rest. */
+  multi: boolean
+  /** Shift — select every row from the last-clicked one to this one. */
+  range: boolean
+}
+
 interface FlatTreeItemProps {
   node: HierarchyNode
   depth: number
@@ -39,7 +47,10 @@ interface FlatTreeItemProps {
   isDimmedByHighlight?: boolean
   isFocused?: boolean
   isTracing?: boolean
-  onSelect: (id: string) => void
+  /** A row click, with the modifiers that were held. `multi` toggles the
+   *  row in the selection; `range` selects from the last-clicked row to
+   *  this one. The column resolves `range` — it owns the visible order. */
+  onSelect: (id: string, modifiers: RowSelectModifiers) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
@@ -456,7 +467,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       }}
       onClick={(e) => {
         e.stopPropagation()
-        onSelect(node.id)
+        onSelect(node.id, { multi: e.metaKey || e.ctrlKey, range: e.shiftKey })
       }}
       onDoubleClick={(e) => {
         e.stopPropagation()

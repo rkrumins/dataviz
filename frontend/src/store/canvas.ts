@@ -127,6 +127,10 @@ interface CanvasState {
   selectedNodeIds: string[]
   selectedEdgeIds: string[]
   selectNode: (id: string, multi?: boolean) => void
+  /** Replace the whole node selection — what a shift-range and every bulk
+   *  action need. Logical groupings are filtered out: a group is a visual
+   *  container, not an entity, and bulk actions have nothing to walk from. */
+  setSelection: (ids: string[]) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
   /** Last selectNode() call. `drawerNodeId` is sticky, so click observers (the
@@ -361,9 +365,13 @@ export const useCanvasStore = create<CanvasState>()(
       selectedEdgeIds: [],
       selectNode: (id, multi = false) => set((state) => ({
         selectedNodeIds: multi
-          ? state.selectedNodeIds.includes(id)
-            ? state.selectedNodeIds.filter((nid) => nid !== id)
-            : [...state.selectedNodeIds, id]
+          // A logical grouping is a container, not an entity — it can be
+          // clicked, but it never joins a selection a bulk action reads.
+          ? isSelectableNode(id)
+            ? state.selectedNodeIds.includes(id)
+              ? state.selectedNodeIds.filter((nid) => nid !== id)
+              : [...state.selectedNodeIds, id]
+            : state.selectedNodeIds
           : state.selectedNodeIds.length === 1 && state.selectedNodeIds[0] === id
             ? [] // Toggle off: clicking the already-selected node deselects it
             : [id],
@@ -387,6 +395,18 @@ export const useCanvasStore = create<CanvasState>()(
         // edge drawer.
         drawerNodeId: null,
       })),
+      setSelection: (ids) => set(() => {
+        const next = [...new Set(ids.filter(isSelectableNode))]
+        return {
+          selectedNodeIds: next,
+          // Node and edge selections are mutually exclusive, as in selectNode.
+          selectedEdgeIds: [],
+          // One node set this way reads as a plain click and opens the sticky
+          // drawer; a set of several must not, because the drawer shows ONE
+          // entity and a selection of five is not one entity.
+          ...(next.length === 1 ? { drawerNodeId: next[0] } : {}),
+        }
+      }),
       clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
       lastNodeClick: { nodeId: null, seq: 0 },
 
@@ -543,6 +563,11 @@ export const useCanvasStore = create<CanvasState>()(
     }
   )
 )
+
+/** A logical grouping (`logical:<id>`) is a visual container the view config
+ *  declares, not an entity in the graph. It has no urn to trace, expand or
+ *  link, so it never belongs in a selection that bulk actions read. */
+const isSelectableNode = (id: string): boolean => !id.startsWith('logical:')
 
 // Selector hooks
 export const useNodes = () => useCanvasStore((s) => s.nodes)
