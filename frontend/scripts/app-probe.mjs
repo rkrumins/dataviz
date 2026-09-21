@@ -205,13 +205,29 @@ export function helpers(evalJs) {
     const row = rows.find(r => (r.innerText || '').split('\\n')[0].trim() === ${JSON.stringify(name)})
   `
   return {
-    /** Toggle a container open. The first button in a row is its chevron. */
+    /**
+     * Open a container, IDEMPOTENTLY. The first button in a row is its
+     * chevron, and a chevron TOGGLES — so clicking one that a restored
+     * per-view expansion state had already opened closes it instead, and
+     * every later lookup then fails for a reason that has nothing to do with
+     * the app. Row count is the tell: opening adds rows, closing removes
+     * them, so a shrink is undone.
+     */
     async expand(name) {
+      const count = () => evalJs(`return document.querySelectorAll('[id^="layer-node-"]').length`)
+      const before = await count()
       const found = await evalJs(`${rowExpr(name)}
         if (row) { row.scrollIntoView({ block: 'center' }); row.querySelector('button')?.click() }
         return !!row`)
+      if (!found) return false
       await sleep(2000)
-      return found
+      if (await count() < before) {
+        await evalJs(`${rowExpr(name)}
+          if (row) { row.scrollIntoView({ block: 'center' }); row.querySelector('button')?.click() }
+          return true`)
+        await sleep(2000)
+      }
+      return true
     },
     async clickRow(name) {
       const found = await evalJs(`${rowExpr(name)}
@@ -220,15 +236,63 @@ export function helpers(evalJs) {
       await sleep(1600)
       return found
     },
-    /** A row's visible lines plus its control count — a container that lost
-     *  its `+N` badge is a node that arrived in the store half-formed. */
-    info(name) {
-      return evalJs(`${rowExpr(name)}
+    /**
+     * A row's visible lines plus its control count — a container that lost its
+     * `+N` badge is a node that arrived in the store half-formed.
+     *
+     * The columns are VIRTUALIZED, so a row outside the window is not in the
+     * DOM at all and a plain query cannot tell "absent" from "not painted".
+     * This scrolls each column through its own height looking for the row
+     * before reporting null, which is the difference between a real finding
+     * and a false one.
+     */
+    async info(name) {
+      const read = () => evalJs(`${rowExpr(name)}
         if (!row) return null
         return {
           text: (row.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean),
           buttons: row.querySelectorAll('button').length,
         }`)
+      const first = await read()
+      if (first) return first
+      await evalJs(`
+        for (const c of document.querySelectorAll('.custom-scrollbar')) c.scrollTop = 0
+        return true`)
+      await sleep(200)
+      const fromTop = await read()
+      if (fromTop) return fromTop
+
+      // Step each column by most of its own height, so no window is skipped —
+      // sampling a few fractions of a long column walks straight past rows.
+      // Scroll positions are restored, because a probe that leaves the canvas
+      // somewhere else changes what the NEXT check sees.
+      const saved = await evalJs(`
+        return [...document.querySelectorAll('.custom-scrollbar')].map(c => c.scrollTop)`)
+      try {
+        for (let pass = 0; pass < 30; pass++) {
+          const more = await evalJs(`
+            let moved = false
+            for (const c of document.querySelectorAll('.custom-scrollbar')) {
+              const max = c.scrollHeight - c.clientHeight
+              if (c.scrollTop >= max - 1) continue
+              c.scrollTop = Math.min(max, c.scrollTop + c.clientHeight * 0.8)
+              moved = true
+            }
+            return moved`)
+          await sleep(200)
+          const found = await read()
+          if (found) return found
+          if (!more) break
+        }
+        return null
+      } finally {
+        await evalJs(`
+          const tops = ${JSON.stringify(saved ?? [])}
+          document.querySelectorAll('.custom-scrollbar').forEach((c, i) => {
+            if (typeof tops[i] === 'number') c.scrollTop = tops[i]
+          })
+          return true`)
+      }
     },
     rowNames() {
       return evalJs(`return [...document.querySelectorAll('[id^="layer-node-"]')]

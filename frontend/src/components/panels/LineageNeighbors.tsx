@@ -53,7 +53,9 @@ interface LineageNeighborsProps {
   /** Reveal the target on canvas (expand ancestors, pan/scroll). May
    *  return a promise — the clicked row shows an inline spinner until it
    *  resolves. */
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   /** Reveal a set of neighbors at once and fit the canvas around them.
    *  Used by the multi-select action bar. Implementations may run each
    *  reveal in parallel; the drawer doesn't swap when this fires. */
@@ -96,6 +98,9 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   const dataSourceId = useWorkspacesStore((s) => s.activeDataSourceId ?? undefined)
 
   const [expanded, setExpanded] = useState<Direction | null>(null)
+  /** A partner the canvas could not bring in — named so the reader knows
+   *  WHICH one, and cleared as soon as they try something else. */
+  const [unreachable, setUnreachable] = useState<string | null>(null)
 
   // Multi-select state lives at the panel level (rather than inside each
   // direction's ExpandedDetail) for two reasons:
@@ -233,8 +238,17 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
     // the visual reveal rather than pinning the drawer interaction.
     try {
       const result = onFocusNode(neighborId)
-      if (result && typeof (result as Promise<void>).then === 'function') {
-        await withTimeout(result as Promise<void>, TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.focusNode')
+      const outcome = result && typeof (result as Promise<unknown>).then === 'function'
+        ? await withTimeout(result as Promise<unknown>, TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.focusNode')
+        : undefined
+      // The walk finished and the entity is still not on the canvas — a view
+      // that does not hold it, a chain that could not be completed, or a
+      // synthetic rollup endpoint. Opening the drawer on it would CLOSE the
+      // drawer, because `isOpen` is `!!selectedNode` and the store cannot
+      // answer for it. Say so and stay where we are.
+      if (outcome === 'unavailable') {
+        setUnreachable(neighborId)
+        return
       }
       // Swapped only once the reveal has landed it, for an entity the store
       // did not hold. Opening earlier would point the drawer at nothing.
@@ -243,8 +257,8 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
         selectNode(neighborId)
       }
     } catch (err) {
-      // The swap still happens on a timeout: the reveal may simply be slow,
-      // and a drawer that never opens is worse than one that opens on an
+      // A timeout is different from "not here": the reveal may simply be
+      // slow, and a drawer that never opens is worse than one opened on an
       // entity the canvas is still bringing into view.
       if (!known) {
         openNodeDrawer(neighborId)
@@ -308,6 +322,22 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           >
             <LucideIcons.RotateCw className="w-3 h-3" />
             Retry
+          </button>
+        </div>
+      )}
+      {unreachable && (
+        <div className="flex items-start gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
+          <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+          <span className="min-w-0">
+            This view doesn&apos;t hold that entity, so the canvas can&apos;t show it.
+            Trace or the Focus Lens will still walk to it.
+          </span>
+          <button
+            type="button"
+            onClick={() => setUnreachable(null)}
+            className="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded-md font-semibold hover:bg-amber-500/15 cursor-pointer"
+          >
+            Dismiss
           </button>
         </div>
       )}

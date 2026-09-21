@@ -18,6 +18,7 @@
  * after a real fetch, and about a panel resolving against a real store.
  *
  *   node scripts/app-probe-drawer.mjs [viewId] [spine...] [--leaf name] [--target name]
+ *       [--deep-parent name]
  *
  * Defaults to the estate the reports came from. Requires the dev stack up.
  */
@@ -35,6 +36,10 @@ const SPINE = positional.length > 1
  *  thing under test. Overridable with --target. */
 const targetFlag = argv.indexOf('--target')
 const TARGET = targetFlag >= 0 ? argv[targetFlag + 1] : 'INTERMEDIATE_T2'
+/** The container that HOLDS the deep partner — several levels down, and
+ *  collapsed, which is what makes the deep case a real walk. */
+const deepFlag = argv.indexOf('--deep-parent')
+const DEEP_PARENT = deepFlag >= 0 ? argv[deepFlag + 1] : 'int_clean_contacts_t2'
 
 const results = []
 const check = (name, pass, detail) => {
@@ -62,8 +67,19 @@ try {
   check('drawer opens on the clicked entity', lines?.[1] === LEAF, lines?.[1])
 
   // The partner rows live inside the direction cards, which start closed.
-  // A card's button begins with its count, so "1" opens the one with a partner.
-  await h.clickDrawerButton('1')
+  // Opened by LABEL, never by the leading count: a count is not a selector —
+  // "1" matches whatever button happens to start with it, which silently
+  // clicks something else and makes every later lookup fail for a reason that
+  // has nothing to do with the app.
+  const opened = await evalJs(`
+    const p = document.querySelector('[data-panel="entity-drawer"]')
+    if (!p) return false
+    const b = [...p.querySelectorAll('button')]
+      .find(x => (x.innerText || '').includes('Data Consumers'))
+    if (b) { b.scrollIntoView({ block: 'center' }); b.click() }
+    return !!b`)
+  check('the consumers card opens', opened)
+  await new Promise((r) => setTimeout(r, 1500))
 
   // The container to open from the drawer, and its healthy shape beforehand.
   const before = await h.info(TARGET)
@@ -100,6 +116,50 @@ try {
     await new Promise((r) => setTimeout(r, 2500))
     check('back returns to where the walk started',
       (await h.drawerLines() ?? [])[1] === LEAF, (await h.drawerLines() ?? [])[1])
+  }
+
+  // ── The DEEP case: a partner several levels inside a collapsed container.
+  // This is the one that stayed broken longest. The reveal has to walk the
+  // whole chain — and every ancestor arrives from /ancestors with
+  // `childCount: null`, which the hydrator once read as "childless" and
+  // skipped, so the walk stopped partway, the target never landed, and the
+  // drawer closed itself.
+  // Back has returned us to the leaf, but the drawer re-rendered on the way,
+  // so its direction card is closed again.
+  await evalJs(`
+    const p = document.querySelector('[data-panel="entity-drawer"]')
+    if (!p) return false
+    const b = [...p.querySelectorAll('button')].find(x => (x.innerText || '').includes('Data Consumers'))
+    if (b) { b.scrollIntoView({ block: 'center' }); b.click() }
+    return !!b`)
+  await new Promise((r) => setTimeout(r, 1500))
+
+  const deepUrnBefore = await evalJs(`
+    const p = document.querySelector('[data-panel="entity-drawer"]')
+    const m = p ? (p.innerText || '').match(/urn:li:[^\\s]+/) : null
+    return m ? m[0] : null`)
+
+  const wentDeep = await evalJs(`
+    const p = document.querySelector('[data-panel="entity-drawer"]')
+    if (!p) return false
+    const b = [...p.querySelectorAll('button')].find(x => {
+      const t = x.innerText || ''
+      return t.trim().startsWith(${JSON.stringify(LEAF)}) && t.includes(${JSON.stringify(DEEP_PARENT)})
+    })
+    if (b) { b.scrollIntoView({ block: 'center' }); b.click() }
+    return !!b`)
+  if (wentDeep) {
+    await new Promise((r) => setTimeout(r, 7000))
+    const deepUrnAfter = await evalJs(`
+      const p = document.querySelector('[data-panel="entity-drawer"]')
+      const m = p ? (p.innerText || '').match(/urn:li:[^\\s]+/) : null
+      return m ? m[0] : null`)
+    check('the drawer survives a deep jump',
+      await evalJs(`return !!document.querySelector('[data-panel="entity-drawer"]')`))
+    check('a deep jump moves to a DIFFERENT entity',
+      !!deepUrnAfter && deepUrnAfter !== deepUrnBefore, `${deepUrnBefore} -> ${deepUrnAfter}`)
+    check('the deep container tree is brought onto the canvas',
+      !!await h.info(DEEP_PARENT), DEEP_PARENT)
   }
 
   const out = await shot('/tmp/app-probe-drawer.png')

@@ -1133,8 +1133,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (loadingNodes.has(parentId)) return
 
         const nodeData = parentNode.data as any
-        const childCount = (nodeData.childCount as number) ?? (nodeData.metadata?.childCount as number) ?? 0
-        if (childCount === 0) return
+        // UNKNOWN IS NOT ZERO.
+        //
+        // `childCount` is deliberately null on any read path that cannot count
+        // containment edges live — `/ancestors` is one, and it is exactly the
+        // path a deep reveal seeds its chain from. Folding that null into 0
+        // meant every such ancestor was treated as childless and its page was
+        // never fetched: the reveal stopped partway, the target never landed,
+        // and the container rendered with no children and no way to open it.
+        //
+        // Only a counted zero means "nothing to load". Unknown means "ask".
+        const rawChildCount = (nodeData.childCount as number | null | undefined)
+            ?? (nodeData.metadata?.childCount as number | null | undefined)
+        if (rawChildCount === 0) return
+        const childCount = typeof rawChildCount === 'number' ? rawChildCount : Number.POSITIVE_INFINITY
 
         const existingNodeIds = new Set(nodes.map(n => n.id))
         // Optimistic, unsaved children aren't part of the backend's `childCount` and have no

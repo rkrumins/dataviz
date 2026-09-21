@@ -86,7 +86,9 @@ interface EntityDrawerProps {
    *  collapsed ancestors (lazy-loading from the backend if needed), then
    *  pans/scrolls to the target. May return a promise; the drawer's
    *  neighbor row awaits it to show a loading spinner. */
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   /** Reveal a set of neighbors at once and fit the canvas around them.
    *  Used by the LineageNeighbors multi-select action bar. */
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
@@ -1116,7 +1118,9 @@ function RelationshipSummary({
 }: {
   nodeId: string
   childCount: number
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
 }) {
   const { node, parentNode, parentName, currentEdgeType, childCountLoaded } = useContainmentPlacement(nodeId)
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
@@ -1277,7 +1281,9 @@ interface ViewModeContentProps {
   propertiesBag: Record<string, any>
   onCopyUrn: () => void
   copiedUrn: boolean
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
   wsId?: string
   graphId?: string | null

@@ -320,11 +320,17 @@ export const useCanvasStore = create<CanvasState>()(
       },
       addNodes: (newNodes) => set((state) => {
         const existingIds = state._nodeIndex
-        const uniqueNodes = newNodes.filter((n) => !existingIds.has(n.id))
-        if (uniqueNodes.length === 0) return state // No-op: prevent unnecessary re-render
-        const nextIndex = new Set(existingIds)
+        const uniqueNodes: LineageNode[] = []
+        const dupes = new Map<string, LineageNode>()
+        for (const n of newNodes) {
+          if (existingIds.has(n.id)) dupes.set(n.id, n)
+          else uniqueNodes.push(n)
+        }
+        const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
+        if (uniqueNodes.length === 0 && !enriched) return state
+        const nextIndex = uniqueNodes.length > 0 ? new Set(existingIds) : existingIds
         uniqueNodes.forEach((n) => nextIndex.add(n.id))
-        return { nodes: [...state.nodes, ...uniqueNodes], _nodeIndex: nextIndex }
+        return { nodes: [...(enriched ?? state.nodes), ...uniqueNodes], _nodeIndex: nextIndex }
       }),
       addEdges: (newEdges) => set((state) => {
         const existingIds = state._edgeIndex
@@ -361,15 +367,21 @@ export const useCanvasStore = create<CanvasState>()(
         }
       }),
       addGraph: (newNodes, newEdges) => set((state) => {
-        const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
+        const uniqueNodes: LineageNode[] = []
+        const dupes = new Map<string, LineageNode>()
+        for (const n of newNodes) {
+          if (state._nodeIndex.has(n.id)) dupes.set(n.id, n)
+          else uniqueNodes.push(n)
+        }
         const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
-        if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return state
-        const nodeIndex = new Set(state._nodeIndex)
-        const edgeIndex = new Set(state._edgeIndex)
+        const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
+        if (uniqueNodes.length === 0 && uniqueEdges.length === 0 && !enriched) return state
+        const nodeIndex = uniqueNodes.length > 0 ? new Set(state._nodeIndex) : state._nodeIndex
+        const edgeIndex = uniqueEdges.length > 0 ? new Set(state._edgeIndex) : state._edgeIndex
         uniqueNodes.forEach((n) => nodeIndex.add(n.id))
         uniqueEdges.forEach((e) => edgeIndex.add(e.id))
         return {
-          nodes: [...state.nodes, ...uniqueNodes],
+          nodes: [...(enriched ?? state.nodes), ...uniqueNodes],
           edges: [...state.edges, ...uniqueEdges],
           _nodeIndex: nodeIndex,
           _edgeIndex: edgeIndex,
@@ -607,6 +619,57 @@ export const useCanvasStore = create<CanvasState>()(
     }
   )
 )
+
+/**
+ * Fill in what the store is MISSING about a node it already holds.
+ *
+ * `addNodes`/`addGraph` keep the first version of an id they are given, which
+ * is right for position and for anything the user has since edited — but it
+ * also meant a node first seen in a LEAN shape could never be completed. The
+ * ancestors `/ancestors` returns carry `childCount: null`, so a container
+ * first met that way kept no child count for the rest of the session: no `+N`
+ * badge, no chevron, no way to open it. That is a container losing its
+ * containment tree, and no amount of re-fetching fixed it.
+ *
+ * Fill-only, never overwrite: a value the store already has wins, so a richer
+ * earlier read, a live edit and a node's position are all safe. Returns the
+ * SAME object when nothing was missing, so React sees no change.
+ */
+function enrichNode(existing: LineageNode, incoming: LineageNode): LineageNode {
+  const from = incoming.data as Record<string, unknown> | undefined
+  if (!from) return existing
+  const have = existing.data as unknown as Record<string, unknown>
+  let filled: Record<string, unknown> | null = null
+  for (const key in from) {
+    const v = from[key]
+    if (v === undefined || v === null) continue
+    if (have[key] !== undefined && have[key] !== null) continue
+    filled ??= { ...have }
+    filled[key] = v
+  }
+  return filled ? ({ ...existing, data: filled } as LineageNode) : existing
+}
+
+/**
+ * One pass over the held nodes, filling whatever the incoming duplicates can
+ * complete. Returns null when nothing changed — the caller then keeps the
+ * existing array and React re-renders nothing. O(nodes + dupes), the same
+ * order as the copy the caller was doing anyway.
+ */
+function enrichAll(
+  nodes: LineageNode[],
+  dupes: Map<string, LineageNode>,
+): LineageNode[] | null {
+  let changed = false
+  const next = nodes.map((n) => {
+    const incoming = dupes.get(n.id)
+    if (!incoming) return n
+    const merged = enrichNode(n, incoming)
+    if (merged !== n) changed = true
+    return merged
+  })
+  return changed ? next : null
+}
 
 /** Record a drawer move. A move from the middle of the trail drops whatever
  *  was ahead of it, the way every back/forward history does; re-opening the
