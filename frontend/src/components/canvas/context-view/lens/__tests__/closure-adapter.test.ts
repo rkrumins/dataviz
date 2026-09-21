@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, beforeAll } from 'vitest'
 
-import { toLensClosure, mergeClosures, emptyWalkModel, type LensWalkModel } from '../closure-adapter'
+import { toLensClosure, mergeClosures, emptyWalkModel, unionWalkModels, type LensWalkModel } from '../closure-adapter'
 import { buildLensSubgraph } from '../lens-subgraph'
 import type {
     GraphNode,
@@ -520,4 +520,85 @@ describe('partiality is derived, never sticky', () => {
     }), 'F')
     expect(m.truncationReason).toBe('timeout')
   })
+})
+
+
+// ---------------------------------------------------------------------------
+// unionWalkModels — several seeds, one overlay
+// ---------------------------------------------------------------------------
+
+describe('unionWalkModels', () => {
+    const model = (focusUrn: string, over: Partial<LensWalkModel> = {}): LensWalkModel => ({
+        focusUrn,
+        nodes: [],
+        lineageEdges: [],
+        containmentEdges: [],
+        upstreamUrns: new Set(),
+        downstreamUrns: new Set(),
+        frontierUp: [],
+        frontierDown: [],
+        truncated: false,
+        truncationReason: null,
+        seedTruncated: false,
+        seedCursor: null,
+        ...over,
+    })
+
+    it('hands back the SAME model when there is one seed — no new path for a normal trace', () => {
+        const only = model('a', { nodes: [{ urn: 'a' } as never] })
+        expect(unionWalkModels([only])).toBe(only)
+    })
+
+    it('is null when there is nothing to union', () => {
+        expect(unionWalkModels([])).toBeNull()
+    })
+
+    it('dedupes a node two seeds both reached', () => {
+        const a = model('a', { nodes: [{ urn: 'shared' } as never, { urn: 'x' } as never] })
+        const b = model('b', { nodes: [{ urn: 'shared' } as never, { urn: 'y' } as never] })
+        const u = unionWalkModels([a, b])!
+        expect(u.nodes.map(n => n.urn).sort()).toEqual(['shared', 'x', 'y'])
+    })
+
+    it('dedupes a hop two seeds both found, by the pair it connects', () => {
+        const hop = { sourceUrn: 'p', targetUrn: 'q', edgeType: 'FLOWS_TO' }
+        const u = unionWalkModels([
+            model('a', { lineageEdges: [hop] }),
+            model('b', { lineageEdges: [{ ...hop }] }),
+        ])!
+        expect(u.lineageEdges).toHaveLength(1)
+    })
+
+    it('never counts one seed as another seed’s lineage', () => {
+        // 'b' is upstream of 'a' — but both are selected, so 'b' is hop 0 of
+        // its own walk and the SELECTION has no upstream from it.
+        const u = unionWalkModels([
+            model('a', { upstreamUrns: new Set(['b', 'outside']) }),
+            model('b', { downstreamUrns: new Set(['a']) }),
+        ])!
+        expect([...u.upstreamUrns]).toEqual(['outside'])
+        expect([...u.downstreamUrns]).toEqual([])
+    })
+
+    it('is incomplete if ANY seed is incomplete', () => {
+        const u = unionWalkModels([
+            model('a'),
+            model('b', { truncated: true, truncationReason: 'max_nodes' }),
+        ])!
+        expect(u.truncated).toBe(true)
+        expect(u.truncationReason).toBe('max_nodes')
+    })
+
+    it('carries a seedTruncated from any seed', () => {
+        const u = unionWalkModels([model('a'), model('b', { seedTruncated: true })])!
+        expect(u.seedTruncated).toBe(true)
+    })
+
+    it('keeps what any seed still owes on the frontier', () => {
+        const u = unionWalkModels([
+            model('a', { frontierUp: [{ urn: 'f1', totalCount: 3, nextCursor: null, reason: 'cut' }] }),
+            model('b', { frontierUp: [{ urn: 'f2', totalCount: 1, nextCursor: null, reason: 'depth' }] }),
+        ])!
+        expect(u.frontierUp.map(f => f.urn).sort()).toEqual(['f1', 'f2'])
+    })
 })

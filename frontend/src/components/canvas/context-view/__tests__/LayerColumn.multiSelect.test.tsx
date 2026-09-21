@@ -7,7 +7,7 @@
  * it owns the order the rows are actually drawn in — a collapsed subtree
  * contributes nothing to a range the user can see.
  */
-import { render, fireEvent, screen } from '@testing-library/react'
+import { render, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import { installJsdomLayout } from '@/test/canvasHarness'

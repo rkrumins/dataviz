@@ -297,3 +297,85 @@ export function mergeClosures(
         seedCursor,
     }
 }
+
+
+/**
+ * Union several walk models into one — the canvas's bulk trace.
+ *
+ * Each selected seed is walked independently (so one seed's truncation or
+ * failure is never attributed to another); this is where the separate
+ * pictures become the single overlay the canvas draws.
+ *
+ * Nodes and edges dedupe by id, because two seeds that reach the same table
+ * have found ONE table, not two. `upstreamUrns` / `downstreamUrns` union for
+ * the same reason — with one deliberate exception: a urn that is itself one
+ * of the seeds is dropped from both. A seed is hop 0 of its own walk, and
+ * counting it as another seed's upstream would let a selection report
+ * lineage it does not have.
+ *
+ * `truncated` and `seedTruncated` are ORed: if any seed's picture is
+ * incomplete, the union is incomplete, and the overlay has to say so.
+ * `focusUrn` is the first seed — the union has no single focal, and callers
+ * that need the whole set read it from the selection instead.
+ */
+export function unionWalkModels(models: readonly LensWalkModel[]): LensWalkModel | null {
+    if (models.length === 0) return null
+    if (models.length === 1) return models[0]!
+
+    const seeds = new Set(models.map((m) => m.focusUrn))
+    const nodes = new Map<string, LensWalkNode>()
+    const lineageEdges = new Map<string, LensEdgeLike>()
+    const containmentEdges = new Map<string, LensContainmentEdgeLike>()
+    const upstreamUrns = new Set<string>()
+    const downstreamUrns = new Set<string>()
+    const coarseUp = new Set<string>()
+    const coarseDown = new Set<string>()
+    const frontierUp = new Map<string, LensFrontierEntry>()
+    const frontierDown = new Map<string, LensFrontierEntry>()
+    let truncated = false
+    let seedTruncated = false
+    let truncationReason: string | null = null
+
+    for (const m of models) {
+        for (const n of m.nodes) nodes.set(n.urn, n)
+        // `id` is optional on a lineage hop and absent on a containment
+        // edge, so both dedupe by the pair they connect (and, for lineage,
+        // the relationship) — the same identity `mergeClosures` treats as one
+        // edge. Two seeds reaching the same pair found ONE hop.
+        for (const e of m.lineageEdges) {
+            lineageEdges.set(e.id ?? `${e.sourceUrn}\u0000${e.targetUrn}\u0000${e.edgeType ?? ''}`, e)
+        }
+        for (const e of m.containmentEdges) {
+            containmentEdges.set(`${e.sourceUrn}\u0000${e.targetUrn}`, e)
+        }
+        for (const u of m.upstreamUrns) if (!seeds.has(u)) upstreamUrns.add(u)
+        for (const u of m.downstreamUrns) if (!seeds.has(u)) downstreamUrns.add(u)
+        for (const u of m.coarseUpstreamUrns ?? []) if (!seeds.has(u)) coarseUp.add(u)
+        for (const u of m.coarseDownstreamUrns ?? []) if (!seeds.has(u)) coarseDown.add(u)
+        // A node still owed by ANY seed is still owed by the union.
+        for (const f of m.frontierUp) frontierUp.set(f.urn, f)
+        for (const f of m.frontierDown) frontierDown.set(f.urn, f)
+        truncated = truncated || m.truncated
+        seedTruncated = seedTruncated || m.seedTruncated
+        truncationReason = truncationReason ?? m.truncationReason
+    }
+
+    return {
+        focusUrn: models[0]!.focusUrn,
+        nodes: [...nodes.values()],
+        lineageEdges: [...lineageEdges.values()],
+        containmentEdges: [...containmentEdges.values()],
+        upstreamUrns,
+        downstreamUrns,
+        ...(coarseUp.size > 0 ? { coarseUpstreamUrns: coarseUp } : {}),
+        ...(coarseDown.size > 0 ? { coarseDownstreamUrns: coarseDown } : {}),
+        frontierUp: [...frontierUp.values()],
+        frontierDown: [...frontierDown.values()],
+        truncated,
+        truncationReason,
+        seedTruncated,
+        // The union has no single focus whose contents could be resumed; each
+        // seed's own cursor is drained by the driver on its own model.
+        seedCursor: null,
+    }
+}

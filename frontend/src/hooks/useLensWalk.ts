@@ -149,6 +149,9 @@ const EMPTY_META: WalkMeta = { requests: 0, unbounded: false }
 /** Client-side caches keyed by urn must fold in provider identity, or the
  *  same urn across two graphs/data sources collides (GraphDataProvider's
  *  `scopeKey` contract). */
+/** Shared empty focal list — a stable identity for the closed case. */
+const EMPTY_FOCUS: readonly string[] = []
+
 function cacheKeyFor(provider: GraphDataProvider | null, focusUrn: string): string {
     return `${provider?.scopeKey ?? ''} ${focusUrn}`
 }
@@ -192,8 +195,14 @@ function owedEntries(model: LensWalkModel, dir: LensWalkDir, fullWalk: boolean) 
 }
 
 export function useLensWalk(
-    /** Current focal, or null when the lens is closed (clears the session). */
-    focusUrn: string | null,
+    /**
+     * The focal(s) to drive, or null when the lens is closed (clears the
+     * session). A single urn is the Lens's case. An ARRAY is the canvas's
+     * bulk trace: every seed is walked and each keeps its own model, which
+     * the caller unions — the walks stay independent so one seed's
+     * checkpoint, failure or truncation is never attributed to another.
+     */
+    focus: string | readonly string[] | null,
     /** Null = no provider reachable; every focal degrades to 'unsupported'. */
     provider: GraphDataProvider | null,
     /** Persisted upstream/downstream depth for the initial fetch. */
@@ -202,6 +211,19 @@ export function useLensWalk(
      *  entry, depth ones included, until the flow is complete. */
     fullWalk = false,
 ): LensWalkData {
+    // One shape internally. `focusKey` keeps the memo (and every effect that
+    // depends on the list) stable across the fresh array a caller re-creates
+    // on each render.
+    const focusKey = typeof focus === 'string' ? focus : (focus ?? []).join('\u0000')
+    const focusUrns = useMemo<readonly string[]>(
+        () => (focus === null ? EMPTY_FOCUS : typeof focus === 'string' ? [focus] : [...focus]),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [focusKey],
+    )
+    /** The focal the PUBLIC ops act on. With one focal — every existing
+     *  caller — this is exactly the old `focusUrn`. */
+    const primaryFocusUrn = focusUrns[0] ?? null
+
     const [state, setState] = useState<Map<string, WalkEntry>>(() => new Map())
     // Per-cacheKey walk bookkeeping: requests issued (for the failsafe and
     // the narration) and whether the checkpoint was lifted. Render state,
@@ -339,6 +361,10 @@ export function useLensWalk(
      *  named seeds) is followed: the same request goes out again with the
      *  cursor, until it drains. */
     const runFrontierOp = useCallback(async (
+        /** WHICH focal's model this continuation merges into. Passed rather
+         *  than captured: with several focals being driven at once, a
+         *  continuation has to name its own. */
+        focusUrn: string | null,
         cardUrn: string,
         dir: LensWalkDir | 'both',
         buildRequest: (baseModel: LensWalkModel) => TraceClosureRequest,
@@ -404,22 +430,22 @@ export function useLensWalk(
         if (followUp !== null) {
             const cursor = followUp
             const base = mergedModel
-            void runFrontierOp(cardUrn, dir, (m) => ({ ...buildRequest(base ?? m), seedCursor: cursor, maxNodes: WALK_PAGE_NODES }), statusKey, mergeCtx)
+            void runFrontierOp(focusUrn, cardUrn, dir, (m) => ({ ...buildRequest(base ?? m), seedCursor: cursor, maxNodes: WALK_PAGE_NODES }), statusKey, mergeCtx)
         }
-    }, [provider, focusUrn, bumpRequests])
+    }, [provider, bumpRequests])
 
     const extend = useCallback((cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => {
-        void runFrontierOp(cardUrn, dir, (baseModel) => ({
+        void runFrontierOp(primaryFocusUrn, cardUrn, dir, (baseModel) => ({
             urn: cardUrn,
             direction: dir === 'up' ? 'upstream' : 'downstream',
             ...depthFields(dir, 1),
             seedUrns: seedLeaves,
             excludeUrns: knownUrns(baseModel),
         }), `${dir}:${cardUrn}`, { rootUrn: cardUrn, direction: dir })
-    }, [runFrontierOp])
+    }, [runFrontierOp, primaryFocusUrn])
 
-    const page = useCallback((cardUrn: string, dir: LensWalkDir, cursor: string) => {
-        void runFrontierOp(cardUrn, dir, () => ({
+    const pageFor = useCallback((focusUrn: string | null, cardUrn: string, dir: LensWalkDir, cursor: string) => {
+        void runFrontierOp(focusUrn, cardUrn, dir, () => ({
             urn: cardUrn,
             direction: dir === 'up' ? 'upstream' : 'downstream',
             ...depthFields(dir, 1),
@@ -427,6 +453,11 @@ export function useLensWalk(
             maxNodes: WALK_PAGE_NODES,
         }), `${dir}:${cardUrn}`, { rootUrn: cardUrn, direction: dir })
     }, [runFrontierOp])
+
+    const page = useCallback(
+        (cardUrn: string, dir: LensWalkDir, cursor: string) => pageFor(primaryFocusUrn, cardUrn, dir, cursor),
+        [pageFor, primaryFocusUrn],
+    )
 
     // The focus's own contents page: focus-anchored, both directions at the
     // entry's fetched depth, resuming the model's seedCursor. Own status key
@@ -437,7 +468,7 @@ export function useLensWalk(
         const entry = stateRef.current.get(cacheKey)
         const cursor = entry?.model.seedCursor
         if (!cursor || !entry) return
-        void runFrontierOp(walkFocusUrn, 'both', (baseModel) => ({
+        void runFrontierOp(walkFocusUrn, walkFocusUrn, 'both', (baseModel) => ({
             urn: walkFocusUrn,
             direction: 'both',
             upstreamDepth: entry.depth,
@@ -453,7 +484,7 @@ export function useLensWalk(
     // anchor it named (clearFrontierRoots), and rootUrn is the first anchor
     // — NOT the focus — so the focus's seed cursor is never touched.
     const bulk = useCallback((anchors: string[], dir: LensWalkDir, walkFocusUrn: string) => {
-        void runFrontierOp(anchors[0]!, dir, (baseModel) => ({
+        void runFrontierOp(walkFocusUrn, anchors[0]!, dir, (baseModel) => ({
             urn: anchors[0]!,
             direction: dir === 'up' ? 'upstream' : 'downstream',
             ...depthFields(dir, 1),
@@ -471,46 +502,63 @@ export function useLensWalk(
     // its 'error' marker and is never auto-retried — the walk stops
     // honestly instead of looping on a broken hop.
     useEffect(() => {
-        if (!focusUrn) return
-        const cacheKey = cacheKeyFor(provider, focusUrn)
-        const entry = state.get(cacheKey)
-        if (entry?.status !== 'done') return
-        const meta = walkMeta.get(cacheKey) ?? EMPTY_META
-        if (meta.requests >= WALK_REQUEST_FAILSAFE) return
-        if (!meta.unbounded && entry.model.nodes.length >= TRACE_CHECKPOINT_NODES) return
+        if (focusUrns.length === 0) return
+
+        // The concurrency budget is SHARED across focals, not per focal:
+        // it bounds requests in flight, and driving five seeds must not put
+        // five times the load on the server. Spent in focal order, so the
+        // first seed completes first rather than all of them creeping.
         let slots = FULL_WALK_CONCURRENCY
-        for (const v of entry.extendStatus.values()) if (v === 'loading') slots--
+        for (const focal of focusUrns) {
+            const key = cacheKeyFor(provider, focal)
+            const e = state.get(key)
+            if (!e) continue
+            for (const v of e.extendStatus.values()) if (v === 'loading') slots--
+        }
         if (slots <= 0) return
 
-        // 1. The focus's own owed contents FIRST — nothing else can complete
-        //    the picture of the thing the user asked about.
-        if (entry.model.seedCursor && !entry.extendStatus.has(`seed:${focusUrn}`)) {
-            pageSeeds(focusUrn)
-            return
-        }
-        // 2. Paged hubs, per anchor (a cursor is per adjacency by contract).
-        for (const dir of ['up', 'down'] as const) {
-            for (const fr of owedEntries(entry.model, dir, fullWalk)) {
+        for (const focusUrn of focusUrns) {
+            if (slots <= 0) return
+            const cacheKey = cacheKeyFor(provider, focusUrn)
+            const entry = state.get(cacheKey)
+            if (entry?.status !== 'done') continue
+            const meta = walkMeta.get(cacheKey) ?? EMPTY_META
+            // The failsafe and the checkpoint are PER FOCAL: one seed hitting
+            // its ceiling must not stop the others being walked.
+            if (meta.requests >= WALK_REQUEST_FAILSAFE) continue
+            if (!meta.unbounded && entry.model.nodes.length >= TRACE_CHECKPOINT_NODES) continue
+
+            // 1. The focus's own owed contents FIRST — nothing else can
+            //    complete the picture of the thing the user asked about.
+            if (entry.model.seedCursor && !entry.extendStatus.has(`seed:${focusUrn}`)) {
+                pageSeeds(focusUrn)
+                slots--
+                continue
+            }
+            // 2. Paged hubs, per anchor (a cursor is per adjacency by contract).
+            for (const dir of ['up', 'down'] as const) {
+                for (const fr of owedEntries(entry.model, dir, fullWalk)) {
+                    if (slots <= 0) return
+                    if (fr.nextCursor === null || entry.extendStatus.has(`${dir}:${fr.urn}`)) continue
+                    pageFor(focusUrn, fr.urn, dir, fr.nextCursor)
+                    slots--
+                }
+            }
+            // 3. Cursor-less entries, in BULK per direction: cut entries in
+            //    every mode, depth entries only in full flow.
+            for (const dir of ['up', 'down'] as const) {
                 if (slots <= 0) return
-                if (fr.nextCursor === null || entry.extendStatus.has(`${dir}:${fr.urn}`)) continue
-                page(fr.urn, dir, fr.nextCursor)
+                if (entry.extendStatus.has(`bulk:${dir}:${focusUrn}`)) continue
+                const anchors = owedEntries(entry.model, dir, fullWalk)
+                    .filter(fr => fr.nextCursor === null && !entry.extendStatus.has(`${dir}:${fr.urn}`))
+                    .map(fr => fr.urn)
+                    .slice(0, WALK_BATCH_SIZE)
+                if (anchors.length === 0) continue
+                bulk(anchors, dir, focusUrn)
                 slots--
             }
         }
-        // 3. Cursor-less entries, in BULK per direction: cut entries in every
-        //    mode, depth entries only in full flow.
-        for (const dir of ['up', 'down'] as const) {
-            if (slots <= 0) return
-            if (entry.extendStatus.has(`bulk:${dir}:${focusUrn}`)) continue
-            const anchors = owedEntries(entry.model, dir, fullWalk)
-                .filter(fr => fr.nextCursor === null && !entry.extendStatus.has(`${dir}:${fr.urn}`))
-                .map(fr => fr.urn)
-                .slice(0, WALK_BATCH_SIZE)
-            if (anchors.length === 0) continue
-            bulk(anchors, dir, focusUrn)
-            slots--
-        }
-    }, [fullWalk, focusUrn, provider, state, walkMeta, page, pageSeeds, bulk])
+    }, [fullWalk, focusUrns, provider, state, walkMeta, pageFor, pageSeeds, bulk])
 
     const computeWalkProgress = useCallback((urn: string): WalkProgress | null => {
         const cacheKey = cacheKeyFor(provider, urn)
@@ -606,17 +654,19 @@ export function useLensWalk(
         })
     }, [provider])
 
-    // Initial fetch on focal change.
+    // Initial fetch on focal change — one per focal. `runFetch` is guarded
+    // by `startedRef`, so a focal already walked this session is a cache hit
+    // and never refetched (which is what makes adding a seed to a selection
+    // cost only the new seed).
     useEffect(() => {
-        if (!focusUrn) return
-        void runFetch(focusUrn)
-    }, [focusUrn, runFetch])
+        for (const urn of focusUrns) void runFetch(urn)
+    }, [focusUrns, runFetch])
 
     // Session lifecycle: clear everything when the lens closes so a new
     // session starts from the data source, not from a stale picture — and
     // abort whatever is still in flight.
     useEffect(() => {
-        if (focusUrn) return
+        if (focusUrns.length > 0) return
         if (startedRef.current.size === 0 && inFlightRef.current.size === 0) return
         abortRef.current.abort()
         abortRef.current = new AbortController()
@@ -625,7 +675,7 @@ export function useLensWalk(
         inFlightRef.current.clear()
         setState(new Map())
         setWalkMeta(new Map())
-    }, [focusUrn])
+    }, [focusUrns])
 
     const walkFor = useCallback(
         (urn: string): WalkEntry | null => state.get(cacheKeyFor(provider, urn)) ?? null,
