@@ -15,7 +15,7 @@
  * - Collapse/expand per node
  */
 
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef, type RefObject } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import {
@@ -41,15 +41,65 @@ import type {
 } from '@/types/schema'
 import { LayerSortMenu } from '@/components/canvas/context-view/LayerSortMenu'
 
-import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 
 /** Rows a column draws before it offers to show more. The rail is a 300px
  *  authoring aid, not the canvas — a long column is scrolled past, not read. */
 const RAIL_PAGE = 50
+
+/** An anchored column's unloaded remainder. `remaining` is `null` when the
+ *  server has more but its size isn't known — said as "more", never as zero.
+ *  `failed`: the last page request failed; the row offers a retry. */
+export interface AnchorMore {
+    anchorUrn: string
+    remaining: number | null
+    failed: boolean
+}
+
+/**
+ * Fetch more when the row DWELLS in view (300ms), once per `latchKey` — which
+ * the caller ties to what the column holds and shows, so it re-fires only after
+ * something landed. Off while `enabled` is false (in flight, failed, nothing
+ * left). The observer is rooted in the rail's own scroller. Same guards that
+ * ended the historical load-more pump (see LoadMoreItem).
+ */
+function useAutoMore(
+    ref: RefObject<HTMLElement | null>,
+    latchKey: string,
+    enabled: boolean,
+    fire: () => void,
+) {
+    const firedRef = useRef<string | null>(null)
+    const fireRef = useRef(fire)
+    useEffect(() => { fireRef.current = fire }, [fire])
+    useEffect(() => {
+        if (!enabled) return
+        const el = ref.current
+        if (!el || typeof IntersectionObserver === 'undefined') return
+        let dwell: ReturnType<typeof setTimeout> | null = null
+        const io = new IntersectionObserver(([entry]) => {
+            if (!entry?.isIntersecting) {
+                if (dwell !== null) { clearTimeout(dwell); dwell = null }
+                return
+            }
+            if (firedRef.current === latchKey) return
+            dwell = setTimeout(() => {
+                dwell = null
+                firedRef.current = latchKey
+                fireRef.current()
+            }, 300)
+        }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
+        io.observe(el)
+        return () => {
+            io.disconnect()
+            if (dwell !== null) clearTimeout(dwell)
+        }
+    }, [ref, latchKey, enabled])
+}
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useEntityTypes } from '@/store/schema'
 import {
     fallbackNameFromUrn,
+    WIZARD_CHILDREN_PAGE_SIZE,
     type WizardEntityIndex,
 } from '@/components/views/ViewWizard/useWizardEntityIndex'
 
@@ -101,7 +151,7 @@ interface LayerHierarchyPanelProps {
     /** Drop one root before/after another inside the same column. */
     onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
     /** layerId -> an anchored column's unloaded remainder, mirroring the canvas. */
-    anchorMoreByLayer?: Map<string, { anchorUrn: string; remaining: number }>
+    anchorMoreByLayer?: Map<string, AnchorMore>
     onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
@@ -699,7 +749,7 @@ interface LayerRowProps {
     onResetCustomOrder?: (layerId: string) => void
     onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
     /** This column's unloaded remainder, when it is anchored. */
-    anchorMore?: { anchorUrn: string; remaining: number }
+    anchorMore?: AnchorMore
     onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
@@ -780,15 +830,33 @@ function LayerRow({
     const shownRows = useMemo(() => rootRows.slice(0, visibleCount), [rootRows, visibleCount])
     const heldButHidden = rootRows.length - shownRows.length
     // What the column has yet to show: rows it holds but has not drawn, plus
-    // rows the server still has. Both read as "more" to the user.
-    const remaining = heldButHidden + (anchorMore?.remaining ?? 0)
+    // rows the server still has. Both read as "more" to the user. The server's
+    // share is `null` when it has more but the count isn't known — said as
+    // "more", never as zero.
+    const serverRemaining = anchorMore ? anchorMore.remaining : 0
+    const remaining = serverRemaining === null ? null : heldButHidden + serverRemaining
+    const moreFailed = heldButHidden === 0 && (anchorMore?.failed ?? false)
+    const hasMore = heldButHidden > 0 || (!!anchorMore && !anchorMore.failed)
+    const anchorLoading = !!anchorMore && entityIndex.isLoading(anchorMore.anchorUrn)
     // How many the next click actually produces: revealing rows we hold is a
-    // RAIL_PAGE, fetching the anchor's next page is a CHILDREN_PAGE_SIZE.
+    // RAIL_PAGE, fetching the anchor's next page is a WIZARD_CHILDREN_PAGE_SIZE
+    // (the wizard index's page — not the canvas's).
     // Naming the wrong one would promise 50 and deliver 100.
     const nextChunk = heldButHidden > 0
         ? Math.min(heldButHidden, RAIL_PAGE)
-        : Math.min(anchorMore?.remaining ?? 0, CHILDREN_PAGE_SIZE)
-    const totalShown = rootRows.length + (anchorMore?.remaining ?? 0)
+        : Math.min(serverRemaining ?? WIZARD_CHILDREN_PAGE_SIZE, WIZARD_CHILDREN_PAGE_SIZE)
+    const totalShown = rootRows.length + (serverRemaining ?? 0)
+    const totalLabel = serverRemaining === null
+        ? `${totalShown.toLocaleString()}+`
+        : totalShown.toLocaleString()
+    const showMore = useCallback(() => {
+        if (heldButHidden > 0) setVisibleCount(v => v + RAIL_PAGE)
+        else if (anchorMore) onLoadMoreAnchor?.(anchorMore.anchorUrn)
+    }, [heldButHidden, anchorMore, onLoadMoreAnchor])
+    // Scroll-driven: the row fetches once per growth of what the column holds
+    // or shows, never while its page is in flight or failed.
+    const moreRowRef = useRef<HTMLButtonElement>(null)
+    useAutoMore(moreRowRef, `${rootRows.length}:${visibleCount}`, hasMore && !anchorLoading, showMore)
     const sortMode: LayerNodeSortMode = layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
     const hasCustomOrder = useMemo(
         () => Object.values(assignments).some(e => e.layerId === layer.id && e.orderKey),
@@ -915,7 +983,7 @@ function LayerRow({
                         <span
                             data-testid={`layer-count-${layer.id}`}
                             className="text-xs text-slate-400 shrink-0"
-                        >{totalShown}</span>
+                        >{totalLabel}</span>
                     )}
 
                     {/* Column sort — the canvas's own menu, writing the same
@@ -1077,7 +1145,7 @@ function LayerRow({
                                         <div className="flex items-center gap-1.5 px-3 py-1">
                                             <Layers className="w-3 h-3 text-slate-400 shrink-0" />
                                             <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
-                                                In this column ({totalShown.toLocaleString()})
+                                                In this column ({totalLabel})
                                             </span>
                                             <span className="flex-1" />
                                             {totalAssigned > 0 && (
@@ -1110,19 +1178,32 @@ function LayerRow({
                                             anchor's next page. An anchored column
                                             draws no anchor row, so this is also the
                                             only place its paging can live. */}
-                                        {remaining > 0 && (
+                                        {(hasMore || moreFailed) && (
                                             <button
+                                                ref={moreRowRef}
                                                 onClick={e => {
                                                     e.stopPropagation()
-                                                    if (heldButHidden > 0) setVisibleCount(v => v + RAIL_PAGE)
-                                                    else if (anchorMore) onLoadMoreAnchor?.(anchorMore.anchorUrn)
+                                                    if (!anchorLoading) showMore()
                                                 }}
-                                                className="w-full text-left px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+                                                disabled={anchorLoading}
+                                                className="w-full text-left px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors disabled:cursor-wait disabled:opacity-70"
                                             >
-                                                Show {nextChunk} more
-                                                <span className="ml-1 text-slate-400 font-normal tabular-nums">
-                                                    ({remaining.toLocaleString()} left)
-                                                </span>
+                                                {anchorLoading ? 'Loading…'
+                                                    : moreFailed ? (
+                                                        <>
+                                                            Couldn't load the next {WIZARD_CHILDREN_PAGE_SIZE}
+                                                            <span className="ml-1 text-slate-400 font-normal">· Retry</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            Show {nextChunk} more
+                                                            {remaining !== null && (
+                                                                <span className="ml-1 text-slate-400 font-normal tabular-nums">
+                                                                    ({remaining.toLocaleString()} left)
+                                                                </span>
+                                                            )}
+                                                        </>
+                                                    )}
                                             </button>
                                         )}
                                     </div>

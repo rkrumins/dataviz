@@ -48,7 +48,7 @@ import {
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
-import { LayerHierarchyPanel, type ActiveTarget, type DropPayload, type LayerRootRow } from './LayerHierarchyPanel'
+import { LayerHierarchyPanel, type ActiveTarget, type AnchorMore, type DropPayload, type LayerRootRow } from './LayerHierarchyPanel'
 import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
 import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
 import { suggestLayerMappings, type MagicMapSuggestion } from '../views/ViewWizard/magicMap'
@@ -1705,15 +1705,27 @@ export function LayerStudio({
         [layers, assignments, effectiveScope],
     )
 
-    /** Mirrors the canvas: how much of each anchored column is still unloaded. */
+    /** Mirrors the canvas: how much of each anchored column is still unloaded.
+     *  The SERVER's hasMore decides whether more exists; the looked-up count only
+     *  sizes it. `remaining: null` = more exists, size unknown (the count is not
+     *  in yet, or stale) — offered without a number, never as zero. A failed page
+     *  is offered as a retry, even when the column holds no rows yet. */
     const anchorMoreByLayer = useMemo(() => {
-        const out = new Map<string, { anchorUrn: string; remaining: number }>()
+        const out = new Map<string, AnchorMore>()
         for (const layer of layers) {
             if (!layer.anchorUrn) continue
             const loaded = entityIndex.childrenOf(layer.anchorUrn).length
-            const total = entityIndex.resolve(layer.anchorUrn)?.childCount ?? loaded
-            if (loaded > 0 && total > loaded) {
-                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
+            const page = entityIndex.childPageState(layer.anchorUrn)
+            if (page.failed) {
+                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: null, failed: true })
+                continue
+            }
+            if (loaded === 0 || page.hasMore === false) continue
+            const total = entityIndex.resolve(layer.anchorUrn)?.childCount
+            if (total !== undefined && total > loaded) {
+                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded, failed: false })
+            } else if (page.hasMore === true) {
+                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: null, failed: false })
             }
         }
         return out

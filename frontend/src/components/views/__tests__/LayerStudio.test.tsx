@@ -26,9 +26,13 @@ beforeAll(() => {
 // Same stub the other store-touching suites use.
 vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
 
-vi.mock('@/providers/GraphProviderContext', () => ({
-  useGraphProvider: () => ({ getNode: vi.fn().mockResolvedValue(null) }),
-}))
+// ONE stable provider: the wizard's entity index resets its caches when the
+// provider identity changes. Lookups are batched through getNodes; an empty
+// answer = "not in the graph".
+vi.mock('@/providers/GraphProviderContext', () => {
+  const provider = { getNodes: vi.fn().mockResolvedValue([]) }
+  return { useGraphProvider: () => provider }
+})
 
 // LayerStudio reads the data source's ontology to offer Auto-layer's candidate
 // top-level types. That hook is react-query backed and this suite renders without
@@ -73,6 +77,7 @@ const fakeBrowser = {
   topLevelHasMore: false,
   topLevelTotalCount: 1,
   topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
+  failedIds: new Set<string>(),
   loadingNodes: new Set<string>(),
 }
 

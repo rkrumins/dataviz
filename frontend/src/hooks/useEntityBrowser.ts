@@ -138,6 +138,10 @@ export interface UseEntityBrowserResult {
     searchQuery: string
     typeFilter: string | null
     error: string | null
+    /** Ids whose last page request FAILED (a parent URN, or '__top-level').
+     *  Cleared when the next attempt starts. Lets the tree say "couldn't load"
+     *  instead of showing an expanded node that merely looks empty. */
+    failedIds: Set<string>
 
     // ─── Actions ───
     loadTopLevel: () => Promise<void>
@@ -177,6 +181,10 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set())
+    const markFailed = useCallback((id: string) => {
+        setFailedIds(prev => { const next = new Set(prev); next.add(id); return next })
+    }, [])
     const [searchQuery, setSearchQueryState] = useState('')
     const [typeFilter, setTypeFilterState] = useState<string | null>(null)
 
@@ -286,6 +294,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
     const addLoading = useCallback((id: string) => {
         setLoadingNodes(prev => { const next = new Set(prev); next.add(id); return next })
+        // Every attempt starts here, so a retry clears the failure it retries.
+        setFailedIds(prev => {
+            if (!prev.has(id)) return prev
+            const next = new Set(prev)
+            next.delete(id)
+            return next
+        })
     }, [])
 
     const removeLoading = useCallback((id: string) => {
@@ -440,10 +455,11 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             mergeTopLevelResult(result, 'append')
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load more top-level nodes:', err)
+            markFailed('__top-level')
         } finally {
             removeLoading('__top-level')
         }
-    }, [topLevelHasMore, topLevelCursor, provider, mergeTopLevelResult, addLoading, removeLoading])
+    }, [topLevelHasMore, topLevelCursor, provider, mergeTopLevelResult, addLoading, removeLoading, markFailed])
 
     // ─── expandNode: lazy-load direct children (ONE level only) ───
     // Uses nodesRef to avoid re-creating this callback when nodes change.
@@ -465,10 +481,11 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             mergeChildrenPage(urn, result, 'replace')
         } catch (err) {
             console.error(`[useEntityBrowser] Failed to expand ${urn}:`, err)
+            markFailed(urn)
         } finally {
             removeLoading(urn)
         }
-    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading])
+    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading, markFailed])
     // NOTE: no `nodes` in deps — uses nodesRef instead to prevent infinite re-creation
 
     // ─── loadMoreChildren ───
@@ -489,10 +506,11 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             mergeChildrenPage(parentUrn, result, 'append')
         } catch (err) {
             console.error(`[useEntityBrowser] Failed to load more children for ${parentUrn}:`, err)
+            markFailed(parentUrn)
         } finally {
             removeLoading(parentUrn)
         }
-    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading])
+    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading, markFailed])
 
     // ─── loadAllChildren: page through EVERY remaining child of a node ───
     // Resumes from the current cursor when children are partially loaded, so
@@ -548,12 +566,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             return childIds
         } catch (err) {
             console.error(`[useEntityBrowser] Failed to load all children for ${parentUrn}:`, err)
+            markFailed(parentUrn)
             return nodesRef.current.get(parentUrn)?.childIds ?? []
         } finally {
             bulkInFlightRef.current.delete(parentUrn)
             removeLoading(parentUrn)
         }
-    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading])
+    }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading, markFailed])
 
     // ─── loadAllTopLevel: page through EVERY remaining top-level node ───
     // Mirrors loadMoreTopLevel's context (current type filter, no search param —
@@ -591,11 +610,12 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             }
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load all top-level nodes:', err)
+            markFailed('__top-level')
         } finally {
             bulkInFlightRef.current.delete('__top-level')
             removeLoading('__top-level')
         }
-    }, [provider, mergeTopLevelResult, addLoading, removeLoading])
+    }, [provider, mergeTopLevelResult, addLoading, removeLoading, markFailed])
 
     // ─── peekNode: ref-backed fresh read ───
 
@@ -684,6 +704,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         searchQuery,
         typeFilter,
         error,
+        failedIds,
         loadTopLevel,
         loadMoreTopLevel,
         expandNode,

@@ -728,7 +728,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             const batches: string[][] = []
                             for (let i = 0; i < unplaced.length; i += 100) batches.push(unplaced.slice(i, i + 100))
                             const placed = await loadNodeBatches(
-                                batches.map(batch => ({ urns: batch as any[], limit: batch.length })),
+                                batches.map(batch => ({ urns: batch, limit: batch.length })),
                             )
                             if (controller.signal.aborted) return
                             allNodes = [...allNodes, ...placed]
@@ -1342,7 +1342,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             // server page — counting them would skew the pagination offset (skipping a real child)
             // and trip the "all loaded" short-circuit. Tally only SAVED children here.
             const pendingNodeIds = new Set(
-                nodes.filter(n => (n.data as any)?.isPending === 'create').map(n => n.id),
+                nodes.filter(n => n.data?.isPending === 'create').map(n => n.id),
             )
             // A child primed out of band by a search reveal (`useRevealSearchHit`)
             // belongs to some later page — counting it would skew the offset the

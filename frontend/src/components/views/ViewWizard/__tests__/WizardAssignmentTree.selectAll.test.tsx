@@ -72,6 +72,7 @@ function makeBrowser() {
     topLevelHasMore: false,
     topLevelTotalCount: 1,
     topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
+    failedIds: new Set<string>(),
     loadingNodes: new Set<string>(),
   }
   return browser

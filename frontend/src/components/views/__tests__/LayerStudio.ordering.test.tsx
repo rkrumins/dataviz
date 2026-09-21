@@ -61,6 +61,7 @@ const fakeBrowser = {
   peekNode: (urn: string) => fakeBrowser.nodes.get(urn),
   topLevelHasMore: false, topLevelTotalCount: 3,
   topLevelMetadata: { rootTypeCount: 3, orphanCount: 0 },
+  failedIds: new Set<string>(),
   loadingNodes: new Set<string>(),
 }
 vi.mock('@/hooks/useEntityBrowser', () => ({ useEntityBrowser: () => fakeBrowser }))

@@ -59,6 +59,7 @@ function makeIndex(
     loadChildren,
     loadMoreChildren: vi.fn().mockResolvedValue(undefined),
     isLoading: () => false,
+    childPageState: () => ({ hasMore: undefined, failed: false }),
   }
 }
 

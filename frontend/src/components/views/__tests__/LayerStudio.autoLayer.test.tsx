@@ -83,6 +83,7 @@ const fakeBrowser = {
   topLevelHasMore: false,
   topLevelTotalCount: 3,
   topLevelMetadata: { rootTypeCount: 2, orphanCount: 1 },
+  failedIds: new Set<string>(),
   loadingNodes: new Set<string>(),
 }
 
