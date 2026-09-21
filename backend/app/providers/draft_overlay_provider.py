@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, TypeVar
 
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
-    GraphNode, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
+    GraphNode, NodePage, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
 from .versioned_branch_provider import VersionedBranchProvider
 
@@ -200,6 +200,31 @@ class DraftOverlayProvider:
                 out.append(d.with_child_count(n))
         return out
 
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """A page in MAIN's order: `has_more` and `next_offset` are the base's, so a
+        draft that deletes rows can't end paging early and the draft's new nodes —
+        on the first page only — can't push the next page past rows of main."""
+        base = await self._base.get_nodes_page(query)
+        d = await self._delta_()
+        if d.empty:
+            return base
+        seen: set = set()
+        out: List[GraphNode] = []
+        for n in base.nodes:
+            if n.urn in d.node_remove:
+                continue
+            merged = d.overlay_existing(n)
+            if merged is not None:
+                out.append(merged)
+            seen.add(n.urn)
+        if not (query.offset or 0):
+            for urn, n in d.node_upsert.items():
+                if urn in seen or urn not in d.node_new:
+                    continue
+                if self._matches(n, query):
+                    out.append(d.with_child_count(n))
+        return NodePage(nodes=out, hasMore=base.has_more, nextOffset=base.next_offset)
+
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         base = await self._base.search_nodes(query, limit=limit, offset=offset)
         d = await self._delta_()
@@ -270,10 +295,14 @@ class DraftOverlayProvider:
             if merged is not None:
                 children.append(merged)
         present = {c.urn for c in children}
-        for e in d.cont_added:
-            if e.source_urn == parent_urn and e.target_urn in d.node_upsert and e.target_urn not in present:
-                children.append(d.with_child_count(d.node_upsert[e.target_urn]))
-                present.add(e.target_urn)
+        # The draft's new children ride on the FIRST page only: on every page they
+        # would repeat, and a client counting rows to find the next page would
+        # step past rows of main it has not seen.
+        if offset == 0 and not cursor:
+            for e in d.cont_added:
+                if e.source_urn == parent_urn and e.target_urn in d.node_upsert and e.target_urn not in present:
+                    children.append(d.with_child_count(d.node_upsert[e.target_urn]))
+                    present.add(e.target_urn)
         # containment edges under this parent
         cont = [e for e in base.containment_edges if e.id not in d.edge_remove]
         cont += [e for e in d.cont_added if e.source_urn == parent_urn]
@@ -294,9 +323,16 @@ class DraftOverlayProvider:
                         lineage.append(e)
                 elif e.source_urn in scope and e.target_urn in scope:
                     lineage.append(e)
+        # Where the next page starts and whether there is one are facts about MAIN's
+        # order, which only the base knows — a draft that drops a page's rows must
+        # neither end paging nor move the next page.
         return ChildrenWithEdgesResult(
             children=children, containmentEdges=cont, lineageEdges=lineage,
-            totalChildren=len(children), hasMore=base.has_more, nextCursor=base.next_cursor)
+            totalChildren=len(children), hasMore=base.has_more, nextCursor=base.next_cursor,
+            nextOffset=base.next_offset if base.next_offset is not None else offset + len(base.children),
+            # A base page whose lineage could not be read stays marked as such:
+            # the draft's answer is cached too, and must not pass for complete.
+            degradedDetail=base.degraded_detail)
 
     async def get_children(
         self, parent_urn: str, entity_types: Optional[List[str]] = None,

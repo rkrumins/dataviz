@@ -8,7 +8,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
+    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
@@ -828,6 +828,11 @@ class ContextEngine:
     async def get_nodes_query(self, query: NodeQuery) -> List[GraphNode]:
         """Execute an advanced node query."""
         return await self.provider.get_nodes(query)
+
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """One page of a node query, with whether another follows and where it
+        starts — as the provider counts it (see NodePage)."""
+        return await self.provider.get_nodes_page(query)
 
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         """Get distinct values for a node property."""

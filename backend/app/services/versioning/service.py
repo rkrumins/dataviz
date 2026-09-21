@@ -2264,12 +2264,15 @@ class GraphVersioningService:
     async def _latest_live_ids(
         self, s, model, graph_id: str, branch_id: str, seq: int,
         *, where: Optional[Callable] = None, limit: Optional[int] = None,
+        by_name: bool = False,
     ) -> List[str]:
         """Entity ids whose latest version on ``branch_id`` at ``commit_seq <= seq`` is live
         (not a tombstone), optionally narrowed by ``where`` (predicates over the denormalised
         version columns). DISTINCT ON picks the latest row per entity *before* the live/where
         filter, so a stale revision can never shadow the current one. Bounded by ``limit`` and
-        ordered by entity_id for a stable window."""
+        ordered by entity_id for a stable window — or, ``by_name``, by (display name, entity_id)
+        in BYTE order with a missing name as "": exactly the order a caller then sorts in
+        Python, so a window of the first N ids holds the first N rows a page can need."""
         latest = (
             select(model)
             .where(model.graph_id == graph_id, model.branch_id == branch_id,
@@ -2283,7 +2286,11 @@ class GraphVersioningService:
             preds = where(latest.c)
             if preds:
                 stmt = stmt.where(*preds)
-        stmt = stmt.order_by(latest.c.entity_id)
+        if by_name:
+            stmt = stmt.order_by(func.coalesce(latest.c.display_name, "").collate("C"),
+                                 latest.c.entity_id.collate("C"))
+        else:
+            stmt = stmt.order_by(latest.c.entity_id)
         if limit is not None:
             stmt = stmt.limit(limit)
         return list((await s.execute(stmt)).scalars().all())
@@ -2403,9 +2410,13 @@ class GraphVersioningService:
                         NodeVersionORM.commit_seq <= overlay_seq,
                     ).distinct()
                 )).scalars().all())
+            # The window must be the first rows in the order the page is cut from
+            # (name, then id) — in entity_id order it was an arbitrary slice, and a
+            # deep page skipped rows and repeated others.
             window = offset + limit + len(overlay_ids) + 1
             cand = set(await self._latest_live_ids(
-                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
+                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window,
+                by_name=True))
             cand.update(overlay_ids)
             vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
             rows = [
@@ -2532,7 +2543,7 @@ class GraphVersioningService:
         cset = {t.upper() for t in (containment_edge_types or [])}
         lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
         empty = {"children": [], "containmentEdges": [], "lineageEdges": [],
-                 "totalChildren": 0, "hasMore": False, "nextCursor": None}
+                 "totalChildren": 0, "hasMore": False, "nextCursor": None, "nextOffset": offset}
         async with self._session() as s:
             if branch_id is None:
                 branch_id = await self._main_branch_id(s, graph_id)
@@ -2598,6 +2609,7 @@ class GraphVersioningService:
             "totalChildren": total,
             "hasMore": has_more,
             "nextCursor": (children_out[-1]["displayName"] if (children_out and has_more) else None),
+            "nextOffset": offset + len(page),
         }
 
     async def top_level_from_state(

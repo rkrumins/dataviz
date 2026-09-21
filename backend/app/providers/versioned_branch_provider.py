@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
-    GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult,
+    GraphEdge, GraphNode, GraphSchemaStats, NodePage, NodeQuery, TagSummary, TopLevelNodesResult,
     TraceClosureResult, TraceFocus, TraceResult,
 )
 
@@ -98,6 +98,15 @@ class VersionedBranchProvider:
             containment_edge_types=self._containment_types,
             include_child_count=getattr(query, "include_child_count", True))
         return [GraphNode(**d) for d in rows]
+
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        # Same probe as the interface default (this class doesn't inherit it):
+        # one row past the page says exactly whether another follows.
+        limit = query.limit or 100
+        offset = query.offset or 0
+        rows = await self.get_nodes(query.model_copy(update={"limit": limit + 1}))
+        page = rows[:limit]
+        return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         rows = await self._svc.search_from_state(

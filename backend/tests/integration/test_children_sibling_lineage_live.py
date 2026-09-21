@@ -84,12 +84,14 @@ def _seed():
 async def _page_all(provider, scope):
     loaded = {P}
     kept, seen_any = set(), set()
-    cursor, offset, pages = None, 0, 0
+    offset, pages = 0, 0
     while True:
         kw = {} if scope is None else {"lineage_scope": scope}
+        # Paged the way the client pages: by position, the next one taken from
+        # the server (`nextOffset`), until the server says there is no more.
         r = await provider.get_children_with_edges(
             P, edge_types=["CONTAINS"], lineage_edge_types=["TRANSFORMS"],
-            limit=PAGE, offset=offset, cursor=cursor, include_lineage_edges=True, **kw,
+            limit=PAGE, offset=offset, include_lineage_edges=True, **kw,
         )
         for c in r.children:
             loaded.add(c.urn)
@@ -98,12 +100,12 @@ async def _page_all(provider, scope):
             seen_any.add(pair)
             if e.source_urn in loaded and e.target_urn in loaded:   # the client's rule
                 kept.add(pair)
-        offset += len(r.children)
+        assert r.next_offset == offset + len(r.children)
+        offset = r.next_offset
         pages += 1
         assert pages <= 10, "runaway pagination"
-        if not r.has_more or not r.next_cursor:
+        if not r.has_more:
             break
-        cursor = r.next_cursor
     return loaded, kept, seen_any
 
 

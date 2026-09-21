@@ -5997,18 +5997,6 @@ class FalkorDBProvider(GraphDataProvider):
         params["skip"] = offset
         params["limit"] = limit
 
-        # Keyset continuation when paging by type (label-union path): rows strictly
-        # after (displayName, urn), seeked inside each branch. It replaces SKIP, so a
-        # row deleted before the reader's position can't shift another out of reach.
-        # `offset` still arrives alongside, for providers that page by offset.
-        keyset = use_label_union and query.after_urn is not None
-        if keyset:
-            params["afterName"] = query.after_display_name or ""
-            params["afterUrn"] = query.after_urn
-            shared_conditions.append(
-                "(n.displayName > $afterName OR (n.displayName = $afterName AND n.urn > $afterUrn))"
-            )
-
         # Child count: only compute when needed (skip for bulk lineage fetches)
         include_child_count = query.include_child_count
 
@@ -6102,30 +6090,33 @@ class FalkorDBProvider(GraphDataProvider):
                 safe_label = _sanitize_label(t)
                 union_branches.append(f"MATCH (n:{safe_label}){where_suffix} RETURN n")
             # Wrap in subquery pattern: UNION all branches, then paginate + child count.
-            # (displayName, urn) is a TOTAL order: tied names can't split differently
-            # between two page queries, so no row is skipped or repeated at a boundary.
-            page_clause = "" if keyset else " SKIP $skip"
+            # (displayName, urn, id) is a TOTAL order — even two nodes sharing a name
+            # AND a urn — so tied rows can't split differently between two page
+            # queries, and no row is skipped or repeated at a boundary.
             inner = " UNION ".join(union_branches)
             if include_child_count:
                 containment = list(self._get_containment_edge_types())
                 containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
                 if containment_rel_types:
+                    # Counted with a pattern comprehension, not OPTIONAL MATCH +
+                    # count(): the aggregation reorders the page's rows, and a
+                    # caller that trims a page (get_nodes_page probes one row past
+                    # it) would drop an arbitrary row instead of the last one.
                     cypher = (
                         f"CALL {{ {inner} }} "
-                        f"WITH n ORDER BY n.displayName, n.urn{page_clause} LIMIT $limit "
-                        f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child) "
-                        f"RETURN n, count(child) as childCount"
+                        f"WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit "
+                        f"RETURN n, size([(n)-[:{containment_rel_types}]->(child) | 1]) as childCount"
                     )
                 else:
                     cypher = (
                         f"CALL {{ {inner} }} "
-                        f"WITH n ORDER BY n.displayName, n.urn{page_clause} LIMIT $limit "
+                        f"WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit "
                         f"RETURN n, 0 as childCount"
                     )
             else:
                 cypher = (
                     f"CALL {{ {inner} }} "
-                    f"WITH n ORDER BY n.displayName, n.urn{page_clause} LIMIT $limit "
+                    f"WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit "
                     f"RETURN n"
                 )
         else:
@@ -6439,7 +6430,8 @@ class FalkorDBProvider(GraphDataProvider):
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
             dir_kw = " DESC" if sort_direction == "desc" else ""
-            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
+            # id(c) last: a TOTAL order even when siblings share a name and a urn.
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}, id(c){dir_kw}"
 
         # Use SKIP only when no cursor is provided (first page)
         skip_clause = "" if cursor else " SKIP $skip"
@@ -6519,7 +6511,7 @@ class FalkorDBProvider(GraphDataProvider):
             # No containment types — return empty result
             return ChildrenWithEdgesResult(
                 children=[], containmentEdges=[], lineageEdges=[],
-                totalChildren=0, hasMore=False,
+                totalChildren=0, hasMore=False, nextOffset=offset,
             )
 
         search_where = ""
@@ -6555,7 +6547,8 @@ class FalkorDBProvider(GraphDataProvider):
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
             dir_kw = " DESC" if sort_direction == "desc" else ""
-            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
+            # id(c) last: a TOTAL order even when siblings share a name and a urn.
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}, id(c){dir_kw}"
 
         skip_clause = "" if cursor else " SKIP $skip"
 
@@ -6581,6 +6574,8 @@ class FalkorDBProvider(GraphDataProvider):
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
+        # Rows the page consumed in the query's order — where the next page starts.
+        rows_read = len(result.result_set or [])
 
         children: List[GraphNode] = []
         containment_edges: List[GraphEdge] = []
@@ -6611,6 +6606,10 @@ class FalkorDBProvider(GraphDataProvider):
         # it is still bounded by the page and its degree. A one-child page matters
         # there: its edges to earlier siblings arrive with it.
         lineage_edges_list: List[GraphEdge] = []
+        # A lineage query that fails leaves the page's children right and its
+        # lineage short: say so (degraded_detail), so the response cache keeps
+        # it for seconds instead of serving it to everyone for an hour.
+        lineage_failures: List[str] = []
         if include_lineage_edges and len(child_urns) >= (1 if siblings_scope else 2):
             page_urns = [parent_urn] + child_urns
             exclude_types = list(target_edge_types) + ["AGGREGATED"]
@@ -6657,6 +6656,7 @@ class FalkorDBProvider(GraphDataProvider):
                     return res.result_set or []
                 except Exception as exc:
                     logger.warning("children page-lineage query failed: %s", exc)
+                    lineage_failures.append(type(exc).__name__)
                     return []
 
             # Siblings scope: the page is the near end in BOTH directions; the far
@@ -6680,6 +6680,7 @@ class FalkorDBProvider(GraphDataProvider):
                     return res.result_set or []
                 except Exception as exc:
                     logger.warning("children sibling-lineage query failed: %s", exc)
+                    lineage_failures.append(type(exc).__name__)
                     return []
 
             if siblings_scope:
@@ -6736,6 +6737,12 @@ class FalkorDBProvider(GraphDataProvider):
             totalChildren=total,
             hasMore=has_more,
             nextCursor=next_cursor,
+            nextOffset=offset + rows_read,
+            degradedDetail=(
+                f"lineage incomplete: {len(lineage_failures)} lineage "
+                f"quer{'y' if len(lineage_failures) == 1 else 'ies'} failed ({', '.join(sorted(set(lineage_failures)))})"
+                if lineage_failures else None
+            ),
         )
 
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:

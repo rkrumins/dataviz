@@ -62,6 +62,9 @@ async def _run() -> None:
             lineage_edge_types=LIN, limit=1, offset=off, lineage_scope=scope)
     p1, p2 = await page(0, "page"), await page(1, "page")
     assert [c["urn"] for c in p1["children"]] == ["T1"] and [c["urn"] for c in p2["children"]] == ["T2"]
+    # Each page says where the next one starts, and the last says there is none.
+    assert (p1["nextOffset"], p1["hasMore"]) == (1, True)
+    assert (p2["nextOffset"], p2["hasMore"]) == (2, False)
     assert p1["lineageEdges"] == [] and p2["lineageEdges"] == []
     s1, s2 = await page(0, "siblings"), await page(1, "siblings")
     assert {e["id"] for e in s1["lineageEdges"]} == {"e_12"}
@@ -83,6 +86,20 @@ async def _run() -> None:
     assert {e["id"] for e in rd["containmentEdges"]} == {"e_d1", "e_d3"}
     assert {e["id"] for e in rd["lineageEdges"]} == {"e_13"}
     assert rd["totalChildren"] == 2
+
+    # Paged one child at a time by the position the branch reports, the draft
+    # yields each of its children exactly once.
+    seen, off = [], 0
+    for _ in range(5):
+        r = await svc.get_children_with_edges_from_state(
+            graph_id=gid, branch_id=draft, parent_urn="DOM", containment_edge_types=CONT,
+            limit=1, offset=off)
+        seen += [c["urn"] for c in r["children"]]
+        assert r["nextOffset"] == off + len(r["children"])
+        off = r["nextOffset"]
+        if not r["hasMore"]:
+            break
+    assert sorted(seen) == ["T1", "T3"]
 
     # main is unchanged by the draft
     rm = await cwe(main)

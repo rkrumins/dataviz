@@ -19,7 +19,7 @@ from backend.app.models.graph import (
     CreateNodeRequest, CreateNodeResult,
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
     BatchCommandRequest, BatchCommandResult, BatchResponse,
-    ChildrenWithEdgesResult, TopLevelNodesResult,
+    ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
@@ -2249,6 +2249,45 @@ async def query_nodes(
         expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
     )
     return result.root
+
+
+@router.post("/nodes/page", response_model=NodePage, response_model_by_alias=True)
+async def query_nodes_page(
+    response: Response,
+    query: NodeQuery = Body(..., embed=True),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """One page of an advanced node query, with `hasMore` and `nextOffset` — for
+    a client paging a whole entity type. The provider says where the next page
+    starts: a draft overlay adds and drops rows around the page it read, so a
+    count of the rows returned would skip or repeat rows.
+
+    Only what pages losslessly is accepted: entity types (optionally a search).
+    Property / tag / name filters are applied AFTER the database's SKIP/LIMIT, so
+    a filtered page's length says nothing about what follows; a URN lookup is not
+    a feed. Those stay on /nodes/query."""
+    if not query.entity_types or query.urns or query.property_filters or query.tag_filters or query.name_filter:
+        raise HTTPException(
+            status_code=422,
+            detail="/nodes/page pages by entity type only; use /nodes/query for URN lookups and filtered queries",
+        )
+
+    async def compute() -> NodePage:
+        return await engine.get_nodes_page(query)
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        return await _bounded_compute(engine, compute)()
+    return await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_NODES_QUERY,
+        # Same namespace as /nodes/query, never the same key: the answers differ.
+        params={**_node_query_cache_params(query), "paged": True},
+        compute=_bounded_compute(engine, compute),
+        model_cls=NodePage,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
+    )
 
 
 def _node_query_cache_params(query) -> dict:

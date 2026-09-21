@@ -22,7 +22,7 @@ from starlette.routing import Match
 
 # Private-use stand-in for an encoded '/' while matching — cannot come from the
 # URL's own escapes except as %EE%80%80, which no URN scheme here produces.
-_SLASH = ""
+_SLASH = "\ue000"
 
 
 def _decode_keeping_slashes(raw_path: bytes) -> str:
