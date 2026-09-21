@@ -1825,6 +1825,36 @@ export function ContextViewCanvas({
   const nodesByLayerRef = useRef(nodesByLayer)
   nodesByLayerRef.current = nodesByLayer
 
+  // A logical group opens when it first appears.
+  //
+  // Grouping makes `logical:<id>` the ROOT of its members in that layer, and
+  // a collapsed root anchors everything beneath it to itself — so lineage
+  // between two members of a CLOSED group has no line to draw, and the
+  // canvas showed a group card with no lineage at all. Grouping related
+  // entities together is the whole reason to build a group, so the default
+  // has to be open: a group the user assembled should show what is in it.
+  //
+  // Once per group id, tracked in a ref, so a deliberate collapse afterwards
+  // stays collapsed instead of springing open on the next render.
+  const autoOpenedGroupsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const unopened: string[] = []
+    nodesByLayer.forEach((roots) => {
+      for (const root of roots) {
+        if (!root.isLogical) continue
+        if (autoOpenedGroupsRef.current.has(root.id)) continue
+        autoOpenedGroupsRef.current.add(root.id)
+        unopened.push(root.id)
+      }
+    })
+    if (unopened.length === 0) return
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const id of unopened) next.add(id)
+      return next
+    })
+  }, [nodesByLayer])
+
   // Live context for resolving a parent's effective child-sort direction inside
   // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
   // nodeLayerMap would re-mint it every canvas mutation and bust LayerColumn's memo).

@@ -213,7 +213,7 @@ export function useEdgeProjection({
   browseBundleFanInThreshold = 1,
   nodeLayerIndexMap,
   hiddenEdgeTypes,
-}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number } {
+}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
   // user-facing count itself is returned from the projection memo (no ref —
@@ -343,7 +343,7 @@ export function useEdgeProjection({
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
   // This memo only re-runs when edges or the ancestorMap actually change.
   const projection = useMemo(() => {
-    if (!showLineageFlow) return { edges: [], unresolvedCount: 0 }
+    if (!showLineageFlow) return { edges: [], unresolvedCount: 0, hiddenInsideCount: 0 }
 
     const edgeGroups = new Map<string, any[]>()
 
@@ -358,6 +358,13 @@ export function useEdgeProjection({
 
     // A. Aggregated Edges
     let unresolvedThisPass = 0
+    // Both endpoints rolled up to the SAME anchor — a connection that lives
+    // entirely inside one collapsed container (most visibly, a closed
+    // logical group). There is no line to draw between a node and itself,
+    // but the connection is real and the canvas has to be able to say so:
+    // this used to be discarded without a trace, which is how putting two
+    // related entities into a group made their lineage "disappear".
+    let hiddenInsideThisPass = 0
     Array.from(aggregatedEdges.values())
       .filter(e => e.state === 'collapsed')
       .forEach(e => {
@@ -478,9 +485,14 @@ export function useEdgeProjection({
           addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge), lifted)
         } else if (!sId || !tId) {
           // Endpoint resolves to nothing on canvas (unloaded or unassigned
-          // entity) — the edge is hidden. Count it; sId === tId self-rollup
-          // collapses are legitimate and excluded.
+          // entity) — the edge is hidden, and counted.
           unresolvedThisPass++
+        } else {
+          // sId === tId: a legitimate self-rollup, but not a non-event.
+          // Counted separately so the canvas can offer to open the
+          // container rather than leaving the user to wonder where their
+          // lineage went.
+          hiddenInsideThisPass++
         }
       })
 
@@ -770,8 +782,8 @@ export function useEdgeProjection({
       }
     })
 
-    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass }
-    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass }
+    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass }
+    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass }
   }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes])
 
   const projectedEdges = projection.edges
@@ -849,6 +861,7 @@ export function useEdgeProjection({
     lineageEdges,
     visibleLineageEdges: visibleLineageEdgesWithDelegation,
     unresolvedEdgeCount: projection.unresolvedCount,
+    hiddenInsideCollapsedCount: projection.hiddenInsideCount,
     // Legacy alias — same value; kept for existing consumers.
     unresolvedAggregatedCount: projection.unresolvedCount,
   }

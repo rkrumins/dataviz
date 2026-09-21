@@ -416,11 +416,26 @@ export function useLayerAssignment({
     // childCmp (which honours orderKeys, so a manually-ordered group is
     // internally consistent, but the wrappers themselves aren't reorderable).
     const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
+    // The LEGACY per-layer arrays, for entities the canonical record below
+    // does not cover.
     sortedLayers.forEach(l => {
       l.entityAssignments?.forEach(a => {
         if (a.logicalNodeId) entityLogicalMap.set(a.entityId, a.logicalNodeId)
       })
     })
+    // The canonical `referenceLayout.assignments` record — the same entry
+    // that carries `layerId`, and where `assignEntities` stamps
+    // `logicalNodeId`. It was not read here at all, so a group's membership
+    // rendered while the session's drag was still in memory and quietly came
+    // apart once the canonical record was the only thing left.
+    //
+    // It is AUTHORITATIVE for every entity it covers: naming a group puts the
+    // entity in it, and omitting one takes the entity out — otherwise a
+    // legacy array could hold an entity in a group it had been moved out of.
+    for (const [urn, entry] of Object.entries(assignments)) {
+      if (entry.logicalNodeId) entityLogicalMap.set(urn, entry.logicalNodeId)
+      else entityLogicalMap.delete(urn)
+    }
     // Also check instanceAssignments (user drag in current session)
     instanceAssignments.forEach((a, entityId) => {
       if ('logicalNodeId' in a && (a as { logicalNodeId?: string }).logicalNodeId) {
