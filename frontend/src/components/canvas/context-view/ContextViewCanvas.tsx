@@ -1675,7 +1675,8 @@ export function ContextViewCanvas({
    * offer a page that will never arrive.
    */
   // Read from the store here, not from useGraphHydration below — this memo is
-  // declared first. The server's "no more pages" beats the count.
+  // declared first. The server's "no more pages" beats the count — while the
+  // anchor still has the childCount it was said against.
   const childPaging = useCanvasStore(s => s.childPaging)
   const anchorMoreByLayer = useMemo(() => {
     const out = new Map<string, { anchorUrn: string; remaining: number }>()
@@ -1683,8 +1684,9 @@ export function ContextViewCanvas({
       if (!layer.anchorUrn) continue
       const anchor = nodeMap.get(layer.anchorUrn)
       if (!anchor) continue
-      if (childPaging[layer.anchorUrn]?.hasMore === false) continue
       const total = Number((anchor.data as Record<string, unknown> | undefined)?.childCount ?? 0) || 0
+      const pager = childPaging[layer.anchorUrn]
+      if (pager && !pager.hasMore && pager.childCount === total) continue
       const loaded = (childMap.get(layer.anchorUrn) ?? []).length
       if (total > loaded) {
         out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
@@ -2916,7 +2918,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, childPageEpochs, exhaustedParents, loadMoreFeeds } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -5599,7 +5601,6 @@ export function ContextViewCanvas({
                 onRevealSearchHit={revealSearchHit}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
-                childPageEpochs={childPageEpochs}
                 exhaustedParents={exhaustedParents}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}

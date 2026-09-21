@@ -7,8 +7,11 @@
  *    request leaves its URNs unresolved and retries. Tombstoning a failure made
  *    an anchor "unknown, 0 children" for the session, and the rail then offered
  *    none of its children;
+ *  - an answer that lands after the lookup effect re-ran (a snapshot publish
+ *    mid-flight) is SHOWN — the re-run skips in-flight URNs, so the original
+ *    run is the only one that can re-render for them;
  *  - child paging records what the SERVER said (hasMore) and whether the last
- *    page failed, and carries the cursor with the offset.
+ *    page failed, and reads each page where the server said it starts.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -82,6 +85,28 @@ describe('useWizardEntityIndex — resolving assigned URNs', () => {
   })
 })
 
+describe('useWizardEntityIndex — an answer that lands after a re-run', () => {
+  it('is shown, not left in the cache with nothing to draw it', async () => {
+    const pending: Array<{ urns: string[]; resolve: (v: unknown) => void }> = []
+    const getNodes = vi.fn((q: { urns: string[] }) => new Promise(r => { pending.push({ urns: q.urns, resolve: r }) }))
+    const provider = { getNodes, getChildrenWithEdges: vi.fn() }
+    let assignments = assignmentsFor(3)
+    const { result, rerender } = renderHook(() => useWizardEntityIndex({
+      provider: provider as never, containmentEdgeTypes: ['CONTAINS'], assignments, snapshot: null,
+    }))
+    // An assignment edit (or a snapshot publish) re-runs the lookup mid-flight.
+    assignments = { ...assignments }
+    rerender()
+    const before = result.current
+    await act(async () => {
+      pending.splice(0).forEach(p => p.resolve(p.urns.map(u => ({ urn: u, entityType: 't', displayName: u, childCount: 4000 }))))
+      await new Promise(r => setTimeout(r, 1))
+    })
+    expect(result.current).not.toBe(before)                   // it re-rendered…
+    expect(result.current.resolve(urn(0))?.childCount).toBe(4000)   // …with the answer
+  })
+})
+
 describe('useWizardEntityIndex — a provider that keeps failing', () => {
   afterEach(() => { vi.useRealTimers() })
 
@@ -105,14 +130,15 @@ describe('useWizardEntityIndex — a provider that keeps failing', () => {
 
 describe('useWizardEntityIndex — paging a container', () => {
   const ANCHOR = 'urn:anchor'
-  const page = (from: number, count: number, total: number) => {
-    const last = from + count - 1
-    return {
-      children: Array.from({ length: count }, (_, k) => ({ urn: urn(from + k), entityType: 'system', displayName: `c${from + k}` })),
-      containmentEdges: [], lineageEdges: [], totalChildren: total,
-      hasMore: last < total - 1, nextCursor: last < total - 1 ? `after:${last}` : null,
-    }
-  }
+  /** The server reads `count` rows at `from` and reports where the next page
+   *  starts; `hide` rows are dropped from what it RETURNS (a draft that deleted
+   *  them) without moving that position. */
+  const page = (from: number, count: number, total: number, hide = new Set<number>()) => ({
+    children: Array.from({ length: count }, (_, k) => from + k).filter(i => !hide.has(i))
+      .map(i => ({ urn: urn(i), entityType: 'system', displayName: `c${i}` })),
+    containmentEdges: [], lineageEdges: [], totalChildren: total,
+    hasMore: from + count < total, nextOffset: from + count,
+  })
 
   let provider: ReturnType<typeof makeProvider>
   beforeEach(() => {
@@ -121,15 +147,21 @@ describe('useWizardEntityIndex — paging a container', () => {
       page(o.offset ?? 0, Math.min(50, 120 - (o.offset ?? 0)), 120))
   })
 
-  it("records the server's hasMore and carries the cursor with the offset", async () => {
+  it("records the server's hasMore and reads each page where the server said it starts", async () => {
+    // A draft deleted child 10: page 1 returns 49 rows, but the next page still
+    // starts at 50 — counting the rows would re-read child 49 and drift.
+    provider.getChildrenWithEdges.mockImplementation(async (_u: string, o: { offset?: number }) =>
+      page(o.offset ?? 0, Math.min(50, 120 - (o.offset ?? 0)), 120, new Set([10])))
     const { result } = render(provider, {})
     await act(async () => { await result.current.loadChildren(ANCHOR) })
     expect(result.current.childPageState(ANCHOR)).toEqual({ hasMore: true, failed: false })
 
     await act(async () => { await result.current.loadMoreChildren(ANCHOR) })
-    expect(provider.getChildrenWithEdges.mock.calls[1][1]).toMatchObject({ offset: 50, cursor: 'after:49' })
+    const second = provider.getChildrenWithEdges.mock.calls[1][1] as { offset?: number; cursor?: string }
+    expect(second.offset).toBe(50)
+    expect(second.cursor).toBeUndefined()
     await act(async () => { await result.current.loadMoreChildren(ANCHOR) })
-    expect(result.current.childrenOf(ANCHOR)).toHaveLength(120)
+    expect(result.current.childrenOf(ANCHOR)).toHaveLength(119)
     expect(result.current.childPageState(ANCHOR).hasMore).toBe(false)
   })
 

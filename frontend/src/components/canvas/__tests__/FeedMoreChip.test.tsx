@@ -10,7 +10,7 @@ import { FeedMoreChip } from '../FeedMoreChip'
 import { useCanvasStore, type TypeFeedState } from '@/store/canvas'
 
 const feed = (over: Partial<TypeFeedState>): TypeFeedState => ({
-  entityTypes: ['domain'], afterName: 'x', afterUrn: 'u', offset: 200, hasMore: true, epoch: 1, ...over,
+  entityTypes: ['domain'], offset: 200, hasMore: true, ...over,
 })
 
 describe('FeedMoreChip', () => {

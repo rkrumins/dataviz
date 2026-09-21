@@ -19,13 +19,20 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockProvider } = vi.hoisted(() => ({
-  mockProvider: {
+const { mockProvider } = vi.hoisted(() => {
+  const mockProvider = {
     getNodes: vi.fn(async () => []),
     getEdgesBetween: vi.fn(async () => []),
     getChildren: vi.fn(async () => []),
-  },
-}))
+    // Type and root loads page through getNodesPage; it answers from this
+    // file's own getNodes mock, so each test's getNodes behaviour applies.
+    getNodesPage: vi.fn(async (q: { offset?: number }) => {
+      const nodes = await (mockProvider.getNodes as (q: unknown) => Promise<unknown[]>)(q)
+      return { nodes, hasMore: false, nextOffset: (q.offset ?? 0) + nodes.length }
+    }),
+  }
+  return { mockProvider }
+})
 
 vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => mockProvider,

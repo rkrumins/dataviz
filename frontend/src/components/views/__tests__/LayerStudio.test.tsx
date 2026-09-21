@@ -59,7 +59,7 @@ const fakeBrowser = {
       childIds: [],
       totalChildren: 0,
       hasMore: false,
-      nextCursor: null,
+      nextOffset: 0,
       loaded: true,
     }],
   ]),

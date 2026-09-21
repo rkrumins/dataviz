@@ -90,7 +90,7 @@ describe('anchored column — the prefetch seeds the shared pager', () => {
     await waitFor(() => expect(hydrating.result.current.hydrationStatus).toBe('ready'))
 
     const pager = useCanvasStore.getState().childPaging[ANCHOR]
-    expect(pager).toMatchObject({ cursor: 'after:99', delivered: 100, hasMore: true })
+    expect(pager).toMatchObject({ offset: 100, hasMore: true })
     expect(mockProvider.getChildren).not.toHaveBeenCalled()
 
     // The canvas has its OWN instance of the hook — as in the app.
@@ -99,7 +99,6 @@ describe('anchored column — the prefetch seeds the shared pager', () => {
     await act(async () => { await canvas.result.current.loadChildren(ANCHOR) })
 
     const call = mockProvider.getChildrenWithEdges.mock.calls[0] as unknown as [string, { cursor?: string; offset?: number }]
-    expect(call[1].cursor).toBe('after:99')
     expect(call[1].offset).toBe(100)
     expect(mockProvider.getChildrenWithEdges).toHaveBeenCalledTimes(1)   // no page-1 refetch
   })
@@ -125,6 +124,6 @@ describe('anchored column — the prefetch seeds the shared pager', () => {
     const call = mockProvider.getChildrenWithEdges.mock.calls.at(-1) as unknown as [string, { cursor?: string; offset?: number }]
     expect(call[1].cursor ?? null).toBeNull()
     expect(call[1].offset ?? 0).toBe(0)
-    expect(useCanvasStore.getState().childPaging[ANCHOR]).toMatchObject({ delivered: 100, hasMore: true })
+    expect(useCanvasStore.getState().childPaging[ANCHOR]).toMatchObject({ offset: 100, hasMore: true })
   })
 })

@@ -1136,8 +1136,11 @@ function LayerRow({
 
                                 {/* The column's roots, in the order the canvas draws
                                     them. Drag a row onto another row's top or bottom
-                                    edge to rearrange; the middle drops into the layer. */}
-                                {rootRows.length > 0 && (
+                                    edge to rearrange; the middle drops into the layer.
+                                    Also drawn with NO rows when the first page failed:
+                                    the Retry lives here, and a blank column would look
+                                    finished. */}
+                                {(rootRows.length > 0 || moreFailed) && (
                                     <div
                                         data-testid={`layer-rows-${layer.id}`}
                                         className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1"

@@ -29,7 +29,7 @@ type FakeEntry = {
   totalChildren: number
   totalIsExact: boolean
   hasMore: boolean
-  nextCursor: string | null
+  nextOffset: number
   loaded: boolean
 }
 
@@ -40,7 +40,7 @@ function nodeA(overrides: Partial<FakeEntry> = {}): FakeEntry {
     totalChildren: 0,
     totalIsExact: true,
     hasMore: false,
-    nextCursor: null,
+    nextOffset: 0,
     loaded: true,
     ...overrides,
   }
@@ -53,7 +53,7 @@ function child(urn: string, name: string, overrides: Partial<FakeEntry> = {}): F
     totalChildren: 0,
     totalIsExact: true,
     hasMore: false,
-    nextCursor: null,
+    nextOffset: 0,
     loaded: true,
     ...overrides,
   }
@@ -224,7 +224,7 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     // 888 children, only the first page loaded — the exact case that used to
     // mean clicking "Load more" seventeen times.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
-      ['urn:a', nodeA({ totalChildren: 888, hasMore: true, nextCursor: 'cursor-1', loaded: true })],
+      ['urn:a', nodeA({ totalChildren: 888, hasMore: true, nextOffset: 50, loaded: true })],
     ])
     renderTree()
 
@@ -243,14 +243,14 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     //     would just be a slow way of placing the parent (its children inherit),
     //     and would give no way to place children WITHOUT their parent.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
-      ['urn:a', nodeA({ totalChildren: 2, hasMore: true, nextCursor: 'c1', loaded: true })],
+      ['urn:a', nodeA({ totalChildren: 2, hasMore: true, nextOffset: 1, loaded: true })],
     ])
     fakeBrowser.loadAllChildren.mockImplementationOnce(async (urn: string) => {
       // Simulate the hook: children land in the map and the ids come back.
       // A NEW Map — the tree memoises on map identity, as the real hook does.
       fakeBrowser.nodes = new Map<string, FakeEntry>([
         [urn, nodeA({
-          totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
+          totalChildren: 2, hasMore: false, nextOffset: 0, loaded: true,
           childIds: ['urn:c1', 'urn:c2'],
         })],
         ['urn:c1', child('urn:c1', 'Child One')],

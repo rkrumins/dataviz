@@ -86,16 +86,15 @@ interface LayerColumnProps {
   onRevealSearchHit?: (urn: string, ancestorPath: AncestorRef[]) => void
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
-  /** Pages landed per parent — the load-more latch re-arms on these. */
-  childPageEpochs?: Map<string, number>
   /** Open scope: this column's type feeds still have more (present only then).
    *  Drawn as a column-level row that auto-loads while the column GROWS and
    *  offers a click when a page lands elsewhere — never an unattended drain. */
   feedMore?: { loading: boolean; failed: boolean }
   onFeedMore?: (layerId: string) => void
-  /** Parents the server says have no further pages: no load-more row, even
-   *  when some of their children render in other columns. */
-  exhaustedParents?: Set<string>
+  /** Parents the server says have no further pages, with the childCount that
+   *  was said against: no load-more row while the parent still has that count,
+   *  even when some of its children render in other columns. */
+  exhaustedParents?: Map<string, number>
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
@@ -232,7 +231,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   onRevealSearchHit,
   loadingNodes,
   failedNodes,
-  childPageEpochs,
   exhaustedParents,
   feedMore,
   onFeedMore,
@@ -607,7 +605,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
         const hasMore = !isTracing && node.children.length < childCount && !activeQuery
-          && !(exhaustedParents?.has(node.id) ?? false)
+          && exhaustedParents?.get(node.id) !== childCount
 
         // What the session found INSIDE this container, at any depth — the
         // half of the answer that is NOT already on the canvas. These rows
@@ -2293,12 +2291,14 @@ export const LayerColumn = React.memo(function LayerColumn({
                           ? {
                             isLoading: feedMore?.loading ?? false,
                             failed: (feedMore?.failed ?? false) && !(feedMore?.loading ?? false),
-                            epoch: visibleCount,
+                            rearmKey: visibleCount,
                             onLoadMore: () => onFeedMore?.(layer.id),
                           }
                           : {
                             isLoading: loadingNodes?.has(item.node.id) ?? false,
-                            epoch: childPageEpochs?.get(item.node.id) ?? 0,
+                            // Re-arm only when THIS column grows: children placed in
+                            // another column must not drain this parent unattended.
+                            rearmKey: visibleCount,
                             failed: (failedNodes?.has(item.node.id) ?? false) && !(loadingNodes?.has(item.node.id) ?? false),
                             onLoadMore: (auto?: boolean) => handleLoadMore(item.node.id, auto),
                           })}

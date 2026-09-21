@@ -41,7 +41,7 @@ vi.mock('@/hooks/useDataSourceSchema', () => ({
 
 const node = (urn: string, name: string, kids = 0) => [urn, {
   node: { urn, entityType: 'domain', displayName: name, properties: {} },
-  childIds: [], totalChildren: kids, hasMore: false, nextCursor: null, loaded: true,
+  childIds: [], totalChildren: kids, hasMore: false, nextOffset: 0, loaded: true,
 }] as const
 
 const fakeBrowser = {

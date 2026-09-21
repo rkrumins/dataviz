@@ -98,6 +98,13 @@ describe('LayerHierarchyPanel — an anchored column past its first page', () =>
     expect(onLoadMoreAnchor).toHaveBeenCalledWith(ANCHOR)
   })
 
+  it('offers the retry even when the FIRST page failed and the column holds nothing', () => {
+    // A blank column looks finished — the original "none of its children" symptom.
+    const { onLoadMoreAnchor } = renderRail({ anchorUrn: ANCHOR, remaining: 4000, failed: true }, 0)
+    fireEvent.click(screen.getByRole('button', { name: /couldn't load the next/i }))
+    expect(onLoadMoreAnchor).toHaveBeenCalledWith(ANCHOR)
+  })
+
   it('fetches when scrolled into view, once per growth of the column', () => {
     const { onLoadMoreAnchor, view } = renderRail({ anchorUrn: ANCHOR, remaining: 4000, failed: false })
     const dwell = () => {

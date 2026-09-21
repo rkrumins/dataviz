@@ -155,7 +155,7 @@ describe('LoadMoreItem', () => {
     })
 })
 
-describe('LoadMoreItem — latch on landed pages, not on the count', () => {
+describe('LoadMoreItem — re-arms when its column grows, and only then', () => {
     let fire: ((entries: { isIntersecting: boolean }[]) => void) | null = null
     let observerRoot: unknown = 'unset'
 
@@ -181,23 +181,42 @@ describe('LoadMoreItem — latch on landed pages, not on the count', () => {
         act(() => { vi.advanceTimersByTime(300) })
     }
 
-    it('re-arms when a page lands even though the remaining count did not move', () => {
-        // A page whose rows render in ANOTHER column leaves this parent's count
-        // unchanged. Latched on the count alone, the row would never fire again
-        // and the parent would silently stop paging.
+    it('re-fires only after a page grows its column', () => {
+        // The caller keys the row on its COLUMN's row count. A page whose rows
+        // land in another column leaves that unchanged — even though this
+        // parent's remaining count moved — so the row does not fire again on its
+        // own: no unattended walk of a parent whose children render elsewhere.
+        // A click still loads.
         const onLoadMore = vi.fn()
-        const row = (epoch: number) => (
-            <LoadMoreItem depth={1} parentIsLast={[false]} count={400} epoch={epoch} autoLoad onLoadMore={onLoadMore} />
+        const row = (rows: number, remaining: number) => (
+            <LoadMoreItem depth={1} parentIsLast={[false]} count={remaining} rearmKey={rows} autoLoad onLoadMore={onLoadMore} />
         )
-        const { rerender } = render(row(1))
+        const { rerender } = render(row(10, 400))
         dwellInView()
         expect(onLoadMore).toHaveBeenCalledTimes(1)
 
-        rerender(row(1))                 // same count, same epoch — no page landed
+        rerender(row(10, 300))           // a page landed ELSEWHERE: this column did not grow
         dwellInView()
         expect(onLoadMore).toHaveBeenCalledTimes(1)
+        fireEvent.click(screen.getByRole('button'))
+        expect(onLoadMore).toHaveBeenCalledTimes(2)
 
-        rerender(row(2))                 // a page landed; count unchanged
+        rerender(row(110, 200))          // a page grew this column
+        dwellInView()
+        expect(onLoadMore).toHaveBeenCalledTimes(3)
+    })
+
+    it('latches on the count when the caller gives no key', () => {
+        const onLoadMore = vi.fn()
+        const row = (remaining: number) => (
+            <LoadMoreItem depth={1} parentIsLast={[false]} count={remaining} autoLoad onLoadMore={onLoadMore} />
+        )
+        const { rerender } = render(row(400))
+        dwellInView()
+        rerender(row(400))
+        dwellInView()
+        expect(onLoadMore).toHaveBeenCalledTimes(1)
+        rerender(row(300))
         dwellInView()
         expect(onLoadMore).toHaveBeenCalledTimes(2)
     })
@@ -206,14 +225,14 @@ describe('LoadMoreItem — latch on landed pages, not on the count', () => {
         // Rooted in the column's own scroller, the observer still "saw" the row
         // of a column the canvas had scrolled out of view: every off-screen
         // column on a 56-column view fetched its next page unasked.
-        render(<LoadMoreItem depth={0} parentIsLast={[]} count={400} epoch={1} autoLoad onLoadMore={vi.fn()} />)
+        render(<LoadMoreItem depth={0} parentIsLast={[]} count={400} rearmKey={1} autoLoad onLoadMore={vi.fn()} />)
         expect(observerRoot).toBeNull()
     })
 
     it('says a page failed, waits for a click, and never auto-fires meanwhile', () => {
         const onLoadMore = vi.fn()
         render(
-            <LoadMoreItem depth={1} parentIsLast={[false]} count={400} epoch={3} failed autoLoad onLoadMore={onLoadMore} />,
+            <LoadMoreItem depth={1} parentIsLast={[false]} count={400} rearmKey={3} failed autoLoad onLoadMore={onLoadMore} />,
         )
         // Not merely unfired: no observer is armed at all while the page is failed.
         expect(fire).toBeNull()

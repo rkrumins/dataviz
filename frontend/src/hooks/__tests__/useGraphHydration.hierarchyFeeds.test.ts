@@ -22,6 +22,7 @@ const root = (i: number) => `urn:h:r${String(i).padStart(3, '0')}`
 const { mockProvider, inFlight } = vi.hoisted(() => ({
   mockProvider: {
     getNodes: vi.fn(),
+    getNodesPage: vi.fn(),
     getEdges: vi.fn(async () => []),
     getEdgesBetween: vi.fn(async () => []),
     getChildren: vi.fn(async () => []),
@@ -58,13 +59,16 @@ vi.mock('@/config/polling', () => ({
 import { useGraphHydration } from '../useGraphHydration'
 import { useCanvasStore } from '@/store/canvas'
 
+/** Roots in the server's order, read by offset; the server says where the next
+ *  page starts. */
 function serveRoots() {
-  return async (q: { limit?: number; offset?: number; afterUrn?: string }) => {
+  return async (q: { limit?: number; offset?: number }) => {
     const all = Array.from({ length: ROOTS }, (_, i) => ({
       urn: root(i), entityType: 'domain', displayName: `r${String(i).padStart(3, '0')}`, childCount: 150,
     }))
-    const start = q.afterUrn ? all.findIndex(n => n.urn === q.afterUrn) + 1 : (q.offset ?? 0)
-    return all.slice(start, start + (q.limit ?? 100))
+    const start = q.offset ?? 0
+    const nodes = all.slice(start, start + (q.limit ?? 100))
+    return { nodes, hasMore: start + nodes.length < ROOTS, nextOffset: start + nodes.length }
   }
 }
 
@@ -78,7 +82,7 @@ function serveChildren(failFor?: string) {
     const kids = Array.from({ length: 100 }, (_, k) => ({ urn: `${urn}:c${k}`, entityType: 'system', displayName: `c${k}` }))
     return {
       children: kids, containmentEdges: [], lineageEdges: [],
-      totalChildren: 150, hasMore: true, nextCursor: `after:${urn}:c99`,
+      totalChildren: 150, hasMore: true, nextOffset: 100,
     }
   }
 }
@@ -90,7 +94,8 @@ describe('hierarchy/graph hydration', () => {
     inFlight.max = 0
     useCanvasStore.getState().setGraph([], [])
     useCanvasStore.getState().clearNodeFetchFailures()
-    mockProvider.getNodes.mockImplementation(serveRoots() as never)
+    mockProvider.getNodesPage.mockImplementation(serveRoots() as never)
+    mockProvider.getNodes.mockImplementation(async () => [])
   })
 
   it('never has more than a handful of child requests in flight', async () => {
@@ -106,9 +111,7 @@ describe('hierarchy/graph hydration', () => {
     mockProvider.getChildrenWithEdges.mockImplementation(serveChildren() as never)
     const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
     await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
-    expect(useCanvasStore.getState().childPaging[root(0)]).toMatchObject({
-      cursor: `after:${root(0)}:c99`, delivered: 100, hasMore: true,
-    })
+    expect(useCanvasStore.getState().childPaging[root(0)]).toMatchObject({ offset: 100, hasMore: true })
   })
 
   it('counts a failed first page instead of reading it as "no children"', async () => {

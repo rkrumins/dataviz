@@ -39,7 +39,10 @@ export interface EntityIdentity {
 
 interface ProviderScope {
     provider: GraphDataProvider
-    paging: Map<string, { cursor: string | null; hasMore: boolean; failed: boolean }>
+    /** Per container: where its next page starts and whether there is one — as
+     *  the SERVER said (a draft adds and drops rows around each page) — and
+     *  whether the last page failed. */
+    paging: Map<string, { offset: number; hasMore: boolean; failed: boolean }>
     waiting: Set<string>
     attempts: Map<string, number>
     timers: Set<ReturnType<typeof setTimeout>>
@@ -184,7 +187,10 @@ export function useWizardEntityIndex(opts: {
                     // Re-render only on an ANSWER. A failure changes nothing on
                     // screen, and re-rendering on it lets a failing provider drive
                     // a render loop (its retry is scheduled, not immediate).
-                    if (answered && !cancelled) setTick(t => t + 1)
+                    // Not gated on `cancelled`: a re-run while this was in flight
+                    // skips these URNs as in flight, so if this run stayed silent
+                    // the answer would sit in the cache with nothing to show it.
+                    if (answered) setTick(t => t + 1)
                 }
             })
         }
@@ -212,10 +218,10 @@ export function useWizardEntityIndex(opts: {
     }, [tick])
 
     /**
-     * One page of `urn`'s children, appended to whatever is cached. `offset` is
-     * the cached length, so repeated calls walk the container a page at a time —
-     * an anchored column shows a first page and pulls the rest on demand rather
-     * than dragging 5000 rows into the wizard.
+     * One page of `urn`'s children, appended to whatever is cached, read at
+     * `offset` — where the server said the next page starts — so repeated calls
+     * walk the container a page at a time: an anchored column shows a first page
+     * and pulls the rest on demand rather than dragging 5000 rows into the wizard.
      */
     const fetchChildPage = useCallback(async (urn: string, offset: number) => {
         if (loadingRef.current.has(urn)) return
@@ -227,15 +233,15 @@ export function useWizardEntityIndex(opts: {
             const result = await provider.getChildrenWithEdges(urn, {
                 edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
                 limit: CHILDREN_PAGE_SIZE,
-                // Both: FalkorDB seeks by cursor (lossless across duplicate
-                // names); offset-paging providers use the offset.
+                // By position — every provider pages by it, whatever the names.
                 offset,
-                cursor: offset > 0 ? prev?.cursor ?? null : null,
                 includeLineageEdges: false,
             })
+            const next = result.nextOffset ?? offset + result.children.length
             paging.set(urn, {
-                cursor: result.nextCursor ?? null,
-                hasMore: result.hasMore && result.children.length > 0,
+                offset: next,
+                // "More" from a page that did not move the position can make no progress.
+                hasMore: result.hasMore && next > offset,
                 failed: false,
             })
             const known = childrenRef.current.get(urn) ?? []
@@ -266,7 +272,7 @@ export function useWizardEntityIndex(opts: {
             // first page permanent for the session.
             console.error(`[useWizardEntityIndex] Failed to load children for ${urn}:`, err)
             // ...and SAY so: the rail offers a retry instead of looking finished.
-            paging.set(urn, { cursor: prev?.cursor ?? null, hasMore: prev?.hasMore ?? true, failed: true })
+            paging.set(urn, { offset: prev?.offset ?? offset, hasMore: prev?.hasMore ?? true, failed: true })
         } finally {
             loadingRef.current.delete(urn)
             setTick(t => t + 1)
@@ -281,8 +287,9 @@ export function useWizardEntityIndex(opts: {
 
     /** The next page, for a container the user is still walking through. */
     const loadMoreChildren = useCallback(async (urn: string) => {
-        await fetchChildPage(urn, (childrenRef.current.get(urn) ?? []).length)
-    }, [fetchChildPage])
+        const at = scoped().paging.get(urn)?.offset ?? (childrenRef.current.get(urn) ?? []).length
+        await fetchChildPage(urn, at)
+    }, [fetchChildPage, scoped])
 
     const isLoading = useCallback((urn: string) => loadingRef.current.has(urn),
         // eslint-disable-next-line react-hooks/exhaustive-deps

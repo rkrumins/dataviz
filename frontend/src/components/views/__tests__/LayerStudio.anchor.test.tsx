@@ -52,7 +52,7 @@ const fakeBrowser = {
   topLevelIds: ['urn:finance'],
   nodes: new Map([['urn:finance', {
     node: { urn: 'urn:finance', entityType: 'domain', displayName: 'Financial Services', properties: {} },
-    childIds: [], totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
+    childIds: [], totalChildren: 2, hasMore: false, nextOffset: 0, loaded: true,
   }]]),
   parentMap: new Map<string, string>(),
   isLoading: false,

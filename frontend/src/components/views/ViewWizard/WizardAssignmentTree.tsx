@@ -10,7 +10,7 @@
  * - Conflict detection and warnings
  */
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -762,11 +762,11 @@ export function WizardAssignmentTree({
             // server that is failing.
             if (row.failed) continue
 
-            // Cursor identity — advances with every loaded page.
-            const cursor = parentId
-                ? b.peekNode(parentId)?.nextCursor ?? ''
-                : String(b.topLevelIds.length)
-            const guard = `${key}:${cursor}`
+            // Re-arm only when the LIST grows. Keyed on the page position, a row
+            // that stayed on screen because a filter ("Unassigned only", a type)
+            // hid every row it loaded fired again for every page — an unattended
+            // walk of the whole container. Stalled like that, it waits for a click.
+            const guard = `${key}:${flattenedNodes.length}`
             if (autoLoadedRef.current.has(guard)) continue
             autoLoadedRef.current.add(guard)
 
@@ -1041,8 +1041,10 @@ export function WizardAssignmentTree({
     // Search is server-side — no client-side auto-expand needed.
     // Results come back as flat root items from the API.
 
-    // Keyboard shortcuts
-    useEffect(() => {
+    // Keyboard shortcuts. A layout effect swaps the listener in the same commit
+    // that paints the selection: a passive one lagged a task behind, so a digit
+    // pressed as "250 selected" appeared assigned the PREVIOUS selection.
+    useLayoutEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             const target = e.target as HTMLElement | null
             // Never hijack typing — search box, rename inputs, quick-assign selects.

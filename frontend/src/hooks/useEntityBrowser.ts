@@ -16,7 +16,8 @@
  *   orphans explicitly (diagnostic `rootTypeCount` / `orphanCount` fields).
  *
  * Designed for million-node scale:
- * - Cursor-based pagination for both top-level AND child loads
+ * - Top-level pages by cursor; child loads page by the position the server
+ *   returns (`nextOffset`), which every provider honours
  * - Strictly lazy: ONE level per expand, never recursive
  * - Type filter is pure frontend ontology computation (no API call) when
  *   filtering what the user sees; when the filter is active AND no search
@@ -67,8 +68,10 @@ export interface BrowserNode {
     totalIsExact: boolean
     /** Whether more children exist beyond what's loaded */
     hasMore: boolean
-    /** Cursor for the next page of children */
-    nextCursor: string | null
+    /** Where the next page of children starts — as the SERVER said: a draft adds
+     *  and drops rows around each page, and a name cursor breaks on providers
+     *  that ignore it and on entities with no stored display name. */
+    nextOffset: number
     /** Whether children have been fetched at least once */
     loaded: boolean
 }
@@ -185,6 +188,15 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     const markFailed = useCallback((id: string) => {
         setFailedIds(prev => { const next = new Set(prev); next.add(id); return next })
     }, [])
+    /** A page for `id` landed — by any path — so its failure no longer stands. */
+    const clearFailed = useCallback((id: string) => {
+        setFailedIds(prev => {
+            if (!prev.has(id)) return prev
+            const next = new Set(prev)
+            next.delete(id)
+            return next
+        })
+    }, [])
     const [searchQuery, setSearchQueryState] = useState('')
     const [typeFilter, setTypeFilterState] = useState<string | null>(null)
 
@@ -248,6 +260,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             setTopLevelTotalCount(0)
             setTopLevelMetadata({ rootTypeCount: 0, orphanCount: 0 })
             setParentMap(new Map())
+            setFailedIds(new Set())
             setError(null)
         }
     }, [provider])
@@ -295,13 +308,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     const addLoading = useCallback((id: string) => {
         setLoadingNodes(prev => { const next = new Set(prev); next.add(id); return next })
         // Every attempt starts here, so a retry clears the failure it retries.
-        setFailedIds(prev => {
-            if (!prev.has(id)) return prev
-            const next = new Set(prev)
-            next.delete(id)
-            return next
-        })
-    }, [])
+        clearFailed(id)
+    }, [clearFailed])
 
     const removeLoading = useCallback((id: string) => {
         setLoadingNodes(prev => { const next = new Set(prev); next.delete(id); return next })
@@ -313,7 +321,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         childIds: prev?.childIds ?? [],
         ...resolveChildTotal(node, prev?.childIds.length ?? 0, prev?.hasMore ?? false, prev),
         hasMore: prev?.hasMore ?? false,
-        nextCursor: prev?.nextCursor ?? null,
+        nextOffset: prev?.nextOffset ?? 0,
         loaded: prev?.loaded ?? false,
     }), [])
 
@@ -360,8 +368,9 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 rootTypeCount: result.rootTypeCount ?? 0,
                 orphanCount: result.orphanCount ?? 0,
             })
+            clearFailed('__top-level')
         },
-        [commitNodes, freshEntry],
+        [commitNodes, freshEntry, clearFailed],
     )
 
     /**
@@ -377,6 +386,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             parentUrn: string,
             result: Awaited<ReturnType<GraphDataProvider['getChildrenWithEdges']>>,
             mode: 'replace' | 'append',
+            /** The offset the page was REQUESTED at — pages can land out of order. */
+            requestedAt?: number,
         ): string[] => {
             let childIdsAfter: string[] = []
 
@@ -389,6 +400,15 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
                 const parent = next.get(parentUrn)
                 if (parent) {
+                    const readAt = requestedAt ?? (mode === 'replace' ? 0 : parent.nextOffset)
+                    const reached = result.nextOffset ?? readAt + result.children.length
+                    // A page that lands BEHIND where paging already stands (a slower
+                    // request from an earlier position) adds its rows, but must not
+                    // move the position back or end paging.
+                    const behind = mode === 'append' && reached < parent.nextOffset
+                    const nextOffset = behind ? parent.nextOffset : reached
+                    // "More" from a page that did not move the position can make no progress.
+                    const hasMore = behind ? parent.hasMore : Boolean(result.hasMore) && reached > readAt
                     const pageIds = result.children.map(c => c.urn)
                     const merged = mode === 'replace'
                         ? pageIds
@@ -398,9 +418,9 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                     next.set(parentUrn, {
                         ...parent,
                         childIds: merged,
-                        ...resolveChildTotal(parent.node, merged.length, Boolean(result.hasMore), parent),
-                        hasMore: Boolean(result.hasMore),
-                        nextCursor: result.nextCursor ?? null,
+                        ...resolveChildTotal(parent.node, merged.length, hasMore, parent),
+                        hasMore,
+                        nextOffset,
                         loaded: true,
                     })
                 }
@@ -408,9 +428,10 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             })
 
             commitParentMap(result.containmentEdges)
+            clearFailed(parentUrn)
             return childIdsAfter
         },
-        [commitNodes, commitParentMap, freshEntry],
+        [commitNodes, commitParentMap, freshEntry, clearFailed],
     )
 
     // ─── loadTopLevel ───
@@ -441,7 +462,9 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     // ─── loadMoreTopLevel ───
 
     const loadMoreTopLevel = useCallback(async () => {
-        if (!topLevelHasMore) return
+        // Nothing left to load: a failure recorded earlier no longer stands (its
+        // Retry would otherwise do nothing, forever).
+        if (!topLevelHasMore) { clearFailed('__top-level'); return }
         addLoading('__top-level')
 
         try {
@@ -459,7 +482,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         } finally {
             removeLoading('__top-level')
         }
-    }, [topLevelHasMore, topLevelCursor, provider, mergeTopLevelResult, addLoading, removeLoading, markFailed])
+    }, [topLevelHasMore, topLevelCursor, provider, mergeTopLevelResult, addLoading, removeLoading, markFailed, clearFailed])
 
     // ─── expandNode: lazy-load direct children (ONE level only) ───
     // Uses nodesRef to avoid re-creating this callback when nodes change.
@@ -497,13 +520,14 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         addLoading(parentUrn)
 
         try {
+            const readAt = parentEntry.nextOffset
             const result = await provider.getChildrenWithEdges(parentUrn, {
                 edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
                 limit: PAGE_SIZE,
-                cursor: parentEntry.nextCursor,
+                offset: readAt,
                 includeLineageEdges: false,
             })
-            mergeChildrenPage(parentUrn, result, 'append')
+            mergeChildrenPage(parentUrn, result, 'append', readAt)
         } catch (err) {
             console.error(`[useEntityBrowser] Failed to load more children for ${parentUrn}:`, err)
             markFailed(parentUrn)
@@ -513,9 +537,10 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     }, [provider, containmentEdgeTypes, mergeChildrenPage, addLoading, removeLoading, markFailed])
 
     // ─── loadAllChildren: page through EVERY remaining child of a node ───
-    // Resumes from the current cursor when children are partially loaded, so
-    // work already done by expand/load-more is never re-fetched. Cursor state
-    // is tracked locally from API results (React state is stale inside the loop).
+    // Resumes where the server said the next page starts when children are
+    // partially loaded, so work already done by expand/load-more is never
+    // re-fetched. Read back from the ref after each merge (React state is stale
+    // inside the loop).
 
     const loadAllChildren = useCallback(async (parentUrn: string): Promise<string[]> => {
         const alreadyComplete = (urn: string) => {
@@ -531,7 +556,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         try {
             const first = nodesRef.current.get(parentUrn)
             // Resume from where paging left off rather than re-fetching page 1.
-            let cursor: string | null = first?.loaded ? (first.nextCursor ?? null) : null
+            let offset = first?.loaded ? first.nextOffset : 0
             let mode: 'replace' | 'append' = first?.loaded ? 'append' : 'replace'
             let childIds: string[] = first?.childIds ?? []
 
@@ -539,18 +564,20 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 const result = await provider.getChildrenWithEdges(parentUrn, {
                     edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
                     limit: BULK_CHILD_PAGE_SIZE,
-                    ...(cursor ? { cursor } : { offset: 0 }),
+                    offset,
                     includeLineageEdges: false,
                 })
 
                 // Returns the merged child list — the caller must never have to
                 // re-read React state to find out what it just loaded.
-                childIds = mergeChildrenPage(parentUrn, result, mode)
+                childIds = mergeChildrenPage(parentUrn, result, mode, offset)
                 mode = 'append'
 
-                if (!result.hasMore) break
-                cursor = result.nextCursor ?? null
-                if (!cursor) break // defensive: server claims more but gave no cursor
+                // The merge recorded where the next page starts and whether there
+                // is one (false when the position did not move — no progress).
+                const after = nodesRef.current.get(parentUrn)
+                if (!after?.hasMore) break
+                offset = after.nextOffset
 
                 // The safety stop used to end the loop in silence, handing back a
                 // PARTIAL list that every caller treats as "all of them" — a

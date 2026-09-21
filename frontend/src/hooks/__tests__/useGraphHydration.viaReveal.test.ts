@@ -4,12 +4,12 @@
  * `useRevealSearchHit` attaches a hit that lives beyond page 1 directly —
  * node + containment edge — so the row renders without paging through every
  * sibling before it. That child is NOT part of any loaded page: counting it
- * in `currentChildrenCount` shifts the next page's offset by one and a real
- * sibling is skipped forever. It carries `data.viaReveal` for exactly this
- * reason (same rule as an optimistic `isPending: 'create'` child).
+ * toward the next page's offset would skip a real sibling forever. Positions
+ * come from the server's pager, never from counting held rows, so it can't.
  *
  * Pinned here:
- *  - 100 loaded children + 1 revealed → the next page asks for offset 100.
+ *  - page 1 loaded (its pager at 100) + 1 revealed → the next page asks for
+ *    offset 100.
  *  - when a page actually delivers the revealed child it becomes a normal
  *    loaded child: the flag is cleared so it counts from then on.
  */
@@ -85,7 +85,7 @@ function makeContainmentEdge(target: string): LineageEdge {
   } as LineageEdge
 }
 
-/** Parent with 150 children: page 1 (100) loaded, plus one revealed child. */
+/** Parent with 150 children: page 1 (100) loaded by its pager, plus one revealed child. */
 function seedCanvas() {
   const loaded = Array.from({ length: 100 }, (_, i) => makeNode(childUrn(i)))
   const nodes: LineageNode[] = [
@@ -102,8 +102,9 @@ function seedCanvas() {
     edges,
     _nodeIndex: new Set(nodes.map((n) => n.id)),
     _edgeIndex: new Set(edges.map((e) => e.id)),
-    // Seeds bypass setGraph, so clear what it clears: no pager survives a reseed.
-    childPaging: {},
+    childPaging: {
+      [PARENT]: { offset: 100, hasMore: true, direction: 'asc', lastUrn: childUrn(99), childCount: 150 },
+    },
     visibleEdges: [],
   })
 }
@@ -114,7 +115,7 @@ describe('loadChildren with a search-revealed child', () => {
     seedCanvas()
   })
 
-  it('excludes the revealed child from the page offset', async () => {
+  it('never lets the revealed child move the next page', async () => {
     const { result } = renderHook(() => useGraphHydration())
 
     await act(async () => {
@@ -140,7 +141,6 @@ describe('loadChildren with a search-revealed child', () => {
       lineageEdges: [],
       totalChildren: 150,
       hasMore: true,
-      nextCursor: null,
     } as any)
 
     const { result } = renderHook(() => useGraphHydration())

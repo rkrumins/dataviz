@@ -1716,12 +1716,14 @@ export function LayerStudio({
             if (!layer.anchorUrn) continue
             const loaded = entityIndex.childrenOf(layer.anchorUrn).length
             const page = entityIndex.childPageState(layer.anchorUrn)
+            const total = entityIndex.resolve(layer.anchorUrn)?.childCount
             if (page.failed) {
-                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: null, failed: true })
+                // A failed page doesn't unlearn the size: keep it when known.
+                const remaining = total !== undefined && total > loaded ? total - loaded : null
+                out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining, failed: true })
                 continue
             }
             if (loaded === 0 || page.hasMore === false) continue
-            const total = entityIndex.resolve(layer.anchorUrn)?.childCount
             if (total !== undefined && total > loaded) {
                 out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded, failed: false })
             } else if (page.hasMore === true) {

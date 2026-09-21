@@ -32,7 +32,7 @@ const fakeBrowser = {
     node: { urn: 'urn:a', entityType: 'domain', displayName: 'Node A', properties: {} },
     // 4,000 children, none loaded: the first page failed.
     childIds: [] as string[], totalChildren: 4000, totalIsExact: true,
-    hasMore: false, nextCursor: null, loaded: false,
+    hasMore: false, nextOffset: 0, loaded: false,
   }]]),
   parentMap: new Map<string, string>(),
   isLoading: false,

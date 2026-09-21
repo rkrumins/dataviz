@@ -452,12 +452,15 @@ export interface NodeQuery {
 
     /** Pagination limit */
     limit?: number
+}
 
-    /** Keyset position when paging by type: rows strictly after
-     *  (afterDisplayName, afterUrn) in (displayName, urn) order. Sent WITH
-     *  `offset` — providers that page by offset ignore it. */
-    afterDisplayName?: string
-    afterUrn?: string
+/** One page of a node query. `nextOffset` is where the next page starts, in the
+ *  PROVIDER's order — a draft overlay adds and drops rows around the page it
+ *  read, so counting the rows returned would skip or repeat rows. */
+export interface NodePage {
+    nodes: GraphNode[]
+    hasMore: boolean
+    nextOffset: number
 }
 
 export interface EdgeQuery {
@@ -768,6 +771,12 @@ export interface GraphDataProvider {
     getNodes(query: NodeQuery): Promise<GraphNode[]>
 
     /**
+     * One page of a node query, with whether another follows and where it starts
+     * — for paging a whole type. Page with `offset: page.nextOffset`.
+     */
+    getNodesPage(query: NodeQuery): Promise<NodePage>
+
+    /**
      * TOTAL lineage degree (in/out) per URN over the full graph —
      * optional capability. Absent URNs in the result are UNKNOWN, never
      * zero. The canvas derives "lineage outside this view" as
@@ -846,6 +855,8 @@ export interface GraphDataProvider {
         totalChildren: number
         hasMore: boolean
         nextCursor?: string | null
+        /** Where the next page starts (see NodePage). Absent from an older server. */
+        nextOffset?: number | null
     }>
 
     /**

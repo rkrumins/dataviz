@@ -9,10 +9,11 @@
  * failure modes structurally:
  *
  * - LATCH ON PROGRESS, NOT RENDERS: the sentinel fires at most once per
- *   (`count`, `epoch`) pair, held in a ref — prop-identity churn can never
- *   re-arm it. It only re-fires after a page actually LANDS: the count moved,
- *   or `epoch` (pages landed for this parent) did — the latter covers a page
- *   whose rows render in another column and leave the count unchanged.
+ *   re-arm key, held in a ref — prop-identity churn can never re-arm it. The
+ *   caller passes `rearmKey`: the row count of the COLUMN the row sits in, so
+ *   it re-fires only after a page grows THIS column. A page whose rows render
+ *   in another column leaves it latched — the row stays and a click still
+ *   works, but nothing pages unattended. Without a key it latches on `count`.
  * - A FAILED page does not re-arm it either: the row says the page failed and
  *   waits for a click, rather than hammering a server that is failing.
  * - DWELL BEFORE FIRING (300ms): scrubbing past the row never pages; only
@@ -40,7 +41,7 @@ export function LoadMoreItem({
   isLoading = false,
   onLoadMore,
   autoLoad = false,
-  epoch,
+  rearmKey,
   failed = false,
 }: {
   parentId?: string
@@ -55,8 +56,8 @@ export function LoadMoreItem({
   onLoadMore: (auto?: boolean) => void
   /** One-page-ahead auto-load when the row scrolls into view. */
   autoLoad?: boolean
-  /** Pages landed for this parent so far; part of the latch key. */
-  epoch?: number
+  /** What re-arms the auto-load once it fired (see the header). */
+  rearmKey?: number
   /** The last page for this parent failed — offer a retry, don't auto-fire. */
   failed?: boolean
 }) {
@@ -65,7 +66,7 @@ export function LoadMoreItem({
 
   const rowRef = useRef<HTMLDivElement>(null)
   const lastFiredKeyRef = useRef<string | null>(null)
-  const latchKey = `${count ?? '?'}:${epoch ?? 0}`
+  const latchKey = rearmKey !== undefined ? `k:${rearmKey}` : `c:${count ?? '?'}`
   const onLoadMoreRef = useRef(onLoadMore)
   useEffect(() => { onLoadMoreRef.current = onLoadMore }, [onLoadMore])
 

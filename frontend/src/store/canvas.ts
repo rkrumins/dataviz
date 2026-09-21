@@ -60,40 +60,33 @@ export interface LineageEdge extends Edge {
 }
 
 /**
- * Where one parent's child pager stands. `delivered` is the number of rows the
- * SERVER has returned in this sequence — the offset the branch/as-of path pages
- * by — and `cursor` is FalkorDB's keyset; every page sends both. `epoch` counts
- * landed pages, so a "load more" row can re-arm on progress even when a page's
- * rows render elsewhere. `lastUrn` is the last child delivered: if it is no longer
- * in the store, the graph was replaced under the pager and it restarts. So does a
- * pager whose parent's `childCount` has since changed — an "exhausted" verdict from
- * an empty page must not outlive children that appeared later.
+ * Where one parent's child pager stands: `offset` is where the next page starts
+ * and `hasMore` whether there is one — both as the SERVER said on the last page,
+ * never a client count (a draft overlay adds and drops rows around each page).
+ * `direction` is the order the offsets are in: a different order restarts at 0.
+ * `lastUrn` is the last child delivered: if it is no longer in the store, the
+ * graph was replaced under the pager and it restarts. So does a pager whose
+ * parent's `childCount` has since changed — a "no more" verdict must not outlive
+ * children that appeared later.
  */
 export interface ChildPageState {
-  cursor: string | null
-  delivered: number
+  offset: number
   hasMore: boolean
   direction: 'asc' | 'desc'
-  epoch: number
   lastUrn: string | null
   childCount: number
 }
 
 /**
- * Where one feed of entities-by-type stands: the entity types it queries, the
- * keyset position after the last page (its maximum (displayName, urn)), the
- * server offset for providers that page by offset, and whether the server has
- * more. An open Context View keeps one feed per visible type; the Hierarchy and
- * Graph views keep a roots feed and an orphans feed. `epoch` counts landed
- * pages so a consumer's latch re-arms on progress.
+ * Where one feed of entities-by-type stands: the entity types it queries, where
+ * its next page starts and whether there is one — as the server said (see
+ * ChildPageState). An open Context View keeps one feed per visible type; the
+ * Hierarchy and Graph views keep a roots feed and an orphans feed.
  */
 export interface TypeFeedState {
   entityTypes: string[]
-  afterName: string | null
-  afterUrn: string | null
   offset: number
   hasMore: boolean
-  epoch: number
 }
 
 interface CanvasState {
@@ -102,6 +95,10 @@ interface CanvasState {
   edges: LineageEdge[]
   _nodeIndex: Set<string>
   _edgeIndex: Set<string>
+  /** Bumped by every setGraph. A page fetched before a new graph was set belongs
+   *  to the OLD graph: a pager compares it and drops the page instead of landing
+   *  it on the new graph and adopting a position it never earned. */
+  graphGeneration: number
   /** Child pagers by parent id — one source of truth for every
    *  useGraphHydration instance (hydration seeds anchors; the canvas pages on
    *  scroll/expand). Cleared by setGraph. Never persisted. */
@@ -307,13 +304,17 @@ const withVersion: (
 function mergeGraph(
   state: CanvasState, newNodes: LineageNode[], newEdges: LineageEdge[],
 ): Pick<CanvasState, 'nodes' | 'edges' | '_nodeIndex' | '_edgeIndex'> | null {
-  const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
-  const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
+  // Unique against the store AND within the batch: a page read from two sides
+  // (lineage out of and into it) brings an edge inside the page twice.
+  const batchNodes = new Set<string>()
+  const batchEdges = new Set<string>()
+  const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id) && !batchNodes.has(n.id) && !!batchNodes.add(n.id))
+  const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id) && !batchEdges.has(e.id) && !!batchEdges.add(e.id))
   if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return null
   const nodeIndex = new Set(state._nodeIndex)
   const edgeIndex = new Set(state._edgeIndex)
-  uniqueNodes.forEach((n) => nodeIndex.add(n.id))
-  uniqueEdges.forEach((e) => edgeIndex.add(e.id))
+  batchNodes.forEach((id) => nodeIndex.add(id))
+  batchEdges.forEach((id) => edgeIndex.add(id))
   return {
     nodes: [...state.nodes, ...uniqueNodes],
     edges: [...state.edges, ...uniqueEdges],
@@ -389,7 +390,7 @@ export const useCanvasStore = create<CanvasState>()(
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
-      setGraph: (nodes, edges) => set(() => {
+      setGraph: (nodes, edges) => set((state) => {
         // Dedup by id to prevent React duplicate-key warnings when callers
         // pass arrays with overlapping entries (e.g. assigned + child nodes).
         const seenNodes = new Set<string>()
@@ -413,12 +414,15 @@ export const useCanvasStore = create<CanvasState>()(
           edges: dedupedEdges,
           _nodeIndex: seenNodes,
           _edgeIndex: seenEdges,
-          // A new graph invalidates every pager and feed position.
+          // A new graph invalidates every pager and feed position — and every
+          // page still in flight for the old one.
+          graphGeneration: state.graphGeneration + 1,
           childPaging: {},
           typeFeeds: {},
         }
       }),
 
+      graphGeneration: 0,
       childPaging: {},
       setChildPage: (parentId, page) => set((state) => ({
         childPaging: { ...state.childPaging, [parentId]: page },
