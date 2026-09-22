@@ -6573,9 +6573,12 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        # One row past the page: whether there IS more is then a fact, not a guess. "A full
+        # page means more" invented a child whenever the count was a multiple of the page
+        # size — a "Load 1 more" that loaded nothing.
+        params["lim"] = limit + 1
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
-        # Rows the page consumed in the query's order — where the next page starts.
-        rows_read = len(result.result_set or [])
+        raw_rows = len(result.result_set or [])
 
         children: List[GraphNode] = []
         containment_edges: List[GraphEdge] = []
@@ -6598,6 +6601,34 @@ class FalkorDBProvider(GraphDataProvider):
 
                 # Build containment edge from the matched relationship
                 containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
+
+        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
+        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
+        # the cursor MUST be the page's boundary sort key or keyset pagination
+        # skips rows. LIMIT selection is unaffected (known engine behaviour).
+        # Sorts on (displayName, urn) — the same composite key the cursor uses,
+        # in the requested direction.
+        if sort_property == "displayName" and children:
+            # Derive the index permutation from _keyset_sort (the single
+            # source of keyset order, incl. the DESC prefix semantics) so the
+            # paired containment_edges list stays aligned with its child.
+            ordered = _keyset_sort(list(children), sort_direction)
+            index_of = {id(node): i for i, node in enumerate(children)}
+            order = [index_of[id(node)] for node in ordered]
+            children = [children[i] for i in order]
+            containment_edges = [containment_edges[i] for i in order]
+            child_urns = [children[i].urn for i in range(len(children))]
+        # The probe row is the LAST in the page's order (LIMIT selects correctly even where
+        # the engine reorders the aggregating RETURN, and the sort above restores the order):
+        # it says there is more and is served by the next page, not this one.
+        has_more = raw_rows > limit
+        if len(children) > limit:
+            children, containment_edges = children[:limit], containment_edges[:limit]
+            child_urns = [c.urn for c in children]
+        # Rows the page consumed in the query's order — where the next page starts (every
+        # row counts, an unreadable one included, or the position lags and repeats rows).
+        rows_read = min(raw_rows, limit)
+        total = offset + len(children) + (1 if has_more else 0)
 
         # --- Step 2: Fetch cross-child lineage edges ---
         # Page scope: the current page's child URNs + parent, NOT cumulative URNs —
@@ -6707,24 +6738,6 @@ class FalkorDBProvider(GraphDataProvider):
                     seen_lineage.add(key)
                     lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], props))
 
-        has_more = len(children) >= limit
-        total = offset + len(children) + (1 if has_more else 0)
-        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
-        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
-        # the cursor MUST be the page's boundary sort key or keyset pagination
-        # skips rows. LIMIT selection is unaffected (known engine behaviour).
-        # Sorts on (displayName, urn) — the same composite key the cursor uses,
-        # in the requested direction.
-        if sort_property == "displayName" and children:
-            # Derive the index permutation from _keyset_sort (the single
-            # source of keyset order, incl. the DESC prefix semantics) so the
-            # paired containment_edges list stays aligned with its child.
-            ordered = _keyset_sort(list(children), sort_direction)
-            index_of = {id(node): i for i, node in enumerate(children)}
-            order = [index_of[id(node)] for node in ordered]
-            children = [children[i] for i in order]
-            containment_edges = [containment_edges[i] for i in order]
-            child_urns = [children[i].urn for i in range(len(children))]
         next_cursor = (
             _encode_keyset_cursor(children[-1].display_name, children[-1].urn, sort_direction)
             if children and has_more else None
@@ -6913,6 +6926,8 @@ class FalkorDBProvider(GraphDataProvider):
                 + " RETURN n, 0 as childCount"
             )
 
+        # One row past the page, so "more" is a fact (see get_children_with_edges).
+        params["limit"] = int(limit) + 1
         try:
             page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
         except asyncio.TimeoutError as e:
@@ -6960,7 +6975,12 @@ class FalkorDBProvider(GraphDataProvider):
         # order-independent.
         nodes = _keyset_sort(nodes, sort_direction)
 
-        has_more = len(nodes) >= int(limit)
+        has_more = len(nodes) > int(limit)
+        if has_more:
+            nodes = nodes[:int(limit)]
+            root_type_count = sum(
+                1 for n in nodes if root_types_set and str(n.entity_type) in root_types_set)
+            orphan_count = len(nodes) - root_type_count
         next_cursor = (
             _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn, sort_direction)
             if (has_more and nodes) else None

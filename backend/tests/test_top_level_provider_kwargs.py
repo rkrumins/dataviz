@@ -95,6 +95,9 @@ async def test_scrambled_page_rows_sorted_and_cursor_is_page_max(monkeypatch):
         [{"urn": "urn:1", "entityType": "layer", "displayName": "Alpha"}, 1],
         [{"urn": "urn:4", "entityType": "layer", "displayName": "Mango"}, 3],
         [{"urn": "urn:2", "entityType": "layer", "displayName": "Beta"}, 2],
+        # The probe row: the page reads one past its limit, so "more" is a fact. It sorts
+        # last and is served by the next page — the cursor is still THIS page's maximum.
+        [{"urn": "urn:9", "entityType": "layer", "displayName": "Zulu"}, 0],
     ]
 
     async def _ro_query(cypher, params=None, **kw):
@@ -142,13 +145,14 @@ async def test_count_timeout_degrades_to_null_total(monkeypatch):
             raise asyncio.TimeoutError()
         return _Result([
             [{"urn": "urn:1", "entityType": "layer", "displayName": "Alpha"}, 0],
+            [{"urn": "urn:2", "entityType": "layer", "displayName": "Beta"}, 0],   # the probe row
         ])
 
     monkeypatch.setattr(p, "_ro_query", _ro_query)
     result = await p.get_top_level_or_orphan_nodes(include_child_count=False, limit=1)
     assert result.total_count is None
     assert [n.display_name for n in result.nodes] == ["Alpha"]
-    assert result.has_more is True  # len(nodes) >= limit
+    assert result.has_more is True  # the probe row says there is a next page
 
 
 @pytest.mark.asyncio
