@@ -485,8 +485,8 @@ class FalkorProjector:
             changes = (await self._compute_changes(s, graph, main_id, from_seq, to_seq)
                        if from_seq > 0 else ([], [], [], []))
             total_items = sum(len(c) for c in changes)
-            structural = (await self._window_is_structural(s, graph, main_id, from_seq, changes)
-                          if from_seq > 0 else False)
+            structural, retypes = (await self._window_meta(s, graph, main_id, from_seq, changes)
+                                   if from_seq > 0 else (False, []))
             if from_seq <= 0:
                 ps.progress_done = 0
                 ps.progress_total = None
@@ -530,6 +530,7 @@ class FalkorProjector:
                 reconciled = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True)
             else:
+                await self._relabel_in_place(client, retypes)
                 await self._apply(client, *changes, level_map=level_map)
             window_rollups_applied = False
             if rollup_pairs and rollup_pairs != "stale":
@@ -951,35 +952,48 @@ class FalkorProjector:
         return {t.upper() for t in (sets[0] or [])} if sets else None
 
     async def _window_is_structural(self, s, graph, main_id, from_seq, changes) -> bool:
-        """Whether a publish window changes what a reader has CACHED about existing entities:
+        return (await self._window_meta(s, graph, main_id, from_seq, changes))[0]
+
+    async def _window_meta(self, s, graph, main_id, from_seq, changes):
+        """``(structural, retypes)`` for a publish window, from one read of the touched
+        entities' values before it.
+
+        ``structural``: the window changes what a reader has CACHED about existing entities —
         retypes one (its urn→label entry would anchor lookups on the OLD label and find
         nothing), removes a containment link, or gives an EXISTING entity a containment parent
         (a move). Creating an entity inside a container is not structural — nothing has
-        cached the new entity's ancestry yet — so the common edit does not flush every
-        provider's caches. Unknown containment types count every edge change."""
+        cached the new entity's ancestry yet. Unknown containment types count every edge
+        change.
+
+        ``retypes``: ``(urn, old label, new label)`` per entity whose type changed — the node
+        is relabelled in place before the window's merge, which would otherwise create a
+        second node under the new label and leave the old one behind."""
         node_upserts, edge_upserts, _node_deletes, edge_deletes = changes
         if not (node_upserts or edge_upserts or edge_deletes):
-            return False
+            return False, []
         cont = await self._containment_types(graph.id)
 
         def containment(rel) -> bool:
             return cont is None or str(rel or "").upper() in cont
 
-        if any(not isinstance(e, dict) or containment(e.get("rel")) for e in edge_deletes):
-            return True
+        structural = any(not isinstance(e, dict) or containment(e.get("rel")) for e in edge_deletes)
         new_children = [_edge_endpoints(p or {})[1] for _e, _su, _tu, p, _sl, _tl in edge_upserts
                         if containment((p or {}).get("edgeType"))]
         ids = [eid for eid, _u, _p in node_upserts] + [c for c in new_children if c]
         if not ids:
-            return False
+            return structural, []
         before = await self._svc._values_at(s, graph.id, main_id, list(dict.fromkeys(ids)), from_seq)
         if any(before.get(c) is not None for c in new_children):
-            return True                                  # an existing entity got a (new) parent
-        for eid, _u, p in node_upserts:
+            structural = True                            # an existing entity got a (new) parent
+        retypes = []
+        for eid, urn, p in node_upserts:
             old = before.get(eid)
-            if old and old.get("entityType") != (p or {}).get("entityType"):
-                return True
-        return False
+            new_type = (p or {}).get("entityType")
+            if old and old.get("entityType") != new_type:
+                structural = True
+                retypes.append((urn, _sanitize_label(old.get("entityType") or "Entity"),
+                                _sanitize_label(new_type or "Entity")))
+        return structural, retypes
 
     async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
         """Net ``:AGGREGATED`` rollup adjustments implied by this window's committed changes:
@@ -1074,7 +1088,7 @@ class FalkorProjector:
             need = {i for i in ids if i and (i, as_of) not in anc_cache}
             if not need:
                 return
-            _seen, edges = await self._svc._containment_ancestors(
+            _seen, edges = await self._svc._containment_parents_climb(
                 s, graph.id, main_id, need, cont_types, as_of)
             parents: Dict[str, List[str]] = {}
             for payload in edges.values():
@@ -1653,18 +1667,7 @@ class FalkorProjector:
                      params={"ids": list(chunk)})
         await self._delete_edges_by_key(client, list(parallel), progress)
 
-        # Retypes IN PLACE: the node keeps its id, its edges and the rollup cells on it.
-        by_relabel: Dict[Tuple[str, str], List[str]] = {}
-        for urn, old, new in diff.relabels:
-            by_relabel.setdefault((old, new), []).append(urn)
-        for (old, new), urns in by_relabel.items():
-            for chunk in _batches(urns, self._batch):
-                await _q(client,
-                         f"UNWIND $urns AS u MATCH (n:{_sanitize_label(old)} {{urn: u}}) "
-                         f"SET n:{_sanitize_label(new)} REMOVE n:{_sanitize_label(old)}",
-                         params={"urns": list(chunk)})
-                if progress:
-                    await progress(len(chunk))
+        await self._relabel_in_place(client, diff.relabels, progress)
 
         # Phase two: payloads for exactly what is written — nothing else is ever read.
         node_keys = list(dict.fromkeys([*diff.node_upserts, *(k for k in nodes if k in duplicated)]))
@@ -1709,6 +1712,23 @@ class FalkorProjector:
                     graph_id, to_seq, total, len(node_upserts), len(diff.relabels),
                     len(diff.node_deletes), len(edge_upserts), len(diff.edge_deletes), rollups)
         return {"writes": total, "rollups": rollups, "structural": structural}
+
+    async def _relabel_in_place(self, client, relabels, progress=None) -> None:
+        """Retype nodes IN PLACE (``SET n:new REMOVE n:old``): the node keeps its id, its
+        edges and the rollup cells on it. A MERGE under the new label would create a second
+        node and leave the old one; a delete-and-recreate would take its edges and rollups."""
+        by: Dict[Tuple[str, str], List[str]] = {}
+        for urn, old, new in relabels:
+            if old != new:
+                by.setdefault((old, new), []).append(urn)
+        for (old, new), urns in by.items():
+            for chunk in _batches(urns, self._batch):
+                await _q(client,
+                         f"UNWIND $urns AS u MATCH (n:{_sanitize_label(old)} {{urn: u}}) "
+                         f"SET n:{_sanitize_label(new)} REMOVE n:{_sanitize_label(old)}",
+                         params={"urns": list(chunk)})
+                if progress:
+                    await progress(len(chunk))
 
     async def _delete_edges_by_key(self, client, keys, progress=None) -> None:
         by: Dict[Tuple[str, str, str], list] = {}

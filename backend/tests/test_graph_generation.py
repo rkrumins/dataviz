@@ -100,7 +100,7 @@ def test_a_structural_change_clears_the_shared_label_and_ancestor_caches():
         async def scan(self, cursor, match=None, count=None):
             return 0, [f"{match[:-1]}d1", f"{match[:-1]}d2"]
 
-        async def delete(self, *keys):
+        async def unlink(self, *keys):                   # non-blocking, unlike DEL
             deleted.extend(keys)
 
     class _Rebuilt:
@@ -108,7 +108,13 @@ def test_a_structural_change_clears_the_shared_label_and_ancestor_caches():
             return True
     p._redis = _Redis()
     p._rebuild_watch = _Rebuilt()
-    asyncio.run(p._refresh_if_graph_rebuilt())
+    p._label_warmup_until = 10 ** 9
+
+    async def run():
+        await p._refresh_if_graph_rebuilt()
+        await asyncio.sleep(0.01)                        # the drop runs in the background
+    asyncio.run(run())
+    assert p._label_warmup_until == 0.0, "the label cache must refill now, not after the cooldown"
     assert p._urn_label_key() in deleted
     assert any(":ancestors:" in k for k in deleted)
 

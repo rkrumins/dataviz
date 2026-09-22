@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import literal, select
 
 from . import config
 from .merkle import _EMPTY, _FANOUT, _leaf_hash, _leaf_path
@@ -131,7 +131,8 @@ class MerkleStore:
         return await self.root_at(s, graph_id, branch_id, seq) == MerkleTree.build(live, self._depth).root
 
     # ---- internals -------------------------------------------------------- #
-    async def _as_of_many(self, s, graph_id, branch_id, paths: Iterable[Path], seq: int) -> Dict[Path, dict]:
+    async def _as_of_many(self, s, graph_id, branch_id, paths: Iterable[Path], seq: int,
+                          *, with_bucket: bool = True) -> Dict[Path, dict]:
         path_strs = [_path_str(p) for p in paths]
         if not path_strs or seq < 1:
             return {}
@@ -141,8 +142,9 @@ class MerkleStore:
         out: Dict[Path, dict] = {}
         CHUNK = 20000
         for i in range(0, len(path_strs), CHUNK):
+            bucket_col = MerkleNodeORM.bucket if with_bucket else literal(None)
             rows = (await s.execute(
-                select(MerkleNodeORM.path, MerkleNodeORM.hash, MerkleNodeORM.bucket).where(
+                select(MerkleNodeORM.path, MerkleNodeORM.hash, bucket_col).where(
                     MerkleNodeORM.graph_id == graph_id, MerkleNodeORM.branch_id == branch_id,
                     MerkleNodeORM.path.in_(path_strs[i:i + CHUNK]),
                     MerkleNodeORM.commit_seq <= seq,
@@ -158,21 +160,25 @@ class MerkleStore:
         queries per tree node visited — every sibling of every differing node included —
         so a 10,000-edge commit's diff cost ~255,000 round trips and dominated its
         projection (75 s of 78 s, measured); this costs ~2 per level."""
+        # Hashes only while walking; a leaf's bucket (its entity→hash map, the bulk of a
+        # row) is read only once that leaf is known to differ — not for every sibling.
         frontier = [prefix]
         while frontier:
-            at_m = await self._as_of_many(s, graph_id, branch_id, frontier, m)
-            at_n = await self._as_of_many(s, graph_id, branch_id, frontier, n)
-            differing = []
-            for p in frontier:
-                hm, hn = at_m.get(p), at_n.get(p)
-                if (hm["hash"] if hm else _EMPTY) == (hn["hash"] if hn else _EMPTY):
-                    continue
-                if len(p) == self._depth:
-                    bm = (hm.get("bucket") if hm else None) or {}
-                    bn = (hn.get("bucket") if hn else None) or {}
+            at_m = await self._as_of_many(s, graph_id, branch_id, frontier, m, with_bucket=False)
+            at_n = await self._as_of_many(s, graph_id, branch_id, frontier, n, with_bucket=False)
+            differing = [
+                p for p in frontier
+                if ((at_m.get(p) or {}).get("hash") or _EMPTY) != ((at_n.get(p) or {}).get("hash") or _EMPTY)
+            ]
+            leaves = [p for p in differing if len(p) == self._depth]
+            if leaves:
+                bm_all = await self._as_of_many(s, graph_id, branch_id, leaves, m)
+                bn_all = await self._as_of_many(s, graph_id, branch_id, leaves, n)
+                for p in leaves:
+                    bm = (bm_all.get(p) or {}).get("bucket") or {}
+                    bn = (bn_all.get(p) or {}).get("bucket") or {}
                     for eid in set(bm) | set(bn):
                         if bm.get(eid) != bn.get(eid):
                             out[eid] = (bm.get(eid), bn.get(eid))
-                else:
-                    differing.append(p)
-            frontier = [p + (idx,) for p in differing for idx in range(_FANOUT)]
+            frontier = [p + (idx,) for p in differing if len(p) < self._depth
+                        for idx in range(_FANOUT)]

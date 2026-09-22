@@ -4,7 +4,7 @@ The response cache was bumped at COMMIT time by the publish endpoints, before th
 ran: a read in between recomputed from the still-old graph and cached that under the new
 generation for an hour. Bulk ingest and sync commits never bumped at all, and a rebuild or heal
 never did either. The projector's post-projection hook is the one place every such path ends,
-so that is where the content and rollup generations are bumped, and the insights refresh
+so that is where the content generation is bumped, and the insights refresh
 (which also marks the materialised top-level payload dirty) is nudged.
 """
 import asyncio
@@ -23,7 +23,7 @@ class _Cache:
         self.rollup.append((scope.workspace_id, scope.data_source_id))
 
 
-def test_a_landed_projection_invalidates_content_and_rollup_reads(monkeypatch):
+def test_a_landed_projection_invalidates_every_cached_read(monkeypatch):
     cache = _Cache()
     nudged = []
 
@@ -37,7 +37,8 @@ def test_a_landed_projection_invalidates_content_and_rollup_reads(monkeypatch):
     monkeypatch.setattr(pt, "nudge_stats_after_projection", _nudge)
     monkeypatch.setattr("backend.app.services.graph_cache.get_graph_cache", lambda: cache)
     asyncio.run(pt.after_projection("ds1"))
-    assert cache.content == [("ws1", "ds1")] and cache.rollup == [("ws1", "ds1")]
+    # One content bump: rollup-endpoint keys embed the content counter ("content.rollup").
+    assert cache.content == [("ws1", "ds1")] and cache.rollup == []
     assert nudged == ["ds1"]
 
 

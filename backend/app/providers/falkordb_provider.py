@@ -4375,6 +4375,20 @@ class FalkorDBProvider(GraphDataProvider):
             # for an hour, so a long run read as untouched since minute zero.
             self._last_op_at = time.monotonic()
 
+    async def _drop_structural_caches(self) -> None:
+        try:
+            await self._redis.unlink(self._urn_label_key())
+            cursor = 0
+            while True:
+                cursor, keys = await self._redis.scan(
+                    cursor, match=f"{self._cache_ns}:ancestors:*", count=500)
+                if keys:
+                    await self._redis.unlink(*keys)
+                if cursor == 0:
+                    break
+        except Exception:                               # noqa: BLE001 — best effort
+            logger.debug("structural cache drop on %s failed", self._graph_name, exc_info=True)
+
     async def _graph_has_no_indexes(self) -> bool:
         """True only when the graph DEFINITELY holds no index. The ensured-indexes
         marker lives in Redis, outside the graph, and a GRAPH.DELETE takes every
@@ -4425,17 +4439,14 @@ class FalkorDBProvider(GraphDataProvider):
             # The shared content caches keyed by what moved: urn → label (a stale label
             # anchors a lookup on the OLD label and finds nothing — the node reads as
             # missing) and ancestor chains (a moved container). Shared across processes;
-            # deleting twice is harmless.
+            # deleting twice is harmless. In the BACKGROUND, not before the user's query,
+            # and with UNLINK: a DEL of a multi-million-field hash blocks Redis for everyone.
+            # The label warmup's cooldown is reset so the cache refills now, not in 15 min.
+            self._label_warmup_until = 0.0
             if self._redis is not None:
-                cursor = 0
-                while True:
-                    cursor, keys = await self._redis.scan(
-                        cursor, match=f"{self._cache_ns}:ancestors:*", count=500)
-                    if keys:
-                        await self._redis.delete(*keys)
-                    if cursor == 0:
-                        break
-                await self._redis.delete(self._urn_label_key())
+                task = asyncio.get_running_loop().create_task(self._drop_structural_caches())
+                _LABEL_WARMUP_TASKS.add(task)
+                task.add_done_callback(_LABEL_WARMUP_TASKS.discard)
             logger.info("graph %s changed structurally elsewhere (dropped, retyped or "
                         "re-parented) — cleared this provider's id tables, graph memos "
                         "and content caches", self._graph_name)

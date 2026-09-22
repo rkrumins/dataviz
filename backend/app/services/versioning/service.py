@@ -2757,6 +2757,45 @@ class GraphVersioningService:
             frontier = nxt
         return seen, edges
 
+    async def _containment_parents_climb(
+        self, s, graph_id: str, branch_id: str, node_ids: set,
+        cset: set, as_of_seq: Optional[int], max_climb: int = 64,
+    ) -> Tuple[set, Dict[str, dict]]:
+        """:meth:`_containment_ancestors`, reading only what a climb needs: per level, the
+        edges whose TARGET is on the frontier and whose type is containment
+        (``ix_ev_target``), then their values as-of. The general helper reads every edge
+        touching the frontier in both directions, lineage included — for a batch of
+        endpoints under wide containers that is millions of rows to find a few parents."""
+        seen = set(node_ids)
+        edges: Dict[str, dict] = {}
+        frontier = set(node_ids)
+        cupper = [c.upper() for c in cset]
+        for _ in range(max_climb):
+            if not frontier:
+                break
+            cand: set = set()
+            for chunk in _chunks(list(frontier), _IN_LIST_MAX):
+                cand.update((await s.execute(
+                    select(EdgeVersionORM.entity_id).where(
+                        EdgeVersionORM.graph_id == graph_id,
+                        EdgeVersionORM.target_entity_id.in_(chunk),
+                        func.upper(EdgeVersionORM.edge_type).in_(cupper),
+                    ).distinct()
+                )).scalars().all())
+            vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+            nxt: set = set()
+            for eid, p in vals.items():
+                if p is None or (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)   # a = parent (source), b = child (target)
+                if b in frontier and a:
+                    edges[eid] = p
+                    if a not in seen:
+                        seen.add(a)
+                        nxt.add(a)
+            frontier = nxt
+        return seen, edges
+
     async def _containment_descendants(
         self, s, graph_id: str, branch_id: str, root_ids: set,
         cset: set, as_of_seq: Optional[int], cap: int, max_depth: int = 64,

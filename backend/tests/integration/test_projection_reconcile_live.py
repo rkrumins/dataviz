@@ -104,6 +104,14 @@ async def _run() -> None:
         assert await _rollups(client) == {}, "the last column edge gone → the cells go"
         assert handoffs == [], handoffs
 
+        # A publish that retypes an entity relabels its node IN PLACE: one node, the new
+        # label, its container link intact (a MERGE under the new label left two nodes).
+        await publish([{"op": "update", "entity_kind": "node", "entity_id": a1,
+                        "payload": {"urn": a1, "entityType": "field", "displayName": "c1"}}])
+        assert await _rows(client, "MATCH (n {urn: $u}) RETURN labels(n)", {"u": a1}) == [[["field"]]]
+        assert await _rows(client, "MATCH (:table {urn: $t})-[:CONTAINS]->(n {urn: $u}) "
+                                   "RETURN count(n)", {"t": TA, "u": a1}) == [[1]]
+
         # ── 2. 10,000 raw lineage edges in ONE commit, maintained inline ──────────────
         n = 100
         cols_a = [f"{TA}:x{i}" for i in range(n)]
