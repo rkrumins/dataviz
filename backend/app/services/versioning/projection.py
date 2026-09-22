@@ -32,7 +32,7 @@ from . import config, db
 from .reconcile import falkor_counts, pg_live_counts_projectable
 from .projection_reconcile import (
     ActualEdge, ActualNode, EdgeKey, ExpectedEdge, ExpectedNode,
-    diff_projection, fingerprint, plan_rollup_deltas,
+    _local_chain, diff_projection, fingerprint, plan_rollup_deltas,
 )
 from .models import (
     EdgeVersionORM,
@@ -895,9 +895,10 @@ class FalkorProjector:
                            "for %s (from_seq=%d to_seq=%d) — content drift repaired", recovered,
                            graph.id, from_seq, to_seq)
 
-    # Bounded-recount cap for containment moves: above this many affected entities/edges the
-    # move can't be maintained incrementally — the on_rollups_stale hook queues a rebuild.
-    _MOVE_EDGE_CAP = 1000
+    # Largest rollup change maintained inline (lineage edges in a window, a moved container's
+    # subtree, a reconcile's contributions); above it the on_rollups_stale hook queues the batch
+    # job. See ``config.PROJECTION_ROLLUP_INLINE_CAP``.
+    _MOVE_EDGE_CAP = config.PROJECTION_ROLLUP_INLINE_CAP
 
     async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
         """Net ``:AGGREGATED`` rollup adjustments implied by this window's committed changes:
@@ -975,8 +976,8 @@ class FalkorProjector:
                     moved.add(_edge_endpoints(new)[1])
         moved.discard("")
         if len(lineage_creates) + len(lineage_deletes) > self._MOVE_EDGE_CAP:
-            # A bulk-sized window (import/sync commit) is the aggregation JOB's territory —
-            # doing the pair math inline would stall the projector. Hand off to the rebuild.
+            # Past the inline cap the aggregation JOB takes over — it too writes only the
+            # difference. Below it the chains come from one batched climb (``prefetch``).
             return "stale"
         if not lineage_creates and not lineage_deletes and not moved:
             return None
@@ -984,11 +985,31 @@ class FalkorProjector:
         anc_cache: Dict[Tuple[str, Optional[int]], Tuple[List[str], Dict[str, List[str]]]] = {}
         lvl_cache: Dict[Tuple[str, Optional[int]], Optional[int]] = {}
 
+        async def prefetch(ids, as_of: Optional[int]) -> None:
+            """Every chain a window needs at one seq, in ONE batched climb — a query per
+            containment LEVEL, not per node — so a 10,000-edge window costs what a 10-edge
+            one does in round trips. (Per node, a deep hierarchy re-read the same top-level
+            containers' edges for every distinct leaf.)"""
+            need = {i for i in ids if i and (i, as_of) not in anc_cache}
+            if not need:
+                return
+            _seen, edges = await self._svc._containment_ancestors(
+                s, graph.id, main_id, need, cont_types, as_of)
+            parents: Dict[str, List[str]] = {}
+            for payload in edges.values():
+                a, b = _edge_endpoints(payload)          # a = parent, b = child
+                if a and b and a not in parents.setdefault(b, []):
+                    parents[b].append(a)
+            for i in need:
+                local = _local_chain(parents, i)
+                anc = {i} | set(local) | {pp for ps in local.values() for pp in ps}
+                anc_cache[(i, as_of)] = (list(anc), local)
+
         async def chain(node_id: str, as_of: Optional[int]) -> Tuple[List[str], Dict[str, List[str]]]:
             """(ancestors-or-self ids, child→ALL-parents multimap) — the
             parent DAG the shared pair rules rank on. Multi-parent nodes
             keep every ancestry (the old single-slot map silently dropped
-            all but the last-seen parent)."""
+            all but the last-seen parent). Normally served by ``prefetch``."""
             key = (node_id, as_of)
             if key not in anc_cache:
                 seen, edges = await self._svc._containment_ancestors(
@@ -1043,8 +1064,6 @@ class FalkorProjector:
                 cube = set(cube_pairs(
                     s_cl, t_cl, include_leaf_mirror=False, s=src, t=tgt,
                 ))
-                ids = {i for pair in cube for i in pair}
-                lv = await levels_of(ids, as_of) if ids else {}
                 depths = {**t_cl, **s_cl}
                 for sx, tx in cube:
                     e = pairs.setdefault(
@@ -1053,9 +1072,6 @@ class FalkorProjector:
                     e["dw"] += sign
                     if (sx, tx) in canon:
                         e["dwc"] += sign
-                    sl, tl = lv.get(sx), lv.get(tx)
-                    if sl is not None and tl is not None:
-                        e["sl"], e["tl"] = sl, tl
                     e["sd"], e["td"] = depths.get(sx), depths.get(tx)
                     if sign > 0 and et:
                         e["types"].add(et)
@@ -1069,6 +1085,8 @@ class FalkorProjector:
                     if sign > 0 and et:
                         e["types"].add(et)
 
+        await prefetch({x for p in lineage_creates.values() for x in _edge_endpoints(p)}, to_seq)
+        await prefetch({x for p in lineage_deletes.values() for x in _edge_endpoints(p)}, from_seq)
         handled = set()
         for eid, p in lineage_creates.items():
             await contribute(p, +1, to_seq)
@@ -1090,6 +1108,9 @@ class FalkorProjector:
                            if eid not in handled and _etype(p) in lineage_types}
             if len(moved_edges) > self._MOVE_EDGE_CAP:
                 return "stale"
+            ends = {x for p in moved_edges.values() for x in _edge_endpoints(p)}
+            await prefetch(ends, from_seq)
+            await prefetch(ends, to_seq)
             for eid, p in moved_edges.items():
                 await contribute(p, -1, from_seq)
                 await contribute(p, +1, to_seq)
@@ -1100,6 +1121,19 @@ class FalkorProjector:
         }
         if not pairs:
             return None
+        if use_canonical:
+            # Level stamps for every surviving cell in one batched read: the node's type
+            # level as of the window's end (as of its start for a node the window deleted).
+            ids = {i for k in pairs for i in k}
+            lv = await levels_of(ids, to_seq)
+            gone = [i for i in ids if lv.get(i) is None]
+            if gone:
+                lv.update({i: v for i, v in (await levels_of(gone, from_seq)).items()
+                           if v is not None})
+            for (sx, tx), e in pairs.items():
+                sl, tl = lv.get(sx), lv.get(tx)
+                if sl is not None and tl is not None:
+                    e["sl"], e["tl"] = sl, tl
         # FalkorDB keys nodes by urn; versioned entity ids usually ARE urns, but imported
         # entities may differ — resolve through the entities' payloads, with the SAME
         # gv:<id> fallback the raw projection uses (_node_urn) so the MATCH always hits.
