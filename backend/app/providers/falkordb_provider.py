@@ -6089,28 +6089,34 @@ class FalkorDBProvider(GraphDataProvider):
             for t in types:
                 safe_label = _sanitize_label(t)
                 union_branches.append(f"MATCH (n:{safe_label}){where_suffix} RETURN n")
-            # Wrap in subquery pattern: UNION all branches, then paginate + child count
+            # Wrap in subquery pattern: UNION all branches, then paginate + child count.
+            # (displayName, urn, id) is a TOTAL order — even two nodes sharing a name
+            # AND a urn — so tied rows can't split differently between two page
+            # queries, and no row is skipped or repeated at a boundary.
             inner = " UNION ".join(union_branches)
             if include_child_count:
                 containment = list(self._get_containment_edge_types())
                 containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
                 if containment_rel_types:
+                    # Counted with a pattern comprehension, not OPTIONAL MATCH +
+                    # count(): the aggregation reorders the page's rows, and a
+                    # caller that trims a page (get_nodes_page probes one row past
+                    # it) would drop an arbitrary row instead of the last one.
                     cypher = (
                         f"CALL {{ {inner} }} "
-                        f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
-                        f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child) "
-                        f"RETURN n, count(child) as childCount"
+                        f"WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit "
+                        f"RETURN n, size([(n)-[:{containment_rel_types}]->(child) | 1]) as childCount"
                     )
                 else:
                     cypher = (
                         f"CALL {{ {inner} }} "
-                        f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                        f"WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit "
                         f"RETURN n, 0 as childCount"
                     )
             else:
                 cypher = (
                     f"CALL {{ {inner} }} "
-                    f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
+                    f"WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit "
                     f"RETURN n"
                 )
         else:
@@ -6424,7 +6430,8 @@ class FalkorDBProvider(GraphDataProvider):
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
             dir_kw = " DESC" if sort_direction == "desc" else ""
-            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
+            # id(c) last: a TOTAL order even when siblings share a name and a urn.
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}, id(c){dir_kw}"
 
         # Use SKIP only when no cursor is provided (first page)
         skip_clause = "" if cursor else " SKIP $skip"
@@ -6479,14 +6486,22 @@ class FalkorDBProvider(GraphDataProvider):
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
         sort_direction: str = "asc",
+        lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         """Optimized single-roundtrip: children + containment edges + cross-child lineage edges.
 
         Supports cursor-based pagination for O(log N) performance at any page depth.
         When `cursor` is provided, it takes precedence over `offset`.
+
+        ``lineage_scope`` sets the far end of the lineage leg. ``"page"`` (default)
+        returns lineage among {parent} ∪ this page. ``"siblings"`` returns lineage
+        between this page and {parent} ∪ EVERY child of the parent, loaded or not —
+        so a client paging a large container gets its cross-page sibling edges at
+        a cost proportional to the page, instead of re-sending every loaded sibling.
         """
         await self._ensure_connected()
         sort_direction = _validate_sort_direction(sort_direction)
+        siblings_scope = lineage_scope == "siblings"
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
         target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
@@ -6496,7 +6511,7 @@ class FalkorDBProvider(GraphDataProvider):
             # No containment types — return empty result
             return ChildrenWithEdgesResult(
                 children=[], containmentEdges=[], lineageEdges=[],
-                totalChildren=0, hasMore=False,
+                totalChildren=0, hasMore=False, nextOffset=offset,
             )
 
         search_where = ""
@@ -6532,7 +6547,8 @@ class FalkorDBProvider(GraphDataProvider):
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
             dir_kw = " DESC" if sort_direction == "desc" else ""
-            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}"
+            # id(c) last: a TOTAL order even when siblings share a name and a urn.
+            order_suffix = f" ORDER BY c.{safe_prop}{dir_kw}, c.urn{dir_kw}, id(c){dir_kw}"
 
         skip_clause = "" if cursor else " SKIP $skip"
 
@@ -6557,7 +6573,12 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        # One row past the page: whether there IS more is then a fact, not a guess. "A full
+        # page means more" invented a child whenever the count was a multiple of the page
+        # size — a "Load 1 more" that loaded nothing.
+        params["lim"] = limit + 1
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
+        raw_rows = len(result.result_set or [])
 
         children: List[GraphNode] = []
         containment_edges: List[GraphEdge] = []
@@ -6581,11 +6602,46 @@ class FalkorDBProvider(GraphDataProvider):
                 # Build containment edge from the matched relationship
                 containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
 
-        # --- Step 2: Fetch cross-child lineage edges (scoped to current page only) ---
-        # Only use the current page's child URNs + parent, NOT cumulative URNs.
-        # This keeps the query O(pageSize²) instead of O(totalLoaded²).
+        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
+        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
+        # the cursor MUST be the page's boundary sort key or keyset pagination
+        # skips rows. LIMIT selection is unaffected (known engine behaviour).
+        # Sorts on (displayName, urn) — the same composite key the cursor uses,
+        # in the requested direction.
+        if sort_property == "displayName" and children:
+            # Derive the index permutation from _keyset_sort (the single
+            # source of keyset order, incl. the DESC prefix semantics) so the
+            # paired containment_edges list stays aligned with its child.
+            ordered = _keyset_sort(list(children), sort_direction)
+            index_of = {id(node): i for i, node in enumerate(children)}
+            order = [index_of[id(node)] for node in ordered]
+            children = [children[i] for i in order]
+            containment_edges = [containment_edges[i] for i in order]
+            child_urns = [children[i].urn for i in range(len(children))]
+        # The probe row is the LAST in the page's order (LIMIT selects correctly even where
+        # the engine reorders the aggregating RETURN, and the sort above restores the order):
+        # it says there is more and is served by the next page, not this one.
+        has_more = raw_rows > limit
+        if len(children) > limit:
+            children, containment_edges = children[:limit], containment_edges[:limit]
+            child_urns = [c.urn for c in children]
+        # Rows the page consumed in the query's order — where the next page starts (every
+        # row counts, an unreadable one included, or the position lags and repeats rows).
+        rows_read = min(raw_rows, limit)
+        total = offset + len(children) + (1 if has_more else 0)
+
+        # --- Step 2: Fetch cross-child lineage edges ---
+        # Page scope: the current page's child URNs + parent, NOT cumulative URNs —
+        # O(pageSize²) instead of O(totalLoaded²). Siblings scope widens only the
+        # FAR end (to every child of the parent); the near end stays this page, so
+        # it is still bounded by the page and its degree. A one-child page matters
+        # there: its edges to earlier siblings arrive with it.
         lineage_edges_list: List[GraphEdge] = []
-        if include_lineage_edges and len(child_urns) >= 2:
+        # A lineage query that fails leaves the page's children right and its
+        # lineage short: say so (degraded_detail), so the response cache keeps
+        # it for seconds instead of serving it to everyone for an hour.
+        lineage_failures: List[str] = []
+        if include_lineage_edges and len(child_urns) >= (1 if siblings_scope else 2):
             page_urns = [parent_urn] + child_urns
             exclude_types = list(target_edge_types) + ["AGGREGATED"]
 
@@ -6631,34 +6687,57 @@ class FalkorDBProvider(GraphDataProvider):
                     return res.result_set or []
                 except Exception as exc:
                     logger.warning("children page-lineage query failed: %s", exc)
+                    lineage_failures.append(type(exc).__name__)
                     return []
 
-            lineage_rows = await asyncio.gather(*[
-                _lineage_for(label, bucket)
-                for label, bucket in await self._label_buckets(page_urns)
-            ])
+            # Siblings scope: the page is the near end in BOTH directions; the far
+            # end must be the parent or share it (pattern predicate over the same
+            # containment alternation step 1 used).
+            async def _sibling_lineage_for(label: str, bucket: List[str], outgoing: bool) -> list:
+                a_anchor = f"(a:{label})" if label else "(a)"
+                hop = f"{a_anchor}-{lr_pattern}->(b)" if outgoing else f"(b)-{lr_pattern}->{a_anchor}"
+                ret = "a.urn, b.urn" if outgoing else "b.urn, a.urn"
+                try:
+                    res = await self._ro_query(
+                        f"MATCH {p_anchor} WHERE p.urn = $parent "
+                        f"MATCH {hop} "
+                        f"WHERE a.urn IN $bucketUrns {lineage_where}"
+                        f"AND (b = p OR (p)-[:{rel_alt}]->(b)) "
+                        f"RETURN {ret}, type(lr), properties(lr)",
+                        params={**lineage_params, "bucketUrns": bucket, "parent": parent_urn},
+                        timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
+                        op="children.lineage.siblings",
+                    )
+                    return res.result_set or []
+                except Exception as exc:
+                    logger.warning("children sibling-lineage query failed: %s", exc)
+                    lineage_failures.append(type(exc).__name__)
+                    return []
+
+            if siblings_scope:
+                buckets = await self._label_buckets(child_urns)
+                lineage_rows = await asyncio.gather(*[
+                    _sibling_lineage_for(label, bucket, outgoing)
+                    for label, bucket in buckets
+                    for outgoing in (True, False)
+                ])
+            else:
+                lineage_rows = await asyncio.gather(*[
+                    _lineage_for(label, bucket)
+                    for label, bucket in await self._label_buckets(page_urns)
+                ])
+            # An edge between two children of this page matches both directional
+            # sibling queries; keep one.
+            seen_lineage: Set[Tuple[str, str, str, str]] = set()
             for rows in lineage_rows:
                 for row in rows:
-                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+                    props = row[3] or {}
+                    key = (row[0], row[1], str(row[2]).upper(), str(props.get("id", "")))
+                    if key in seen_lineage:
+                        continue
+                    seen_lineage.add(key)
+                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], props))
 
-        has_more = len(children) >= limit
-        total = offset + len(children) + (1 if has_more else 0)
-        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
-        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
-        # the cursor MUST be the page's boundary sort key or keyset pagination
-        # skips rows. LIMIT selection is unaffected (known engine behaviour).
-        # Sorts on (displayName, urn) — the same composite key the cursor uses,
-        # in the requested direction.
-        if sort_property == "displayName" and children:
-            # Derive the index permutation from _keyset_sort (the single
-            # source of keyset order, incl. the DESC prefix semantics) so the
-            # paired containment_edges list stays aligned with its child.
-            ordered = _keyset_sort(list(children), sort_direction)
-            index_of = {id(node): i for i, node in enumerate(children)}
-            order = [index_of[id(node)] for node in ordered]
-            children = [children[i] for i in order]
-            containment_edges = [containment_edges[i] for i in order]
-            child_urns = [children[i].urn for i in range(len(children))]
         next_cursor = (
             _encode_keyset_cursor(children[-1].display_name, children[-1].urn, sort_direction)
             if children and has_more else None
@@ -6671,6 +6750,12 @@ class FalkorDBProvider(GraphDataProvider):
             totalChildren=total,
             hasMore=has_more,
             nextCursor=next_cursor,
+            nextOffset=offset + rows_read,
+            degradedDetail=(
+                f"lineage incomplete: {len(lineage_failures)} lineage "
+                f"quer{'y' if len(lineage_failures) == 1 else 'ies'} failed ({', '.join(sorted(set(lineage_failures)))})"
+                if lineage_failures else None
+            ),
         )
 
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
@@ -6841,6 +6926,8 @@ class FalkorDBProvider(GraphDataProvider):
                 + " RETURN n, 0 as childCount"
             )
 
+        # One row past the page, so "more" is a fact (see get_children_with_edges).
+        params["limit"] = int(limit) + 1
         try:
             page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
         except asyncio.TimeoutError as e:
@@ -6888,7 +6975,12 @@ class FalkorDBProvider(GraphDataProvider):
         # order-independent.
         nodes = _keyset_sort(nodes, sort_direction)
 
-        has_more = len(nodes) >= int(limit)
+        has_more = len(nodes) > int(limit)
+        if has_more:
+            nodes = nodes[:int(limit)]
+            root_type_count = sum(
+                1 for n in nodes if root_types_set and str(n.entity_type) in root_types_set)
+            orphan_count = len(nodes) - root_type_count
         next_cursor = (
             _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn, sort_direction)
             if (has_more and nodes) else None

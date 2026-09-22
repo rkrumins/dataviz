@@ -2264,12 +2264,15 @@ class GraphVersioningService:
     async def _latest_live_ids(
         self, s, model, graph_id: str, branch_id: str, seq: int,
         *, where: Optional[Callable] = None, limit: Optional[int] = None,
+        by_name: bool = False,
     ) -> List[str]:
         """Entity ids whose latest version on ``branch_id`` at ``commit_seq <= seq`` is live
         (not a tombstone), optionally narrowed by ``where`` (predicates over the denormalised
         version columns). DISTINCT ON picks the latest row per entity *before* the live/where
         filter, so a stale revision can never shadow the current one. Bounded by ``limit`` and
-        ordered by entity_id for a stable window."""
+        ordered by entity_id for a stable window — or, ``by_name``, by (display name, entity_id)
+        in BYTE order with a missing name as "": exactly the order a caller then sorts in
+        Python, so a window of the first N ids holds the first N rows a page can need."""
         latest = (
             select(model)
             .where(model.graph_id == graph_id, model.branch_id == branch_id,
@@ -2283,7 +2286,11 @@ class GraphVersioningService:
             preds = where(latest.c)
             if preds:
                 stmt = stmt.where(*preds)
-        stmt = stmt.order_by(latest.c.entity_id)
+        if by_name:
+            stmt = stmt.order_by(func.coalesce(latest.c.display_name, "").collate("C"),
+                                 latest.c.entity_id.collate("C"))
+        else:
+            stmt = stmt.order_by(latest.c.entity_id)
         if limit is not None:
             stmt = stmt.limit(limit)
         return list((await s.execute(stmt)).scalars().all())
@@ -2403,9 +2410,13 @@ class GraphVersioningService:
                         NodeVersionORM.commit_seq <= overlay_seq,
                     ).distinct()
                 )).scalars().all())
+            # The window must be the first rows in the order the page is cut from
+            # (name, then id) — in entity_id order it was an arbitrary slice, and a
+            # deep page skipped rows and repeated others.
             window = offset + limit + len(overlay_ids) + 1
             cand = set(await self._latest_live_ids(
-                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
+                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window,
+                by_name=True))
             cand.update(overlay_ids)
             vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
             rows = [
@@ -2519,17 +2530,20 @@ class GraphVersioningService:
         lineage_edge_types: Optional[Sequence[str]] = None, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, include_lineage_edges: bool = True,
         include_child_count: bool = True, limit: int = 100, offset: int = 0,
+        lineage_scope: str = "page",
     ) -> Dict[str, object]:
         """Branch/as-of-aware children-with-edges — the draft/as-of counterpart of the
         provider's ``get_children_with_edges``. One bounded round trip: the parent's OUT
         containment edges give the children (in = ancestors), then the page children's
         cross-edges give the lineage edges within {parent} ∪ children. Bounded by the
         parent's and the page's degree (ix_ev_source/target); mirrors ChildrenWithEdgesResult.
-        Edge-type classification is the graph's ontology sets, matched case-insensitively."""
+        Edge-type classification is the graph's ontology sets, matched case-insensitively.
+        ``lineage_scope="siblings"`` widens the far end from this page to EVERY child
+        of the parent (the incident scan is still over the page only)."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
         empty = {"children": [], "containmentEdges": [], "lineageEdges": [],
-                 "totalChildren": 0, "hasMore": False, "nextCursor": None}
+                 "totalChildren": 0, "hasMore": False, "nextCursor": None, "nextOffset": offset}
         async with self._session() as s:
             if branch_id is None:
                 branch_id = await self._main_branch_id(s, graph_id)
@@ -2557,6 +2571,8 @@ class GraphVersioningService:
             child_cc: Dict[str, int] = {}
             if page_ids and (include_lineage_edges or include_child_count):
                 scope = page_ids | {parent}
+                if lineage_scope == "siblings":
+                    scope = scope | set(cont_edge)
                 # One incident scan over the page serves both the lineage edges and each child's
                 # OUT-containment count (so an expanded child shows its own chevron) — no extra query.
                 for eid, p in (await self._incident_live_edges(s, graph_id, branch_id, page_ids, as_of_seq)).items():
@@ -2593,6 +2609,7 @@ class GraphVersioningService:
             "totalChildren": total,
             "hasMore": has_more,
             "nextCursor": (children_out[-1]["displayName"] if (children_out and has_more) else None),
+            "nextOffset": offset + len(page),
         }
 
     async def top_level_from_state(

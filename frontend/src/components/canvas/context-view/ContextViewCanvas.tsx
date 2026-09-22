@@ -1718,6 +1718,10 @@ export function ContextViewCanvas({
    * child the user moved elsewhere still counts as loaded and the row does not
    * offer a page that will never arrive.
    */
+  // Read from the store here, not from useGraphHydration below — this memo is
+  // declared first. The server's "no more pages" beats the count — while the
+  // anchor still has the childCount it was said against.
+  const childPaging = useCanvasStore(s => s.childPaging)
   const anchorMoreByLayer = useMemo(() => {
     const out = new Map<string, { anchorUrn: string; remaining: number }>()
     for (const layer of sortedLayers) {
@@ -1725,13 +1729,15 @@ export function ContextViewCanvas({
       const anchor = nodeMap.get(layer.anchorUrn)
       if (!anchor) continue
       const total = Number((anchor.data as Record<string, unknown> | undefined)?.childCount ?? 0) || 0
+      const pager = childPaging[layer.anchorUrn]
+      if (pager && !pager.hasMore && pager.childCount === total) continue
       const loaded = (childMap.get(layer.anchorUrn) ?? []).length
       if (total > loaded) {
         out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
       }
     }
     return out
-  }, [sortedLayers, nodeMap, childMap])
+  }, [sortedLayers, nodeMap, childMap, childPaging])
 
 
   // Helper: Calculate currently visible top-level nodes (containers)
@@ -3054,7 +3060,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -3124,6 +3130,52 @@ export function ContextViewCanvas({
     if (traceWriteLocked()) return
     void loadMoreRoots()
   }, [loadMoreRoots, traceWriteLocked])
+
+  // ── Open-scope type feeds, per column ─────────────────────────────
+  // A column pages the feeds of the types it holds by rule; the column that
+  // takes unassigned entities pages every feed no layer claims. Matched
+  // case-insensitively: a rule and a feed can spell a type differently
+  // (observed vs declared), and a missed match is a column that silently
+  // never loads more.
+  const typeFeeds = useCanvasStore(s => s.typeFeeds)
+  const feedTypesByLayer = useMemo(() => {
+    const out = new Map<string, string[]>()
+    const feedTypes = Object.keys(typeFeeds)
+    if (feedTypes.length === 0) return out
+    const byFold = new Map(feedTypes.map(t => [t.toLowerCase(), t]))
+    const claimed = new Set<string>()
+    for (const layer of sortedLayers) {
+      const types = (layer.entityTypes ?? [])
+        .map(t => byFold.get(String(t).toLowerCase()))
+        .filter((t): t is string => !!t)
+      if (types.length === 0) continue
+      out.set(layer.id, types)
+      types.forEach(t => claimed.add(t))
+    }
+    const fallback = sortedLayers.find(l => l.showUnassigned === true)
+    if (fallback) {
+      const rest = feedTypes.filter(t => !claimed.has(t))
+      if (rest.length > 0) out.set(fallback.id, [...(out.get(fallback.id) ?? []), ...rest])
+    }
+    return out
+  }, [typeFeeds, sortedLayers])
+  const feedMoreByLayer = useMemo(() => {
+    const out = new Map<string, { loading: boolean; failed: boolean }>()
+    for (const [layerId, types] of feedTypesByLayer) {
+      const keys = types.filter(t => typeFeeds[t]?.hasMore).map(t => `TYPE:${t}`)
+      if (keys.length === 0) continue
+      out.set(layerId, {
+        loading: keys.some(k => loadingNodes.has(k)),
+        failed: keys.some(k => failedNodes.has(k)),
+      })
+    }
+    return out
+  }, [feedTypesByLayer, typeFeeds, loadingNodes, failedNodes])
+  const onFeedMore = useCallback((layerId: string) => {
+    if (traceWriteLocked()) return
+    const types = feedTypesByLayer.get(layerId)
+    if (types && types.length > 0) void loadMoreFeeds(types)
+  }, [feedTypesByLayer, loadMoreFeeds, traceWriteLocked])
 
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge
@@ -5967,6 +6019,9 @@ export function ContextViewCanvas({
                 onRevealSearchHit={revealSearchHit}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
+                exhaustedParents={exhaustedParents}
+                feedMore={feedMoreByLayer.get(layer.id)}
+                onFeedMore={onFeedMore}
                 onScroll={handleLayerScroll}
                 onAssignToLayer={handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).

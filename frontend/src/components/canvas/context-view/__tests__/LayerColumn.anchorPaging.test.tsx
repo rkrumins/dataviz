@@ -39,7 +39,7 @@ const NODES = [node('Payments'), node('Ledger')]
 
 function renderColumn(
     anchorMore?: { anchorUrn: string; remaining: number },
-    opts: { nodes?: HierarchyNode[]; anchorIssue?: 'missing' | 'duplicate' } = {},
+    opts: { nodes?: HierarchyNode[]; anchorIssue?: 'missing' | 'duplicate'; failedNodes?: Set<string> } = {},
 ) {
     installJsdomLayout()
     const onLoadMore = vi.fn()
@@ -53,6 +53,7 @@ function renderColumn(
                     nodes={opts.nodes ?? NODES}
                     anchorMore={anchorMore}
                     anchorIssue={opts.anchorIssue}
+                    failedNodes={opts.failedNodes}
                     selectedNodeId={null}
                     expandedNodes={new Set()}
                     searchResults={new Set<string>()}
@@ -94,6 +95,19 @@ describe('LayerColumn — paging an anchored column', () => {
         fireEvent.click(screen.getByRole('button', { name: /Load 100 more/ }))
         expect(onLoadMore).toHaveBeenCalled()
         expect(onLoadMore.mock.calls[0][0]).toBe(ANCHOR)
+    })
+
+    it('offers the first page when it never arrived, instead of calling the column empty', () => {
+        // Hydration leaves a failed first page to the column; the column must
+        // still have a row to ask again with.
+        renderColumn({ anchorUrn: ANCHOR, remaining: 300 }, { nodes: [] })
+        expect(screen.getByRole('button', { name: /Load 100 more of 300 remaining/ })).toBeInTheDocument()
+        expect(screen.queryByText(/No assigned entities yet/i)).not.toBeInTheDocument()
+    })
+
+    it('says the page failed and waits for a Retry', () => {
+        renderColumn({ anchorUrn: ANCHOR, remaining: 300 }, { nodes: [], failedNodes: new Set([ANCHOR]) })
+        expect(screen.getByRole('button', { name: /couldn't load the next 100\. retry/i })).toBeInTheDocument()
     })
 
     it('shows nothing extra once the column holds the lot', () => {

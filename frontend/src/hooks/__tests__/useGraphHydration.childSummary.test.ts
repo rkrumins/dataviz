@@ -76,8 +76,10 @@ function makeContainmentEdge(target: string): LineageEdge {
   return { id: `c:${PARENT}>${target}`, source: PARENT, target, data: { edgeType: 'CONTAINS' } } as LineageEdge
 }
 
-/** A container declaring `childCount` children, with `loaded` of them already in the store. */
-function seedCanvas(childCount: number, loaded: number) {
+/** A container declaring `childCount` children, with `loaded` of them already in the store —
+ *  delivered by an earlier page when `paged` (its pager resumes after them), else out of band
+ *  (a pager-less parent starts at the top: held rows are not necessarily the first ones). */
+function seedCanvas(childCount: number, loaded: number, paged = false) {
   const kids = Array.from({ length: loaded }, (_, i) => makeNode(childUrn(i)))
   const nodes = [
     makeNode(PARENT, { label: 'Snowflake', type: 'database', childCount }),
@@ -89,6 +91,10 @@ function seedCanvas(childCount: number, loaded: number) {
     edges,
     _nodeIndex: new Set(nodes.map((n) => n.id)),
     _edgeIndex: new Set(edges.map((e) => e.id)),
+    // Seeds bypass setGraph, so clear what it clears: no pager survives a reseed.
+    childPaging: paged && loaded > 0
+      ? { [PARENT]: { offset: loaded, hasMore: true, direction: 'asc', lastUrn: childUrn(loaded - 1), childCount } }
+      : {},
     visibleEdges: [],
   })
 }
@@ -102,7 +108,6 @@ function page(children: { urn: string; entityType: string }[]) {
     lineageEdges: [],
     totalChildren: 41,
     hasMore: true,
-    nextCursor: null,
   } as any
 }
 
@@ -132,7 +137,7 @@ describe('loadChildren hands back what the page delivered', () => {
   })
 
   it('reports a later page with the offset it was fetched at', async () => {
-    seedCanvas(41, 5)
+    seedCanvas(41, 5, true)
     mockProvider.getChildrenWithEdges.mockResolvedValueOnce(
       page([5, 6, 7, 8, 9].map((i) => ({ urn: childUrn(i), entityType: 'dataset' }))),
     )
@@ -162,7 +167,7 @@ describe('loadChildren hands back what the page delivered', () => {
   })
 
   it('still reports a page that brought nothing back', async () => {
-    seedCanvas(41, 5)
+    seedCanvas(41, 5, true)
     mockProvider.getChildrenWithEdges.mockResolvedValueOnce(page([]))
     const { result } = renderHook(() => useGraphHydration())
 

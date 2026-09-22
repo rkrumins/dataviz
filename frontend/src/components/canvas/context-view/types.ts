@@ -9,7 +9,10 @@ export interface FlatTreeNode {
   isLast: boolean
   parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
   isLoadMore?: boolean
-  loadMoreCount?: number
+  /** Remaining to load — `null` when unknown (a type feed's column row). */
+  loadMoreCount?: number | null
+  /** The column-level row that pages this column's TYPE feeds (open scope). */
+  isFeedMore?: boolean
   isSearchBox?: boolean
   isSkeleton?: boolean
   skeletonIndex?: number

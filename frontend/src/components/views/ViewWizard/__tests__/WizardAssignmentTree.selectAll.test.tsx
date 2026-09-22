@@ -29,14 +29,14 @@ type Entry = {
   totalChildren: number
   totalIsExact: boolean
   hasMore: boolean
-  nextCursor: string | null
+  nextOffset: number
   loaded: boolean
 }
 
 const entry = (urn: string, name: string, over: Partial<Entry> = {}): Entry => ({
   node: { urn, entityType: 'domain', displayName: name, properties: {} },
   childIds: [], totalChildren: 0, totalIsExact: true,
-  hasMore: false, nextCursor: null, loaded: true, ...over,
+  hasMore: false, nextOffset: 0, loaded: true, ...over,
 })
 
 /** A root holding TOTAL children, of which only the first PAGE are loaded. */
@@ -44,7 +44,7 @@ function makeBrowser() {
   const nodes = new Map<string, Entry>()
   nodes.set('urn:root', entry('urn:root', 'Root', {
     childIds: Array.from({ length: PAGE }, (_, i) => childUrn(i)),
-    totalChildren: TOTAL, hasMore: true, nextCursor: 'c99',
+    totalChildren: TOTAL, hasMore: true, nextOffset: 100,
   }))
   for (let i = 0; i < PAGE; i++) nodes.set(childUrn(i), entry(childUrn(i), `Child ${i}`))
 
@@ -63,7 +63,7 @@ function makeBrowser() {
       const all = Array.from({ length: TOTAL }, (_, i) => childUrn(i))
       for (const urn of all) if (!nodes.has(urn)) nodes.set(urn, entry(urn, `Child ${urn.slice(5)}`))
       nodes.set(parentUrn, entry(parentUrn, 'Root', {
-        childIds: all, totalChildren: TOTAL, hasMore: false, nextCursor: null,
+        childIds: all, totalChildren: TOTAL, hasMore: false, nextOffset: 0,
       }))
       all.forEach(urn => browser.parentMap.set(urn, parentUrn))
       return all
@@ -72,6 +72,7 @@ function makeBrowser() {
     topLevelHasMore: false,
     topLevelTotalCount: 1,
     topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
+    failedIds: new Set<string>(),
     loadingNodes: new Set<string>(),
   }
   return browser
@@ -130,6 +131,36 @@ describe('WizardAssignmentTree — select all children of a root', () => {
     fireEvent.keyDown(window, { key: '2' })
     await waitFor(() => expect(onBulkAssign).toHaveBeenCalled())
     expect(onBulkAssign.mock.calls[0][1]).not.toContain('urn:root')
+  })
+
+  it('a digit pressed the moment the count shows acts on THAT selection', async () => {
+    // The shortcut listener used to be swapped in a passive effect, a task
+    // AFTER the screen updated: a key pressed in between assigned the PREVIOUS
+    // selection (the root) while the toolbar said "250 selected".
+    const onBulkAssign = vi.fn()
+    render(
+      <WizardAssignmentTree
+        layers={layers}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={onBulkAssign}
+      />
+    )
+    fireEvent.click(screen.getByText('Root'))
+    const selectAll = await screen.findByRole('button', { name: new RegExp(`Select its ${TOTAL} children only`) })
+    const pressed = new Promise<void>((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!document.body.textContent?.includes(`${TOTAL} selected`)) return
+        observer.disconnect()
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '2' }))
+        resolve()
+      })
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true })
+    })
+    fireEvent.click(selectAll)
+    await pressed
+    expect(onBulkAssign).toHaveBeenCalledTimes(1)
+    expect(onBulkAssign.mock.calls[0][1]).toHaveLength(TOTAL)
   })
 })
 
