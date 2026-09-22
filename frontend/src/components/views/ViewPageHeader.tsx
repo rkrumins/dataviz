@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { cn } from '@/lib/utils'
 import {
@@ -91,6 +91,7 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { timeAgo } from '@/lib/timeAgo'
 import {
@@ -100,6 +101,7 @@ import {
 import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
+import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
@@ -204,6 +206,8 @@ export function ViewPageHeader({ viewId, workspaceName }: {
         next.focus()
     }
     const [shareOpen, setShareOpen] = useState(false)
+    const [exportOpen, setExportOpen] = useState(false)
+    const exportEnabled = useFeature('viewExportEnabled')
     // Double-click the name to rename it — the affordance came up with the name
     // when the canvas toolbar's duplicate title was removed. The long way round
     // (Details → Name) is unchanged; this is the shortcut people already had.
@@ -630,6 +634,27 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         </button>
                     </HoverTip>
 
+                    {/* Anyone who can read the view can take a copy of its design
+                        elsewhere; the admin switch withdraws the button and the
+                        server refuses the file together. */}
+                    {exportEnabled && (
+                        <HoverTip
+                            className="inline-flex"
+                            label="Download this view as a file to import into another environment"
+                            detail="Its design and version history, not the graph data"
+                        >
+                            <button
+                                type="button"
+                                onClick={() => setExportOpen(true)}
+                                className={actionButtonClass}
+                                aria-label="Export"
+                            >
+                                <FileDown className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">Export</span>
+                            </button>
+                        </HoverTip>
+                    )}
+
                     {/* Came up from CanvasVersioningBar, which held it and the
                         branch switcher and nothing else. A read-only session
                         gets no versioning chrome at all (CanvasRouter mounts
@@ -790,6 +815,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                 isOpen={activityOpen}
                 onClose={() => setActivityOpen(false)}
             />
+
+            {exportOpen && (
+                <ExportViewDialog
+                    views={[{ id: view.id, name: view.name }]}
+                    onClose={() => setExportOpen(false)}
+                />
+            )}
 
             {/* Approve / decline already live in the Share dialog — the badge
                 and the audience control are routes to them, not a second

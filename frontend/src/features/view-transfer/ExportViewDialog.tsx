@@ -1,0 +1,421 @@
+/**
+ * ExportViewDialog — download one or more views as a file another environment can import.
+ *
+ * A view file carries the view's DESIGN (layers, placements, rules, settings, name) and its
+ * version history, never the graph data. Every export is a real version: the one picked, or the
+ * current design, which is saved as a new version first when it has unsaved changes, so the file
+ * always names a version this view can be compared and updated against later.
+ *
+ * Two columns, like the graph ExportDialog: what travels (and what doesn't) on the left, the
+ * version choice and a preview of the file on the right.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { useQueries, useQueryClient } from '@tanstack/react-query'
+import {
+  AlertTriangle, Check, CheckCircle2, Copy, Download, EyeOff, FileJson2, Fingerprint, History,
+  Layers, Loader2, RefreshCw, Tag, X,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
+import { Backdrop } from '@/components/ui/Backdrop'
+import { useModalA11y } from '@/hooks/useModalA11y'
+import {
+  VIEW_VERSION_STATUS_QUERY_KEY, invalidateViewVersions, useViewVersions,
+} from '@/hooks/useViewVersions'
+import { exportViews, type ExportedFile } from '@/services/viewTransferApiService'
+import { getViewVersionStatus, type ViewVersionSummary } from '@/services/viewVersionsApiService'
+import { recordEvent } from '@/services/telemetryService'
+import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName } from './format'
+
+export interface ExportViewDialogProps {
+  /** One view, or several (the Explorer's bulk bar). */
+  views: Array<{ id: string; name: string }>
+  /** Pre-select an earlier version (single view only), e.g. "Export v6" from the history. */
+  initialVersion?: number
+  onClose: () => void
+}
+
+type Phase = 'choose' | 'running' | 'done' | 'failed'
+
+/** The server's cap on views in one file (`view_transfer.limits.MAX_VIEWS_PER_BUNDLE`). */
+export const MAX_VIEWS_PER_FILE = 200
+
+export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewDialogProps) {
+  const single = views.length === 1
+  const [phase, setPhase] = useState<Phase>('choose')
+  const [pick, setPick] = useState<'current' | number>(initialVersion ?? 'current')
+  const [note, setNote] = useState('')
+  const [result, setResult] = useState<ExportedFile | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+  // Stable for the dialog's whole life: the a11y hook re-focuses the panel whenever its callback
+  // changes, which would pull the cursor out of the note field on any parent re-render.
+  const runningRef = useRef(false)
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    runningRef.current = phase === 'running'
+    onCloseRef.current = onClose
+  })
+  const close = useCallback(() => { if (!runningRef.current) onCloseRef.current() }, [])
+  const panelRef = useModalA11y(true, close)
+
+  async function run() {
+    setPhase('running')
+    setError(null)
+    try {
+      const file = await exportViews(
+        views.map((v) => ({ viewId: v.id, version: single && pick !== 'current' ? pick : null })),
+        note.trim() || undefined,
+      )
+      setResult(file)
+      setPhase('done')
+      // Exporting unsaved changes saved them as a version: the history and header chip moved.
+      views.forEach((v) => invalidateViewVersions(queryClient, v.id))
+      recordEvent('view.export', { views: views.length, version: single && pick !== 'current' ? 'earlier' : 'current' })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'The export could not be completed.')
+      setPhase('failed')
+    }
+  }
+
+  const title = single ? 'Export view' : `Export ${views.length} views`
+  const tooMany = views.length > MAX_VIEWS_PER_FILE
+
+  // Portaled, and clicks stop here: hosts include clickable cards and menus, which must not
+  // react to a click that was meant for the dialog.
+  return createPortal(
+    <div onClick={(e) => e.stopPropagation()}>
+      <Backdrop open onClick={phase === 'running' ? undefined : onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+        <div
+          ref={panelRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="export-view-title"
+          tabIndex={-1}
+          className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden pointer-events-auto outline-none"
+        >
+          <div className="border-b border-glass-border/50 px-8 py-5 flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-4 min-w-0">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 flex-shrink-0">
+                <FileJson2 className="w-6 h-6" />
+              </div>
+              <div className="min-w-0">
+                <h3 id="export-view-title" className="text-xl font-bold text-ink">{title}</h3>
+                <p className="text-xs text-ink-muted mt-0.5 truncate">
+                  {single ? <>A file of <span className="font-medium text-ink-secondary">{views[0].name}</span> to import into another environment</>
+                    : 'One file with every view, to import into another environment'}
+                </p>
+              </div>
+            </div>
+            {phase !== 'running' && (
+              <button onClick={onClose} aria-label="Close" className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {phase === 'choose' && (
+              <div className="grid md:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+                <WhatTravels />
+                <div className="px-8 py-6 space-y-5">
+                  {single
+                    ? <SingleViewChoice view={views[0]} pick={pick} setPick={setPick} note={note} setNote={setNote} />
+                    : <ManyViewsChoice views={views} note={note} setNote={setNote} />}
+                </div>
+              </div>
+            )}
+            {phase === 'running' && (
+              <div className="px-8 py-16 flex flex-col items-center gap-4">
+                <div className="relative w-16 h-16">
+                  <div className="absolute inset-0 rounded-full bg-indigo-500/10 animate-ping" />
+                  <div className="relative w-16 h-16 rounded-full bg-indigo-50 dark:bg-indigo-950/40 flex items-center justify-center">
+                    <Loader2 className="w-7 h-7 text-indigo-500 animate-spin" />
+                  </div>
+                </div>
+                <p className="text-sm font-semibold text-ink">Preparing the file…</p>
+                <p className="text-[11px] text-ink-muted">Recording the version and naming every entity it places. The download starts by itself.</p>
+              </div>
+            )}
+            {phase === 'done' && result && <Done result={result} count={views.length} />}
+            {phase === 'failed' && (
+              <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
+                <div className="w-11 h-11 rounded-xl bg-rose-50 dark:bg-rose-950/30 text-rose-500 flex items-center justify-center flex-shrink-0">
+                  <AlertTriangle className="w-6 h-6" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-lg font-bold text-ink">The export didn't complete</h3>
+                  <p className="text-sm text-ink-muted mt-1 break-words">{error}</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 px-8 py-4 border-t border-glass-border/50 bg-black/[0.01] dark:bg-white/[0.01] flex-shrink-0">
+            <button onClick={onClose} disabled={phase === 'running'} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
+              {phase === 'done' ? 'Done' : 'Cancel'}
+            </button>
+            {phase === 'choose' && tooMany && (
+              <p className="mr-auto text-[11px] text-amber-600 dark:text-amber-400">
+                A file holds up to {MAX_VIEWS_PER_FILE} views. Select fewer and export them in groups.
+              </p>
+            )}
+            {phase === 'choose' && (
+              <button onClick={run} disabled={tooMany} className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20 disabled:opacity-40 disabled:cursor-not-allowed">
+                <Download className="w-4 h-4" /> Download
+              </button>
+            )}
+            {phase === 'failed' && (
+              <button onClick={run} className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
+                <RefreshCw className="w-4 h-4" /> Try again
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+// ── Left column ──────────────────────────────────────────────────────────────
+
+function WhatTravels() {
+  return (
+    <div className="px-8 py-6 border-b md:border-b-0 md:border-r border-glass-border/50 bg-gradient-to-br from-indigo-50/40 to-transparent dark:from-indigo-950/15 space-y-5">
+      <div>
+        <h4 className="text-sm font-bold text-ink">What's in the file</h4>
+        <p className="text-[11px] text-ink-muted mt-0.5">Everything needed to rebuild the view where the same data source is onboarded.</p>
+      </div>
+      <ul className="space-y-3">
+        <Feature icon={<Layers className="w-4 h-4" />} title="Its design, exactly"
+          body="Layers, placements, rules, display rules and settings — including any this environment doesn't know about yet." />
+        <Feature icon={<Tag className="w-4 h-4" />} title="Name, description, icon and tags"
+          body="Kept as they are. Whoever imports it can rename it on the way in." />
+        <Feature icon={<History className="w-4 h-4" />} title="Its version history"
+          body="So importing a newer file later updates the view there instead of making a second one." />
+        <Feature icon={<Fingerprint className="w-4 h-4" />} title="A fingerprint"
+          body="The import checks it, and says so if the file was edited after it left." />
+      </ul>
+      <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.04] px-3.5 py-3 flex items-start gap-2.5">
+        <EyeOff className="w-4 h-4 text-ink-muted flex-shrink-0 mt-0.5" />
+        <p className="text-[11px] text-ink-muted leading-relaxed">
+          <span className="font-semibold text-ink-secondary">Not included:</span> the graph data itself, who the view is
+          shared with, favourites, draft changes, and anyone's email address. Entities are named so the import can show
+          what it didn't find.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function Feature({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
+  return (
+    <li className="flex items-start gap-3">
+      <span className="w-7 h-7 rounded-lg bg-indigo-100/70 dark:bg-indigo-900/40 text-indigo-500 flex items-center justify-center flex-shrink-0">{icon}</span>
+      <div>
+        <p className="text-xs font-semibold text-ink">{title}</p>
+        <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">{body}</p>
+      </div>
+    </li>
+  )
+}
+
+// ── Right column: one view ───────────────────────────────────────────────────
+
+function SingleViewChoice({ view, pick, setPick, note, setNote }: {
+  view: { id: string; name: string }
+  pick: 'current' | number
+  setPick: (p: 'current' | number) => void
+  note: string
+  setNote: (n: string) => void
+}) {
+  const { data, isLoading, error } = useViewVersions(view.id)
+  const versions = data?.items ?? []
+  const working = data?.workingCopy
+  const head = versions[0]
+  const dirty = !!working?.dirty
+  const exportsAs = pick === 'current' ? (dirty ? (head?.version ?? 0) + 1 : head?.version ?? null) : pick
+  const chosen: ViewVersionSummary | undefined = pick === 'current' ? head : versions.find((v) => v.version === pick)
+  const earlier = versions.slice(dirty ? 0 : 1)
+
+  if (isLoading) {
+    return <div className="flex items-center gap-2 text-xs text-ink-muted py-10 justify-center"><Loader2 className="w-4 h-4 animate-spin" /> Reading this view's versions…</div>
+  }
+  if (error) {
+    return <p className="text-xs text-rose-500 py-6">Couldn't read this view's versions: {error.message}</p>
+  }
+
+  return (
+    <>
+      <div>
+        <label className="block text-xs font-medium text-ink-secondary mb-2">Which version</label>
+        <div className="space-y-2">
+          <Choice active={pick === 'current'} onClick={() => setPick('current')}
+            title={dirty ? `The current design, as v${exportsAs}` : `The current design${head ? ` · v${head.version}` : ''}`}
+            desc={dirty ? 'It has unsaved changes. They are saved as a new version first, so the file names a version this view has.'
+              : head ? `${VERSION_SOURCE_LABEL[head.source]} ${timeAgo(head.createdAt)}${head.createdByName ? ` by ${head.createdByName}` : ''}` : ''} />
+          {pick === 'current' && dirty && (
+            <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500}
+              placeholder={`Note for v${exportsAs} (optional) — e.g. "For the UAT release"`}
+              className="w-full px-3 py-2 rounded-xl border border-glass-border bg-transparent text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500 transition-colors" />
+          )}
+          {earlier.length > 0 && (
+            <Choice active={pick !== 'current'} onClick={() => setPick(earlier[0].version)}
+              title="An earlier version" desc="Export the view as it was at a version in its history." />
+          )}
+          {pick !== 'current' && (
+            <select value={pick} onChange={(e) => setPick(Number(e.target.value))} aria-label="Version to export"
+              className="w-full px-3 py-2 rounded-xl border border-glass-border bg-canvas-elevated text-sm text-ink focus:outline-none focus:border-indigo-500">
+              {earlier.map((v) => (
+                <option key={v.version} value={v.version}>
+                  v{v.version} · {VERSION_SOURCE_LABEL[v.source]} · {timeAgo(v.createdAt)}{v.message ? ` · ${v.message}` : ''}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      </div>
+      <FilePreview filename={viewFileName(view.name, exportsAs)} stats={chosen?.stats}
+        extra={pick === 'current' && dirty ? '+ unsaved changes' : undefined} />
+    </>
+  )
+}
+
+function Choice({ active, onClick, title, desc }: { active: boolean; onClick: () => void; title: string; desc: string }) {
+  return (
+    <button type="button" onClick={onClick} aria-pressed={active}
+      className={cn('w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
+        active ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
+          : 'border-glass-border hover:border-glass-border-hover')}>
+      <p className={cn('text-xs font-semibold', active ? 'text-ink' : 'text-ink-secondary')}>{title}</p>
+      {desc && <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">{desc}</p>}
+    </button>
+  )
+}
+
+function FilePreview({ filename, stats, extra }: { filename: string; stats?: Record<string, number>; extra?: string }) {
+  const rows: Array<[string, number | undefined]> = [
+    ['layers', stats?.layers], ['placements', stats?.assignments], ['rules', stats?.rules],
+    ['display rules', stats?.displayRules],
+  ]
+  return (
+    <div className="rounded-xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] p-4">
+      <div className="flex items-center gap-2.5">
+        <FileJson2 className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+        <span className="text-xs font-mono text-ink truncate" title={filename}>{filename}</span>
+      </div>
+      {stats && (
+        <div className="grid grid-cols-4 gap-2 mt-3">
+          {rows.map(([label, value]) => (
+            <div key={label} className="rounded-lg bg-canvas-elevated border border-glass-border/60 px-2 py-1.5 text-center">
+              <p className="text-sm font-bold text-ink tabular-nums">{(value ?? 0).toLocaleString()}</p>
+              <p className="text-[10px] text-ink-muted">{label}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {extra && <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-2">Counts are of the latest version, {extra}.</p>}
+    </div>
+  )
+}
+
+// ── Right column: several views ──────────────────────────────────────────────
+
+function ManyViewsChoice({ views, note, setNote }: {
+  views: Array<{ id: string; name: string }>
+  note: string
+  setNote: (n: string) => void
+}) {
+  const statuses = useQueries({
+    queries: views.map((v) => ({
+      queryKey: [VIEW_VERSION_STATUS_QUERY_KEY, v.id],
+      queryFn: () => getViewVersionStatus(v.id),
+      staleTime: 15_000,
+    })),
+  })
+  const dirtyCount = statuses.filter((s) => s.data?.dirty).length
+  const rows = useMemo(() => views.map((v, i) => ({ view: v, status: statuses[i] })), [views, statuses])
+
+  return (
+    <>
+      <div>
+        <label className="block text-xs font-medium text-ink-secondary mb-2">{pluralize(views.length, 'view')}, each at its current design</label>
+        <ul className="rounded-xl border border-glass-border divide-y divide-glass-border/60 max-h-72 overflow-y-auto">
+          {rows.map(({ view, status }) => {
+            const head = status.data?.headVersion ?? null
+            const dirty = !!status.data?.dirty
+            return (
+              <li key={view.id} className="flex items-center gap-3 px-3.5 py-2.5">
+                <span className="text-xs font-medium text-ink truncate flex-1" title={view.name}>{view.name}</span>
+                {status.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted" />
+                  : dirty ? (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                      title="Unsaved changes are saved as a new version first">
+                      {head ? `v${head} + changes → v${head + 1}` : 'saved as v1'}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                      {head ? `v${head}` : 'v1'}
+                    </span>
+                  )}
+              </li>
+            )
+          })}
+        </ul>
+      </div>
+      {dirtyCount > 0 && (
+        <div>
+          <label className="block text-xs font-medium text-ink-secondary mb-1.5">
+            Note for the {pluralize(dirtyCount, 'new version')} <span className="text-ink-muted font-normal">(optional)</span>
+          </label>
+          <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} placeholder='e.g. "For the UAT release"'
+            className="w-full px-3 py-2 rounded-xl border border-glass-border bg-transparent text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500 transition-colors" />
+        </div>
+      )}
+      <FilePreview filename={`${views.length}-views.view.json`} />
+    </>
+  )
+}
+
+// ── Done ─────────────────────────────────────────────────────────────────────
+
+function Done({ result, count }: { result: ExportedFile; count: number }) {
+  const [copied, setCopied] = useState(false)
+  const fingerprint = result.definitionHash ?? result.bundleHash
+  const copy = async () => {
+    if (!fingerprint) return
+    try {
+      await navigator.clipboard.writeText(fingerprint)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* clipboard unavailable — the hash is still on screen */ }
+  }
+  return (
+    <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
+      <div className="w-11 h-11 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500 flex items-center justify-center flex-shrink-0">
+        <CheckCircle2 className="w-6 h-6" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <h3 className="text-lg font-bold text-ink">Downloaded</h3>
+        <p className="text-sm text-ink-muted mt-1">
+          Saved <span className="font-medium text-ink break-all">{result.filename}</span> ({fileSize(result.bytes)})
+          {result.version ? <>, the view at <span className="font-medium text-ink">v{result.version}</span></> : count > 1 ? <>, {pluralize(count, 'view')}</> : null}.
+          To bring it into another environment, open the View wizard there and choose <span className="font-medium text-ink">Import a view</span>.
+        </p>
+        {fingerprint && (
+          <div className="mt-4 flex items-center gap-2 rounded-xl border border-glass-border px-3 py-2">
+            <Fingerprint className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+            <span className="text-[11px] text-ink-muted">Fingerprint</span>
+            <span className="text-xs font-mono text-ink truncate" title={fingerprint}>{shortHash(fingerprint, 16)}</span>
+            <button onClick={copy} className="ml-auto flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline">
+              {copied ? <><Check className="w-3 h-3" /> Copied</> : <><Copy className="w-3 h-3" /> Copy</>}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

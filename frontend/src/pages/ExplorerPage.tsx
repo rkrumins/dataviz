@@ -39,12 +39,14 @@ import { ExplorerEmptyState } from '@/components/explorer/ExplorerEmptyState'
 import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useFeature } from '@/store/features'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useCopyViewLink } from '@/lib/viewShareLink'
@@ -172,6 +174,8 @@ export function ExplorerPage() {
   const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
+  const exportEnabled = useFeature('viewExportEnabled')
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   
@@ -927,8 +931,16 @@ export function ExplorerPage() {
         selectedCount={selectedIds.size}
         onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
+        onExport={exportEnabled && parsed.category !== 'deleted'
+          ? () => setExportSelection(Array.from(selectedIds, id => ({
+              id, name: views.find(v => v.id === id)?.name ?? id,
+            })))
+          : undefined}
         onClearSelection={() => setSelectedIds(new Set())}
       />
+      {exportSelection && (
+        <ExportViewDialog views={exportSelection} onClose={() => setExportSelection(null)} />
+      )}
       {shareView && (
         <ShareViewDialog
           viewId={shareView.id}

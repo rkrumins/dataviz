@@ -2720,7 +2720,11 @@ app.add_middleware(
     # without it ``parseRetryAfterMs`` reads null on every cross-origin
     # answer and the client falls back to its own backoff — losing the
     # server's pacing hint on exactly the 429/503/504 that carry one.
-    expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After"],
+    #
+    # The view-file export (``/views/transfer/export``) names its download and proves its
+    # content in headers: the filename, and the hashes the Export dialog shows.
+    expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was

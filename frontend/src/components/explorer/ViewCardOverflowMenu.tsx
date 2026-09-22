@@ -4,7 +4,7 @@
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
 import {
-  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2,
+  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
@@ -15,6 +15,8 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useFeature } from '@/store/features'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -52,6 +54,8 @@ export function ViewCardOverflowMenu({
   const { notify } = useAppNotifications()
   const { appName } = useBrand()
   const [activityOpen, setActivityOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const exportEnabled = useFeature('viewExportEnabled')
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close on click outside
@@ -120,6 +124,9 @@ export function ViewCardOverflowMenu({
         isOpen={activityOpen}
         onClose={() => setActivityOpen(false)}
       />
+      {exportOpen && (
+        <ExportViewDialog views={[{ id: viewId, name: viewName }]} onClose={() => setExportOpen(false)} />
+      )}
       <button
         onClick={e => { e.preventDefault(); e.stopPropagation(); setIsOpen(!isOpen) }}
         className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
@@ -194,6 +201,16 @@ export function ViewCardOverflowMenu({
                 <History className="w-3.5 h-3.5" />
                 Activity
               </button>
+              {exportEnabled && (
+                <button
+                  onClick={() => { setExportOpen(true); setIsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  Export…
+                </button>
+              )}
               <div className="border-t border-glass-border/50 my-1" />
               <button
                 onClick={() => { onDelete(); setIsOpen(false) }}

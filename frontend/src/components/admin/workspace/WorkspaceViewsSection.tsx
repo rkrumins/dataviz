@@ -59,6 +59,8 @@ import { useViewUsage } from '@/hooks/useContentInsights'
 import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useFeature } from '@/store/features'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
@@ -177,6 +179,8 @@ export default function WorkspaceViewsSection({
 
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+    const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
+    const exportEnabled = useFeature('viewExportEnabled')
     const [shareView, setShareView] = useState<{ id: string; name: string; visibility: string } | null>(null)
     const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
     const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -744,8 +748,16 @@ export default function WorkspaceViewsSection({
                 selectedCount={selectedIds.size}
                 onDelete={canBulkDelete ? () => setShowBulkDelete(true) : undefined}
                 onChangeVisibility={handleBulkVisibility}
+                onExport={exportEnabled
+                    ? () => setExportSelection(Array.from(selectedIds, id => ({
+                        id, name: views.find(v => v.id === id)?.name ?? id,
+                    })))
+                    : undefined}
                 onClearSelection={() => setSelectedIds(new Set())}
             />
+            {exportSelection && (
+                <ExportViewDialog views={exportSelection} onClose={() => setExportSelection(null)} />
+            )}
 
             {/* ── Detail drawer (view + edit details), reused from Explorer ── */}
             <ExplorerPreviewDrawer

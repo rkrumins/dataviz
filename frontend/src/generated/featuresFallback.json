@@ -266,6 +266,69 @@
       ]
     },
     {
+      "key": "viewExportEnabled",
+      "name": "Export views",
+      "description": "Let people download a view \u2014 its layers, assignments and settings \u2014 as a file, to bring it into another environment or keep a copy of its design.",
+      "category": "governance",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A view file holds the view's design and the names and types of the entities it places, not the graph data itself; exporting the data is 'Export graph data'. Turn both off if nothing about your lineage should leave the product.",
+      "impactWhenOff": "The Export actions disappear and the server refuses to build the file. Views keep working and their version history is unaffected. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /views/transfer/export \u2014 build a view file",
+        "POST /views/transfer/packages \u2014 build a view + data package"
+      ],
+      "uiSurfaces": [
+        "Export on the view header, the view card menu and the Explorer bulk bar",
+        "'Export view' items in the canvas Import / Export menu"
+      ],
+      "stillAllowed": [
+        "Reading, editing and versioning every view",
+        "Files already downloaded are not recalled \u2014 this stops NEW ones"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "viewImportEnabled",
+      "name": "Import views",
+      "description": "Let people bring a view in from a file exported by another environment, check it against a data source here, and create or update a view from it.",
+      "category": "governance",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this off to make every view in this environment be built here, in the wizard, rather than arrive as a file from somewhere else.",
+      "impactWhenOff": "The Import journey disappears from the View wizard and the server refuses uploads. Views can still be built in the wizard, and exporting still works.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /views/transfer/inspect \u2014 read an uploaded view file",
+        "POST /views/transfer/reconcile \u2014 check it against a data source",
+        "POST /views/transfer/import \u2014 create or update a view from it"
+      ],
+      "uiSurfaces": [
+        "The 'Import a view' journey in the View wizard",
+        "'Import view' buttons in the Explorer and the workspace Views manager"
+      ],
+      "stillAllowed": [
+        "Building views in the wizard",
+        "Exporting views"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "nodeSortingEnabled",
       "name": "Node sorting controls",
       "description": "Let people choose how nodes are ordered inside a Context View layer \u2014 alphabetical, by type, by size, or a hand-arranged custom order (drag to reorder in a draft).",
@@ -693,6 +756,8 @@
     "traceEnabled": true,
     "graphExportEnabled": true,
     "blankModelsEnabled": true,
+    "viewExportEnabled": true,
+    "viewImportEnabled": true,
     "nodeSortingEnabled": true,
     "semanticLayerEditMode": true,
     "semanticLayerNonAdminEditing": true,
