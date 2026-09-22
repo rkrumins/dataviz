@@ -98,7 +98,8 @@ async def _prepare(session: AsyncSession, item: ReconcileItem) -> Prepared:
         mergeable = state.status == DIVERGED and item.action == "update"
         if item.strategy == "merge" and mergeable:
             base_row = await view_version_repo.get_version(session, row.id, state.base_version)
-            merged = merge_definitions(view_version_repo.definition_of(base_row), working.definition, incoming)
+            base = view_version_repo.base_definition(base_row, state.base_hash)
+            merged = merge_definitions(base, working.definition, incoming)
             effective, conflicts = portable_definition(merged.definition, item.view_type), merged.conflicts
         latest = await view_version_repo.head(session, row.id)
         update = {
@@ -198,6 +199,8 @@ class ImportItem:
     request_id: Optional[str]
     batch_id: Optional[str]
     strategy: str = "replace"
+    #: The file's own definition, when what is written differs from it (see ``origin_hash``).
+    origin_definition: Optional[Dict[str, Any]] = None
 
 
 class AlreadyImported(Exception):
@@ -232,6 +235,8 @@ async def import_item(
     view_type = item.metadata.get("viewType") or "graph"
     definition = portable_definition(item.definition, view_type)
     submitted_hash = content_hash(definition)
+    origin_definition = (portable_definition(item.origin_definition, view_type)
+                         if item.origin_definition is not None else None)
 
     # The same write-side rules every layout write obeys.
     adjustments: List[str] = []
@@ -323,6 +328,10 @@ async def import_item(
         "exportedBy": item.provenance.get("exportedBy"),
         "fileName": item.provenance.get("fileName"),
     }
+    # What was stored differs from the file: keep the file's design, so a later file from the
+    # same lineage can still merge from it (``view_version_repo.base_definition``).
+    origin_hash = content_hash(origin_definition) if origin_definition is not None else None
+    diverges = origin_hash is not None and origin_hash != stored.content_hash
     provenance = {
         "origin": origin,
         "ancestry": item.history,
@@ -334,8 +343,11 @@ async def import_item(
         "adjustments": adjustments,
         "report": {"summary": summary, "layers": report["layers"]},
     }
+    if diverges:
+        provenance["originDefinition"] = origin_definition
     version, created = await view_version_repo.checkpoint(
         session, row, source="import", actor=actor, force=True,
+        origin_hash=origin_hash if diverges else None,
         message=f"Imported from {origin['environment'] or 'another environment'}"
                 + (f" (v{origin['version']})" if origin.get("version") else ""),
         provenance=provenance, request_id=item.request_id,

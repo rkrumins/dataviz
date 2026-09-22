@@ -144,10 +144,12 @@ async def _reconcile(client: AsyncClient, view: dict, target: dict, *, action="c
 
 
 async def _import(client: AsyncClient, inspected: dict, target: dict, *, action="create",
-                  definition=None, strategy="replace", expected=None, request_id=None, **metadata):
+                  definition=None, strategy="replace", expected=None, request_id=None,
+                  originDefinition=None, **metadata):
     view = inspected["views"][0]
     bundle = inspected["bundle"]
     return await client.post("/api/v1/views/transfer/import", json={
+        "originDefinition": originDefinition,
         "action": action, "strategy": strategy, "target": target,
         "metadata": {**view["metadata"], **metadata},
         "definition": view["definition"] if definition is None else definition,
@@ -331,6 +333,35 @@ async def test_diverged_views_merge_keeping_both_sides(test_client, graph):
     [older] = (await _reconcile(test_client, old["views"][0], {"viewId": target_id},
                                 action="update")).json()["views"]
     assert older["update"]["status"] == "file_is_older"
+
+
+async def test_choices_made_on_import_survive_the_next_update(test_client, graph):
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    source_id = await _view(test_client, dev)
+    first = await _file(test_client, source_id)
+    [view] = first["views"]
+    [result] = (await _reconcile(test_client, view, {"workspaceId": uat},
+                                 resolutions={"drop": ["urn:gone"]})).json()["views"]
+    resp = await _import(test_client, first, {"workspaceId": uat}, definition=result["effectiveDefinition"],
+                         originDefinition=view["definition"])
+    body = resp.json()
+    target_id = body["viewId"]
+    assert body["integrity"]["verified"] is True, "what was sent is what was stored"
+    assert body["integrity"]["storedHash"] != view["definitionHash"], "but it isn't the file any more"
+
+    # The same file again: nothing new, even though what's stored isn't byte-identical to it.
+    [again] = (await _reconcile(test_client, view, {"viewId": target_id}, action="update")).json()["views"]
+    assert again["update"]["status"] == "up_to_date"
+
+    # Dev moves on. The newer file still finds the import as the version both sides agreed on, and
+    # merging keeps what was dropped on the way in while taking what dev added.
+    await _edit(test_client, source_id, "urn:x")
+    newer = await _file(test_client, source_id)
+    [update] = (await _reconcile(test_client, newer["views"][0], {"viewId": target_id}, action="update",
+                                 strategy="merge")).json()["views"]
+    assert (update["update"]["status"], update["update"]["mergeAvailable"]) == ("diverged", True)
+    assignments = _assignments(update["effectiveDefinition"])
+    assert "urn:x" in assignments and "urn:gone" not in assignments
 
 
 async def test_unsaved_edits_here_are_kept_as_a_version_before_an_update(test_client, graph):

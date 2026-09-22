@@ -84,6 +84,7 @@ def upgrade() -> None:
             sa.Column("version", sa.Integer(), nullable=False),
             sa.Column("content_hash", sa.Text(), nullable=False),
             sa.Column("definition", sa.Text(), nullable=False),
+            sa.Column("origin_hash", sa.Text(), nullable=True),
             sa.Column("name", sa.Text(), nullable=False),
             sa.Column("description", sa.Text(), nullable=True),
             sa.Column("icon", sa.Text(), nullable=True),

@@ -354,6 +354,10 @@ class ImportRequest(BaseModel):
     #: the wizard since. The server canonicalises, validates and hashes it again.
     definition: Dict[str, Any]
     origin: ImportOrigin = Field(default_factory=ImportOrigin)
+    #: The file's own definition, sent when ``definition`` differs from it (entities remapped
+    #: or dropped, a merge, edits in the wizard). Kept with the version so a later file from the
+    #: same lineage still finds it as the version the two sides last agreed on.
+    originDefinition: Optional[Dict[str, Any]] = None
     manifest: Manifest = Field(default_factory=Manifest)
     history: List[HistoryEntry] = Field(default_factory=list)
     resolutions: Resolutions = Field(default_factory=Resolutions)
@@ -385,6 +389,8 @@ async def import_view_file(
                     **previous}
 
     definition = _checked_definition(req.definition)
+    if req.originDefinition is not None:
+        _checked_definition(req.originDefinition)
     if _assignment_count(definition) > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
         raise HTTPException(status_code=422, detail=(
             f"This view holds more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments."))
@@ -410,6 +416,7 @@ async def import_view_file(
         resolutions_summary=req.resolutions.summary(),
         expected_target_hash=req.expectedTargetHash,
         request_id=req.requestId, batch_id=req.batchId, strategy=req.strategy,
+        origin_definition=req.originDefinition,
     )
     digest = await _compute_ontology_digest(session, target.workspace_id, target.data_source_id)
     try:

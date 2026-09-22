@@ -48,12 +48,12 @@ def _norm(value: Optional[str]) -> str:
 
 
 async def target_versions(session: AsyncSession, view_id: str) -> List[tuple]:
-    """``(version, hash)`` for every version of a view: all a merge base needs."""
+    """``(version, hash, origin_hash)`` for every version of a view: all a merge base needs."""
     result = await session.execute(
-        select(ViewVersionORM.version, ViewVersionORM.content_hash)
+        select(ViewVersionORM.version, ViewVersionORM.content_hash, ViewVersionORM.origin_hash)
         .where(ViewVersionORM.view_id == view_id)
     )
-    return [(v, h) for v, h in result.all()]
+    return [tuple(row) for row in result.all()]
 
 
 async def identity_matches(

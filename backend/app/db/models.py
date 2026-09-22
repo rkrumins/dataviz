@@ -1078,6 +1078,11 @@ class ViewVersionORM(Base):
     version = Column(Integer, nullable=False)
     content_hash = Column(Text, nullable=False)
     definition = Column(Text, nullable=False)                 # canonical JSON
+    # Import versions only, when what was stored differs from the file (entities remapped or
+    # dropped, a merge, edits in the wizard): the FILE's design hash. A later file from the
+    # same lineage carries that hash in its history, so this version is still its merge base;
+    # the file's design itself is kept in ``provenance["originDefinition"]``.
+    origin_hash = Column(Text, nullable=True)
     name = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
     icon = Column(Text, nullable=True)

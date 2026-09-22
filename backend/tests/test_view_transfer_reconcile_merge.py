@@ -125,6 +125,25 @@ def test_update_status_classifies_every_relationship():
     assert update_status(incoming_hash="h3", target_working_hash="hX", target_versions=[(1, "hZ")], **kw).status == UNRELATED
 
 
+def test_an_import_that_changed_its_file_still_answers_to_the_files_hash():
+    # v1 was imported from a file with hash hF, but stored hS (an entity was dropped on the way in).
+    versions = [(1, "hS", "hF")]
+    # The same file again, nothing changed here since: up to date, not "older".
+    same = update_status(incoming_hash="hF", incoming_history_hashes=["hF"], target_working_hash="hS",
+                         target_versions=versions)
+    assert same.status == UP_TO_DATE
+    # A newer file from the same lineage finds v1 through the file's hash. What was stored differs
+    # from that file (the choices made on import), so the two sides have diverged, and a merge
+    # starts from the file's design.
+    newer = update_status(incoming_hash="hF2", incoming_history_hashes=["hF", "hF2"], target_working_hash="hS",
+                          target_versions=versions)
+    assert (newer.status, newer.base_version, newer.base_hash) == (DIVERGED, 1, "hF")
+    # Once this view moved past the import, the old file is older.
+    moved = update_status(incoming_hash="hF", incoming_history_hashes=["hF"], target_working_hash="hX",
+                          target_versions=[(1, "hS", "hF"), (2, "hX", None)])
+    assert (moved.status, moved.base_version) == (FILE_IS_OLDER, 1)
+
+
 def _layout(assignments, layers=None):
     return {"layout": {"type": "reference", "referenceLayout": {
         "layers": layers or [{"id": "l1", "name": "Sources", "order": 0}, {"id": "l2", "name": "Marts", "order": 1}],

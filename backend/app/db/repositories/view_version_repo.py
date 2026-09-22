@@ -154,6 +154,7 @@ async def checkpoint(
     provenance: Optional[dict] = None,
     request_id: Optional[str] = None,
     force: bool = False,
+    origin_hash: Optional[str] = None,
 ) -> Tuple[ViewVersionORM, bool]:
     """Record the view's current design as a new version.
 
@@ -165,6 +166,9 @@ async def checkpoint(
     Version numbers come from ``max + 1`` under the ``(view_id, version)`` unique constraint.
     Callers that can race hold the view row ``FOR UPDATE``; a race that slips through fails
     the insert inside a savepoint and is retried once with a fresh number.
+
+    ``origin_hash`` is for imports that stored something other than their file (see
+    ``ViewVersionORM.origin_hash``); it is ignored when it equals what was stored.
     """
     if source not in SOURCES:
         raise ValueError(f"unknown version source {source!r}")
@@ -183,6 +187,7 @@ async def checkpoint(
             version=number,
             content_hash=state.content_hash,
             definition=canonical_json(state.definition),
+            origin_hash=origin_hash if origin_hash and origin_hash != state.content_hash else None,
             name=state.label["name"],
             description=state.label["description"],
             icon=state.label["icon"],
@@ -300,23 +305,24 @@ async def latest_of_source(
     return result.scalar_one_or_none()
 
 
-async def versions_with_hashes(
-    session: AsyncSession, view_id: str, hashes: List[str],
-) -> List[ViewVersionORM]:
-    """The versions of ``view_id`` whose design hash is one of ``hashes``, newest first."""
-    if not hashes:
-        return []
-    result = await session.execute(
-        select(ViewVersionORM)
-        .where(ViewVersionORM.view_id == view_id, ViewVersionORM.content_hash.in_(hashes))
-        .order_by(ViewVersionORM.version.desc())
-    )
-    return list(result.scalars().all())
-
-
 def definition_of(version: ViewVersionORM) -> dict:
     definition = _load_json(version.definition, {})
     return definition if isinstance(definition, dict) else {}
+
+
+def base_definition(version: ViewVersionORM, base_hash: Optional[str]) -> dict:
+    """The design a merge starts from when ``version`` is the merge base found by ``base_hash``.
+
+    Usually the version's own design. When the base was found through the version's
+    ``origin_hash`` (an import that stored something other than its file), it is the FILE's
+    design: what the file's side last agreed with, so the choices made on import count as
+    changes made here and a merge keeps them.
+    """
+    if base_hash and version.origin_hash and base_hash == version.origin_hash:
+        origin = (_load_json(version.provenance, {}) or {}).get("originDefinition")
+        if isinstance(origin, dict):
+            return origin
+    return definition_of(version)
 
 
 def label_of(version: ViewVersionORM) -> Dict[str, Any]:

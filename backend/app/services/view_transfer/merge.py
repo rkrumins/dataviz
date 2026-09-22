@@ -54,24 +54,36 @@ def update_status(
     incoming_hash: str,
     incoming_history_hashes: Sequence[str],
     target_working_hash: str,
-    target_versions: Sequence[Tuple[int, str]],
+    target_versions: Sequence[Tuple],
 ) -> UpdateStatus:
     """Classify the file against the target view.
 
-    ``target_versions`` are ``(version, hash)`` pairs of the target's history, in any order.
+    ``target_versions`` are the target's history, in any order, as ``(version, hash)`` or
+    ``(version, hash, origin_hash)``. ``origin_hash`` is set on an import version that stored
+    something other than its file (``ViewVersionORM.origin_hash``): that version also answers
+    to the file's hash, and because what it stored differs from the file, the difference (the
+    choices made on import) counts as a change made here.
     """
     if incoming_hash == target_working_hash:
         return UpdateStatus(UP_TO_DATE)
-    newest_first = sorted(target_versions, key=lambda vh: vh[0], reverse=True)
-    for version, hash_ in newest_first:
-        if hash_ == incoming_hash:
-            return UpdateStatus(FILE_IS_OLDER, version, hash_)
+    newest_first = sorted(target_versions, key=lambda v: v[0], reverse=True)
+
+    def answers_to(v: Tuple) -> List[str]:
+        return [h for h in (v[1], v[2] if len(v) > 2 else None) if h]
+
+    for position, v in enumerate(newest_first):
+        if incoming_hash in answers_to(v):
+            if incoming_hash != v[1] and position == 0 and v[1] == target_working_hash:
+                # This very file was imported here last, and nothing has changed since.
+                return UpdateStatus(UP_TO_DATE, v[0], incoming_hash)
+            return UpdateStatus(FILE_IS_OLDER, v[0], incoming_hash)
     known = set(incoming_history_hashes)
-    for version, hash_ in newest_first:
-        if hash_ in known:
-            if hash_ == target_working_hash:
-                return UpdateStatus(FAST_FORWARD, version, hash_)
-            return UpdateStatus(DIVERGED, version, hash_)
+    for v in newest_first:
+        for hash_ in answers_to(v):
+            if hash_ in known:
+                if hash_ == target_working_hash:
+                    return UpdateStatus(FAST_FORWARD, v[0], hash_)
+                return UpdateStatus(DIVERGED, v[0], hash_)
     return UpdateStatus(UNRELATED)
 
 
