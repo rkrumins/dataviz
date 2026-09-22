@@ -75,8 +75,10 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     for the graph's data source when rollups can't be maintained incrementally (a full-seed
     wipe destroyed them, or a containment move exceeded the bounded-recount cap). Dedup and
     concurrency are the AggregationService's own guards (active-job conflict → benign no-op).
-    ``get_aggregation_service`` is a lazy getter (app.state in direct mode; ``None`` — e.g.
-    proxy mode or startup — logs and leaves the manual rebuild path)."""
+    ``get_aggregation_service`` is a lazy getter (app.state in direct mode). With no service
+    in this process — proxy mode, the deployed web tier — the job is queued on the control
+    plane over internal-auth HTTP instead: skipping it there left the 2026-09-22 heal's
+    rollups unrebuilt, while the reconcile sweeper skipped the source trusting this hook."""
     async def _hook(graph_id: str) -> None:
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
@@ -84,15 +86,14 @@ def make_rollup_rebuild_hook(get_aggregation_service):
         if not ds_id:
             return
         agg = get_aggregation_service()
-        if agg is None:
-            logger.info("rollup rebuild for ds=%s not auto-queued (aggregation service "
-                        "unavailable in this runtime); rebuild via the aggregation UI", ds_id)
-            return
         mode = await _projection_mode(str(ds_id))
         if mode == "dedicated":
-            # The projector's wipe never touches a dedicated-mode {graph_name}_proj graph,
-            # so there is nothing to heal — and a wrong-mode rebuild would write rollups
+            # The projector never touches a dedicated-mode {graph_name}_proj graph, so
+            # there is nothing to heal — and a wrong-mode rebuild would write rollups
             # into the source graph, where nothing reads them for this data source.
+            return
+        if agg is None:
+            await _queue_on_control_plane(str(ds_id), graph_id, mode)
             return
         from backend.app.services.aggregation.schemas import AggregationTriggerRequest
         try:
@@ -107,6 +108,42 @@ def make_rollup_rebuild_hook(get_aggregation_service):
         except Exception as exc:                         # active-job conflict etc. — benign
             logger.info("rollup rebuild for ds=%s not queued: %s", ds_id, exc)
     return _hook
+
+
+async def _queue_on_control_plane(ds_id: str, graph_id: str, mode: str) -> None:
+    """Queue the rollup rebuild on the aggregation control plane — the same route and
+    internal auth the insights purge uses for its post-purge rebuild. Never raises: a
+    409 (a job already active) is the benign outcome, and anything else is logged loudly
+    enough to act on."""
+    import os
+    import httpx
+    from backend.app.services.aggregation.internal_auth import internal_auth_headers
+
+    base = os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
+    try:
+        async with httpx.AsyncClient(
+            base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
+            headers=internal_auth_headers(),
+        ) as client:
+            resp = await client.post(
+                f"/aggregation/data-sources/{ds_id}/jobs",
+                params={"triggerSource": "api"},
+                json={"projectionMode": mode,
+                      # evict/restore churn collapses to one job per hour (the service's
+                      # idempotent-replay window), as on the in-process path.
+                      "idempotencyKey": f"gv-rollup-rebuild:{graph_id}"},
+            )
+        if resp.status_code in (200, 201, 202):
+            logger.info("queued aggregation rebuild for ds=%s on the control plane "
+                        "(rollups stale after projection)", ds_id)
+        elif resp.status_code == 409:
+            logger.info("rollup rebuild for ds=%s not queued: a job is already active", ds_id)
+        else:
+            logger.warning("rollup rebuild for ds=%s refused by the control plane (HTTP %s) — "
+                           "rebuild via the aggregation UI", ds_id, resp.status_code)
+    except Exception as exc:                             # pragma: no cover - infra
+        logger.warning("rollup rebuild for ds=%s could not reach the control plane (%s) — "
+                       "rebuild via the aggregation UI", ds_id, exc)
 
 
 async def nudge_stats_after_projection(data_source_id: str) -> None:
