@@ -147,3 +147,72 @@ export function batchTypeOptions(pairs: readonly LinkPair[], ctx: BulkLinkContex
   }
   return [...options.values()].sort((a, b) => b.fits - a.fits || a.label.localeCompare(b.label))
 }
+
+/** Whether a pair's TYPES admit any drawable lineage relationship, and if
+ *  not, why — memoised per (source type, target type), so checking every
+ *  entity on the canvas against the selection stays cheap. Duplicates are
+ *  the review's business, not this. */
+export type FitChecker = (source: string, target: string) => { ok: boolean; reason?: string }
+
+export function makeFitChecker(ctx: Omit<BulkLinkContext, 'existingEdges'>): FitChecker {
+  const memo = new Map<string, { ok: boolean; reason?: string }>()
+  return (source, target) => {
+    const sType = ctx.typeOf(source)
+    const tType = ctx.typeOf(target)
+    const key = `${sType ?? ''}\u0000${tType ?? ''}`
+    let hit = memo.get(key)
+    if (!hit) {
+      const options = deriveConnectableEdges(sType, tType, ctx.relationshipTypes, ctx.containmentEdgeTypes, ctx.entityTypes)
+      hit = options.some((o) => o.allowed)
+        ? { ok: true }
+        : { ok: false, reason: options.find((o) => o.reason)?.reason ?? 'No lineage relationship in the ontology joins these types.' }
+      memo.set(key, hit)
+    }
+    return hit
+  }
+}
+
+/** How many of the selection a candidate for the other side could be linked
+ *  with, in the direction given — and, when none, why. */
+export function candidateFit(
+  candidate: string,
+  selection: readonly string[],
+  direction: BulkDirection,
+  fit: FitChecker,
+): { fits: number; reason?: string } {
+  let fits = 0
+  let reason: string | undefined
+  for (const s of selection) {
+    if (s === candidate) continue
+    const v = direction === 'selection-feeds' ? fit(s, candidate) : fit(candidate, s)
+    if (v.ok) fits++
+    else reason ??= v.reason
+  }
+  return fits > 0 ? { fits } : { fits, reason }
+}
+
+export interface DropVerdict {
+  /** Every pair links / some do / none do — the hovered card's ring. */
+  level: 'all' | 'some' | 'none'
+  /** Links the best relationship would add. */
+  count: number
+  /** One line for the cursor. */
+  text: string
+}
+
+/** What dropping here would do: the best-fitting relationship across every
+ *  source → target pair, and how much of the batch it covers. */
+export function dropVerdict(sources: readonly string[], targets: readonly string[], ctx: BulkLinkContext): DropVerdict {
+  const pairs: LinkPair[] = []
+  for (const s of sources) for (const t of targets) if (s !== t) pairs.push({ source: s, target: t })
+  if (pairs.length === 0) return { level: 'none', count: 0, text: 'Nothing to link here.' }
+  const [best] = batchTypeOptions(pairs, ctx)
+  if (!best) {
+    const reason = makeFitChecker(ctx)(pairs[0].source, pairs[0].target).reason
+    return { level: 'none', count: 0, text: reason ?? 'These are already linked.' }
+  }
+  const noun = (n: number) => (n === 1 ? 'link' : 'links')
+  return best.fits === pairs.length
+    ? { level: 'all', count: best.fits, text: `${best.fits} ${noun(best.fits)} · ${best.label}` }
+    : { level: 'some', count: best.fits, text: `${best.fits} of ${pairs.length} can link · ${best.label}` }
+}

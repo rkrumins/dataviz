@@ -28,7 +28,7 @@ import {
   useViewRelationshipTypes,
   useViewEntityTypes,
 } from '@/hooks/useViewSchema'
-import { useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
+import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
@@ -76,6 +76,10 @@ import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
 import { MemoryGauge } from './MemoryGauge'
 import { BulkLinkPanel } from './BulkLinkPanel'
+import { BulkLinkCard } from './BulkLinkCard'
+import { BulkLinkMarks } from './BulkLinkMarks'
+import { useBulkLinkStore } from './bulkLinkStore'
+import { dropVerdict, type LinkPair } from '@/lib/bulkLinks'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation, useViewportReservation } from './useBandReservation'
@@ -763,9 +767,18 @@ export function ContextViewCanvas({
 
   // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
   // stage a RAW create_edge. Only offered in draft (authoring) mode.
+  // A card that is part of a multi-selection drags the whole selection, and
+  // one card dropped on a selected card links into the whole selection —
+  // both open the bulk card at the drop (BulkLinkCard).
   const edgeConnect = useEdgeConnect({
     onConnect: (sourceUrn, targetUrn, edgeType) =>
       interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
+    groupOf: (id) => {
+      const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+      return sel.length > 1 && sel.includes(id) ? sel : null
+    },
+    onBulkDrop: ({ direction, picked, at }) =>
+      useBulkLinkStore.getState().openCard({ direction, picked, anchor: at }),
   })
   edgeConnectRef.current = edgeConnect
 
@@ -1927,8 +1940,67 @@ export function ContextViewCanvas({
   // columns still show browse and every authoring affordance on them still
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
-  /** The bulk "Link…" panel over the selection (BulkLinkPanel). */
-  const [bulkLinkOpen, setBulkLinkOpen] = useState(false)
+  // Bulk links: the Link panel, the card a drag drops, picking on the canvas.
+  const bulkLinkSurface = useBulkLinkStore((s) => s.surface)
+  const bulkLinkPicked = useBulkLinkStore((s) => s.picked)
+  const bulkLinkDirection = useBulkLinkStore((s) => s.direction)
+  const bulkLinkPickingOnCanvas = useBulkLinkStore((s) => s.pickingOnCanvas)
+  const bulkSelection = useMemo(() => selectedNodeIds.filter(isSelectableNode), [selectedNodeIds])
+  const bulkSelectionCount = bulkSelection.length
+  // Closes itself when the canvas or the selection stops allowing it.
+  useEffect(() => {
+    if (bulkLinkSurface && (!canvasWritable || bulkSelectionCount < 2)) useBulkLinkStore.getState().close()
+  }, [bulkLinkSurface, canvasWritable, bulkSelectionCount])
+  useEffect(() => () => useBulkLinkStore.getState().close(), [])
+  // While picking on the canvas, a click adds a card to the other side (or
+  // takes it off) instead of changing the selection.
+  const handleRowSelect = useCallback((id: string, multi?: boolean) => {
+    const bulk = useBulkLinkStore.getState()
+    if (bulk.surface && bulk.pickingOnCanvas) {
+      if (isSelectableNode(id) && !useCanvasStore.getState().selectedNodeIds.includes(id)) bulk.togglePicked(id)
+      return
+    }
+    selectNode(id, multi)
+  }, [selectNode])
+  const stageBulkLinks = useCallback((pairs: LinkPair[], edgeType: string) => {
+    // Judged by the view's own ontology — the one the preview used.
+    const outcome = interactions.stageEdgeCreateMany(pairs, edgeType, {
+      relationshipTypes,
+      containmentEdgeTypes,
+      entityTypes: schemaEntityTypes,
+    })
+    if (outcome.staged > 0) {
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: `Added ${outcome.staged.toLocaleString()} ${outcome.staged === 1 ? 'link' : 'links'} to your draft — save when you're done.`,
+      })
+    }
+    return outcome
+  }, [interactions, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
+  // Mid-drag, what dropping on the card under the pointer would do. Recomputed
+  // per card hovered, never per pointer move.
+  const dragHoverId = edgeConnect.state.mode === 'dragging' ? edgeConnect.state.hoverId : null
+  const dragSourceIds = edgeConnect.state.sourceIds
+  const dragHint = useMemo(() => {
+    if (!dragHoverId || dragSourceIds.length === 0) return null
+    const typeOf = new Map<string, string>()
+    for (const n of useCanvasStore.getState().nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) typeOf.set(n.id, t)
+    }
+    const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+    // One card onto a selected card links it into the whole selection.
+    const targets = dragSourceIds.length === 1 && sel.length > 1 && sel.includes(dragHoverId) && !sel.includes(dragSourceIds[0])
+      ? sel
+      : [dragHoverId]
+    return dropVerdict(dragSourceIds, targets, {
+      typeOf: (id) => typeOf.get(id) ?? null,
+      relationshipTypes,
+      containmentEdgeTypes,
+      entityTypes: schemaEntityTypes,
+      existingEdges: useCanvasStore.getState().edges,
+    })
+  }, [dragHoverId, dragSourceIds, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // A SHARED TRACE (`?trace=…`) — decoded once during the first render, so
   // the trace opens on the shared picture with no un-restored flash, and so
@@ -5364,7 +5436,7 @@ export function ContextViewCanvas({
         {/* What the canvas is holding, and what the actions will do with it.
             Hidden during a trace: the trace dock is then the thing being read,
             and the selection has already been spent on it. */}
-        {!traceActive && (
+        {!traceActive && bulkLinkSurface !== 'panel' && (
           <SelectionBar
             nodeIds={selectedNodeIds}
             labelFor={(id) => displayMap.get(id)?.name || id}
@@ -5372,34 +5444,33 @@ export function ContextViewCanvas({
             onClear={clearSelection}
             onTrace={() => startCanvasTrace(selectedNodeIds)}
             onOpenLens={() => openLensForSelection(selectedNodeIds)}
-            onLink={canvasWritable ? () => setBulkLinkOpen(true) : undefined}
+            onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being
             edited only, like every other write. Closes itself when the
             selection or the canvas stops allowing it. */}
-        {bulkLinkOpen && canvasWritable && selectedNodeIds.length > 1 && (
+        {bulkLinkSurface === 'panel' && canvasWritable && bulkSelectionCount > 1 && (
           <BulkLinkPanel
-            selection={selectedNodeIds}
+            selection={bulkSelection}
             labelFor={(id) => displayMap.get(id)?.name || id}
-            onCreate={(pairs, edgeType) => {
-              // Judged by the view's own ontology — the one the panel previewed with.
-              const outcome = interactions.stageEdgeCreateMany(pairs, edgeType, {
-                relationshipTypes,
-                containmentEdgeTypes,
-                entityTypes: schemaEntityTypes,
-              })
-              if (outcome.staged > 0) {
-                useNotificationStore.getState().add({
-                  type: 'success',
-                  message: `Added ${outcome.staged.toLocaleString()} ${outcome.staged === 1 ? 'link' : 'links'} to your draft — save when you're done.`,
-                })
-              }
-              return outcome
-            }}
-            onClose={() => setBulkLinkOpen(false)}
+            onCreate={stageBulkLinks}
+            onClose={() => useBulkLinkStore.getState().close()}
           />
         )}
+        {bulkLinkSurface === 'card' && canvasWritable && bulkSelectionCount > 1 && (
+          <BulkLinkCard
+            selection={bulkSelection}
+            labelFor={(id) => displayMap.get(id)?.name || id}
+            onCreate={stageBulkLinks}
+            onClose={() => useBulkLinkStore.getState().close()}
+          />
+        )}
+        <BulkLinkMarks
+          picked={bulkLinkSurface ? bulkLinkPicked : []}
+          pickedRole={bulkLinkDirection === 'selection-feeds' ? 'Target' : 'Source'}
+          hover={dragHoverId && dragHint ? { id: dragHoverId, level: dragHint.level } : null}
+        />
 
         <div
           ref={edgeLegendRef}
@@ -5765,8 +5836,9 @@ export function ContextViewCanvas({
           {/* In-progress edge while dragging a connection (shares the overlay
               coordinate space — absolute sibling inside the scroll container). */}
           <ConnectionDragLayer
-            sourceId={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceId : null}
+            sourceIds={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceIds : []}
             pointer={edgeConnect.state.pointer}
+            hint={dragHint}
           />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
@@ -5865,7 +5937,7 @@ export function ContextViewCanvas({
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedForRender}
                 searchResults={advancedMatchUrns}
-                onSelect={selectNode}
+                onSelect={bulkLinkPickingOnCanvas ? handleRowSelect : selectNode}
                 onSelectRange={setSelection}
                 selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}

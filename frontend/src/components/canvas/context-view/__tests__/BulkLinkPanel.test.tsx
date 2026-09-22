@@ -2,14 +2,17 @@
  * BulkLinkPanel — the selection is one side, the reader picks the other and
  * says which way the data flows; every pair is previewed with its verdict,
  * and only the pairs the ontology allows are handed to be staged.
+ * Candidates are ranked by whether they can take a link at all, and can be
+ * picked from the canvas as well as the list.
  */
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import type { WorkspaceSchema } from '@/types/schema'
 import { BulkLinkPanel } from '../BulkLinkPanel'
+import { useBulkLinkStore } from '../bulkLinkStore'
 
 const node = (id: string, type: string) =>
   ({ id, position: { x: 0, y: 0 }, data: { label: id, urn: id, type } }) as unknown as LineageNode
@@ -44,20 +47,21 @@ function renderPanel(selection: string[]) {
   return { onCreate, onClose }
 }
 
-const pickByText = (name: string) => {
-  const list = screen.getByRole('region', { name: 'Other side' })
-  const row = within(list).getByText(name).closest('label')!
-  fireEvent.click(row.querySelector('input')!)
-}
-const preview = () => screen.getByRole('region', { name: 'Preview' })
+const otherSide = () => screen.getByRole('region', { name: /^Choose the (targets|sources)$/ })
+const rowOf = (name: string) => within(otherSide()).getByText(name).closest('button')!
+const pickByText = (name: string) => fireEvent.click(rowOf(name))
+const preview = () => screen.getByLabelText('Preview')
 
-beforeEach(() => seed())
+beforeEach(() => {
+  useBulkLinkStore.getState().close()
+  seed()
+})
 
 describe('BulkLinkPanel', () => {
   it('N sources → 1 target: previews each link, and hands exactly those to be staged', () => {
     const { onCreate, onClose } = renderPanel(['t1', 't2'])
     pickByText('r1')
-    expect(within(preview()).getByText('2 links will be added')).toBeInTheDocument()
+    expect(screen.getByText('2 links will be added')).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /Flows To.*fits 2 of 2/ })).toHaveAttribute('aria-checked', 'true')
     fireEvent.click(screen.getByRole('button', { name: 'Add 2 links' }))
     expect(onCreate).toHaveBeenCalledWith([{ source: 't1', target: 'r1' }, { source: 't2', target: 'r1' }], 'FLOWS_TO')
@@ -86,7 +90,7 @@ describe('BulkLinkPanel', () => {
     seed([{ source: 't1', target: 'r1', edgeType: 'FLOWS_TO' }])
     const { onCreate } = renderPanel(['t1', 't2'])
     pickByText('r1')
-    expect(within(preview()).getByText('1 link will be added · 1 skipped')).toBeInTheDocument()
+    expect(screen.getByText('1 link will be added · 1 skipped')).toBeInTheDocument()
     expect(within(preview()).getByText(/already connected/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Add 1 link' }))
     expect(onCreate).toHaveBeenCalledWith([{ source: 't2', target: 'r1' }], 'FLOWS_TO')
@@ -94,9 +98,30 @@ describe('BulkLinkPanel', () => {
 
   it('never offers a logical group, or the selection itself, as the other side', () => {
     renderPanel(['t1', 't2'])
-    const list = screen.getByRole('region', { name: 'Other side' })
-    expect(within(list).queryByText('logical:g')).toBeNull()
-    expect(within(list).queryByText('t1')).toBeNull()
+    expect(within(otherSide()).queryByText('logical:g')).toBeNull()
+    expect(within(otherSide()).queryByText('t1')).toBeNull()
+  })
+
+  it('says which candidates can take a link, and ranks those first', () => {
+    renderPanel(['t1', 't2'])
+    // A table feeds tables and reports, so both groups can link …
+    expect(within(rowOf('r1')).getByText('Can link')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Swap direction' }))
+    // … but a report feeds nothing: every report says so, and the tables lead.
+    expect(within(rowOf('r1')).getByText("Can't link")).toBeInTheDocument()
+    const groups = within(otherSide()).getAllByText(/can link$/).map((el) => el.textContent)
+    expect(groups[0]).toMatch(/^\d+ can link$/)
+    expect(within(otherSide()).getByText('none can link')).toBeInTheDocument()
+  })
+
+  it('picks on the canvas: the toggle arms it, and a card picked there joins the other side', () => {
+    const { onCreate } = renderPanel(['t1', 't2'])
+    fireEvent.click(screen.getByRole('button', { name: 'Pick on canvas' }))
+    expect(useBulkLinkStore.getState().pickingOnCanvas).toBe(true)
+    act(() => useBulkLinkStore.getState().togglePicked('r2')) // what a canvas click does
+    expect(rowOf('r2')).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: 'Add 2 links' }))
+    expect(onCreate).toHaveBeenCalledWith([{ source: 't1', target: 'r2' }, { source: 't2', target: 'r2' }], 'FLOWS_TO')
   })
 
   it('asks before adding more than 50 links', () => {

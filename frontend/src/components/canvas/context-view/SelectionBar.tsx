@@ -150,6 +150,7 @@ export function SelectionBar({
               <button
                 type="button"
                 onClick={onLink}
+                title="Or drag the + on any selected card onto another card"
                 className={cn(
                   'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
                   'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
