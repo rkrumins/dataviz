@@ -149,7 +149,7 @@ def _get_projector():
             return None
         from backend.app.services.versioning.projection import FalkorProjector
         from backend.app.services.projection_target import (
-            make_rollup_rebuild_hook, nudge_stats_after_projection,
+            make_rollup_rebuild_hook, after_projection,
             resolve_aggregation_edge_types,
         )
 
@@ -169,7 +169,7 @@ def _get_projector():
         _projector = FalkorProjector(
             factory, edge_types_resolver=resolve_aggregation_edge_types,
             on_rollups_stale=make_rollup_rebuild_hook(_agg_service),
-            on_projected=nudge_stats_after_projection)
+            on_projected=after_projection)
     return _projector
 
 

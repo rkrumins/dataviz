@@ -146,6 +146,37 @@ async def _queue_on_control_plane(ds_id: str, graph_id: str, mode: str) -> None:
                        "rebuild via the aggregation UI", ds_id, exc)
 
 
+async def _workspace_of(data_source_id: str) -> Optional[str]:
+    async with get_async_session() as s:
+        ds_row = await data_source_repo.get_data_source_orm(s, data_source_id)
+    return getattr(ds_row, "workspace_id", None) if ds_row is not None else None
+
+
+async def after_projection(data_source_id: str) -> None:
+    """The projector's ``on_projected`` hook: committed main just landed in the data
+    source's FalkorDB graph — by a publish, a merge, a revert, a bulk ingest, a sync, a
+    rebuild or a heal; they all end here. Invalidate every cached read of it (the content
+    AND rollup generations — a lineage change moves rollup cells too), then nudge the
+    insights refresh, which also marks the materialised top-level payload dirty.
+
+    The publish endpoints' own bump runs at COMMIT time, before the projection: a read in
+    that window recomputes from the still-old graph and caches it under the new generation
+    for an hour. This bump, after the data is really there, is the one that makes it right.
+    Never raises."""
+    try:
+        ws = await _workspace_of(data_source_id)
+        if ws:
+            from backend.app.services.graph_cache import CacheScope, get_graph_cache
+            cache = get_graph_cache()
+            scope = CacheScope(str(ws), str(data_source_id), "")
+            await cache.bump_generation(scope)
+            await cache.bump_rollup_generation(scope)
+    except Exception as exc:                             # pragma: no cover - infra
+        logger.warning("read-cache invalidation after projection of ds=%s skipped: %s",
+                       data_source_id, exc)
+    await nudge_stats_after_projection(data_source_id)
+
+
 async def nudge_stats_after_projection(data_source_id: str) -> None:
     """The projector's ``on_projected`` hook: committed main state just
     landed in the data source's real FalkorDB graph (publish / merge /

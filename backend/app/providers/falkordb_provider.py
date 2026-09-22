@@ -4390,7 +4390,7 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _refresh_if_graph_rebuilt(self) -> None:
         """Forget everything this provider learned from a graph that has since been
-        dropped and written again: the handles' id tables (falkordb-py would otherwise
+        dropped and written again, or retyped / re-parented by a publish: the handles' id tables (falkordb-py would otherwise
         decode every node with the old names — Domain as "Schema Field") and the
         graph-derived memos (rollup meta, regime, property names, casing maps, the
         ensured-indexes latch — the drop took the indexes). At most one Redis read per
@@ -4417,8 +4417,23 @@ class FalkorDBProvider(GraphDataProvider):
             self._casing_maps_cache = None
             self._property_key_count_cache = None
             self._save_indices_ensured = False
-            logger.info("graph %s was dropped and rewritten elsewhere — cleared this "
-                        "provider's id tables and graph memos", self._graph_name)
+            # The shared content caches keyed by what moved: urn → label (a stale label
+            # anchors a lookup on the OLD label and finds nothing — the node reads as
+            # missing) and ancestor chains (a moved container). Shared across processes;
+            # deleting twice is harmless.
+            if self._redis is not None:
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(
+                        cursor, match=f"{self._cache_ns}:ancestors:*", count=500)
+                    if keys:
+                        await self._redis.delete(*keys)
+                    if cursor == 0:
+                        break
+                await self._redis.delete(self._urn_label_key())
+            logger.info("graph %s changed structurally elsewhere (dropped, retyped or "
+                        "re-parented) — cleared this provider's id tables, graph memos "
+                        "and content caches", self._graph_name)
         except Exception:                               # noqa: BLE001 — never fails a query
             logger.debug("rebuild check skipped for %s", getattr(self, "_graph_name", "?"),
                          exc_info=True)

@@ -479,6 +479,8 @@ class FalkorProjector:
             changes = (await self._compute_changes(s, graph, main_id, from_seq, to_seq)
                        if from_seq > 0 else ([], [], [], []))
             total_items = sum(len(c) for c in changes)
+            structural = (await self._window_is_structural(s, graph, main_id, from_seq, changes)
+                          if from_seq > 0 else False)
             if from_seq <= 0:
                 ps.progress_done = 0
                 ps.progress_total = None
@@ -641,6 +643,14 @@ class FalkorProjector:
                 await self._on_rollups_stale(graph_id)
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("rollup-rebuild hook failed for %s: %s", graph_id, exc)
+
+        # A retype or a containment change leaves every reader's urn→label and ancestor
+        # caches describing the old shape; the graph's generation tells every process to
+        # drop them (graph_generation — pulled by each provider within seconds).
+        if published and (structural or (reconciled or {}).get("structural")
+                          or heal_outcome.get("structural")):
+            from backend.app.providers.graph_generation import bump_graph_generation
+            await bump_graph_generation(name, reason="structural change published")
 
         # Committed main just landed in the real FalkorDB graph — let the
         # app layer nudge the insights counts poll (after the watermark is
@@ -903,6 +913,42 @@ class FalkorProjector:
     # subtree, a reconcile's contributions); above it the on_rollups_stale hook queues the batch
     # job. See ``config.PROJECTION_ROLLUP_INLINE_CAP``.
     _MOVE_EDGE_CAP = config.PROJECTION_ROLLUP_INLINE_CAP
+
+    async def _containment_types(self, graph_id: str) -> Optional[Set[str]]:
+        """The ontology's containment edge types, upper-cased; None when unknown."""
+        if self._edge_types_resolver is None:
+            return None
+        try:
+            sets = await self._edge_types_resolver(self._svc, graph_id)
+        except Exception:                                # pragma: no cover - app-layer resolution
+            return None
+        return {t.upper() for t in (sets[0] or [])} if sets else None
+
+    async def _window_is_structural(self, s, graph, main_id, from_seq, changes) -> bool:
+        """Whether a publish window retypes an entity or writes / removes a containment
+        edge — the changes a reader's urn→label and ancestor caches cannot follow on their
+        own (a stale label anchors a lookup on the OLD label and finds nothing). Unknown
+        containment types count every edge change."""
+        node_upserts, edge_upserts, _node_deletes, edge_deletes = changes
+        if not (node_upserts or edge_upserts or edge_deletes):
+            return False
+        cont = await self._containment_types(graph.id)
+
+        def containment(rel) -> bool:
+            return cont is None or str(rel or "").upper() in cont
+
+        if any(containment((p or {}).get("edgeType")) for _e, _su, _tu, p, _sl, _tl in edge_upserts):
+            return True
+        if any(not isinstance(e, dict) or containment(e.get("rel")) for e in edge_deletes):
+            return True
+        if node_upserts:
+            before = await self._svc._values_at(
+                s, graph.id, main_id, [eid for eid, _u, _p in node_upserts], from_seq)
+            for eid, _u, p in node_upserts:
+                old = before.get(eid)
+                if old and old.get("entityType") != (p or {}).get("entityType"):
+                    return True
+        return False
 
     async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
         """Net ``:AGGREGATED`` rollup adjustments implied by this window's committed changes:
@@ -1611,11 +1657,15 @@ class FalkorProjector:
                      "MERGE (m:_GVRollupMeta {id: 'meta'}) SET m.seq = $seq REMOVE m.reconciling",
                      params={"seq": to_seq})
         writes = diff.writes + len(strays) + len(unkeyed) + len(parallel)
+        known_cont = cont_types if sets else None
+        structural = bool(diff.relabelled or strays or unkeyed) or any(
+            known_cont is None or k[1].upper() in known_cont
+            for k in [*diff.edge_upserts, *diff.edge_deletes, *parallel])
         logger.info("reconcile for %s at seq %d: %d write(s) (%d node upsert(s), %d node "
                     "delete(s), %d edge upsert(s), %d edge delete(s)); rollups %s",
                     graph_id, to_seq, writes, len(diff.node_upserts), len(diff.node_deletes),
                     len(diff.edge_upserts), len(diff.edge_deletes), rollups)
-        return {"writes": writes, "rollups": rollups}
+        return {"writes": writes, "rollups": rollups, "structural": structural}
 
     async def _delete_edges_by_key(self, client, keys, stored_label: Dict[str, str]) -> None:
         by: Dict[Tuple[str, str, str], list] = {}

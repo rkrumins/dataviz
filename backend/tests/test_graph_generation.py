@@ -88,3 +88,49 @@ def test_the_provider_clears_its_handles_tables_and_graph_caches():
     asyncio.run(p._refresh_if_graph_rebuilt())
     assert schema.cleared == 1
     assert p._agg_meta_cached is None and p._save_indices_ensured is False
+
+
+def test_a_structural_change_clears_the_shared_label_and_ancestor_caches():
+    # A stale urn→label anchors a lookup on the OLD label and finds nothing: after a
+    # retype the entity would read as missing. Ancestor chains go stale on a move.
+    p = FalkorDBProvider(host="h", port=6379, graph_name="g", auto_reconcile=False)
+    deleted = []
+
+    class _Redis:
+        async def scan(self, cursor, match=None, count=None):
+            return 0, [f"{match[:-1]}d1", f"{match[:-1]}d2"]
+
+        async def delete(self, *keys):
+            deleted.extend(keys)
+
+    class _Rebuilt:
+        async def rebuilt(self, _name):
+            return True
+    p._redis = _Redis()
+    p._rebuild_watch = _Rebuilt()
+    asyncio.run(p._refresh_if_graph_rebuilt())
+    assert p._urn_label_key() in deleted
+    assert any(":ancestors:" in k for k in deleted)
+
+
+def test_a_window_that_retypes_or_reparents_is_structural():
+    from backend.app.services.versioning.projection import FalkorProjector
+
+    class _Svc:
+        async def _values_at(self, s, gid, branch, ids, seq):
+            return {"n1": {"entityType": "domain"}}
+
+    async def _types(_svc, _gid):
+        return (["CONTAINS"], ["TRANSFORMS"])
+
+    proj = FalkorProjector(graph_client_factory=lambda *a, **k: None, edge_types_resolver=_types)
+    proj._svc = _Svc()
+    g = SimpleNamespace(id="g")
+    lineage = ("e", "a", "b", {"edgeType": "TRANSFORMS"}, "t", "t")
+    contain = ("e", "a", "b", {"edgeType": "CONTAINS"}, "t", "t")
+    run = lambda ch: asyncio.run(proj._window_is_structural(None, g, "m", 3, ch))
+    assert run(([], [lineage], [], [])) is False                     # lineage only
+    assert run(([], [contain], [], [])) is True                      # re-parent
+    assert run(([("n1", "u1", {"entityType": "schemaField"})], [], [], [])) is True  # retype
+    assert run(([("n1", "u1", {"entityType": "domain", "displayName": "x"})], [], [], [])) is False
+    assert run(([], [], [], [])) is False
