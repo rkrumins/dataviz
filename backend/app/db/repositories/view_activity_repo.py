@@ -38,6 +38,9 @@ ACTIONS = frozenset({
     # Break-glass transparency: an admin opened a private view they
     # neither created nor were shared on.
     "admin_viewed",
+    # Moving a view between environments, and the history of its design.
+    # An export is recorded because it is the door a view's contents leave by.
+    "imported", "exported", "version_saved", "version_restored",
 })
 
 

@@ -890,6 +890,13 @@ class ViewORM(Base):
     data_updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # The identity that travels with a view between environments. `id` is minted
+    # per environment; this one is copied into an exported file and adopted by the
+    # import, so dev's view and prod's copy of it can recognise each other and a
+    # second import updates the first instead of duplicating it. Not unique: a
+    # workspace may legitimately hold a view and a separate copy of it. NULL only
+    # on rows that predate the column and escaped its backfill.
+    portable_id = Column(Text, nullable=True, default=lambda: f"pv_{uuid.uuid4().hex}")
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -906,6 +913,7 @@ class ViewORM(Base):
         Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        Index("idx_view_portable", "portable_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
@@ -949,7 +957,8 @@ class ViewActivityLogORM(Base):
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
             "'data_changed', 'publish_requested', 'publish_denied', "
-            "'admin_viewed')",
+            "'admin_viewed', 'imported', 'exported', 'version_saved', "
+            "'version_restored')",
             name="ck_val_action_enum",
         ),
     )
@@ -1036,6 +1045,75 @@ class ViewLayoutOverlayORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewLayoutOverlay view_id={self.view_id!r} branch_id={self.branch_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# view_versions (the history of a view's design)                       #
+# ------------------------------------------------------------------ #
+class ViewVersionORM(Base):
+    """One immutable, content-addressed checkpoint of a view's design.
+
+    ``definition`` is the portable definition (``view_transfer.canonical``) as canonical JSON,
+    and ``content_hash`` is its SHA-256. The same design hashes the same in every
+    environment, which is how an imported view proves nothing was lost and how a later import
+    finds the version the two sides last agreed on.
+
+    This is NOT graph version control. Drafts, commits and pull requests version the graph's
+    DATA; this table versions the view's layers, assignments and settings, for every view
+    whether or not its data source is version-controlled.
+
+    Checkpoints are taken at deliberate moments (create, wizard save, import, restore, draft
+    promote, export, "Save version"), never per canvas autosave, so history stays readable and
+    bounded. ``name``/``description``/``icon``/``tags``/``view_type`` snapshot the label at that
+    moment; ``provenance`` records where an imported or restored version came from.
+    """
+    __tablename__ = "view_versions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"vv_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version = Column(Integer, nullable=False)
+    content_hash = Column(Text, nullable=False)
+    definition = Column(Text, nullable=False)                 # canonical JSON
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    icon = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                        # JSON array
+    view_type = Column(Text, nullable=False)
+    # baseline | create | wizard | import | restore | promote | export | manual | snapshot
+    source = Column(Text, nullable=False)
+    message = Column(Text, nullable=True)
+    parent_version = Column(Integer, nullable=True)
+    stats = Column(Text, nullable=True)                       # JSON: headline counts
+    provenance = Column(Text, nullable=True)                  # JSON: origin / restoredFrom / report
+    ontology_digest = Column(Text, nullable=True)
+    # Client-supplied idempotency key: a retried import returns the version its first
+    # attempt wrote instead of writing a second one.
+    request_id = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("view_id", "version", name="uq_view_versions_view_version"),
+        Index("idx_vv_view_created", "view_id", "created_at"),
+        # Partial on both dialects: a bare postgresql_where is silently dropped on SQLite,
+        # where the repo tests run (see the uq_ds_* indexes above for the same trap).
+        Index("uq_vv_request_id", "request_id",
+              unique=True,
+              postgresql_where=text("request_id IS NOT NULL"),
+              sqlite_where=text("request_id IS NOT NULL")),
+        CheckConstraint(
+            "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
+            "'promote', 'export', 'manual', 'snapshot')",
+            name="ck_view_versions_source",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewVersion view_id={self.view_id!r} v{self.version} {self.content_hash[:15]!r}>"
 
 
 # ------------------------------------------------------------------ #

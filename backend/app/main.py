@@ -2511,6 +2511,10 @@ class _TimeoutMiddleware:
             # Keep below nginx's proxy_read_timeout (180s) so the proxy
             # never wins the race against this tier.
             ("/api/v1/versioning/",   float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))),
+            # Moving views between environments: checking every entity a large view places
+            # against the target graph legitimately outlasts the 30s default. Below nginx's
+            # proxy_read_timeout (180s) for the same reason as versioning.
+            ("/api/v1/views/transfer/", float(os.getenv("HTTP_TIMEOUT_VIEW_TRANSFER_SECS", "120"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 

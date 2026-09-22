@@ -306,6 +306,7 @@ def _to_response(
         updatedAt=row.updated_at,
         deletedAt=getattr(row, 'deleted_at', None),
         ontologyDigest=getattr(row, 'ontology_digest', None),
+        portableId=getattr(row, 'portable_id', None),
     )
 
 
@@ -999,6 +1000,18 @@ async def promote_overlay(
 
     await session.delete(overlay)
     await session.flush()
+
+    # The draft's layout is now the view's: record it in the view's history. Imported here,
+    # not at module level, because the version repository reads back through this module.
+    # Best-effort like the promote itself: a history write must never undo a merge.
+    from backend.app.db.repositories import view_version_repo
+    try:
+        await view_version_repo.checkpoint(
+            session, row, source="promote", actor=actor,
+            message="Draft changes published", provenance={"branchId": branch_id},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("promote_overlay: version checkpoint failed for view %s", view_id)
     return True
 
 

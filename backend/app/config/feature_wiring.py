@@ -348,6 +348,36 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Exports already downloaded are not recalled — this stops NEW ones",
         ),
     ),
+    "viewExportEnabled": FeatureWiring(
+        key="viewExportEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /views/transfer/export — build a view file",
+            "POST /views/transfer/packages — build a view + data package",
+        ),
+        ui_surfaces=(
+            "Export on the view header, the view card menu and the Explorer bulk bar",
+            "'Export view' items in the canvas Import / Export menu",
+        ),
+        still_allowed=(
+            "Reading, editing and versioning every view",
+            "Files already downloaded are not recalled — this stops NEW ones",
+        ),
+    ),
+    "viewImportEnabled": FeatureWiring(
+        key="viewImportEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /views/transfer/inspect — read an uploaded view file",
+            "POST /views/transfer/reconcile — check it against a data source",
+            "POST /views/transfer/import — create or update a view from it",
+        ),
+        ui_surfaces=(
+            "The 'Import a view' journey in the View wizard",
+            "'Import view' buttons in the Explorer and the workspace Views manager",
+        ),
+        still_allowed=("Building views in the wizard", "Exporting views"),
+    ),
     "blankModelsEnabled": FeatureWiring(
         key="blankModelsEnabled",
         posture="capability",

@@ -478,6 +478,46 @@ class GraphDataProvider(ABC):
         pairs = await asyncio.gather(*(one(u) for u in dict.fromkeys(urns)))
         return {urn: chain for urn, chain in pairs if chain is not None}
 
+    #: URNs asked for per ``get_nodes`` call by the default ``resolve_identities``.
+    RESOLVE_IDENTITIES_CHUNK = 1000
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which of ``urns`` exist, and as what.
+
+        Built for checking an imported view against this graph, where the difference between
+        "not here" and "couldn't tell" decides a match percentage, so the result has THREE
+        states, not two:
+
+          * ``{urn: {"type", "name", "qualifiedName"}}``: found;
+          * ``{urn: None}``: looked for and confirmed absent;
+          * urn ABSENT from the result: unknown, because its lookup failed. Callers must never
+            treat that as missing.
+
+        This default asks ``get_nodes`` a chunk at a time; a chunk that raises is unknown. A
+        provider whose ``get_nodes`` swallows partial failures must override this (FalkorDB
+        does).
+        """
+        out: Dict[str, Optional[Dict[str, Any]]] = {}
+        wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
+        size = self.RESOLVE_IDENTITIES_CHUNK
+        for start in range(0, len(wanted), size):
+            chunk = wanted[start:start + size]
+            try:
+                nodes = await self.get_nodes(
+                    NodeQuery(urns=chunk, include_child_count=False, limit=len(chunk))
+                )
+            except Exception:
+                continue  # absent = unknown, never missing
+            found = {n.urn: n for n in nodes}
+            for urn in chunk:
+                node = found.get(urn)
+                out[urn] = (
+                    {"type": node.entity_type, "name": node.display_name,
+                     "qualifiedName": node.qualified_name}
+                    if node is not None else None
+                )
+        return out
+
     @abstractmethod
     async def get_descendants(
         self,

@@ -13914,6 +13914,102 @@ class FalkorDBProvider(GraphDataProvider):
                 out[urn] = counts.get(urn, {"in": 0, "out": 0})
         return out
 
+    #: URNs per label-qualified seek in ``resolve_identities``.
+    _RESOLVE_IDENTITIES_CHUNK = 2000
+
+    async def _identity_seek(self, label: str, urns: List[str]) -> Dict[str, Dict[str, Any]]:
+        """One label-qualified index seek: the found subset of ``urns`` with its identity.
+        Raises on failure; the caller decides what a failure means."""
+        cypher = (
+            f"MATCH (n:{label}) WHERE n.urn IN $urns "
+            "RETURN n.urn, labels(n)[0], coalesce(n.displayName, n.name, n.title, n.label), "
+            "n.qualifiedName"
+        )
+        result = await self._ro_query(cypher, params={"urns": urns}, timeout=10.0,
+                                      op="resolve_identities")
+        found: Dict[str, Dict[str, Any]] = {}
+        for row in (result.result_set or []):
+            if not row or not row[0]:
+                continue
+            urn = str(row[0])
+            found[urn] = {
+                "type": str(row[1]) if row[1] is not None else "unknown",
+                "name": str(row[2]) if row[2] is not None else urn,
+                "qualifiedName": str(row[3]) if row[3] is not None else None,
+            }
+        return found
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which of ``urns`` exist, and as what. See the interface for the three states.
+
+        Overridden because ``get_nodes`` logs and swallows a failed label query, so the default
+        would report a failure as "missing". Two passes, both label-qualified index seeks (this
+        build has no label-less URN index, so an unlabeled ``IN`` would be a full scan):
+
+        1. Seek each URN under the label the urn→label cache holds for it. That finds nearly
+           everything in one query per label per chunk.
+        2. Seek whatever pass 1 didn't find under EVERY label in the graph. The cache is not
+           proof of absence: its entries can be stale (a re-typed node lives under a new label)
+           or missing. A URN is reported absent only when every label's seek succeeded and
+           none held it; a URN whose seek failed and wasn't found elsewhere stays unknown.
+        """
+        wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
+        out: Dict[str, Optional[Dict[str, Any]]] = {}
+        if not wanted:
+            return out
+        await self._ensure_connected()
+        size = self._RESOLVE_IDENTITIES_CHUNK
+
+        pending: List[str] = []
+        try:
+            buckets = await self._label_buckets(wanted)
+        except Exception:
+            buckets = [("", wanted)]
+        for label, bucket in buckets:
+            if not label:
+                pending.extend(bucket)
+                continue
+            for start in range(0, len(bucket), size):
+                chunk = bucket[start:start + size]
+                try:
+                    found = await self._identity_seek(label, chunk)
+                except Exception as exc:
+                    logger.warning("resolve_identities seek failed (%d urns, label=%r): %s",
+                                   len(chunk), label, exc)
+                    pending.extend(chunk)
+                    continue
+                out.update(found)
+                pending.extend(u for u in chunk if u not in found)
+
+        if not pending:
+            return out
+        try:
+            res = await self._ro_query("CALL db.labels() YIELD label RETURN label", timeout=5.0,
+                                       op="resolve_identities")
+            labels = [_sanitize_label(str(r[0])) for r in (res.result_set or [])
+                      if r and r[0] and not str(r[0]).startswith("_")]
+        except Exception as exc:
+            logger.warning("resolve_identities: label enumeration failed: %s", exc)
+            return out  # every pending URN stays unknown
+        failed: set = set()
+        remaining = pending
+        for label in labels:
+            if not remaining:
+                break
+            for start in range(0, len(remaining), size):
+                chunk = remaining[start:start + size]
+                try:
+                    out.update(await self._identity_seek(label, chunk))
+                except Exception as exc:
+                    logger.warning("resolve_identities confirm seek failed (%d urns, label=%r): %s",
+                                   len(chunk), label, exc)
+                    failed.update(chunk)
+            remaining = [u for u in remaining if u not in out]
+        for urn in remaining:
+            if urn not in failed:
+                out[urn] = None
+        return out
+
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         await self._ensure_connected()
         if property_name in ("entityType", "entitytype"):

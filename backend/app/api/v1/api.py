@@ -13,7 +13,7 @@ from .endpoints import (
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
-    groups, workspace_members, view_grants, role_bindings,
+    groups, workspace_members, view_grants, view_versions, view_transfer, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
     admin_idp_groups,
@@ -150,6 +150,20 @@ api_router.include_router(
     view_grants.router,
     prefix="/views/{view_id}/grants",
     tags=["views:grants"],
+)
+# The history of a view's design (not graph version control). Included before
+# views.router like the grants above, so no `/{view_id}` route can capture it.
+api_router.include_router(
+    view_versions.router,
+    prefix="/views/{view_id}/versions",
+    tags=["views:versions"],
+)
+# Moving views between environments (export / import files). Before views.router
+# for the same reason: `/views/transfer/...` must never reach a `/{view_id}` route.
+api_router.include_router(
+    view_transfer.router,
+    prefix="/views/transfer",
+    tags=["views:transfer"],
 )
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(

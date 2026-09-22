@@ -57,6 +57,7 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "ContextModelORM": "visualization",
     "ViewORM": "visualization",
     "ViewFavouriteORM": "visualization",
+    "ViewVersionORM": "visualization",
     # aggregation
     "AggregationJobORM": "aggregation",
     "DataSourcePollingConfigORM": "aggregation",
