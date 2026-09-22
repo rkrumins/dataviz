@@ -407,6 +407,10 @@ class FalkorProjector:
         instance), freeing its RAM; the next projection re-creates it from Postgres
         (plan §16.5 #9-10)."""
         await (await self._graph_client(name, provider_id)).delete()
+        # The next projection writes the graph again with a new id catalogue; every
+        # long-lived reader must drop its old one (graph_generation).
+        from backend.app.providers.graph_generation import bump_graph_generation
+        await bump_graph_generation(name, reason="projection cache drop")
 
     async def project_graph(self, graph_id: str) -> Dict[str, object]:
         """Catch a graph's FalkorDB projection up to its target watermark.
