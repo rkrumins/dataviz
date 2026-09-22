@@ -4382,7 +4382,12 @@ class FalkorDBProvider(GraphDataProvider):
         no longer had, and every read was a full scan. Unanswerable → False, so the
         marker keeps its old meaning."""
         try:
-            res = await self._graph.query("CALL db.indexes() YIELD label RETURN count(label)")
+            # Read-only and bounded: a write-flagged query would create an empty key for an
+            # evicted graph, and this sits on the connect / job path. A missing key raises
+            # on RO_QUERY → "unknown" → the marker keeps its old meaning.
+            call = getattr(self._graph, "ro_query", None) or self._graph.query
+            res = await asyncio.wait_for(
+                call("CALL db.indexes() YIELD label RETURN count(label)"), timeout=2.0)
             rows = getattr(res, "result_set", None)
             return bool(rows) and rows[0][0] == 0
         except Exception:                               # noqa: BLE001 — never decides alone

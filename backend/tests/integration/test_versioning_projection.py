@@ -122,12 +122,23 @@ class FakeGraph:
             return _Result([[self._id_of(u), [n.get("_label")], u, n.get("gvHash")]
                             for u, n in self.nodes.items()
                             if params["lo"] <= self._id_of(u) < params["hi"]])
-        if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi RETURN"):
-            return _Result([[[self.nodes[e["src"]].get("_label")], e["src"], e["type"],
-                             [self.nodes[e["tgt"]].get("_label")], e["tgt"], e.get("gvHash")]
+        if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi"):
+            return _Result([[self._id_of(e["src"]), e["type"], self._id_of(e["tgt"]), e.get("gvHash")]
                             for e in self.edges.values()
                             if e["src"] in self.nodes and e["tgt"] in self.nodes
+                            and e["type"] != "AGGREGATED"
                             and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
+        # The node merge's removed-property read: the keys each node still holds.
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and cypher.endswith("RETURN u, keys(n)"):
+            return _Result([[u, [k for k in self.nodes[u] if not k.startswith("_")]]
+                            for u in params["urns"] if u in self.nodes])
+        # A retype, in place: the node keeps its edges.
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and " SET n:" in cypher and " REMOVE n:" in cypher:
+            new = cypher.split(" SET n:", 1)[1].split(" REMOVE", 1)[0]
+            for u in params["urns"]:
+                if u in self.nodes:
+                    self.nodes[u]["_label"] = new
+            return None
         # Node upsert: UNWIND $batch AS item MERGE (n:{label} {urn: item.urn}) SET ... REMOVE ...
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):
             label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]

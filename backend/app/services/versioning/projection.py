@@ -29,10 +29,14 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func, literal, or_, select
 
 from . import config, db
-from .reconcile import falkor_counts, pg_live_counts_projectable, rollup_health
+from .merkle import content_hash
+from .reconcile import (
+    falkor_counts, pg_live_counts_projectable, reconcile_interrupted, rollup_health,
+)
 from .projection_reconcile import (
     ActualEdge, ActualNode, EdgeKey, ExpectedEdge, ExpectedNode,
-    _local_chain, diff_projection, fingerprint, plan_rollup_deltas,
+    ROLLUP_EDGE_TYPE, _local_chain, diff_projection, fingerprint, plan_rollup_deltas,
+    urn_triples,
 )
 from .models import (
     EdgeVersionORM,
@@ -43,7 +47,7 @@ from .models import (
     _now,
 )
 from .service import GraphVersioningService, _is_edge_payload
-from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.derived_artifacts import is_derived_label
 
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
@@ -165,22 +169,38 @@ def _projected_level(payload: dict, level_map: Optional[Dict[str, int]]) -> Opti
     return payload.get("level") if lvl is None else lvl
 
 
-def _node_fingerprint(label: str, payload: dict, level: Optional[int]) -> str:
-    """What a projected node IS, as ``n.gvHash``: its label, its committed
-    payload and its stamped level. Deliberately not the written item — which
-    keys land native vs in ``propertiesRaw`` depends on each pass's property
-    budget, and the same content must fingerprint the same way every pass."""
-    return fingerprint({"l": label, "p": payload, "lv": level})
+def _projector_owned_property_names() -> Set[str]:
+    """Every node property the platform writes itself — never a user's to remove. Empty
+    (→ removal skipped) when the platform set cannot be resolved."""
+    from backend.app.providers.falkordb_provider import platform_property_names
+    platform = set(platform_property_names())
+    if not platform:
+        return set()
+    return platform | {
+        "urn", "entityId", "displayName", "qualifiedName", "description", "tags",
+        "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt", "propertiesRaw",
+        "level", "searchableText", "gvHash", "properties",
+    }
 
 
-def _edge_fingerprint(rel_type: str, payload: dict) -> str:
-    return fingerprint({"r": rel_type, "p": payload})
+def _node_fingerprint(label: str, chash: str, ontology_level: Optional[int]) -> int:
+    """What a projected node IS, as ``n.gvHash``: its label, Postgres's content hash of its
+    committed payload, and the level the ONTOLOGY gives its type (a payload's own level is
+    inside the content hash). Never the written item — which keys land native vs in
+    ``propertiesRaw`` depends on each pass's property budget. The reconcile builds the same
+    value from a version row alone, without reading the payload."""
+    return fingerprint("n", label, chash, ontology_level)
+
+
+def _edge_fingerprint(rel_type: str, chash: str) -> int:
+    return fingerprint("e", rel_type, chash)
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
 def _node_merge_cypher(label: str) -> str:
     return (
         f"UNWIND $batch AS item MERGE (n:{label} {{urn: item.urn}}) "
+        f"SET n += item.gone "
         f"SET n.entityId = item.entityId, n.displayName = item.displayName, "
         f"n.qualifiedName = item.qualifiedName, n.description = item.description, "
         f"n.tags = item.tags, n.layerAssignment = item.layerAssignment, "
@@ -323,7 +343,7 @@ def _is_derived_edge_payload(payload: Optional[dict]) -> bool:
     imports, before bootstrap excluded them) otherwise re-created every one of
     them as an empty stub on each full seed — no weight, no aggKey — which
     readers then served as real rollup cells."""
-    return bool(payload) and is_derived_edge_type(str(payload.get("edgeType") or ""))
+    return bool(payload) and str(payload.get("edgeType") or "") == ROLLUP_EDGE_TYPE
 
 
 def _edge_endpoints(payload: dict) -> Tuple[str, str]:
@@ -511,7 +531,9 @@ class FalkorProjector:
                     client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True)
             else:
                 await self._apply(client, *changes, level_map=level_map)
+            window_rollups_applied = False
             if rollup_pairs and rollup_pairs != "stale":
+                window_rollups_applied = True
                 # After the raw upserts, so pair endpoints exist. Idempotent per window
                 # (gvSeq guard), so a retried window can't double-count weights. A rollup
                 # failure must NEVER hold back raw-edge projection (rollups are a derived
@@ -525,10 +547,19 @@ class FalkorProjector:
 
             # Reconcile PG (SoR) vs FalkorDB (cache) and bounded-heal a dropped delta before
             # the watermark advances, so the cache can't silently diverge from committed main.
+            # A reconcile that died between its raw and rollup writes (its heal's retry is an
+            # ordinary window that would otherwise publish over it) leaves rollups no delta can
+            # repair: every pass checks, and hands them to the batch job.
+            interrupted = False
+            try:
+                interrupted = await reconcile_interrupted(client)
+            except Exception:                            # pragma: no cover - infra
+                logger.debug("rollup health unreadable for %s", graph_id, exc_info=True)
             heal_outcome: Dict[str, object] = {}
             verify_error, healed = (
                 await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
-                                            level_map=level_map, heal_outcome=heal_outcome)
+                                            level_map=level_map, heal_outcome=heal_outcome,
+                                            rollups_moved=window_rollups_applied)
                 if config.PROJECTION_VERIFY_ENABLED else (None, False)
             )
 
@@ -612,55 +643,64 @@ class FalkorProjector:
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
 
-        # Rollups the projector could not move by delta itself: a reconcile whose difference
-        # was too large to do inline or which found the stored rollups untrustworthy (stubs,
-        # a crashed reconcile, never aggregated), or a publish window with a containment move /
-        # bulk change / overlapping application. Hand off to the app layer to queue the
-        # aggregation batch job, which derives them from the raw graph and writes only the
-        # difference (fires after the watermark is durable, so it sees the projected raw edges).
-        # Gated on `published`: aggregating over — or nudging insights for — an unfaithful seed
-        # that was NOT published (reads still serve Postgres) would build rollups on top of a
-        # known-bad raw layer. A later successful rebuild re-fires this (full seed ⇒ from_seq<=0).
-        rollups_stale = (rollup_pairs == "stale"
-                         or (reconciled or {}).get("rollups") == "stale"
-                         or heal_outcome.get("rollups") == "stale")
-        if published and self._on_rollups_stale is not None and rollups_stale:
-            try:
-                await self._on_rollups_stale(graph_id)
-            except Exception as exc:                   # pragma: no cover - infra
-                logger.warning("rollup-rebuild hook failed for %s: %s", graph_id, exc)
+        # Everything below runs AFTER the watermark is durable and must run exactly then: the
+        # rollup hand-off, the structural bump, the read-cache invalidation, the ontology bump.
+        # A caller's budget (project_now's 10s, then the worker takes over) must not cancel it
+        # half-way — the worker finds nothing left to project and would never re-run it — so it
+        # is shielded: a cancel still reaches the caller, and these finish on their own.
+        async def _after_publish() -> None:
+            # Rollups the projector could not move by delta itself: a reconcile whose difference
+            # was too large to do inline or which found the stored rollups untrustworthy (stubs,
+            # a crashed reconcile, never aggregated), or a publish window with a containment move /
+            # bulk change / overlapping application. Hand off to the app layer to queue the
+            # aggregation batch job, which derives them from the raw graph and writes only the
+            # difference (fires after the watermark is durable, so it sees the projected raw edges).
+            # Gated on `published`: aggregating over — or nudging insights for — an unfaithful seed
+            # that was NOT published (reads still serve Postgres) would build rollups on top of a
+            # known-bad raw layer. The next pass that publishes re-evaluates it.
+            rollups_stale = (rollup_pairs == "stale" or interrupted
+                             or (reconciled or {}).get("rollups") == "stale"
+                             or heal_outcome.get("rollups") == "stale")
+            if published and self._on_rollups_stale is not None and rollups_stale:
+                try:
+                    await self._on_rollups_stale(graph_id)
+                except Exception as exc:                   # pragma: no cover - infra
+                    logger.warning("rollup-rebuild hook failed for %s: %s", graph_id, exc)
 
-        # A retype or a containment change leaves every reader's urn→label and ancestor
-        # caches describing the old shape; the graph's generation tells every process to
-        # drop them (graph_generation — pulled by each provider within seconds).
-        if published and (structural or (reconciled or {}).get("structural")
-                          or heal_outcome.get("structural")):
-            from backend.app.providers.graph_generation import bump_graph_generation
-            await bump_graph_generation(name, reason="structural change published")
+            # A retype or a containment change leaves every reader's urn→label and ancestor
+            # caches describing the old shape; the graph's generation tells every process to
+            # drop them (graph_generation — pulled by each provider within seconds).
+            if published and (structural or (reconciled or {}).get("structural")
+                              or heal_outcome.get("structural")):
+                from backend.app.providers.graph_generation import bump_graph_generation
+                await bump_graph_generation(name, reason="structural change published")
 
-        # Committed main just landed in the real FalkorDB graph — let the
-        # app layer nudge the insights counts poll (after the watermark is
-        # durable, so the poll observes the projected state).
-        if published and self._on_projected is not None and data_source_id:
-            try:
-                await self._on_projected(data_source_id)
-            except Exception as exc:                   # pragma: no cover - infra
-                logger.warning("on_projected hook failed for %s: %s", graph_id, exc)
+            # Committed main just landed in the real FalkorDB graph — let the
+            # app layer nudge the insights counts poll (after the watermark is
+            # durable, so the poll observes the projected state).
+            if published and self._on_projected is not None and data_source_id:
+                try:
+                    await self._on_projected(data_source_id)
+                except Exception as exc:                   # pragma: no cover - infra
+                    logger.warning("on_projected hook failed for %s: %s", graph_id, exc)
 
-        # A full-seed / heal reseed can change the graph's stored relationship-type spelling, but the
-        # reader's ontology→observed alias map is cached (resolved_ontology_cache) and is NOT
-        # invalidated by a projection rebuild — so reads keep matching the PRE-rebuild spelling and
-        # raw lineage edges (whose declared types are often mixed-case) silently stop rendering until
-        # the TTL lapses. Bump the ontology generation so every pod re-introspects the reseeded graph
-        # and rebuilds a correct alias (and drop this pod's L1 entry immediately). Best-effort;
-        # scoped to full-seed/heal so incremental publishes don't re-incur the resolve/DDL tax.
-        if published and (from_seq <= 0 or healed) and workspace_id and data_source_id:
-            try:
-                from backend.app.services.resolved_ontology_cache import bump_ontology_generation
-                await bump_ontology_generation(workspace_id, data_source_id)
-            except Exception as exc:                   # pragma: no cover - infra
-                logger.warning("ontology-generation bump after rebuild failed for %s: %s",
-                               graph_id, exc)
+            # A full-seed / heal reseed can change the graph's stored relationship-type spelling, but the
+            # reader's ontology→observed alias map is cached (resolved_ontology_cache) and is NOT
+            # invalidated by a projection rebuild — so reads keep matching the PRE-rebuild spelling and
+            # raw lineage edges (whose declared types are often mixed-case) silently stop rendering until
+            # the TTL lapses. Bump the ontology generation so every pod re-introspects the reseeded graph
+            # and rebuilds a correct alias (and drop this pod's L1 entry immediately). Best-effort;
+            # scoped to full-seed/heal so incremental publishes don't re-incur the resolve/DDL tax.
+            if published and (from_seq <= 0 or healed) and workspace_id and data_source_id:
+                try:
+                    from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+                    await bump_ontology_generation(workspace_id, data_source_id)
+                except Exception as exc:                   # pragma: no cover - infra
+                    logger.warning("ontology-generation bump after rebuild failed for %s: %s",
+                                   graph_id, exc)
+
+
+        await asyncio.shield(asyncio.ensure_future(_after_publish()))
 
         applied = sum(len(c) for c in changes) + int((reconciled or {}).get("writes") or 0) \
             + int(heal_outcome.get("writes") or 0)
@@ -877,7 +917,7 @@ class FalkorProjector:
                 by = {(e, h): p for e, h, p in rows}
                 for eid, hn in batch:
                     p = by.get((eid, hn))
-                    if p is None:
+                    if p is None or _is_derived_edge_payload(p):
                         continue
                     if _is_edge_payload(p):
                         src, tgt = _edge_endpoints(p)
@@ -911,10 +951,12 @@ class FalkorProjector:
         return {t.upper() for t in (sets[0] or [])} if sets else None
 
     async def _window_is_structural(self, s, graph, main_id, from_seq, changes) -> bool:
-        """Whether a publish window retypes an entity or writes / removes a containment
-        edge — the changes a reader's urn→label and ancestor caches cannot follow on their
-        own (a stale label anchors a lookup on the OLD label and finds nothing). Unknown
-        containment types count every edge change."""
+        """Whether a publish window changes what a reader has CACHED about existing entities:
+        retypes one (its urn→label entry would anchor lookups on the OLD label and find
+        nothing), removes a containment link, or gives an EXISTING entity a containment parent
+        (a move). Creating an entity inside a container is not structural — nothing has
+        cached the new entity's ancestry yet — so the common edit does not flush every
+        provider's caches. Unknown containment types count every edge change."""
         node_upserts, edge_upserts, _node_deletes, edge_deletes = changes
         if not (node_upserts or edge_upserts or edge_deletes):
             return False
@@ -923,17 +965,20 @@ class FalkorProjector:
         def containment(rel) -> bool:
             return cont is None or str(rel or "").upper() in cont
 
-        if any(containment((p or {}).get("edgeType")) for _e, _su, _tu, p, _sl, _tl in edge_upserts):
-            return True
         if any(not isinstance(e, dict) or containment(e.get("rel")) for e in edge_deletes):
             return True
-        if node_upserts:
-            before = await self._svc._values_at(
-                s, graph.id, main_id, [eid for eid, _u, _p in node_upserts], from_seq)
-            for eid, _u, p in node_upserts:
-                old = before.get(eid)
-                if old and old.get("entityType") != (p or {}).get("entityType"):
-                    return True
+        new_children = [_edge_endpoints(p or {})[1] for _e, _su, _tu, p, _sl, _tl in edge_upserts
+                        if containment((p or {}).get("edgeType"))]
+        ids = [eid for eid, _u, _p in node_upserts] + [c for c in new_children if c]
+        if not ids:
+            return False
+        before = await self._svc._values_at(s, graph.id, main_id, list(dict.fromkeys(ids)), from_seq)
+        if any(before.get(c) is not None for c in new_children):
+            return True                                  # an existing entity got a (new) parent
+        for eid, _u, p in node_upserts:
+            old = before.get(eid)
+            if old and old.get("entityType") != (p or {}).get("entityType"):
+                return True
         return False
 
     async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
@@ -1414,21 +1459,23 @@ class FalkorProjector:
     _SCAN_PAGE = 20000
 
     async def _scan_projection(self, client):
-        """What FalkorDB holds, as the reconcile compares it: projected nodes by
-        urn (every copy, in case a legacy type change left one per label),
-        projected edges by (source urn, type, target urn), and the internal ids
-        of nodes carrying no urn (never the projector's — nothing to keep).
-        The platform's own bookkeeping labels and rollup edges are skipped."""
+        """What FalkorDB holds, as the reconcile compares it: projected nodes by (label, urn)
+        — every copy, so a true duplicate is seen — projected edges by (source label, source
+        urn, type, target label, target urn), the edge keys holding more than one relationship,
+        and the internal ids of nodes carrying no urn (never the projector's). The platform's
+        own bookkeeping labels and rollup edges are skipped."""
         res = await _q(client, "MATCH (n) RETURN max(id(n))",
                        timeout_ms=_READ_TIMEOUT_MS, read_only=True)
         rows = getattr(res, "result_set", None) or []
         top = rows[0][0] if rows and rows[0] else None
-        copies: Dict[str, List[ActualNode]] = {}
+        copies: Dict[Tuple[str, str], int] = {}
+        nodes: Dict[Tuple[str, str], ActualNode] = {}
+        key_of: Dict[int, Tuple[str, str]] = {}          # internal id -> (label, urn)
         edges: Dict[EdgeKey, ActualEdge] = {}
         parallel: Set[EdgeKey] = set()
         unkeyed: List[int] = []
         if top is None:
-            return copies, edges, parallel, unkeyed
+            return nodes, copies, edges, parallel, unkeyed
         for lo in range(0, int(top) + 1, self._SCAN_PAGE):
             page = {"lo": lo, "hi": lo + self._SCAN_PAGE}
             res = await _q(client,
@@ -1442,101 +1489,118 @@ class FalkorProjector:
                 if not urn:
                     unkeyed.append(int(nid))
                     continue
-                copies.setdefault(str(urn), []).append(
-                    ActualNode(label=labels[0] if labels else "", fp=fp))
+                key = (labels[0] if labels else "", str(urn))
+                copies[key] = copies.get(key, 0) + 1
+                nodes[key] = ActualNode(fp=fp)
+                key_of[int(nid)] = key
+        # Edges after every node page, joined on internal ids: each row carries two ints
+        # instead of two label lists and two urns, and the platform's rollups — often the
+        # bulk of a large graph's relationships — are filtered by the server.
+        for lo in range(0, int(top) + 1, self._SCAN_PAGE):
+            page = {"lo": lo, "hi": lo + self._SCAN_PAGE}
             res = await _q(client,
                            "MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
-                           "RETURN labels(a), a.urn, type(r), labels(b), b.urn, r.gvHash",
+                           f"AND type(r) <> '{ROLLUP_EDGE_TYPE}' "
+                           "RETURN id(a), type(r), id(b), r.gvHash",
                            params=page, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
-            for la, su, rel, lb, tu, fp in (getattr(res, "result_set", None) or []):
-                if is_derived_edge_type(str(rel)) or not su or not tu:
-                    continue
-                if any(is_derived_label(str(x)) for x in (la or []) + (lb or [])):
-                    continue
-                key = (str(su), str(rel), str(tu))
+            for ia, rel, ib, fp in (getattr(res, "result_set", None) or []):
+                a, b = key_of.get(int(ia)), key_of.get(int(ib))
+                if a is None or b is None:
+                    continue                             # bookkeeping or urn-less endpoint
+                key = (a[0], a[1], str(rel), b[0], b[1])
                 if key in edges:
-                    parallel.add(key)                    # legacy duplicate of one triple
+                    parallel.add(key)                    # legacy duplicate of one relationship
                 edges[key] = ActualEdge(fp=fp)
-        return copies, edges, parallel, unkeyed
+        return nodes, copies, edges, parallel, unkeyed
 
     async def _expected_projection(self, s, graph, main_id, to_seq, level_map):
-        """What FalkorDB should hold at ``to_seq``: the same live state a full
-        seed replays, keyed the way the scan keys what is there."""
-        state = await self._svc._state_as_of(s, graph.id, main_id, to_seq)
-        nodes: Dict[str, ExpectedNode] = {}
+        """What FalkorDB should hold at ``to_seq``, NARROW: the winners a full seed replays
+        (fork-aware), keyed the way the projector writes them — (label, urn) per node, so
+        entities sharing a urn under different types are the separate nodes they have always
+        been — each with its fingerprint and a reference to fetch its payload IF it must be
+        written. No payload is read here. Where several entities share one key, entity id
+        order makes the winner stable, as the write order does in ``_apply``.
+
+        Returns ``(nodes, edges, types_by_urn)``."""
+        heads = await self._svc._heads_as_of(s, graph.id, main_id, to_seq)
+        nodes: Dict[Tuple[str, str], ExpectedNode] = {}
         urn_of: Dict[str, str] = {}
         label_of: Dict[str, str] = {}
-        for eid, p in state.items():
-            if p is None or _is_edge_payload(p):
-                continue
-            urn = _node_urn(eid, p)
-            urn_of[eid] = urn
-            label_of[eid] = str(p.get("entityType") or "Entity")
-            label = _sanitize_label(label_of[eid])
-            nodes[urn] = ExpectedNode(
-                entity_id=eid, label=label, payload=p,
-                fp=_node_fingerprint(label, p, _projected_level(p, level_map)))
+        types_by_urn: Dict[str, str] = {}
+        lm = level_map or {}
+        for eid in sorted(e for e, h in heads.items() if h is not None and h[0] == "node"):
+            _kind, gid, vid, chash, urn, etype = heads[eid]
+            urn = urn or f"gv:{eid}"
+            etype = etype or "Entity"
+            urn_of[eid], label_of[eid] = urn, etype
+            types_by_urn[urn] = etype
+            label = _sanitize_label(etype)
+            nodes[(label, urn)] = ExpectedNode(
+                entity_id=eid, ref=("node", gid, vid),
+                fp=_node_fingerprint(label, chash, lm.get(etype)))
         edges: Dict[EdgeKey, ExpectedEdge] = {}
-        endpoint_labels: Dict[str, str] = {}
-        for eid in sorted(e for e, p in state.items()
-                          if p is not None and _is_edge_payload(p)
-                          and not _is_derived_edge_payload(p)):
-            p = state[eid]
-            src, tgt = _edge_endpoints(p)
+        for eid in sorted(e for e, h in heads.items() if h is not None and h[0] == "edge"):
+            _kind, gid, vid, chash, etype, src, tgt = heads[eid]
+            if (etype or "") == ROLLUP_EDGE_TYPE:
+                continue                                 # the platform's, never the log's
             su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
             tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
-            rel = _sanitize_label(p.get("edgeType") or "REL")
-            # One relationship per triple in FalkorDB; the last id in a stable
-            # order is the one both the write and the fingerprint describe.
-            edges[(su, rel, tu)] = ExpectedEdge(
-                entity_id=eid, payload=p, fp=_edge_fingerprint(rel, p))
-            endpoint_labels[su], endpoint_labels[tu] = slb, tlb
-        return nodes, edges, endpoint_labels
+            rel = _sanitize_label(etype or "REL")
+            edges[(_sanitize_label(slb or "Entity"), su, rel, _sanitize_label(tlb or "Entity"), tu)] = \
+                ExpectedEdge(entity_id=eid, ref=("edge", gid, vid), fp=_edge_fingerprint(rel, chash))
+        del heads
+        return nodes, edges, types_by_urn
 
     async def _rollups_trusted(self, client, actual_lineage: int) -> bool:
         """Whether the stored rollups are exactly what FalkorDB's raw edges imply — the
         precondition for correcting them by delta (``reconcile.RollupHealth``, the same
-        reading "Check sync" reports). Not so with stub rollups, after a reconcile that died
-        between its raw and rollup writes, or when rollups nobody stamped exist or lineage
-        exists that no rollup was ever written for: the batch job derives them instead,
-        writing only the difference."""
+        reading "Check sync" reports)."""
         return (await rollup_health(client)).trusted(actual_lineage)
 
     async def _reconcile_in_place(self, client, graph_id, main_id, to_seq, is_fork,
-                                  level_map, track_progress: bool = False) -> Dict[str, object]:
-        """Make FalkorDB hold exactly committed main at ``to_seq`` by writing
-        only the difference, and move the rollups by that same difference —
-        never dropping the graph. See ``projection_reconcile``.
+                                  level_map, track_progress: bool = False,
+                                  rollups_moved_this_pass: bool = False) -> Dict[str, object]:
+        """Make FalkorDB hold exactly committed main at ``to_seq`` by writing only the
+        difference, and move the rollups by that same difference — never dropping the graph.
+        See ``projection_reconcile``.
 
-        Returns ``{"writes", "rollups"}`` where ``rollups`` is ``"none"``
-        (nothing rollup-relevant changed), ``"applied"``, or ``"stale"`` (the
-        change is too large to do inline, or the stored rollups were not
-        trustworthy to begin with — the caller queues the batch job)."""
+        Returns ``{"writes", "rollups", "structural"}``; ``rollups`` is ``"none"`` (nothing
+        rollup-relevant changed), ``"applied"``, or ``"stale"`` — the batch job must derive
+        them: the change is too large to do inline, the stored rollups are not a trustworthy
+        base, this pass already moved them from Postgres's window (``rollups_moved_this_pass``
+        — a heal after a publish window; its deltas assumed raw writes that did not land, so a
+        second delta would double-count), rollup cells went with a node that had to be deleted
+        outright, or the graph is a fork (its chains span the parent's rows)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
-            nodes, edges, endpoint_labels = await self._expected_projection(
+            nodes, edges, types_by_urn = await self._expected_projection(
                 s, graph, main_id, to_seq, level_map)
-        copies, actual_edges, parallel, unkeyed = await self._scan_projection(client)
+        actual_nodes, copies, actual_edges, parallel, unkeyed = await self._scan_projection(client)
 
-        # A urn held by more than one node (a legacy type change that left the
-        # old-label copy behind) and a triple held by more than one relationship
-        # are not compared: every copy is removed and the one that should exist
-        # is written once. Deleting copies by (label, urn) or by triple cannot
-        # spare "the one to keep", so the diff must see them as absent — while
-        # the rollup plan below still sees them as present, which they are.
-        duplicated = {u for u, cs in copies.items() if len(cs) > 1}
-        strays = [(u, c.label) for u in duplicated for c in copies[u]]
-        actual_nodes = {u: cs[0] for u, cs in copies.items() if u not in duplicated}
-        comparable_edges = {k: v for k, v in actual_edges.items()
-                            if k not in parallel and k[0] not in duplicated
-                            and k[2] not in duplicated}
-        diff = diff_projection(nodes, edges, actual_nodes, comparable_edges)
+        # A (label, urn) held by more than one node, or a relationship key held by more than
+        # one relationship, is legacy duplication: every copy is removed and the one that
+        # should exist written once. The diff sees them as absent (so they ARE written back);
+        # the rollup plan sees them as present, which they are.
+        duplicated = {k for k, n in copies.items() if n > 1}
+        comparable_nodes = {k: v for k, v in actual_nodes.items() if k not in duplicated}
+        comparable_edges = {
+            k: v for k, v in actual_edges.items()
+            if k not in parallel and (k[0], k[1]) not in duplicated and (k[3], k[4]) not in duplicated}
+        # Pure CPU over every entity of the graph: off the event loop, so a reconcile of a
+        # multi-million-entity graph never stalls the requests sharing this process.
+        diff = await asyncio.to_thread(
+            diff_projection, nodes, edges, comparable_nodes, comparable_edges)
 
-        rollups = "none"
-        plan = None
-        sets = None
+        rollups, plan, sets = "none", None, None
         cont_types: Set[str] = set()
-        if not is_fork and self._edge_types_resolver is not None:
+        raw_edges_change = bool(diff.edge_upserts or diff.edge_deletes or parallel
+                                or diff.node_deletes or duplicated or unkeyed)
+        # Rollup cells on a node deleted outright (a true duplicate, a urn-less stray) go with
+        # its DETACH; no delta can say what they held.
+        cells_lost = bool(duplicated or unkeyed)
+        if is_fork:
+            rollups = "stale" if (raw_edges_change or diff.relabels) else "none"
+        elif self._edge_types_resolver is not None:
             try:
                 sets = await self._edge_types_resolver(self._svc, graph_id)
             except Exception:                            # pragma: no cover - app-layer resolution
@@ -1547,60 +1611,79 @@ class FalkorProjector:
             cont_types = {t.upper() for t in (sets[0] or [])}
             lineage_types = {t.upper() for t in (sets[1] or [])}
             if lineage_types:
-                types_by_urn = {u: str(n.payload.get("entityType") or "") for u, n in nodes.items()}
-                plan = plan_rollup_deltas(
-                    edges.keys(), actual_edges.keys(),
+                expected_triples = urn_triples(edges.keys())
+                actual_triples = urn_triples(actual_edges.keys())
+                plan = await asyncio.to_thread(
+                    plan_rollup_deltas, expected_triples, actual_triples,
                     lineage_types=lineage_types, cont_types=cont_types,
                     canonical=bool(cont_types), cap=self._MOVE_EDGE_CAP,
                     level_of=lambda u: level_map.get(types_by_urn.get(u) or "")
                     if level_map else None,
                 )
-                actual_lineage = sum(1 for k in actual_edges if k[1].upper() in lineage_types)
-                if plan.stale or not await self._rollups_trusted(client, actual_lineage):
+                actual_lineage = sum(1 for k in actual_triples if k[1].upper() in lineage_types)
+                if (plan.stale or cells_lost or (rollups_moved_this_pass and plan.pairs)
+                        or not await self._rollups_trusted(client, actual_lineage)):
                     rollups, plan = "stale", None
                 elif plan.pairs:
                     rollups = "applied"
-        elif rollups == "none" and not is_fork and (diff.edge_upserts or diff.edge_deletes
-                                                    or parallel or diff.node_deletes):
-            # Edges changed but this projector cannot say which are lineage (no
-            # resolver, or it resolved nothing): hand the rollups to the batch
-            # job rather than leave them describing edges that no longer exist.
+        elif rollups == "none" and not is_fork and raw_edges_change:
+            # Edges changed but this projector cannot say which are lineage (no resolver, or
+            # it resolved nothing): the batch job re-derives the rollups.
             rollups = "stale"
 
         if plan is not None and plan.pairs:
-            # Set BEFORE the raw writes: once they land, a fresh diff can no
-            # longer see what these deltas were for, so a crash in between must
-            # be visible to the next pass (_rollups_trusted).
+            # Set BEFORE the raw writes: once they land, a fresh diff can no longer see what
+            # these deltas were for, so a crash in between must be visible to every later
+            # pass (rollup_health → reconcile_interrupted).
             await _q(client, "MERGE (m:_GVRollupMeta {id: 'meta'}) SET m.reconciling = $ts",
                      params={"ts": int(time.time() * 1000)})
 
-        # Strays, unkeyed nodes and parallel copies go first: the upserts below
-        # then land on the single node / relationship each key should have.
-        for label, urns in _group(strays).items():
+        total = diff.writes + sum(copies[k] for k in duplicated) + len(unkeyed) + len(parallel)
+        progress = self._progress_writer(graph_id, total) if track_progress and total else None
+        stored_label = {u: l for (l, u) in comparable_nodes}
+
+        # Duplicates first, so the writes below land on the single node / relationship each
+        # key should have.
+        for label, urns in _group([(u, l) for (l, u) in duplicated]).items():
             for chunk in _batches(urns, self._batch):
                 await _q(client, _delete_nodes_cypher(_sanitize_label(label)),
                          params={"urns": list(chunk)})
         for chunk in _batches(unkeyed, self._batch):
             await _q(client, "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n",
                      params={"ids": list(chunk)})
-        stored_label = {u: n.label for u, n in actual_nodes.items()}
-        await self._delete_edges_by_key(client, list(parallel), stored_label)
+        await self._delete_edges_by_key(client, list(parallel), progress)
 
-        progress = (self._progress_writer(graph_id, diff.writes)
-                    if track_progress and diff.writes else None)
-        node_upserts = [(nodes[u].entity_id, u, nodes[u].payload) for u in diff.node_upserts]
-        edge_upserts = [
-            (edges[k].entity_id, k[0], k[2], edges[k].payload,
-             endpoint_labels.get(k[0]) or "Entity", endpoint_labels.get(k[2]) or "Entity")
-            for k in diff.edge_upserts
-        ]
-        await self._apply(client, node_upserts, edge_upserts, diff.node_deletes, [],
+        # Retypes IN PLACE: the node keeps its id, its edges and the rollup cells on it.
+        by_relabel: Dict[Tuple[str, str], List[str]] = {}
+        for urn, old, new in diff.relabels:
+            by_relabel.setdefault((old, new), []).append(urn)
+        for (old, new), urns in by_relabel.items():
+            for chunk in _batches(urns, self._batch):
+                await _q(client,
+                         f"UNWIND $urns AS u MATCH (n:{_sanitize_label(old)} {{urn: u}}) "
+                         f"SET n:{_sanitize_label(new)} REMOVE n:{_sanitize_label(old)}",
+                         params={"urns": list(chunk)})
+                if progress:
+                    await progress(len(chunk))
+
+        # Phase two: payloads for exactly what is written — nothing else is ever read.
+        node_keys = list(dict.fromkeys([*diff.node_upserts, *(k for k in nodes if k in duplicated)]))
+        edge_keys = list(dict.fromkeys([*diff.edge_upserts, *(
+            k for k in edges if k in parallel
+            or (k[0], k[1]) in duplicated or (k[3], k[4]) in duplicated)]))
+        async with self._session() as s:
+            payload_of = await self._svc._payloads_by_version(
+                s, [nodes[k].ref for k in node_keys] + [edges[k].ref for k in edge_keys])
+        node_upserts = [(nodes[k].entity_id, k[1], payload_of[nodes[k].ref[2]]) for k in node_keys]
+        edge_upserts = [(edges[k].entity_id, k[1], k[4], payload_of[edges[k].ref[2]], k[0], k[3])
+                        for k in edge_keys]
+        await self._apply(client, node_upserts, edge_upserts,
+                          [(u, l) for (l, u) in diff.node_deletes], [],
                           progress=progress, level_map=level_map)
-        await self._delete_edges_by_key(client, diff.edge_deletes, stored_label)
+        await self._delete_edges_by_key(client, diff.edge_deletes, progress)
 
         if plan is not None and plan.pairs:
-            label_by_urn = {**{u: cs[0].label for u, cs in copies.items()},
-                            **{u: n.label for u, n in nodes.items()}}
+            label_by_urn = {**stored_label, **{u: l for (l, u) in nodes}}
             digest = None
             if level_map and cont_types:
                 from backend.app.services.ontology_levels import compute_level_digest
@@ -1611,37 +1694,37 @@ class FalkorProjector:
                                    "tlb": label_by_urn.get(tu) or "Entity",
                                    **({"dg": digest} if digest is not None else {})}
             await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=None)
-        if plan is not None and not plan.stale:
-            # The rollups now describe main at to_seq: the next publish window
-            # continues from here.
+        if plan is not None and not plan.stale and rollups != "stale":
+            # The rollups now describe main at to_seq: the next publish window continues
+            # from here.
             await _q(client,
                      "MERGE (m:_GVRollupMeta {id: 'meta'}) SET m.seq = $seq REMOVE m.reconciling",
                      params={"seq": to_seq})
-        writes = diff.writes + len(strays) + len(unkeyed) + len(parallel)
         known_cont = cont_types if sets else None
-        structural = bool(diff.relabelled or strays or unkeyed) or any(
-            known_cont is None or k[1].upper() in known_cont
+        structural = bool(diff.relabels or duplicated or unkeyed) or any(
+            known_cont is None or k[2].upper() in known_cont
             for k in [*diff.edge_upserts, *diff.edge_deletes, *parallel])
-        logger.info("reconcile for %s at seq %d: %d write(s) (%d node upsert(s), %d node "
-                    "delete(s), %d edge upsert(s), %d edge delete(s)); rollups %s",
-                    graph_id, to_seq, writes, len(diff.node_upserts), len(diff.node_deletes),
-                    len(diff.edge_upserts), len(diff.edge_deletes), rollups)
-        return {"writes": writes, "rollups": rollups, "structural": structural}
+        logger.info("reconcile for %s at seq %d: %d write(s) (%d node upsert(s), %d relabel(s), "
+                    "%d node delete(s), %d edge upsert(s), %d edge delete(s)); rollups %s",
+                    graph_id, to_seq, total, len(node_upserts), len(diff.relabels),
+                    len(diff.node_deletes), len(edge_upserts), len(diff.edge_deletes), rollups)
+        return {"writes": total, "rollups": rollups, "structural": structural}
 
-    async def _delete_edges_by_key(self, client, keys, stored_label: Dict[str, str]) -> None:
+    async def _delete_edges_by_key(self, client, keys, progress=None) -> None:
         by: Dict[Tuple[str, str, str], list] = {}
-        for su, rel, tu in keys:
-            by.setdefault((rel, _sanitize_label(stored_label.get(su) or "Entity"),
-                           _sanitize_label(stored_label.get(tu) or "Entity")), []).append(
-                {"src": su, "tgt": tu})
+        for sl, su, rel, tl, tu in keys:
+            by.setdefault((rel, _sanitize_label(sl or "Entity"), _sanitize_label(tl or "Entity")),
+                          []).append({"src": su, "tgt": tu})
         for (rel, sl, tl), items in by.items():
             for chunk in _batches(items, self._batch):
                 await _q(client, _delete_edges_by_key_cypher(rel, sl, tl),
                          params={"batch": chunk})
+                if progress:
+                    await progress(len(chunk))
 
     async def _verify_and_heal(
         self, client, graph_id, main_id, from_seq, to_seq, is_fork, level_map=None,
-        heal_outcome: Optional[Dict[str, object]] = None,
+        heal_outcome: Optional[Dict[str, object]] = None, rollups_moved: bool = False,
     ) -> Tuple[Optional[str], bool]:
         """Reconcile live node/edge COUNTS between Postgres (SoR) and FalkorDB after an
         apply, and — on a FULL SEED — additionally CONTENT-verify (id-set + deep fields), since
@@ -1713,7 +1796,8 @@ class FalkorProjector:
                 # In place, like a full replay: write back only what is missing
                 # and move the rollups by the same difference.
                 healed = await self._reconcile_in_place(
-                    client, graph_id, main_id, to_seq, is_fork, level_map)
+                    client, graph_id, main_id, to_seq, is_fork, level_map,
+                    rollups_moved_this_pass=rollups_moved)
                 if heal_outcome is not None:
                     heal_outcome.update(healed)
                 pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
@@ -1917,10 +2001,13 @@ class FalkorProjector:
             item = _node_item(eid, urn, p, level_map, native_keys)
             # The fingerprint a later reconcile compares against, so it can
             # tell an up-to-date node from one it must rewrite.
-            item["gvHash"] = _node_fingerprint(label, p, item["level"])
+            item["gvHash"] = _node_fingerprint(
+                label, content_hash(p), (level_map or {}).get(p.get("entityType")))
             by_label.setdefault(label, []).append(item)
+        keep = _projector_owned_property_names()
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):
+                await self._mark_removed_properties(client, label, chunk, keep)
                 await _q(client, _node_merge_cypher(label), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
@@ -1933,7 +2020,7 @@ class FalkorProjector:
                 _sanitize_label(tlb or "Entity"),
             )
             item = _edge_item(eid, su, tu, p)
-            item["gvHash"] = _edge_fingerprint(key[0], p)
+            item["gvHash"] = _edge_fingerprint(key[0], content_hash(p))
             by_rel.setdefault(key, []).append(item)
         for (rel, sl, tl), items in by_rel.items():
             for chunk in _batches(items, self._batch):
@@ -1951,6 +2038,25 @@ class FalkorProjector:
                 await _q(client, _delete_nodes_cypher(label), params={"urns": list(chunk)})
                 if progress:
                     await progress(len(chunk))
+
+    async def _mark_removed_properties(self, client, label: str, chunk: list, keep) -> None:
+        """Give each item a ``gone`` map of the user properties its node still carries but
+        the committed payload no longer has — ``n += nativeProps`` only ever adds, so a
+        property removed from an entity used to stay on its node (in Properties, matching
+        search filters) until a drop-and-replay wiped the graph, which no longer happens. A
+        null in the map removes the property. Skipped when the platform's own property names
+        are unknown, so nothing that might be the platform's is ever taken."""
+        for item in chunk:
+            item["gone"] = {}
+        if not keep:
+            return
+        res = await _q(client, f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) RETURN u, keys(n)",
+                       params={"urns": [i["urn"] for i in chunk]},
+                       timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+        held = {str(u): set(ks or []) for u, ks in (getattr(res, "result_set", None) or [])}
+        for item in chunk:
+            stale = held.get(item["urn"], set()) - keep - set(item["nativeProps"] or {})
+            item["gone"] = {k: None for k in stale}
 
     async def _run_edge_deletes(self, client, edge_deletes, progress=None) -> None:
         """Typed + endpoint-anchored deletes for resolved entries (dicts);

@@ -16,6 +16,7 @@ converges within one interval.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Awaitable, Callable, Dict, Optional, Tuple
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 _KEY = "falkorgen:{}"
 #: How often a provider re-reads a graph's generation. A read is one Redis GET.
 CHECK_INTERVAL_S = 2.0
+#: The read rides a user's query: a slow or unreachable bus must cost that query at most
+#: this, never the client's multi-second socket timeouts. A timed-out read changes nothing.
+READ_TIMEOUT_S = 0.25
 _TTL_S = 30 * 24 * 3600
 
 
@@ -62,10 +66,12 @@ class GraphRebuildWatch:
         reader: Callable[[str], Awaitable[Optional[str]]] = read_graph_generation,
         clock: Callable[[], float] = time.monotonic,
         interval_s: float = CHECK_INTERVAL_S,
+        read_timeout_s: float = READ_TIMEOUT_S,
     ):
         self._reader = reader
         self._clock = clock
         self._interval = interval_s
+        self._read_timeout = read_timeout_s
         self._seen: Dict[str, Tuple[bool, Optional[str]]] = {}   # name -> (known, generation)
         self._checked_at: Dict[str, float] = {}
 
@@ -77,7 +83,7 @@ class GraphRebuildWatch:
             return False
         self._checked_at[graph_name] = now
         try:
-            current = await self._reader(graph_name)
+            current = await asyncio.wait_for(self._reader(graph_name), timeout=self._read_timeout)
         except Exception:
             return False                                 # an unreadable bus changes nothing
         known, seen = self._seen.get(graph_name, (False, None))

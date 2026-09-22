@@ -106,7 +106,7 @@ async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
     monkeypatch.setattr(proj, "_expected_projection", fake_expected_projection)
 
     async def fake_scan_projection(client):
-        return {}, {}, set(), []
+        return {}, {}, {}, set(), []
     monkeypatch.setattr(proj, "_scan_projection", fake_scan_projection)
 
     started = asyncio.Event()

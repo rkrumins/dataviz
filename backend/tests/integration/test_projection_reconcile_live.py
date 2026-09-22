@@ -125,6 +125,13 @@ async def _run() -> None:
         got = await _rollups(client)
         assert got[(TA, TB)] == n * n // 2, got
 
+        # An aggregation run has derived the rollups (its _AggMeta stamp): the baseline a
+        # reconcile needs before it may correct them by delta rather than hand them off.
+        await client.query(
+            "MERGE (m:_AggMeta {id: 'singleton'}) SET m.regime = 'boundary', "
+            "m.runStartMs = $t, m.lastMaterializedAt = $iso",
+            {"t": int(time.time() * 1000), "iso": "2026-09-22T00:00:00+00:00"})
+
         # ── 3. the incident: a published write lost from FalkorDB, healed in place ────
         lost = f"{TA}:lost"
         await publish([_node(lost, "column"), _edge("tal", TA, lost, "CONTAINS"),
@@ -158,6 +165,21 @@ async def _run() -> None:
         dom = (await _rows(reader, "MATCH (n {urn: $u}) RETURN n", {"u": D1}))[0][0]
         assert dom.labels == ["domain"], f"a Domain must still decode as a Domain: {dom.labels}"
         assert handoffs == [], handoffs
+
+        # ── 3b. a heal right after a window that moved the rollups hands them off ─────
+        # The window's deltas come from Postgres and land even when a raw write does not; a
+        # second delta from the heal would count the same edge twice.
+        lost2 = f"{TA}:lost2"
+        await publish([_node(lost2, "column"), _edge("tal2", TA, lost2, "CONTAINS")])
+        await client.query("MATCH (n:column {urn: $u}) DETACH DELETE n", {"u": lost2})
+        before_h1 = await _rollups(client)
+        await publish([_edge("lost2_b1", lost2, b1, "TRANSFORMS")])
+        after_h1 = await _rollups(client)
+        assert after_h1[(TA, TB)] <= before_h1[(TA, TB)] + 1, \
+            f"one edge must never add more than 1: {before_h1[(TA, TB)]} -> {after_h1[(TA, TB)]}"
+        assert handoffs == [gid], f"the rollups must go to the batch job: {handoffs}"
+        handoffs.clear()
+        before = after_h1
 
         # ── 5. a rebuild of an up-to-date graph writes nothing ────────────────────────
         assert await svc.request_projection_rebuild(gid) is True

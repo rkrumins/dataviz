@@ -5328,6 +5328,56 @@ class GraphVersioningService:
                 state[eid] = None if op == "delete" else payload_by_vid.get(vid)
         return state
 
+    async def _heads_as_of(self, s, graph_id, branch_id, seq) -> Dict[str, Optional[tuple]]:
+        """The NARROW form of :meth:`_state_as_of` — the same winners (fork-aware, the same
+        ordering), but no payloads: ``entity_id -> None`` (deleted) or a tuple
+
+        * node: ``("node", graph_id, version_id, content_hash, urn, entity_type)``
+        * edge: ``("edge", graph_id, version_id, content_hash, edge_type, source_id, target_id)``
+
+        ``graph_id`` is the graph whose rows hold the version (a fork's base lives in its
+        parent), for :meth:`_payloads_by_version`. What a reconcile diffs on: a few dozen bytes
+        per entity instead of its whole payload, and no JSON to hash."""
+        heads: Dict[str, Optional[tuple]] = {}
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            main_id = await self._main_branch_id(s, graph_id)
+            if branch_id == main_id:
+                parent_main = await self._main_branch_id(s, graph.fork_parent_graph_id)
+                heads.update(await self._heads_as_of(
+                    s, graph.fork_parent_graph_id, parent_main, graph.fork_base_commit_seq or 0))
+        for model, kind in ((NodeVersionORM, "node"), (EdgeVersionORM, "edge")):
+            cols = ((model.entity_id, model.id, model.op, model.content_hash,
+                     model.urn, model.entity_type) if kind == "node" else
+                    (model.entity_id, model.id, model.op, model.content_hash,
+                     model.edge_type, model.source_entity_id, model.target_entity_id))
+            rows = (await s.execute(
+                select(*cols)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )).all()
+            for eid, vid, op, chash, *rest in rows:
+                heads[eid] = None if op == "delete" else (kind, graph_id, vid, chash, *rest)
+        return heads
+
+    async def _payloads_by_version(self, s, refs) -> Dict[str, dict]:
+        """``version_id -> payload`` for ``refs`` = iterable of ``(kind, graph_id, version_id)``
+        — the second phase: only for what a reconcile must actually write."""
+        grouped: Dict[Tuple[str, str], List[str]] = {}
+        for kind, gid, vid in refs:
+            grouped.setdefault((kind, gid), []).append(vid)
+        out: Dict[str, dict] = {}
+        for (kind, gid), vids in grouped.items():
+            model = NodeVersionORM if kind == "node" else EdgeVersionORM
+            for chunk in _chunks(vids, _IN_LIST_MAX):
+                for vid, payload in (await s.execute(
+                    select(model.id, model.payload).where(model.graph_id == gid, model.id.in_(chunk))
+                )).all():
+                    out[vid] = payload
+        return out
+
     async def _changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> set:
         """Entity ids touched by commits in ``(from_seq, to_seq]`` — O(changed),
         index-backed by ``ix_*_branch_changeset`` (a commit writes rows only for

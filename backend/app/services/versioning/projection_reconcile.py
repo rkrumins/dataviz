@@ -37,103 +37,137 @@ difference — rather than stalling the projector.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from backend.common.derived_artifacts import is_derived_edge_type
+#: The platform writes its rollups under exactly this type, and every count the verify
+#: compares (``type(r) <> 'AGGREGATED'``) excludes exactly it. Matching it case-blind would
+#: drop a customer's own ``aggregated`` edge type from the projection and fail the verify forever.
+ROLLUP_EDGE_TYPE = "AGGREGATED"
 from backend.common.providers.pair_rules import ancestor_closure, boundary_pairs, cube_pairs
 
-#: (source urn, relationship type as projected, target urn) — the projector
-#: MERGEs one relationship per such triple, so it is the edge's identity in
-#: FalkorDB.
-EdgeKey = Tuple[str, str, str]
+#: A projected node's identity in FalkorDB: every node write MERGEs on (label, urn), so two
+#: live entities sharing a urn under different types are two nodes, and a retype is a
+#: different key — never just a urn.
+NodeKey = Tuple[str, str]
+#: A projected edge's identity: (source label, source urn, type, target label, target urn) —
+#: the projector MERGEs one relationship per such tuple, label-anchored at both ends.
+EdgeKey = Tuple[str, str, str, str, str]
 
 
-def fingerprint(obj: object) -> str:
-    """A short, stable digest of what the projector writes for one item."""
-    blob = json.dumps(obj, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+#: Bump when the projector changes WHAT it writes for the same committed content (a new
+#: derived field, a different searchable text): every fingerprint moves, so the next
+#: reconcile rewrites every item once instead of leaving old-shape nodes behind forever.
+PROJECTION_SHAPE = 1
+
+
+def fingerprint(*parts: object) -> int:
+    """A stable signed 64-bit digest of what the projector writes for one item — built
+    from Postgres's own content hash of the payload, never the payload itself, so a
+    reconcile fingerprints millions of rows without serialising any of them. An int64
+    costs FalkorDB 8 bytes per item, not a string."""
+    blob = "\x1f".join(str(p) for p in (PROJECTION_SHAPE, *parts))
+    return int.from_bytes(hashlib.sha1(blob.encode("utf-8")).digest()[:8], "big", signed=True)
 
 
 @dataclass(frozen=True)
 class ExpectedNode:
     entity_id: str
-    label: str
-    payload: dict
-    fp: str
+    ref: object          # how to fetch the payload, only if this node must be written
+    fp: int
 
 
 @dataclass(frozen=True)
 class ExpectedEdge:
     entity_id: str
-    payload: dict
-    fp: str
+    ref: object
+    fp: int
 
 
 @dataclass(frozen=True)
 class ActualNode:
-    label: str
-    fp: Optional[str]
+    fp: Optional[int]
 
 
 @dataclass(frozen=True)
 class ActualEdge:
-    fp: Optional[str]
+    fp: Optional[int]
 
 
 @dataclass
 class ProjectionDiff:
-    node_upserts: List[str] = field(default_factory=list)          # urns
-    node_deletes: List[Tuple[str, str]] = field(default_factory=list)  # (urn, label as stored)
+    node_upserts: List[NodeKey] = field(default_factory=list)
+    node_deletes: List[NodeKey] = field(default_factory=list)
+    #: (urn, stored label, new label) — relabelled IN PLACE: the node keeps its id, its
+    #: edges and the rollup cells on it (a delete-and-recreate took them all).
+    relabels: List[Tuple[str, str, str]] = field(default_factory=list)
     edge_upserts: List[EdgeKey] = field(default_factory=list)
     edge_deletes: List[EdgeKey] = field(default_factory=list)
-    relabelled: Set[str] = field(default_factory=set)
 
     @property
     def empty(self) -> bool:
-        return not (self.node_upserts or self.node_deletes or self.edge_upserts or self.edge_deletes)
+        return not (self.node_upserts or self.node_deletes or self.relabels
+                    or self.edge_upserts or self.edge_deletes)
 
     @property
     def writes(self) -> int:
-        return (len(self.node_upserts) + len(self.node_deletes)
+        return (len(self.node_upserts) + len(self.node_deletes) + len(self.relabels)
                 + len(self.edge_upserts) + len(self.edge_deletes))
 
 
 def diff_projection(
-    expected_nodes: Mapping[str, ExpectedNode],
+    expected_nodes: Mapping[NodeKey, ExpectedNode],
     expected_edges: Mapping[EdgeKey, ExpectedEdge],
-    actual_nodes: Mapping[str, ActualNode],
+    actual_nodes: Mapping[NodeKey, ActualNode],
     actual_edges: Mapping[EdgeKey, ActualEdge],
 ) -> ProjectionDiff:
     """The writes that make FalkorDB hold exactly what Postgres says.
 
-    A node whose type changed is deleted under its stored label and written
-    under the new one: nodes are merged on (label, urn), so merging under the
-    new label alone would leave a duplicate behind. Its edges go with the
-    DETACH, so they are written again; an extra edge whose endpoint is being
-    deleted needs no write of its own for the same reason.
+    A urn stored under exactly one label that Postgres no longer has, and expected under
+    exactly one label FalkorDB does not have, is a retype: relabelled in place, then
+    rewritten (its fingerprint covers the label). Stored edges are compared as they will
+    read AFTER those relabels, so an edge that survives a retype is left alone. An extra
+    edge whose endpoint is being deleted needs no write of its own (the DETACH takes it).
     """
     d = ProjectionDiff()
-    d.relabelled = {
-        u for u, e in expected_nodes.items()
-        if u in actual_nodes and actual_nodes[u].label != e.label
-    }
-    for u, e in expected_nodes.items():
-        a = actual_nodes.get(u)
-        if a is None or u in d.relabelled or a.fp != e.fp:
-            d.node_upserts.append(u)
-    for u, a in actual_nodes.items():
-        if u not in expected_nodes or u in d.relabelled:
-            d.node_deletes.append((u, a.label))
-    detached = {u for u, _ in d.node_deletes}
-    for k, e in expected_edges.items():
-        a = actual_edges.get(k)
-        if a is None or a.fp != e.fp or k[0] in detached or k[2] in detached:
-            d.edge_upserts.append(k)
-    for k in actual_edges:
-        if k not in expected_edges and k[0] not in detached and k[2] not in detached:
-            d.edge_deletes.append(k)
+    missing: Dict[str, List[str]] = {}
+    extra: Dict[str, List[str]] = {}
+    for label, urn in expected_nodes:
+        if (label, urn) not in actual_nodes:
+            missing.setdefault(urn, []).append(label)
+    for label, urn in actual_nodes:
+        if (label, urn) not in expected_nodes:
+            extra.setdefault(urn, []).append(label)
+    relabel_to: Dict[NodeKey, str] = {}
+    for urn, labels in missing.items():
+        if len(labels) == 1 and len(extra.get(urn, ())) == 1:
+            old, new = extra[urn][0], labels[0]
+            d.relabels.append((urn, old, new))
+            relabel_to[(old, urn)] = new
+    for key, e in expected_nodes.items():
+        a = actual_nodes.get(key)
+        if a is None or a.fp != e.fp:
+            d.node_upserts.append(key)
+    for key in actual_nodes:
+        if key not in expected_nodes and key not in relabel_to:
+            d.node_deletes.append(key)
+    detached = set(d.node_deletes)
+
+    def after_relabel(label: str, urn: str) -> str:
+        return relabel_to.get((label, urn), label)
+
+    stored: Dict[EdgeKey, ActualEdge] = {}
+    for (sl, su, rel, tl, tu), a in actual_edges.items():
+        if (sl, su) in detached or (tl, tu) in detached:
+            continue                                     # goes with its endpoint
+        stored[(after_relabel(sl, su), su, rel, after_relabel(tl, tu), tu)] = a
+    for key, e in expected_edges.items():
+        a = stored.get(key)
+        if a is None or a.fp != e.fp:
+            d.edge_upserts.append(key)
+    for key in stored:
+        if key not in expected_edges:
+            d.edge_deletes.append(key)
     return d
 
 
@@ -146,7 +180,14 @@ class RollupPlan:
     contributions: int
 
 
-def _containment_parents(keys: Iterable[EdgeKey], cont_types: Set[str]) -> Dict[str, List[str]]:
+UrnTriple = Tuple[str, str, str]      # (source urn, type, target urn) — what rollups are keyed on
+
+
+def urn_triples(keys: Iterable[EdgeKey]) -> Set[UrnTriple]:
+    return {(su, rel, tu) for _sl, su, rel, _tl, tu in keys}
+
+
+def _containment_parents(keys: Iterable[UrnTriple], cont_types: Set[str]) -> Dict[str, List[str]]:
     parents: Dict[str, List[str]] = {}
     for s, t, c in keys:
         if t.upper() in cont_types:
@@ -197,7 +238,7 @@ def _descendants(children: Mapping[str, List[str]], roots: Iterable[str]) -> Set
 
 def _contribute(
     pairs: Dict[Tuple[str, str], Dict[str, object]],
-    key: EdgeKey,
+    key: UrnTriple,
     sign: int,
     parents: Mapping[str, List[str]],
     *,
@@ -244,8 +285,8 @@ def _contribute(
 
 
 def plan_rollup_deltas(
-    expected_keys: Iterable[EdgeKey],
-    actual_keys: Iterable[EdgeKey],
+    expected_keys: Iterable[UrnTriple],
+    actual_keys: Iterable[UrnTriple],
     *,
     lineage_types: Set[str],
     cont_types: Set[str],
@@ -257,22 +298,40 @@ def plan_rollup_deltas(
     raw edges imply to what Postgres's imply. See the module docstring."""
     lineage_types = {t.upper() for t in lineage_types}
     cont_types = {t.upper() for t in cont_types}
-    expected = {k for k in expected_keys if not is_derived_edge_type(k[1])}
-    actual = {k for k in actual_keys if not is_derived_edge_type(k[1])}
+    expected = {k for k in expected_keys if k[1] != ROLLUP_EDGE_TYPE}
+    actual = {k for k in actual_keys if k[1] != ROLLUP_EDGE_TYPE}
 
-    def lineage(keys: Set[EdgeKey]) -> Set[EdgeKey]:
-        return {k for k in keys if k[1].upper() in lineage_types}
+    upper_of: Dict[str, str] = {}
+
+    def upper(rel: str) -> str:                          # a handful of distinct types
+        u = upper_of.get(rel)
+        if u is None:
+            u = upper_of[rel] = rel.upper()
+        return u
+
+    def lineage(keys: Set[UrnTriple]) -> Set[UrnTriple]:
+        return {k for k in keys if upper(k[1]) in lineage_types}
 
     lin_e, lin_a = lineage(expected), lineage(actual)
     added, removed = lin_e - lin_a, lin_a - lin_e
 
-    par_e = _containment_parents(expected, cont_types)
-    par_a = _containment_parents(actual, cont_types)
-    moved = {
-        n for n in set(par_e) | set(par_a)
-        if set(par_e.get(n, ())) != set(par_a.get(n, ()))
-    }
-    affected = moved | _descendants(_children_of(par_e), moved) | _descendants(_children_of(par_a), moved)
+    def containment(keys: Set[UrnTriple]) -> Set[UrnTriple]:
+        return {k for k in keys if upper(k[1]) in cont_types}
+
+    cont_e, cont_a = containment(expected), containment(actual)
+    par_e = _containment_parents(cont_e, cont_types)
+    par_a = _containment_parents(cont_a, cont_types)
+    if cont_e == cont_a:
+        moved: Set[str] = set()                          # the common case: nothing re-parented
+    else:
+        moved = {
+            n for n in {k[2] for k in cont_e ^ cont_a}
+            if set(par_e.get(n, ())) != set(par_a.get(n, ()))
+        }
+    if not (added or removed or moved):
+        return RollupPlan(pairs={}, stale=False, contributions=0)
+    affected = moved | _descendants(_children_of(par_e), moved) | _descendants(_children_of(par_a), moved) \
+        if moved else set()
     recount = {k for k in lin_e & lin_a if k[0] in affected or k[2] in affected}
 
     contributions = len(added) + len(removed) + 2 * len(recount)

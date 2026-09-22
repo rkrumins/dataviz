@@ -7,13 +7,13 @@ Data health panel can say "rebuild" for exactly the graphs a rebuild would repai
 from backend.app.services.versioning.reconcile import RollupHealth
 
 
-def _h(aggregated=0, stubs=0, stamped=False, interrupted=False):
-    return RollupHealth(aggregated=aggregated, stubs=stubs, stamped=stamped,
-                        reconcile_interrupted=interrupted)
+def _h(aggregated=0, stubs=0, baseline=False, maintained=False, interrupted=False):
+    return RollupHealth(aggregated=aggregated, stubs=stubs, baseline=baseline,
+                        maintained=maintained, reconcile_interrupted=interrupted)
 
 
-def test_stamped_rollups_are_trusted_and_ok():
-    h = _h(aggregated=10, stamped=True)
+def test_rollups_an_aggregation_run_derived_are_trusted_and_ok():
+    h = _h(aggregated=10, baseline=True, maintained=True)
     assert h.trusted(lineage_edges=5) and h.status == "ok"
 
 
@@ -24,7 +24,7 @@ def test_stub_rollups_are_never_trusted():
 
 
 def test_an_interrupted_reconcile_is_not_trusted_even_when_stamped():
-    h = _h(aggregated=10, stamped=True, interrupted=True)
+    h = _h(aggregated=10, baseline=True, interrupted=True)
     assert not h.trusted(lineage_edges=5) and h.status == "untrusted"
 
 
@@ -35,3 +35,10 @@ def test_lineage_with_no_rollups_ever_written_is_missing():
 
 def test_an_empty_graph_is_trivially_consistent():
     assert _h().trusted(lineage_edges=0)
+
+
+def test_rollups_only_ever_moved_by_delta_are_not_a_baseline():
+    # A first seed / eviction-restore / a graph no run ever covered: the batch job derives
+    # them (and stamps _AggMeta) rather than trusting a partial set.
+    h = _h(aggregated=40, maintained=True)
+    assert not h.trusted(lineage_edges=40) and h.status == "ok"

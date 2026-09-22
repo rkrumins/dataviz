@@ -33,75 +33,79 @@ CONT = {"CONTAINS"}
 LIN = {"TRANSFORMS", "DEPENDS_ON"}
 
 
-def _en(label, fp="x"):
-    return ExpectedNode(entity_id="e", label=label, payload={}, fp=fp)
+def _en(fp="x"):
+    return ExpectedNode(entity_id="e", ref=None, fp=fp)
 
 
 def _ee(fp="x"):
-    return ExpectedEdge(entity_id="e", payload={}, fp=fp)
+    return ExpectedEdge(entity_id="e", ref=None, fp=fp)
 
 
-# ── raw diff ──────────────────────────────────────────────────────────────
+def _an(fp="x"):
+    return ActualNode(fp)
+
+
+# ── raw diff (nodes are (label, urn); edges are label-anchored at both ends) ──
 
 
 def test_identical_projection_writes_nothing():
-    nodes = {"a": _en("domain"), "b": _en("dataset")}
-    edges = {("a", "CONTAINS", "b"): _ee()}
+    nodes = {("domain", "a"): _en(), ("dataset", "b"): _en()}
+    edges = {("domain", "a", "CONTAINS", "dataset", "b"): _ee()}
     d = diff_projection(
         nodes, edges,
-        {"a": ActualNode("domain", "x"), "b": ActualNode("dataset", "x")},
-        {("a", "CONTAINS", "b"): ActualEdge("x")},
+        {("domain", "a"): _an(), ("dataset", "b"): _an()},
+        {("domain", "a", "CONTAINS", "dataset", "b"): ActualEdge("x")},
     )
     assert d.empty
 
 
 def test_missing_extra_and_changed_are_the_only_writes():
-    expected_nodes = {"a": _en("domain"), "b": _en("dataset", fp="new"), "c": _en("dataset")}
-    expected_edges = {("a", "CONTAINS", "c"): _ee()}
-    actual_nodes = {"a": ActualNode("domain", "x"), "b": ActualNode("dataset", "old"),
-                    "z": ActualNode("dataset", "x")}
-    actual_edges = {("a", "CONTAINS", "z"): ActualEdge("x")}
+    expected_nodes = {("domain", "a"): _en(), ("dataset", "b"): _en("new"), ("dataset", "c"): _en()}
+    expected_edges = {("domain", "a", "CONTAINS", "dataset", "c"): _ee()}
+    actual_nodes = {("domain", "a"): _an(), ("dataset", "b"): _an("old"), ("dataset", "z"): _an()}
+    actual_edges = {("domain", "a", "CONTAINS", "dataset", "z"): ActualEdge("x")}
     d = diff_projection(expected_nodes, expected_edges, actual_nodes, actual_edges)
-    assert sorted(d.node_upserts) == ["b", "c"]          # changed + missing; "a" untouched
-    assert d.node_deletes == [("z", "dataset")]
-    assert d.edge_upserts == [("a", "CONTAINS", "c")]
+    assert sorted(d.node_upserts) == [("dataset", "b"), ("dataset", "c")]   # "a" untouched
+    assert d.node_deletes == [("dataset", "z")]
+    assert d.edge_upserts == [("domain", "a", "CONTAINS", "dataset", "c")]
     # The extra edge dies with its endpoint's DETACH DELETE — no separate write.
     assert d.edge_deletes == []
 
 
-def test_a_node_whose_type_changed_is_recreated_under_its_new_label():
-    # MERGE keys on (label, urn): merging under the new label alone would leave
-    # the old-label node behind as a duplicate.
+def test_a_retyped_node_is_relabelled_in_place_and_keeps_its_edges():
+    # Deleting and recreating it took every edge and rollup cell on it with it.
     d = diff_projection(
-        {"a": _en("schemaField"), "b": _en("dataset")},
-        {("a", "TRANSFORMS", "b"): _ee()},
-        {"a": ActualNode("domain", "x"), "b": ActualNode("dataset", "x")},
-        {("a", "TRANSFORMS", "b"): ActualEdge("x")},
+        {("schemaField", "a"): _en("new"), ("dataset", "b"): _en()},
+        {("schemaField", "a", "TRANSFORMS", "dataset", "b"): _ee()},
+        {("domain", "a"): _an(), ("dataset", "b"): _an()},
+        {("domain", "a", "TRANSFORMS", "dataset", "b"): ActualEdge("x")},
     )
-    assert d.node_upserts == ["a"]
-    assert d.node_deletes == [("a", "domain")]
-    assert d.relabelled == {"a"}
-    # Its edges went with the old node, so they are written again.
-    assert d.edge_upserts == [("a", "TRANSFORMS", "b")]
+    assert d.relabels == [("a", "domain", "schemaField")]
+    assert d.node_upserts == [("schemaField", "a")]
+    assert d.node_deletes == [] and d.edge_upserts == [] and d.edge_deletes == []
+
+
+def test_two_live_entities_sharing_a_urn_are_two_nodes():
+    # Different types → different (label, urn) keys, as every projector write has made them.
+    both = {("chart", "u"): _en(), ("dataset", "u"): _en()}
+    d = diff_projection(both, {}, {("chart", "u"): _an()}, {})
+    assert d.node_upserts == [("dataset", "u")] and not d.relabels and not d.node_deletes
 
 
 def test_an_unstamped_projection_is_rewritten_once_in_place():
     # Graphs projected before fingerprints existed carry none: every item is
     # rewritten on the first reconcile (in place, no drop), then never again.
-    d = diff_projection(
-        {"a": _en("domain")}, {},
-        {"a": ActualNode("domain", None)}, {},
-    )
-    assert d.node_upserts == ["a"] and not d.node_deletes
+    d = diff_projection({("domain", "a"): _en()}, {}, {("domain", "a"): _an(None)}, {})
+    assert d.node_upserts == [("domain", "a")] and not d.node_deletes
 
 
 def test_an_extra_edge_between_surviving_nodes_is_deleted():
     d = diff_projection(
-        {"a": _en("domain"), "b": _en("domain")}, {},
-        {"a": ActualNode("domain", "x"), "b": ActualNode("domain", "x")},
-        {("a", "DEPENDS_ON", "b"): ActualEdge("x")},
+        {("domain", "a"): _en(), ("domain", "b"): _en()}, {},
+        {("domain", "a"): _an(), ("domain", "b"): _an()},
+        {("domain", "a", "DEPENDS_ON", "domain", "b"): ActualEdge("x")},
     )
-    assert d.edge_deletes == [("a", "DEPENDS_ON", "b")]
+    assert d.edge_deletes == [("domain", "a", "DEPENDS_ON", "domain", "b")]
 
 
 # ── rollup deltas ─────────────────────────────────────────────────────────

@@ -41,6 +41,9 @@ def _patch(monkeypatch, mode="in_source"):
         async def get_graph(self, graph_id):
             return {"data_source_id": "ds_1"}
 
+        async def projection_watermark(self, graph_id):
+            return {"projected": 8}
+
     async def _mode(_ds):
         return mode
 
@@ -58,7 +61,7 @@ def test_proxy_mode_queues_the_job_on_the_control_plane(monkeypatch):
     posts = [c for c in _Client.calls if c[0] == "post"]
     assert posts == [(
         "post", "/aggregation/data-sources/ds_1/jobs", {"triggerSource": "api"},
-        {"projectionMode": "in_source", "idempotencyKey": "gv-rollup-rebuild:graph_1"},
+        {"projectionMode": "in_source", "idempotencyKey": "gv-rollup-rebuild:graph_1:8"},
     )]
     init = [c for c in _Client.calls if c[0] == "init"][0][1]
     assert init["base_url"] == "http://controlplane:8091"

@@ -118,7 +118,7 @@ def test_a_window_that_retypes_or_reparents_is_structural():
 
     class _Svc:
         async def _values_at(self, s, gid, branch, ids, seq):
-            return {"n1": {"entityType": "domain"}}
+            return {"n1": {"entityType": "domain"}, "b": {"entityType": "dataset"}}
 
     async def _types(_svc, _gid):
         return (["CONTAINS"], ["TRANSFORMS"])
@@ -127,10 +127,28 @@ def test_a_window_that_retypes_or_reparents_is_structural():
     proj._svc = _Svc()
     g = SimpleNamespace(id="g")
     lineage = ("e", "a", "b", {"edgeType": "TRANSFORMS"}, "t", "t")
-    contain = ("e", "a", "b", {"edgeType": "CONTAINS"}, "t", "t")
+    contain = ("e", "a", "b", {"edgeType": "CONTAINS", "sourceEntityId": "a",
+                                "targetEntityId": "b"}, "t", "t")          # b existed: a move
+    new_child = ("e2", "a", "c", {"edgeType": "CONTAINS", "sourceEntityId": "a",
+                                  "targetEntityId": "c"}, "t", "t")        # c is new
     run = lambda ch: asyncio.run(proj._window_is_structural(None, g, "m", 3, ch))
     assert run(([], [lineage], [], [])) is False                     # lineage only
     assert run(([], [contain], [], [])) is True                      # re-parent
+    assert run(([], [new_child], [], [])) is False                   # creating inside a container
+    assert run(([], [], [], [{"rel": "CONTAINS"}])) is True          # a link removed
     assert run(([("n1", "u1", {"entityType": "schemaField"})], [], [], [])) is True  # retype
     assert run(([("n1", "u1", {"entityType": "domain", "displayName": "x"})], [], [], [])) is False
     assert run(([], [], [], [])) is False
+
+
+def test_a_slow_bus_costs_a_query_at_most_the_read_timeout():
+    clock = _Clock()
+
+    async def slow(_name):
+        await asyncio.sleep(5)
+
+    w = GraphRebuildWatch(reader=slow, clock=clock, interval_s=2.0, read_timeout_s=0.05)
+    import time as _t
+    t0 = _t.monotonic()
+    assert asyncio.run(w.rebuilt("g")) is False
+    assert _t.monotonic() - t0 < 1.0

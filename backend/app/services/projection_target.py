@@ -92,8 +92,17 @@ def make_rollup_rebuild_hook(get_aggregation_service):
             # there is nothing to heal — and a wrong-mode rebuild would write rollups
             # into the source graph, where nothing reads them for this data source.
             return
+        # One job per projected commit: evict/restore churn at the same commit collapses
+        # into it (the service's idempotent-replay window), while a later change is never
+        # swallowed by an earlier job that already ran — a key per GRAPH did exactly that
+        # for an hour.
+        try:
+            projected = (await svc.projection_watermark(graph_id) or {}).get("projected")
+        except Exception:                                # pragma: no cover - infra
+            projected = None
+        key = f"gv-rollup-rebuild:{graph_id}:{projected}"
         if agg is None:
-            await _queue_on_control_plane(str(ds_id), graph_id, mode)
+            await _queue_on_control_plane(str(ds_id), key, mode)
             return
         from backend.app.services.aggregation.schemas import AggregationTriggerRequest
         try:
@@ -101,16 +110,14 @@ def make_rollup_rebuild_hook(get_aggregation_service):
                 # idempotency_key: evict/restore churn (each restore is a full seed) collapses
                 # to one job per hour via the service's idempotent-replay window.
                 await agg.trigger(
-                    str(ds_id),
-                    AggregationTriggerRequest(idempotency_key=f"gv-rollup-rebuild:{graph_id}"),
-                    "api", s)
+                    str(ds_id), AggregationTriggerRequest(idempotency_key=key), "api", s)
             logger.info("queued aggregation rebuild for ds=%s (rollups stale after projection)", ds_id)
         except Exception as exc:                         # active-job conflict etc. — benign
             logger.info("rollup rebuild for ds=%s not queued: %s", ds_id, exc)
     return _hook
 
 
-async def _queue_on_control_plane(ds_id: str, graph_id: str, mode: str) -> None:
+async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -> None:
     """Queue the rollup rebuild on the aggregation control plane — the same route and
     internal auth the insights purge uses for its post-purge rebuild. Never raises: a
     409 (a job already active) is the benign outcome, and anything else is logged loudly
@@ -128,10 +135,7 @@ async def _queue_on_control_plane(ds_id: str, graph_id: str, mode: str) -> None:
             resp = await client.post(
                 f"/aggregation/data-sources/{ds_id}/jobs",
                 params={"triggerSource": "api"},
-                json={"projectionMode": mode,
-                      # evict/restore churn collapses to one job per hour (the service's
-                      # idempotent-replay window), as on the in-process path.
-                      "idempotencyKey": f"gv-rollup-rebuild:{graph_id}"},
+                json={"projectionMode": mode, "idempotencyKey": idempotency_key},
             )
         if resp.status_code in (200, 201, 202):
             logger.info("queued aggregation rebuild for ds=%s on the control plane "
