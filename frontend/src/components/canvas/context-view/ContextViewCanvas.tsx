@@ -75,6 +75,7 @@ import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveR
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
 import { MemoryGauge } from './MemoryGauge'
+import { BulkLinkPanel } from './BulkLinkPanel'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation, useViewportReservation } from './useBandReservation'
@@ -1926,6 +1927,8 @@ export function ContextViewCanvas({
   // columns still show browse and every authoring affordance on them still
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
+  /** The bulk "Link…" panel over the selection (BulkLinkPanel). */
+  const [bulkLinkOpen, setBulkLinkOpen] = useState(false)
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // A SHARED TRACE (`?trace=…`) — decoded once during the first render, so
   // the trace opens on the shared picture with no un-restored flash, and so
@@ -5369,6 +5372,32 @@ export function ContextViewCanvas({
             onClear={clearSelection}
             onTrace={() => startCanvasTrace(selectedNodeIds)}
             onOpenLens={() => openLensForSelection(selectedNodeIds)}
+            onLink={canvasWritable ? () => setBulkLinkOpen(true) : undefined}
+          />
+        )}
+        {/* Link the selection to other entities in one go — a draft being
+            edited only, like every other write. Closes itself when the
+            selection or the canvas stops allowing it. */}
+        {bulkLinkOpen && canvasWritable && selectedNodeIds.length > 1 && (
+          <BulkLinkPanel
+            selection={selectedNodeIds}
+            labelFor={(id) => displayMap.get(id)?.name || id}
+            onCreate={(pairs, edgeType) => {
+              // Judged by the view's own ontology — the one the panel previewed with.
+              const outcome = interactions.stageEdgeCreateMany(pairs, edgeType, {
+                relationshipTypes,
+                containmentEdgeTypes,
+                entityTypes: schemaEntityTypes,
+              })
+              if (outcome.staged > 0) {
+                useNotificationStore.getState().add({
+                  type: 'success',
+                  message: `Added ${outcome.staged.toLocaleString()} ${outcome.staged === 1 ? 'link' : 'links'} to your draft — save when you're done.`,
+                })
+              }
+              return outcome
+            }}
+            onClose={() => setBulkLinkOpen(false)}
           />
         )}
 

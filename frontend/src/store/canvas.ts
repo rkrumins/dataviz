@@ -686,7 +686,7 @@ function pushDrawerHistory(
 /** A logical grouping (`logical:<id>`) is a visual container the view config
  *  declares, not an entity in the graph. It has no urn to trace, expand or
  *  link, so it never belongs in a selection that bulk actions read. */
-const isSelectableNode = (id: string): boolean => !id.startsWith('logical:')
+export const isSelectableNode = (id: string): boolean => !id.startsWith('logical:')
 
 // Selector hooks
 export const useNodes = () => useCanvasStore((s) => s.nodes)
