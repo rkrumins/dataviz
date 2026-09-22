@@ -35,7 +35,6 @@ function run(opts: {
   roots: HierarchyNode[]
   expandedNodes?: Set<string>
   parentMap?: Map<string, string>
-  hoveredNodeId?: string | null
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -59,7 +58,6 @@ function run(opts: {
       isTracing: false,
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
-      hoveredNodeId: opts.hoveredNodeId ?? null,
       browseBundleParentMap: opts.parentMap,
     }),
   )
@@ -125,16 +123,7 @@ describe('useEdgeProjection — coverage-gated delegation', () => {
     expect(cb?.isDelegated).toBe(false)
   })
 
-  it('delegated parent edge re-materializes on endpoint hover', () => {
-    const { roots, parentMap } = buildRoots()
-    const res = run({
-      roots,
-      parentMap,
-      expandedNodes: new Set(['p']),
-      hoveredNodeId: 'p',
-      edges: [edge('e1', 'p', 'b'), edge('e2', 'c1', 'b')],
-    })
-    const pb = res.visibleLineageEdges.find((e: { source: string; target: string; isDelegated?: boolean }) => e.source === 'p' && e.target === 'b')
-    expect(pb?.isDelegated).toBe(false)
-  })
+  // Bringing a delegated line back on hover is the overlay's, at draw time —
+  // see `delegatedLineState` (hoverSpotlight.test.ts). The projection has no
+  // hover input, so a hover never re-runs it.
 })

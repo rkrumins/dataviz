@@ -15,11 +15,21 @@ import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { portView, type NodePorts } from './lineagePorts'
+import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
+
+/** Which modifier keys were held when a row was clicked. */
+export interface RowSelectModifiers {
+  /** Cmd/Ctrl — add or remove this row without disturbing the rest. */
+  multi: boolean
+  /** Shift — select every row from the last-clicked one to this one. */
+  range: boolean
+}
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -29,17 +39,27 @@ interface FlatTreeItemProps {
   layer: ViewLayerConfig
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   isSelected: boolean
+  /** This row is one of SEVERAL selected. A single selection is already
+   *  obvious (the drawer opens on it); a bulk one has to be countable at a
+   *  glance, so these rows carry an explicit mark rather than a tint. */
+  isBulkSelected?: boolean
   isExpanded: boolean
   isLoading?: boolean
   isSearchResult: boolean
   isHighlighted: boolean
   isFocusNode: boolean
   isClickHighlighted?: boolean
-  isHoverHighlighted?: boolean
   isDimmedByHighlight?: boolean
+  /** A multi-selection is active and this row is not in it. Dimmed more
+   *  gently than the search spotlight: the reader is still PICKING, so the
+   *  rows they have not chosen yet have to stay comfortably readable. */
+  isDimmedBySelection?: boolean
   isFocused?: boolean
   isTracing?: boolean
-  onSelect: (id: string) => void
+  /** A row click, with the modifiers that were held. `multi` toggles the
+   *  row in the selection; `range` selects from the last-clicked row to
+   *  this one. The column resolves `range` — it owns the visible order. */
+  onSelect: (id: string, modifiers: RowSelectModifiers) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
@@ -54,16 +74,17 @@ interface FlatTreeItemProps {
    *  band keeps the existing reparent drop. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
-  /** Ambient in/out lineage counts for THIS node. Rendered as edge
-   *  hairlines ANCHORED TO THE ROW BOX — so they always track the card's
-   *  width/position and unmount with it (no overlay coordinate math, no
-   *  stale/offset/ghost marks). */
-  lineageIn?: number
-  lineageOut?: number
-  /** Relative volume (0..1) vs the column's heaviest node — drives the
-   *  hairline opacity so hubs stand out and median rows fade. */
-  lineageIntensityIn?: number
-  lineageIntensityOut?: number
+  /** Where this card's lines on the canvas plug in, by side and direction —
+   *  its lineage PORTS (lineagePorts.ts). Rendered as children of the row
+   *  box, so they track the card's width and position and unmount with it. */
+  ports?: NodePorts
+  /** Relative volume (0..1) per side vs the column's busiest card — a port's
+   *  glow, so hubs stand out; every port is the same height. */
+  portStrengthLeft?: number
+  portStrengthRight?: number
+  /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
+   *  known. Shows a hollow port for lineage with nothing on this canvas. */
+  lineageTotals?: { in: number; out: number }
   /** Out-of-view lineage cue (curated views) — sky dashed marks. */
   externalIn?: number
   externalOut?: number
@@ -89,14 +110,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   layer,
   schema,
   isSelected,
+  isBulkSelected = false,
   isExpanded,
   isLoading = false,
   isSearchResult,
   isHighlighted,
   isFocusNode,
   isClickHighlighted = false,
-  isHoverHighlighted = false,
   isDimmedByHighlight = false,
+  isDimmedBySelection = false,
   isFocused = false,
   isTracing = false,
   onSelect,
@@ -110,10 +132,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
-  lineageIn = 0,
-  lineageOut = 0,
-  lineageIntensityIn = 0,
-  lineageIntensityOut = 0,
+  ports,
+  portStrengthLeft = 0,
+  portStrengthRight = 0,
+  lineageTotals,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -232,6 +254,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `?? default` covers users whose persisted state predates these fields.
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
+  const showEntityIcon = usePreferencesStore(s => s.showCanvasEntityIcons) ?? true
   const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
 
   // Business/Technical. `node.name` is the business-facing name the hierarchy
@@ -243,6 +266,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const leftPort = portView('left', ports, lineageTotals)
+  const rightPort = portView('right', ports, lineageTotals)
   const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
@@ -341,6 +366,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     <div
       ref={itemRef}
       id={`layer-node-${node.id}`}
+      // The hover spotlight's glow never replaces a selected row's own.
+      data-selected={isSelected || undefined}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       onDragOver={(e) => {
@@ -386,14 +413,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // hover-revealed grip below); everything else keeps the pointer.
         reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
         paddingClass,
-        // Subtle backdrop-blur on the card body — visually invisible
-        // (matches the glassy translucent design) but blurs anything
-        // painted behind so cross-column edges don't read as solid lines
-        // bleeding through the node. Same technique the layer header uses
-        // (`backdrop-blur-xl` at LayerColumn.tsx:508). The bg tint is kept
-        // near-zero so the airy feel of the original cards is preserved;
-        // hover / selected gradients below paint over this without conflict.
-        "bg-canvas-elevated/10 backdrop-blur-sm",
+        // The card's surface: solid (lines pass cleanly under it) or, by the
+        // reader's choice, frosted — see `.nx-row-card` in globals.css. The
+        // hover / selected gradients below paint over either.
+        "nx-row-card",
         // Base hover state with gradient.
         //
         // This was `from-white/[0.06]` alone — 6% white, which over a near-white
@@ -404,7 +427,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:to-transparent",
         "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
-        isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        // One of several: the row has to be findable while scanning a column,
+        // so the ring is a full 2px in the accent rather than a 30% hairline.
+        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgba(var(--accent-lineage-rgb),0.7)]",
         // Search result highlight — direct match (advanced search or quick search)
         isSearchResult && !isSelected && cn(
             "bg-gradient-to-r from-amber-500/15 to-transparent",
@@ -428,14 +454,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         (isHighlighted || isOnLineage) && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
-        // Hover-highlight: lighter ephemeral glow on connected nodes
-        isHoverHighlighted && !isSelected && !isClickHighlighted && "bg-gradient-to-r from-blue-500/[0.05] to-transparent ring-1 ring-blue-400/15 dark:from-blue-400/[0.06] dark:ring-blue-400/12",
+        // Hover-highlight (the lighter glow on a hovered entity's connections,
+        // and the dim on everything else) is the edge overlay's, applied as
+        // CSS — `.nx-row-card` under `[data-row-spotlight]`, globals.css.
         // Keyboard focus ring (4.5)
         isFocused && !isSelected && "ring-2 ring-accent-lineage/40 bg-gradient-to-r from-accent-lineage/[0.06] to-transparent",
         // Staged-change row treatment — full-row color tint per change type
         stagedRowClass,
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40",
+        // The selection spotlight: lighter than the search one, and never
+        // applied on top of it (a row cannot be dimmed twice).
+        !isDimmed && isDimmedBySelection && "opacity-60",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse",
         // Reparent drop target (middle band) — a node drag will nest INTO
@@ -456,7 +486,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       }}
       onClick={(e) => {
         e.stopPropagation()
-        onSelect(node.id)
+        onSelect(node.id, { multi: e.metaKey || e.ctrlKey, range: e.shiftKey })
       }}
       onDoubleClick={(e) => {
         e.stopPropagation()
@@ -605,8 +635,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </button>
 
-      {/* Entity Icon - Glass morphism container */}
+      {/* Entity Icon - Glass morphism container. The reader can turn the
+          ontology's icons off (Display > Display options): the row is then
+          its name alone — but a bulk-selected row keeps its check, the one
+          positive "you picked this" mark, in the icon's place. */}
+      {!showEntityIcon && isBulkSelected && (
+        <span
+          className="w-4 h-4 flex-shrink-0 rounded-full bg-accent-lineage flex items-center justify-center shadow-sm"
+          aria-hidden
+        >
+          <LucideIcons.Check className="w-2.5 h-2.5 text-white" strokeWidth={3.5} />
+        </span>
+      )}
+      {showEntityIcon && (
       <div
+        data-entity-icon
         className={cn(
           "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm relative",
           iconContainerSize,
@@ -619,12 +662,24 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           ...(isLogical && { border: `1px dashed ${nodeColor}50` }),
         }}
       >
+        {/* One of several selected. A positive mark, not a tint: the row has
+            to answer "did I pick this one?" without the reader comparing
+            shades across a scrolling column. */}
+        {isBulkSelected && (
+          <span
+            className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-accent-lineage flex items-center justify-center ring-2 ring-canvas shadow-sm"
+            aria-hidden
+          >
+            <LucideIcons.Check className="w-2.5 h-2.5 text-white" strokeWidth={3.5} />
+          </span>
+        )}
         <DynamicIcon
           name={logicalIcon ?? visual?.icon ?? 'Box'}
           className={cn(iconSize, "transition-transform duration-200")}
           style={{ color: nodeColor }}
         />
       </div>
+      )}
 
       {/* Name + type — the text region IS the row's primary payload.
           ``min-w-0`` keeps the flex child from forcing the row to
@@ -843,45 +898,44 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </div>
 
-      {/* Hover indicator line */}
-      <motion.div
-        className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full"
-        style={{ backgroundColor: nodeColor }}
-        initial={false}
-        animate={{
-          height: isSelected ? '70%' : isHovered ? '50%' : '0%',
-          opacity: isSelected ? 1 : isHovered ? 0.6 : 0
-        }}
-        transition={{ duration: 0.2 }}
-      />
-
-      {/* ── Ambient lineage hairlines — ANCHORED TO THIS ROW BOX ──────────
-          Incoming hugs the left edge, outgoing the right; sky dashed cues
-          sit just inboard for out-of-view lineage. Because these are
-          children of the row (position:relative), they track the card's
-          width and position for free, unmount when the row collapses, and
-          can never drift/offset/ghost — no overlay coordinate math.
-          Opacity floors at 0.6 (presence is always legible) with volume
-          intensity on top so hubs stand out. Kept inside the box so the
-          column's overflow-x-hidden never clips them. ── */}
-      {lineageIn > 0 && (
-        <div
-          className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
-          style={{
-            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
-            opacity: 0.6 + lineageIntensityIn * 0.4,
+      {/* Hover indicator line. A left lineage port owns that edge — its rail
+          runs the card's height — so the indicator steps aside there rather
+          than stack a second bar on the same 4px; the card's tint and ring
+          still say hovered / selected. */}
+      {!leftPort && (
+        <motion.div
+          className="absolute left-0 top-1/2 -translate-y-1/2 rounded-r-full"
+          // Selection speaks in the accent, not in the entity's type colour:
+          // a rail tinted per type reads as decoration, and a column of them
+          // cannot be scanned for "what did I pick?".
+          style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
+          initial={false}
+          animate={{
+            width: isBulkSelected ? 4 : 3,
+            height: isSelected ? '85%' : isHovered ? '50%' : '0%',
+            opacity: isSelected ? 1 : isHovered ? 0.6 : 0,
           }}
-          title={`${lineageIn.toLocaleString()} incoming ${unitNoun(lineageIn, 'lines')} on this canvas — ${unitMeaning('lines')}`}
+          transition={{ duration: 0.2 }}
         />
       )}
-      {lineageOut > 0 && (
-        <div
-          className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
-          style={{
-            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
-            opacity: 0.6 + lineageIntensityOut * 0.4,
-          }}
-          title={`${lineageOut.toLocaleString()} outgoing ${unitNoun(lineageOut, 'lines')} on this canvas — ${unitMeaning('lines')}`}
+
+      {/* ── Lineage ports — ANCHORED TO THIS ROW BOX ──────────────────────
+          Where this card's lines plug in: a rail down each edge that carries
+          lines, the card's height, in the lineage direction colours —
+          incoming, outgoing, or split when a side carries both
+          (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
+          brighter the more they carry. Hollow: lineage in the data, none of
+          it on this canvas. No rail: no lineage that way. ── */}
+      {leftPort && (
+        <LineagePortGlyph
+          side="left" view={leftPort} strength={portStrengthLeft}
+          counts={leftPort.kind === 'here' ? ports?.left : lineageTotals}
+        />
+      )}
+      {rightPort && (
+        <LineagePortGlyph
+          side="right" view={rightPort} strength={portStrengthRight}
+          counts={rightPort.kind === 'here' ? ports?.right : lineageTotals}
         />
       )}
       {externalIn > 0 && (

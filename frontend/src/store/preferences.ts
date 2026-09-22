@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { LayerNodeSortAlgo } from '@/types/schema'
+import { DEFAULT_LINEAGE_DIRECTION_COLORS, type LineageDirectionColors } from '@/lib/lineageDirectionColors'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -30,6 +31,13 @@ export const CANVAS_ZOOM_STEP = 0.05
  *  - 'raw'    : every fetched edge renders as a real edge (legacy behavior). Prompts at >5,000.
  */
 export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
+
+/**
+ * Which lineage lines move (the chevrons marching along a line) — see
+ * `lineMotion.ts`. 'focus': the lines being looked at; 'all': every line
+ * while the board is sparse; 'off': none.
+ */
+export type LineageMotion = 'focus' | 'all' | 'off'
 
 export interface NodeStyleConfig {
   color: string
@@ -71,6 +79,25 @@ interface PreferencesState {
   // Sidebar
   sidebarCollapsed: boolean
   toggleSidebar: () => void
+
+  // Canvas bottom-right dock (Data loads + Flows). Collapsed individually
+  // each is still a header; minimizing folds the pair into one slim strip
+  // so the columns get their width and height back.
+  canvasDockMinimized: boolean
+  setCanvasDockMinimized: (minimized: boolean) => void
+
+  // Context View: when the layers do not all fit, the ones outside the open
+  // window fold into spines, so every layer — and every flow into it — stays
+  // on screen. Opt-in (and only offered while `canvasLayerFoldEnabled` is on):
+  // off, every layer keeps its full width and the canvas scrolls sideways.
+  canvasFoldLayers: boolean
+  setCanvasFoldLayers: (fold: boolean) => void
+
+  // Entity drawer — which sections the user has folded away, by section
+  // key. A key absent from the map is OPEN: the default is open, so a new
+  // section never arrives hidden and an older stored map never hides one.
+  drawerSectionsCollapsed: Record<string, boolean>
+  toggleDrawerSection: (key: string) => void
 
   // Canvas preferences
   showMinimap: boolean
@@ -125,10 +152,31 @@ interface PreferencesState {
    * Flow ribbons: in Adaptive mode above the edge budget, draw one
    * Sankey-style band per (source layer → target layer) pair whose
    * thickness encodes TOTAL edge volume — the macro flow stays legible
-   * while individual curves are budgeted. User-toggleable.
+   * while individual curves are budgeted. Opt-in (off by default).
    */
   showFlowRibbons: boolean
   toggleFlowRibbons: () => void
+  /** Which lineage lines move. Calm mode and the system's reduce-motion
+   *  setting override it to 'off'. */
+  lineageMotion: LineageMotion
+  setLineageMotion: (motion: LineageMotion) => void
+  /**
+   * Entity cards on the canvas: solid by default, so a line passes cleanly
+   * under a card — or frosted glass, where lines show softly through. Frosted
+   * re-samples what lies under every card on each scroll frame, which is why
+   * it is the choice rather than the default.
+   */
+  frostedCards: boolean
+  toggleFrostedCards: () => void
+  /** The Anchor Rail's "Connected, above / below" trays — the focused
+   *  entity's partners scrolled out of each column, listed at its edge. Off:
+   *  a small hint in their place, which opens the tray on a click. */
+  showConnectedTrays: boolean
+  toggleConnectedTrays: () => void
+  /** Incoming (upstream) and outgoing (downstream) lineage colours — one pair
+   *  for every surface (lib/lineageDirectionColors.ts). */
+  lineageDirectionColors: LineageDirectionColors
+  setLineageDirectionColors: (colors: LineageDirectionColors) => void
   /**
    * "N on this lineage" pills on the cards of a trace — how much of what is
    * inside a closed card the lineage runs through. On by default; lives
@@ -175,6 +223,14 @@ interface PreferencesState {
   setCanvasDensity: (density: CanvasDensity) => void
   showCanvasTypeBadge: boolean
   toggleCanvasTypeBadge: () => void
+  /** Each row's entity-type icon, from the ontology. Off, a row is its
+   *  name alone — the reader's choice for a quieter, text-first canvas. */
+  showCanvasEntityIcons: boolean
+  toggleCanvasEntityIcons: () => void
+  /** Keep the memory gauge on screen. It shows itself anyway once the tab's
+   *  script heap passes 1 GB. */
+  showMemoryUsage: boolean
+  toggleMemoryUsage: () => void
   subtleCanvasTreeLines: boolean
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
@@ -294,6 +350,21 @@ export const usePreferencesStore = create<PreferencesState>()(
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
+      canvasDockMinimized: false,
+      setCanvasDockMinimized: (canvasDockMinimized) => set({ canvasDockMinimized }),
+
+      canvasFoldLayers: false,
+      setCanvasFoldLayers: (canvasFoldLayers) => set({ canvasFoldLayers }),
+
+      // Entity drawer sections
+      drawerSectionsCollapsed: {},
+      toggleDrawerSection: (key) => set((state) => ({
+        drawerSectionsCollapsed: {
+          ...state.drawerSectionsCollapsed,
+          [key]: !state.drawerSectionsCollapsed[key],
+        },
+      })),
+
       // Canvas
       showMinimap: true,
       showGrid: true,
@@ -322,9 +393,17 @@ export const usePreferencesStore = create<PreferencesState>()(
       externalLineagePreview: false,
       toggleExternalLineagePreview: () =>
         set((state) => ({ externalLineagePreview: !state.externalLineagePreview })),
-      showFlowRibbons: true,
+      showFlowRibbons: false,
       toggleFlowRibbons: () =>
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
+      lineageMotion: 'focus',
+      setLineageMotion: (lineageMotion) => set({ lineageMotion }),
+      frostedCards: false,
+      toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
+      showConnectedTrays: true,
+      toggleConnectedTrays: () => set((state) => ({ showConnectedTrays: !state.showConnectedTrays })),
+      lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS,
+      setLineageDirectionColors: (lineageDirectionColors) => set({ lineageDirectionColors }),
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
@@ -392,12 +471,17 @@ export const usePreferencesStore = create<PreferencesState>()(
       setCanvasDensity: (canvasDensity) => set({ canvasDensity }),
       showCanvasTypeBadge: true,
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
+      showCanvasEntityIcons: true,
+      toggleCanvasEntityIcons: () => set((s) => ({ showCanvasEntityIcons: !(s.showCanvasEntityIcons ?? true) })),
+      showMemoryUsage: false,
+      toggleMemoryUsage: () => set((s) => ({ showMemoryUsage: !s.showMemoryUsage })),
       subtleCanvasTreeLines: false,
       toggleSubtleCanvasTreeLines: () => set((s) => ({ subtleCanvasTreeLines: !s.subtleCanvasTreeLines })),
       resetCanvasDisplaySettings: () => set({
         canvasZoom: 1,
         canvasDensity: 'spacious',
         showCanvasTypeBadge: true,
+        showCanvasEntityIcons: true,
         subtleCanvasTreeLines: false,
       }),
 
@@ -455,7 +539,16 @@ export const usePreferencesStore = create<PreferencesState>()(
       // columns and this preference are removed, so the key is dropped
       // rather than migrated. A state written before v5 no longer needs
       // its 'list' → 'graph' step either; nothing reads the field.
-      version: 7,
+      // v8 (2026-09-21): `canvasFoldLayers` is opt-in. A pre-release build
+      // shipped it ON by default, so a stored `true` is that default, not a
+      // choice anyone made — reset it.
+      // v9 (2026-09-21): flow ribbons are opt-in. They float at the middle of
+      // the view across columns they do not connect; a stored `true` is the
+      // old default, not a choice — reset it.
+      // v10 (2026-09-21): the lineage direction pair's default is blue / green.
+      // The sky / amber stored for the hour before was that default, not a
+      // choice — reset it.
+      version: 10,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -467,6 +560,9 @@ export const usePreferencesStore = create<PreferencesState>()(
           delete next.lensViewMode
           state = next
         }
+        if (version < 8) state = { ...state, canvasFoldLayers: false }
+        if (version < 9) state = { ...state, showFlowRibbons: false }
+        if (version < 10) state = { ...state, lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS }
         return state
       },
     }

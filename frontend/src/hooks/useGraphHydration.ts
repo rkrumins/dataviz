@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useActiveView,
@@ -1132,8 +1133,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (loadingNodes.has(parentId)) return
 
         const nodeData = parentNode.data as any
-        const childCount = (nodeData.childCount as number) ?? (nodeData.metadata?.childCount as number) ?? 0
-        if (childCount === 0) return
+        // UNKNOWN IS NOT ZERO.
+        //
+        // `childCount` is deliberately null on any read path that cannot count
+        // containment edges live — `/ancestors` is one, and it is exactly the
+        // path a deep reveal seeds its chain from. Folding that null into 0
+        // meant every such ancestor was treated as childless and its page was
+        // never fetched: the reveal stopped partway, the target never landed,
+        // and the container rendered with no children and no way to open it.
+        //
+        // Only a counted zero means "nothing to load". Unknown means "ask".
+        const rawChildCount = (nodeData.childCount as number | null | undefined)
+            ?? (nodeData.metadata?.childCount as number | null | undefined)
+        if (rawChildCount === 0) return
+        const childCount = typeof rawChildCount === 'number' ? rawChildCount : Number.POSITIVE_INFINITY
 
         const existingNodeIds = new Set(nodes.map(n => n.id))
         // Optimistic, unsaved children aren't part of the backend's `childCount` and have no
@@ -1205,6 +1218,28 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Single atomic commit — nodes and edges arrive together
                     const { addGraph: addGraphFresh, updateNode } = useCanvasStore.getState()
                     addGraphFresh(nodesToAdd, edgesToAdd)
+
+                    // The page's lineage to the REST of the canvas. The server
+                    // answers this request with cross-child lineage only —
+                    // edges between the children it returned, deliberately, to
+                    // keep that query O(pageSize²) — so a row from "Load 13
+                    // more" arrived with no flow to anything already on screen.
+                    // Fired after the commit so the rows paint immediately and
+                    // their wires follow; a failure costs those rows their
+                    // flows, not the page.
+                    if (nodesToAdd.length > 0) {
+                        void primeLineageFor(
+                            provider,
+                            nodesToAdd.map((n) => n.id),
+                            lineageEdgeTypes,
+                        ).then((extra) => {
+                            if (extra.length > 0 && !signal.aborted) {
+                                useCanvasStore.getState().addGraph([], extra)
+                            }
+                        }).catch((e) => {
+                            console.warn('[children] lineage priming failed', e)
+                        })
+                    }
 
                     // A revealed child this page actually delivered is now a
                     // normal loaded child — clear the flag so it counts

@@ -198,6 +198,7 @@ export function retryDelayMs(err: unknown, attempt: number): number {
 const READ_ONLY_POST_PATHS = [
   /^\/nodes\/query$/,
   /^\/nodes\/degree$/,
+  /^\/nodes\/ancestor-chains$/,
   /^\/edges\/query$/,
   /^\/edges\/between$/,
   /^\/edges\/aggregated$/,

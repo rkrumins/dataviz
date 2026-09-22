@@ -22,7 +22,10 @@ const canvas = readFileSync(resolve(__dirname, '../ContextViewCanvas.tsx'), 'utf
 
 describe('the layer columns fill the scroller\'s visible box', () => {
   it('takes the whole content box, undone by the canvas zoom and nothing else', () => {
-    expect(canvas).toContain('height: `calc(100% / ${canvasZoom})`')
+    // Undone by the zoom only where the browser's `zoom` scales percentages
+    // (lib/cssZoom.ts); under standardised zoom, undoing it left the columns
+    // at 1/zoom of the canvas — 62.5% at 160% — over dead space.
+    expect(canvas).toContain('height: zoomScalesPercentages() ? `calc(100% / ${canvasZoom})` : \'100%\'')
   })
 
   it('never subtracts the scrollbar strip a second time', () => {

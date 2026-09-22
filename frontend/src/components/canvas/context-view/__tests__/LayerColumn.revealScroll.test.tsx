@@ -49,6 +49,7 @@ function renderColumn(session: ViewSearchSession) {
         expandedNodes: new Set(['P']),
         searchResults: new Set<string>(),
         onSelect: vi.fn(),
+        onSelectRange: vi.fn(),
         onToggle: vi.fn(),
         onContextMenu: vi.fn(),
         onDoubleClick: vi.fn(),

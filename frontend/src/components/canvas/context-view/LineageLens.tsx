@@ -39,7 +39,7 @@ import * as LucideIcons from 'lucide-react'
 import { useRelationshipTypes } from '@/store/schema'
 import { relationshipLabel, edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { WalkEntry, LensWalkDir, WalkProgress } from '@/hooks/useLensWalk'
-import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
+import { emptyWalkModel, type LensWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import { accountedLineageEdges } from './lens/rollup-accounting'
 import { rollupResiduals } from '@/hooks/lib/traceWireLedger'
 import {
@@ -81,6 +81,11 @@ import { LensStatusBar } from './lens/LensStatusBar'
 import { applyQueryDimming } from './lens/query-dimming'
 import * as Popover from '@radix-ui/react-popover'
 import { LensSkeleton } from './lens/LensSkeleton'
+import { useThrottledWhileBusy } from '@/hooks/useThrottledWhileBusy'
+
+/** How often the board adopts a new model while a walk streams pages in. */
+const BOARD_BEAT_MS = 1200
+const sameFocal = (a: LensWalkModel | null, b: LensWalkModel | null) => (a?.focusUrn ?? null) === (b?.focusUrn ?? null)
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
@@ -436,7 +441,12 @@ export function LineageLens({
   const capsulePhase: WalkProgress['phase'] | null = walkProgress
     ? (walkProgress.phase === 'checkpoint' || walkProgress.phase === 'error' ? null : walkProgress.phase)
     : walkStatus === 'loading' ? 'loading' : null
-  const model = walk?.model ?? null
+  // The board's model, on a beat while pages stream in: every new model
+  // re-derives the whole board over everything walked so far, and a
+  // streaming walk lands a page about once a second (see
+  // useThrottledWhileBusy). A finished walk, or a new focal, lands at once.
+  const walkBusy = walkProgress?.phase === 'seeding' || walkProgress?.phase === 'walking'
+  const model = useThrottledWhileBusy(walk?.model ?? null, walkBusy, BOARD_BEAT_MS, sameFocal)
 
   // THE TOOLBAR's overflow: measured, never guessed — see useToolbarOverflow.
   const toolbarRowRef = useRef<HTMLDivElement | null>(null)

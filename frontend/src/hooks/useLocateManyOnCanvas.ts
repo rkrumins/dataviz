@@ -41,6 +41,18 @@ export interface UseLocateManyOnCanvasOptions {
   settleMs?: number
 }
 
+/** Resolve as soon as `check` passes, giving up after `budgetMs`. Polled on
+ *  animation frames: the row is painted by React and the virtualizer, so a
+ *  frame is the granularity at which the answer can change. */
+async function appearsWithin(check: () => boolean, budgetMs: number): Promise<boolean> {
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    await new Promise<void>((r) => requestAnimationFrame(() => r()))
+    if (check()) return true
+    if (Date.now() >= deadline) return false
+  }
+}
+
 export interface LocateManyResult {
   revealed: number
   requested: number
@@ -66,11 +78,22 @@ export function useLocateManyOnCanvas(
     // Let any expand-driven re-layout commit before the first reveal.
     await new Promise<void>((r) => requestAnimationFrame(() => r()))
 
+    // The reveal above already ran for every target AT ONCE — the expensive
+    // part (ancestors fetched, each level's children paged in) is parallel.
+    // What was serial was this verification pass, and it paid a flat
+    // `settleMs` for EVERY target even when the row was already painted: a
+    // direction with twenty partners spent nearly two seconds waiting for
+    // scrolls it did not need.
+    //
+    // Scrolling is inherently one-at-a-time — the reveal pulse is a single
+    // slot, and a later target's scroll cancels an earlier one's — so the
+    // loop stays. It just stops paying for rows that are already there, and
+    // stops waiting the full budget once a row appears.
     let revealed = 0
     for (const id of ids) {
+      if (getElementById(id)) { revealed++; continue }
       scrollHitIntoView(id)
-      await new Promise<void>((r) => setTimeout(r, settleMs))
-      if (getElementById(id)) revealed++
+      if (await appearsWithin(() => !!getElementById(id), settleMs)) revealed++
     }
 
     // Best-effort horizontal centring across whatever ended up

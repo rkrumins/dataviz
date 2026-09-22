@@ -80,7 +80,6 @@ function run(opts: {
   parentMap?: Map<string, string>
   browseBundleEnabled?: boolean
   hiddenEdgeTypes?: ReadonlySet<string>
-  hoveredNodeId?: string | null
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -104,7 +103,6 @@ function run(opts: {
       isTracing: false,
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
-      hoveredNodeId: opts.hoveredNodeId ?? null,
       browseBundleEnabled: opts.browseBundleEnabled,
       browseBundleParentMap: opts.parentMap,
       hiddenEdgeTypes: opts.hiddenEdgeTypes,

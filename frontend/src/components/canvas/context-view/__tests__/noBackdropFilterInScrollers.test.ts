@@ -43,14 +43,23 @@ describe('bottom chrome and scroller surfaces carry no backdrop-filter', () => {
     expect(read('connections/ConnectionsPanel.tsx').match(BLUR) ?? []).toEqual([])
   })
 
-  it('FlatTreeItem: only the card body keeps its subtle blur; the hover overlay has none', () => {
+  it('FlatTreeItem: the card blurs nothing unless the reader chose frosted cards', () => {
+    // The card body used to carry `backdrop-blur-sm` over a tint class that
+    // emitted no colour, inside the column scroller: dense dashed lineage
+    // behind it smeared into a pixelated canvas, re-sampled on every scroll
+    // frame. Its surface is now `.nx-row-card` — the canvas colour, lines
+    // passing under it — and the blur lives only in the opt-in frosted rule.
     const src = read('FlatTreeItem.tsx')
-    const hits = src.match(BLUR) ?? []
-    // The card body's `backdrop-blur-sm` softens cross-column edges behind
-    // the node; it is its own static box (no sticky, no animation, no
-    // toggling), which is not the ghosting shape. Exactly one, on that line.
-    expect(hits).toEqual(['backdrop-blur'])
-    expect(src).toMatch(/bg-canvas-elevated\/10 backdrop-blur-sm/)
+    expect(src.match(BLUR) ?? []).toEqual([])
+    expect(src).toMatch(/"nx-row-card"/)
+    const css = readFileSync(resolve(here, '../../../styles/globals.css'), 'utf8')
+    // Every regex metacharacter escaped — the backslash too.
+    const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const rule = (selector: string) =>
+      css.match(new RegExp(`(?:^|\\n)\\s*${escapeRegExp(selector)}\\s*\\{([^}]*)\\}`))?.[1] ?? null
+    expect(rule('.nx-row-card')).toMatch(/background-color:\s*var\(--nx-bg-canvas\)/)
+    expect(rule('.nx-row-card')).not.toMatch(/backdrop-filter/)
+    expect(rule('[data-frosted-cards] .nx-row-card')).toMatch(/backdrop-filter:\s*blur/)
   })
 
   it('FlatTreeItem: the hover action overlay is CSS-owned, never React-state-owned', () => {
@@ -89,14 +98,7 @@ const HOW_TO_FIX =
   + 'opacity, or move it out of the scroller.'
 
 /** Deliberate, with the reason. Keep it short; loosening the rule blinds every other file. */
-const ALLOWED = new Map<string, string>([
-  [
-    'components/canvas/context-view/FlatTreeItem.tsx',
-    "The card body's `backdrop-blur-sm` softens cross-column edges behind the node. "
-      + 'Pinned by the FlatTreeItem case above, which also holds it to exactly one '
-      + 'occurrence and to a static box — no sticky, no size animation, no state toggle.',
-  ],
-])
+const ALLOWED = new Map<string, string>([])
 
 /**
  * Still doing it, with the reason each has not been converted. NOT absolutions:

@@ -14,7 +14,7 @@
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import {
   useSchemaStore,
@@ -47,9 +47,10 @@ import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { Crosshair, X } from 'lucide-react'
+import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
+import { SelectionBar } from './SelectionBar'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
@@ -58,6 +59,7 @@ import {
   openedViewMessage, openingViewMessage,
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
+import { useAncestorChains } from '@/hooks/useAncestorChains'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
@@ -72,6 +74,7 @@ import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
+import { MemoryGauge } from './MemoryGauge'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation, useViewportReservation } from './useBandReservation'
@@ -105,13 +108,15 @@ import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
-import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
+import { useHighlightState } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
-import { computeFitZoom } from './fitZoom'
+import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
+import { useLayerFold } from './useLayerFold'
+import { BRING_IN_BATCH } from './ghostCues'
 import { shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -125,6 +130,7 @@ import {
 } from './lens/lensHistory'
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
+import { selectionMembers, selectionFocusUrn, unionWalkModels, withSelectionFocus } from './lens/closure-adapter'
 import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
 import { useTraceOverlay, type TraceOverlay } from '@/hooks/useTraceOverlay'
 import { lanesToRenderTrees } from '@/hooks/lib/traceViewModel'
@@ -216,7 +222,8 @@ const EMPTY_LAYER_NODES: HierarchyNode[] = []
 const TRACE_EXPANSION_RECORD_MS = 250
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
-import type { AnchorProxyGroup, ColumnGeometryApi } from './types'
+import type { ColumnGeometryApi } from './types'
+import { useAnchorRailStore } from '@/store/anchorRail'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
@@ -225,6 +232,11 @@ import * as assignmentOps from './assignmentMutations'
 import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
+import { bySignificance } from './lineDensity'
+import { buildNodePorts } from './lineagePorts'
+import { PortHoverTip } from './PortHoverTip'
+import { LineageGuide } from './LineageGuide'
+import { zoomScalesPercentages } from '@/lib/cssZoom'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
@@ -341,6 +353,17 @@ const measureLegendHeader = (el: HTMLElement): number => {
   return headers.reduce((sum, h) => sum + h.offsetHeight, 0) + (headers.length - 1) * DOCK_GAP_PX
 }
 
+/**
+ * A node's painted ROW, by id. A folded layer carries an anchor with the
+ * same `layer-node-<id>` for every row that has a line into it (LayerColumn's
+ * fold anchors) — a point on a spine, which nobody can see or click — so an
+ * anchor is not a located row.
+ */
+function paintedRow(nodeId: string): HTMLElement | null {
+  const el = document.getElementById(`layer-node-${nodeId}`)
+  return el && !el.hasAttribute('data-fold-anchor') ? el : null
+}
+
 export function ContextViewCanvas({
   className,
   layers = defaultReferenceModelLayers,
@@ -354,8 +377,15 @@ export function ContextViewCanvas({
   const removeStoreEdges = useCanvasStore((s) => s.removeEdges)
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
+  const setSelection = useCanvasStore((s) => s.setSelection)
+  const canvasDockMinimized = usePreferencesStore((s) => s.canvasDockMinimized)
+  const setCanvasDockMinimized = usePreferencesStore((s) => s.setCanvasDockMinimized)
+  const multiSelectArmed = useCanvasStore((s) => s.multiSelectArmed)
+  const setMultiSelectArmed = useCanvasStore((s) => s.setMultiSelectArmed)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
+  // Set form for the columns, which ask "is this row selected?" per row.
+  const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
@@ -390,7 +420,14 @@ export function ContextViewCanvas({
   // Missing-link alerts are optional: Views are subsets of a Data Source,
   // so links to out-of-view entities can be expected rather than a problem.
   const showMissingConnectionIndicators = usePreferencesStore((s) => s.showMissingConnectionIndicators) ?? true
-  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? true
+  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? false
+  // Which lineage lines move, and whether cards are frosted — Display ›
+  // Lineage › Appearance. Calm mode (MotionConfig 'always') and the system's
+  // reduce-motion setting both read as "reduce" here, and then no line moves.
+  const lineageMotionPref = usePreferencesStore((s) => s.lineageMotion) ?? 'focus'
+  const reduceMotion = useReducedMotionConfig() ?? false
+  const lineageMotion = reduceMotion ? 'off' : lineageMotionPref
+  const frostedCards = usePreferencesStore((s) => s.frostedCards) ?? false
   const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'spacious'
   const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
   const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
@@ -1175,10 +1212,6 @@ export function ContextViewCanvas({
   const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
   const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
 
-  // Assignment warning state (shown when user tries to assign child to different layer)
-  const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
-  const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
     // Drop-to-assign is a layout WRITE; a trace is read-only. (The columns
     // also render the overlay's lanes, so the drop target isn't the browse
@@ -1187,15 +1220,6 @@ export function ContextViewCanvas({
     const before = currentLayout()
     // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
     const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
-
-    // Containment hard rule: a child cannot be placed in a different layer than its parent subtree.
-    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entityId, layerId)
-    if (conflict?.type === 'containment_locked') {
-      setAssignmentWarning(conflict.message)
-      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
-      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
-      return
-    }
 
     const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const entityName = (entity?.data?.label as string) ?? entityId
@@ -1560,6 +1584,12 @@ export function ContextViewCanvas({
       return
     }
     if (!selectedNodeId) return
+    // A MULTI-selection is never auto-scrolled. This slides ONE node's column
+    // into view, and the "one" is whichever happens to be first — so picking a
+    // second entity in another column yanked the viewport off the rows the
+    // user was still choosing from. Building a selection across columns is
+    // exactly when the ground must stay put.
+    if (selectedNodeIds.length > 1) return
     if (lastAutoScrolledForSelectionRef.current === selectedNodeId) return
 
     const layerId = effectiveAssignments.get(selectedNodeId)?.layerId
@@ -1617,7 +1647,7 @@ export function ContextViewCanvas({
       // change left redraws queued against a scroll that had been superseded.
       if (settleTimer != null) clearTimeout(settleTimer)
     }
-  }, [selectedNodeId, isEdgePanelOpen, effectiveAssignments])
+  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments])
 
   const handleLayerScroll = useCallback(() => {
     if (triggerEdgeRedrawRef.current) {
@@ -1798,9 +1828,9 @@ export function ContextViewCanvas({
   const nodeSortingEnabled = useFeature('nodeSortingEnabled')
 
   // Fit-to-width: intrinsic width from state (scrollWidth lies under the
-  // 100/zoom% compensation). Column collapse state is LayerColumn-local,
-  // so v1 assumes all columns expanded — a safe over-estimate that only
-  // makes the fitted zoom slightly smaller.
+  // 100/zoom% compensation). Every column counts as open: Fit is the way
+  // back to seeing every layer at full width, so what happens to be folded
+  // right now does not shrink the run it fits.
   const handleFitToWidth = useCallback(() => {
     const viewport = horizontalScrollRef.current?.clientWidth ?? 0
     setCanvasZoom(computeFitZoom(sortedLayers.length, 0, viewport))
@@ -1824,6 +1854,36 @@ export function ContextViewCanvas({
   // sort handlers keep a stable identity and LayerColumn's memo holds).
   const nodesByLayerRef = useRef(nodesByLayer)
   nodesByLayerRef.current = nodesByLayer
+
+  // A logical group opens when it first appears.
+  //
+  // Grouping makes `logical:<id>` the ROOT of its members in that layer, and
+  // a collapsed root anchors everything beneath it to itself — so lineage
+  // between two members of a CLOSED group has no line to draw, and the
+  // canvas showed a group card with no lineage at all. Grouping related
+  // entities together is the whole reason to build a group, so the default
+  // has to be open: a group the user assembled should show what is in it.
+  //
+  // Once per group id, tracked in a ref, so a deliberate collapse afterwards
+  // stays collapsed instead of springing open on the next render.
+  const autoOpenedGroupsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const unopened: string[] = []
+    nodesByLayer.forEach((roots) => {
+      for (const root of roots) {
+        if (!root.isLogical) continue
+        if (autoOpenedGroupsRef.current.has(root.id)) continue
+        autoOpenedGroupsRef.current.add(root.id)
+        unopened.push(root.id)
+      }
+    })
+    if (unopened.length === 0) return
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const id of unopened) next.add(id)
+      return next
+    })
+  }, [nodesByLayer])
 
   // Live context for resolving a parent's effective child-sort direction inside
   // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
@@ -1853,6 +1913,12 @@ export function ContextViewCanvas({
   // ends and the OVERLAY (below) draws the result. Nothing is merged into
   // the canvas store, so leaving a trace restores the canvas for free.
   const canvasTrace = useCanvasTraceWalk(provider)
+  // Every seed of a bulk trace, as canvas node ids — all of them read as
+  // focus nodes, and their number is what tells a column not to centre.
+  const traceFocusIdSet = useMemo(
+    () => new Set(canvasTrace.tracedUrns.map((u) => urnToIdMap.get(u) ?? u)),
+    [canvasTrace.tracedUrns, urnToIdMap],
+  )
   const traceActive = canvasTrace.isTracing
   // RENDER-TIME twin of `traceWriteLocked()`, which reads refs and so must not
   // be called during render. `overlay.active` implies `traceActive`, so the
@@ -2025,7 +2091,7 @@ export function ContextViewCanvas({
   // with the flow overlay off is a contradiction — tracing IS asking to
   // see the flow — and entering one collapses the sticky drawer once, so
   // the flow opens unobstructed (clicking a node re-opens it as usual).
-  const beginTrace = useCallback((urn: string) => {
+  const beginTrace = useCallback((urn: string | readonly string[]) => {
     setShowLineageFlow(true)
     useCanvasStore.getState().closeNodeDrawer()
     // Lock writes NOW, not on the next commit: the reader can click a browse
@@ -2048,8 +2114,18 @@ export function ContextViewCanvas({
   // switching mode afterwards is instant. Re-tracing the SAME node with
   // a different direction just flips the view — the walk cache stays,
   // and the history records ONE entry per focal (the flip updates it).
-  const startCanvasTrace = useCallback((nodeId: string, direction: 'up' | 'down' | 'both' = 'both') => {
-    const urn = displayMap.get(nodeId)?.urn ?? nodeId
+  const startCanvasTrace = useCallback((
+    nodeId: string | readonly string[],
+    direction: 'up' | 'down' | 'both' = 'both',
+  ) => {
+    // A bulk trace walks every selected entity and the overlay draws their
+    // UNION. History, re-centre and the "already tracing this" check are all
+    // about a single focal, so they follow the FIRST seed — which for an
+    // ordinary one-entity trace is the only one, and nothing changes.
+    const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
+    if (nodeIds.length === 0) return
+    const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
+    const urn = urns[0]!
     const view = {
       showUpstream: direction !== 'down',
       showDownstream: direction !== 'up',
@@ -2069,8 +2145,8 @@ export function ContextViewCanvas({
     setTraceDepthDown(view.depthDown)
     // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
     flushExpansionRecord()
-    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeId, view, timestamp: Date.now() }))
-    beginTrace(urn)
+    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
+    beginTrace(urns)
   }, [displayMap, beginTrace, flushExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
@@ -2562,15 +2638,6 @@ export function ContextViewCanvas({
     }
 
     const before = currentLayout()
-    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entity.urn, layerId)
-    if (conflict?.type === 'containment_locked') {
-      setAssignmentWarning(conflict.message)
-      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
-      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
-      interactions.closeContextMenu()
-      return
-    }
-
     const targetLayer = before.layers.find(l => l.id === layerId)
     const prevLayerId = before.assignments[entity.urn]?.layerId
     const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
@@ -3278,7 +3345,9 @@ export function ContextViewCanvas({
   const locateManyOnCanvas = useLocateManyOnCanvas({
     revealAndFocus: revealOnCanvas,
     scrollHitIntoView,
-    getElementById: (id) => document.getElementById(`layer-node-${id}`),
+    // A target in a folded layer is not located until its layer opens —
+    // which its reveal pulse does (useLayerFold).
+    getElementById: paintedRow,
     getScrollContainer: () => horizontalScrollRef.current,
     notify: (type, message) => { useNotificationStore.getState().add({ type, message }) },
   })
@@ -3348,12 +3417,18 @@ export function ContextViewCanvas({
       const el =
         document.getElementById(`layer-node-${urn}`) ??
         document.querySelector<HTMLElement>(`[id^="layer-node-"][data-urn="${CSS.escape(urn)}"]`)
+      // In a folded layer: the reveal pulse opens the layer and scrolls its
+      // column to the row, which scrolling to the spine could not.
+      if (el?.hasAttribute('data-fold-anchor')) {
+        scrollHitIntoView(el.id.slice('layer-node-'.length))
+        return
+      }
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
         return
       }
     }
-  }, [])
+  }, [scrollHitIntoView])
 
   // Hydration phase mirrored into the canvas store by CanvasRouter — drives
   // the ghost-card stack in empty layers and the GhostLineageOverlay.
@@ -3893,8 +3968,12 @@ export function ContextViewCanvas({
   // `traceContextSet` now comes directly from useTraceFilteredHierarchy above
   // (single source of truth for both filtering and edge projection).
 
-  // Hovered node — needed by both edge projection (delegation) and hover highlight
-  const hoveredNodeId = useHoveredNodeId()
+  // NO hover state here. What a hover changes — lit and dimmed rows and
+  // lines, a hovered entity's own lines in On Hover / Adaptive, an open
+  // container's lines it stood aside for, the Anchor Rail — is the overlay's
+  // to draw (hoverSpotlight.ts). As canvas state, every row the pointer
+  // crossed re-rendered this component, every column and every row:
+  // 100–180 ms of main thread each (measured 2026-09-21).
 
   // Layer-index map: nodeId → layer ordinal (Source=0, Staging=1, …).
   // Drives reverse-flow detection — projected edges where target.layerIdx <
@@ -3935,14 +4014,19 @@ export function ContextViewCanvas({
   //
   // Keyed on `overlay.active`, not `traceActive`: during the walk the canvas
   // is still showing BROWSE and must keep its wires and its honest count.
-  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount } = useEdgeProjection({
+  // Where the lineage endpoints the canvas never loaded live, so their lines
+  // roll up to a container on screen rather than read as leaving the view.
+  // A preview behind `canvasLineageRollupEnabled` (off by default: a roll-up
+  // trades detail for coverage). Browse only, as the projection below.
+  const lineageRollup = useFeature('canvasLineageRollupEnabled')
+  const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge)
+  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
     nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
     showLineageFlow, isTracing: overlay.active,
     traceContextSet, isContainmentEdge,
-    hoveredNodeId,
     suppressedAggEdgeKeys,
     // Browse-mode bundling: kicks in only outside trace mode and only when
     // edge density would otherwise overload the canvas. Walks endpoints up
@@ -3957,6 +4041,9 @@ export function ContextViewCanvas({
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
+    // Chains already fetched stay cached, so switching the flag off must
+    // also stop them being USED.
+    ancestorChains: lineageRollup ? ancestorChains : undefined,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -4083,22 +4170,8 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Significance ranking for the AMBIENT BUDGET, which rations room on the
-  // board. It ranks on `bundleSize` — how many lines this one line replaces —
-  // NOT on `edgeCount`, which is the weight the bundle stands for.
-  //
-  // Those diverge on a roll-up: a "Combined flow" can speak for thousands of
-  // table-level flows while occupying exactly one line. Ranking on the weight
-  // let such a roll-up outrank, and therefore evict, the raw edges a user had
-  // just expanded a container to see — lineage vanishing at the moment they
-  // asked for more of it. `edgeCount` remains the weight everywhere it is
-  // read for display; only the budget's ordering changed.
-  const bySignificance = (
-    a: { bundleSize?: number; edgeCount?: number; confidence?: number },
-    b: { bundleSize?: number; edgeCount?: number; confidence?: number },
-  ) =>
-    ((b.bundleSize ?? b.edgeCount ?? 1) - (a.bundleSize ?? a.edgeCount ?? 1))
-    || ((b.confidence || 0) - (a.confidence || 0))
+  // The ambient budget ranks by `bySignificance` (lineDensity.ts): how many
+  // lines a line replaces, never the weight it stands for.
 
   // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
   // instead of cliffing (old behavior: all ambient edges vanished at
@@ -4114,11 +4187,12 @@ export function ContextViewCanvas({
   }, [isStubsMode, lineageRenderMode, visibleLineageEdges, autoStubThreshold])
 
   // Effective edge set passed to the renderer, plus the shown/total
-  // bookkeeping the status chips surface. Focus (hover / selection /
-  // trace anchor) materializes incident edges in every stub-y mode, but
-  // a hub's fan is ALSO capped at the strongest `autoStubThreshold` —
-  // 650 curves at once is noise; the Lineage Lens enumerates the full
-  // fan properly and the chip points there.
+  // bookkeeping the status chips surface. Focus (selection / trace anchor)
+  // materializes incident edges in every stub-y mode, but a hub's fan is
+  // ALSO capped at the strongest `autoStubThreshold` — 650 curves at once is
+  // noise; the Lineage Lens enumerates the full fan properly and the chip
+  // points there. A HOVERED entity's lines follow the same rule, drawn by
+  // the overlay from `hoverPool` so a hover never re-renders the canvas.
   const edgePresentation = useMemo(() => {
     if (!isStubsMode) {
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
@@ -4126,7 +4200,6 @@ export function ContextViewCanvas({
     const ambient = rankedAmbientEdges ?? []
     const ambientTotal = lineageRenderMode === 'auto' ? visibleLineageEdges.length : 0
     const focusIds = new Set<string>()
-    if (hoveredNodeId) focusIds.add(hoveredNodeId)
     if (selectedNodeId) focusIds.add(selectedNodeId)
     if (overlay.active && canvasTrace.tracedUrn) focusIds.add(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     if (focusIds.size === 0) {
@@ -4149,8 +4222,127 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
+
+  // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
+  // The layer each RENDERED row lives in: the browse map, or in trace mode
+  // the lanes' own — a trace draws cards the browse tree does not hold.
+  const renderLayerOf = useMemo(() => {
+    if (!traceRender) return nodeLayerMap
+    const map = new Map<string, string>()
+    traceRender.byLayer.forEach((roots, layerId) => {
+      const stack = [...roots]
+      while (stack.length > 0) {
+        const node = stack.pop()!
+        map.set(node.id, layerId)
+        stack.push(...node.children)
+      }
+    })
+    return map
+  }, [traceRender, nodeLayerMap])
+  // Folding is offered only while `canvasLayerFoldEnabled` is on, and even
+  // then each reader opts in (`canvasFoldLayers`, off by default).
+  const layerFoldOffered = useFeature('canvasLayerFoldEnabled')
+  const foldLayersEnabled = usePreferencesStore((s) => s.canvasFoldLayers)
+  const setFoldLayersEnabled = usePreferencesStore((s) => s.setCanvasFoldLayers)
+  const layerFold = useLayerFold({
+    layers: sortedLayers,
+    scrollRef: horizontalScrollRef,
+    zoom: canvasZoom,
+    // The wrapper's two edge gutters and, in draft, the add-layer column
+    // (`w-64`) with the gap before it.
+    reservedWidth: 2 * EXTREMITY_EDGE_GUTTER_PX + (isDraft ? COLUMN_GAP_PX + 256 : 0),
+    enabled: layerFoldOffered && foldLayersEnabled,
+    layerOf: (nodeId) => renderLayerOf.get(nodeId),
+    revealTarget,
+    selectedNodeId: selectedNodeIds.length === 1 ? selectedNodeId : null,
+  })
+  // What each folded layer holds of the lineage on screen:
+  //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
+  //     anchors and pins: these lines are drawn, onto the spine;
+  //   * `undrawn` — lines to another folded layer, or inside this one. Not
+  //     drawn (LineageFlowOverlay: a line between two spines is a tangle),
+  //     but still counted on the spine — a folded layer whose only lineage
+  //     runs to other folded layers must not read as having none.
+  const foldLineage = useMemo(() => {
+    const ports = new Map<string, Map<string, { in: number; out: number }>>()
+    const undrawn = new Map<string, number>()
+    if (layerFold.folded.size === 0) return { ports, undrawn }
+    const land = (layerId: string, nodeId: string, side: 'in' | 'out') => {
+      let layerPorts = ports.get(layerId)
+      if (!layerPorts) { layerPorts = new Map(); ports.set(layerId, layerPorts) }
+      const port = layerPorts.get(nodeId) ?? { in: 0, out: 0 }
+      port[side] += 1
+      layerPorts.set(nodeId, port)
+    }
+    for (const edge of effectiveLineageEdges) {
+      // Drawn by the overlay as nothing (a finer edge stands in for it).
+      if (edge.isDelegated) continue
+      const sourceLayer = renderLayerOf.get(edge.source)
+      const targetLayer = renderLayerOf.get(edge.target)
+      if (!sourceLayer || !targetLayer) continue
+      const sourceFolded = layerFold.folded.has(sourceLayer)
+      const targetFolded = layerFold.folded.has(targetLayer)
+      if (sourceFolded && targetFolded) {
+        undrawn.set(sourceLayer, (undrawn.get(sourceLayer) ?? 0) + 1)
+        if (targetLayer !== sourceLayer) undrawn.set(targetLayer, (undrawn.get(targetLayer) ?? 0) + 1)
+      } else if (sourceFolded) land(sourceLayer, edge.source, 'out')
+      else if (targetFolded) land(targetLayer, edge.target, 'in')
+    }
+    return { ports, undrawn }
+  }, [layerFold.folded, effectiveLineageEdges, renderLayerOf])
+
+  // Which layers are folded, as one value — every column re-measures its box
+  // when it changes (LayerColumn's `layoutDependency`).
+  const foldEpoch = useMemo(
+    () => [...layerFold.folded].sort().join(','),
+    [layerFold.folded],
+  )
+
+  // A portal chip names the layer its lineage leads into.
+  const layerNameById = useMemo(
+    () => new Map(sortedLayers.map(layer => [layer.id, layer.name])),
+    [sortedLayers],
+  )
+
+  // An off-canvas stub's click: bring that row's partners onto the canvas, a
+  // batch at a time — the stub's count drops as they land, so the next click
+  // brings the next batch. Each is the drawer's reveal (its ancestors walked
+  // open) without the per-row scroll "Show all" does: a hundred scrolls in a
+  // row is a slideshow, not a reveal.
+  const bringInOffCanvas = useCallback(async (nodeId: string, side: 'in' | 'out') => {
+    const lineage = offCanvasByNode.get(nodeId)
+    const batch = lineage ? [...(side === 'out' ? lineage.outPartners : lineage.inPartners)].slice(0, BRING_IN_BATCH) : []
+    if (batch.length === 0) return
+    let next = 0
+    const worker = async () => {
+      while (next < batch.length) {
+        const id = batch[next++]
+        try { await revealOnCanvas(id, { skipFocus: true }) } catch { /* counted below */ }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(6, batch.length) }, worker))
+    const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+    const landed = batch.filter(id => loaded.has(id))
+    if (landed.length < batch.length) {
+      useNotificationStore.getState().add({
+        type: landed.length === 0 ? 'error' : 'warning',
+        message: landed.length === 0
+          ? `Couldn't bring any of those ${batch.length} entities onto the canvas`
+          : `Brought ${landed.length} of ${batch.length} entities onto the canvas — the rest could not be placed`,
+      })
+    }
+    // Show where they went only when none of them landed in sight: the
+    // batch can take seconds, and a scroll that arrives after the reader has
+    // moved on takes them somewhere they did not ask to go.
+    const box = horizontalScrollRef.current?.getBoundingClientRect()
+    const inSight = box && landed.some(id => {
+      const r = paintedRow(id)?.getBoundingClientRect()
+      return r && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right
+    })
+    if (landed[0] && !inSight) scrollHitIntoView(landed[0])
+  }, [offCanvasByNode, revealOnCanvas, scrollHitIntoView])
 
   // The panel reads the SAME array the overlay is handed, so "in view"
   // means post-budget and the drawn set is a subset of the model.
@@ -4201,6 +4393,14 @@ export function ContextViewCanvas({
   // full projected set (not the hover-filtered slice) so the markers
   // reflect the entity's true lineage volume regardless of which edges
   // happen to be materialized for the current hover.
+  // Where each card's lines plug in, by side and direction — its lineage
+  // ports (lineagePorts.ts). Sides follow the columns' left-to-right order,
+  // exactly as lineRoute.ts attaches the lines themselves.
+  const nodePorts = useMemo(
+    () => buildNodePorts(visibleLineageEdges, (id) => nodeLayerIndexMap.get(id)),
+    [visibleLineageEdges, nodeLayerIndexMap],
+  )
+
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()
     for (const e of visibleLineageEdges) {
@@ -4213,6 +4413,28 @@ export function ContextViewCanvas({
     }
     return counts
   }, [visibleLineageEdges])
+
+  // The entities with the most lineage on the canvas — the Adaptive guide
+  // names them, each one click from all of its lines. Only while Adaptive is
+  // drawing a subset: that is when "which ones matter?" needs answering.
+  const lineageHubs = useMemo(() => {
+    if (edgePresentation.ambientTotal <= edgePresentation.ambientShown) return []
+    const ranked: Array<{ id: string; lines: number }> = []
+    nodeStubCounts.forEach((c, id) => {
+      if (renderMap.has(id)) ranked.push({ id, lines: c.in + c.out })
+    })
+    ranked.sort((a, b) => b.lines - a.lines || (a.id < b.id ? -1 : 1))
+    const colorOf = new Map(sortedLayers.map(l => [l.id, l.color]))
+    return ranked.slice(0, 4).map(({ id, lines }) => {
+      const node = renderMap.get(id)
+      const layerId = renderLayerOf.get(id)
+      return { id, lines, data: node?.data, name: node?.name, layerColor: layerId ? colorOf.get(layerId) : undefined }
+    })
+  }, [edgePresentation.ambientTotal, edgePresentation.ambientShown, nodeStubCounts, renderMap, renderLayerOf, sortedLayers])
+  const focusHub = useCallback((id: string) => {
+    selectNode(id)
+    scrollHitIntoView(id)
+  }, [selectNode, scrollHitIntoView])
 
   // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
@@ -4273,6 +4495,13 @@ export function ContextViewCanvas({
     setLensHistory({ entries: [nodeId], cursor: 0 })
   }, [])
   const openLens = useCallback((nodeId: string) => openLensAt(nodeId, false), [openLensAt])
+  /** Open the Lens on whatever is selected: the entity itself when one is
+   *  held, or a synthetic focus CONTAINING them when several are. */
+  const openLensForSelection = useCallback((ids: readonly string[]) => {
+    if (ids.length === 0) return
+    if (ids.length === 1) { openLens(ids[0]!) ; return }
+    openLens(selectionFocusUrn(ids.map(id => displayMap.get(id)?.urn ?? id)))
+  }, [openLens, displayMap])
   const lensRecenter = useCallback((nodeId: string) => setLensHistory(h => lensPush(h, nodeId)), [])
   const lensBack = useCallback(() => setLensHistory(lensBackward), [])
   const lensForward = useCallback(() => setLensHistory(lensForwardStep), [])
@@ -4303,7 +4532,15 @@ export function ContextViewCanvas({
   const lensInitialDepth = initialLensShare && (initialLensShare.v === 2 || initialLensShare.v === 3) && lensFocal === initialLensShare.entries[initialLensShare.cursor]
     ? initialLensShare.depth
     : userLensInitialDepth
-  const lensWalk = useLensWalk(lensFocal, provider, lensInitialDepth, lensFullWalk)
+  // A selection focal is synthetic — there is nothing at that urn to walk.
+  // Its MEMBERS are what the server is asked about; the union of their walks
+  // then gets the synthetic focus spliced in below.
+  const lensMembers = useMemo(() => selectionMembers(lensFocal), [lensFocal])
+  const lensSeeds = useMemo(
+    () => lensMembers ?? (lensFocal ? [lensFocal] : []),
+    [lensMembers, lensFocal],
+  )
+  const lensWalk = useLensWalk(lensSeeds, provider, lensInitialDepth, lensFullWalk)
   // The rest of a restored exploration — applied once, inside the lens,
   // to the same focal the depth override above targets.
   const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
@@ -4337,7 +4574,31 @@ export function ContextViewCanvas({
     [lensExtend, lensPage, lensRetryWalk, lensPageSeeds],
   )
   const { walkFor: lensWalkFor } = lensWalk
-  const lensWalkEntry = lensFocal ? lensWalkFor(lensFocal) : null
+  const lensWalkEntry = useMemo(() => {
+    if (!lensFocal) return null
+    if (!lensMembers) return lensWalkFor(lensFocal)
+    // Several entities: union their walks, then give the result a synthetic
+    // focus that CONTAINS them, so the lens measures hops from the selection
+    // exactly as it measures them from a container's contents.
+    const entries = lensMembers.map(lensWalkFor).filter((e): e is NonNullable<typeof e> => e !== null)
+    if (entries.length === 0) return null
+    const model = unionWalkModels(entries.map((e) => e.model))
+    if (!model) return null
+    // The card's own header already reads SELECTION, so the name is just the
+    // count. "3 selected entities" wrapped to "3 selectedentities" in the card.
+    const label = `${lensMembers.length} entities`
+    return {
+      model: withSelectionFocus(model, lensMembers, label),
+      status: entries.some((e) => e.status === 'loading')
+        ? 'loading' as const
+        : entries.some((e) => e.status === 'error')
+          ? 'error' as const
+          : 'done' as const,
+      error: entries.find((e) => e.error)?.error ?? null,
+      extendStatus: new Map(entries.flatMap((e) => [...e.extendStatus])),
+      depth: Math.max(...entries.map((e) => e.depth)),
+    }
+  }, [lensFocal, lensMembers, lensWalkFor])
   const { loadAllChildren: loadLensAllChildren, loadChildrenOf: loadLensChildrenOf } = lensChildren
   useEffect(() => {
     focusLensRef.current = () => {
@@ -4365,14 +4626,15 @@ export function ContextViewCanvas({
   // anchors the focus edges to the chip rects. Chip click reuses the
   // reveal mechanism (per-partner Frame); the "+N more" overflow routes
   // to the Lens — the full, searchable list.
-  // ── External lineage (curated views) — "no lineage" vs "outside this
-  // view". Total degrees fetched per hydration settle; external =
-  // total − internal(loaded). Selection-scoped surface: a status chip
-  // for the selected node. Absent totals mean UNKNOWN → no chip, never
+  // ── Total lineage per entity — "no lineage" vs "lineage elsewhere".
+  // Degrees over the whole graph, fetched per hydration settle for every
+  // view: each card's lineage ports read them (lineagePorts.ts), so a card
+  // whose lineage all leads to entities not on this canvas still shows it.
+  // In a CURATED view they also drive the "outside this view" cue: external
+  // = total − internal(loaded). Absent totals mean UNKNOWN → no cue, never
   // a false "no lineage" claim.
-  const externalDegrees = useExternalDegrees(
-    activeEntityScope === 'curated' && showMissingConnectionIndicators,
-  )
+  const externalDegrees = useExternalDegrees(showLineageFlow)
+  const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   // Ambient per-node cue: external = total − internal(loaded), for every
   // loaded node with a KNOWN total. One O(E) pass builds internal
   // degrees; nodes absent from externalDegrees stay absent here
@@ -4380,7 +4642,7 @@ export function ContextViewCanvas({
   // renders nothing.
   const externalCueByNode = useMemo(() => {
     const cue = new Map<string, { in: number; out: number }>()
-    if (externalDegrees.size === 0) return cue
+    if (!showExternalCue || externalDegrees.size === 0) return cue
     const lineageTypeSet = new Set(lineageEdgeTypes)
     const internal = new Map<string, { in: number; out: number }>()
     for (const e of edges) {
@@ -4398,10 +4660,10 @@ export function ContextViewCanvas({
       if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
     })
     return cue
-  }, [externalDegrees, edges, lineageEdgeTypes])
+  }, [showExternalCue, externalDegrees, edges, lineageEdgeTypes])
 
   const selectedExternalLineage = useMemo(() => {
-    if (!selectedNodeId) return null
+    if (!showExternalCue || !selectedNodeId) return null
     const total = externalDegrees.get(selectedNodeId)
     if (!total) return null
     const lineageTypeSet = new Set(lineageEdgeTypes)
@@ -4416,7 +4678,7 @@ export function ContextViewCanvas({
     const exIn = Math.max(0, total.in - inLoaded)
     const exOut = Math.max(0, total.out - outLoaded)
     return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
-  }, [selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
+  }, [showExternalCue, selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
 
   // ── External lineage PREVIEW (feature-flagged) — the guided
   // click-through: fetch ONE node's out-of-scope partners on demand
@@ -4471,35 +4733,13 @@ export function ContextViewCanvas({
     }
   }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
 
-  const [anchorProxyGroups, setAnchorProxyGroups] = useState<Map<string, AnchorProxyGroup>>(() => new Map())
-  const handleAnchorProxies = useCallback((groups: Map<string, AnchorProxyGroup>) => {
-    setAnchorProxyGroups(groups)
-  }, [])
-
-  // Rail focus: selection wins instantly; hover engages after a short
-  // DWELL (so drive-by mouse movement doesn't flash chips) and, when the
-  // hover ends with nothing selected, the rail LINGERS long enough for
-  // the pointer to travel to a chip — the reason a naive hover-scoped
-  // rail is unusable (it dismisses itself en route). Timers are
-  // effect-scoped; every transition cancels the previous one.
-  const [railFocusId, setRailFocusId] = useState<string | null>(null)
-  useEffect(() => {
-    if (selectedNodeId) {
-      const raf = requestAnimationFrame(() => setRailFocusId(selectedNodeId))
-      return () => cancelAnimationFrame(raf)
-    }
-    if (hoveredNodeId) {
-      const t = setTimeout(() => setRailFocusId(hoveredNodeId), 250)
-      return () => clearTimeout(t)
-    }
-    const t = setTimeout(() => setRailFocusId(null), 1500)
-    return () => clearTimeout(t)
-  }, [selectedNodeId, hoveredNodeId])
-
+  // The Anchor Rail — the focused entity's off-screen partners as chips in
+  // their columns — is decided by the overlay (the selection at once, a
+  // hovered entity after a dwell) and read by each column from its store.
   const handleProxyMore = useCallback(() => {
-    const target = railFocusId ?? selectedNodeId
+    const target = useAnchorRailStore.getState().focusId ?? selectedNodeId
     if (target) openLens(target)
-  }, [railFocusId, selectedNodeId, openLens])
+  }, [selectedNodeId, openLens])
 
   // ── Frame pill — offer to frame off-screen 1-hop neighbors on select ──
   // Never auto-scrolls: business users hate surprise camera moves. The
@@ -4566,19 +4806,11 @@ export function ContextViewCanvas({
     isTracing: traceActive, displayMap, childMap,
   })
 
-  // Hover highlight: same visual effect on hover (lighter), defers to click-highlight
-  const { hoverHighlight, isHoverActive } = useHoverHighlight({
-    hoveredNodeId,
-    visibleLineageEdges: effectiveLineageEdges,
-    isTracing: traceActive,
-    displayMap, childMap,
-    isClickHighlightActive,
-  })
-
-  // Merge: click takes priority, hover used when no click selection
-  const isHighlightActive = isClickHighlightActive || isHoverActive
-  const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
-  const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
+  // The HOVER highlight (lighter, deferring to this one) is the overlay's,
+  // applied to the DOM — see hoverSpotlight.ts.
+  const isHighlightActive = isClickHighlightActive
+  const mergedHighlightNodes = highlightState.nodes
+  const mergedHighlightEdges = highlightState.edges
 
   // The Connections panel's highlight is a deliberate gesture on the panel,
   // so while it is active it wins over hover/click — on the OVERLAY only.
@@ -4748,8 +4980,12 @@ export function ContextViewCanvas({
         lineageRenderMode={lineageRenderMode}
         onSetLineageRenderMode={setLineageRenderMode}
         traceActive={traceActive}
-        canTrace={selectedNodeIds.length === 1 && !selectedNodeIds[0].startsWith('logical:')}
-        onStartTrace={() => { if (selectedNodeIds[0]) startCanvasTrace(selectedNodeIds[0]) }}
+        canTrace={selectedNodeIds.length > 0}
+        traceSeedCount={selectedNodeIds.length}
+        canOpenLens={selectedNodeIds.length > 0}
+        multiSelectArmed={multiSelectArmed}
+        onToggleMultiSelect={() => setMultiSelectArmed(!multiSelectArmed)}
+        onStartTrace={() => { if (selectedNodeIds.length > 0) startCanvasTrace(selectedNodeIds) }}
         onExitTrace={exitCanvasTrace}
         lineageReady={hydrationPhase === 'complete'}
         traceUpstreamDepth={traceDepthUp}
@@ -4758,7 +4994,7 @@ export function ContextViewCanvas({
         onResumeTraceHistory={resumeTraceHistory}
         onClearTraceHistory={clearTraceHistory}
         onCopyTraceHistoryLink={traceHistoryLink}
-        onOpenLens={() => { if (selectedNodeIds[0]) openLens(selectedNodeIds[0]) }}
+        onOpenLens={() => openLensForSelection(selectedNodeIds)}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,
           // no refetch (the walk holds the whole flow in memory).
@@ -4994,19 +5230,6 @@ export function ContextViewCanvas({
             <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
           </div>
         )}
-        {/* Warning: containment inheritance violation attempt */}
-        {assignmentWarning && (
-          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 text-xs flex items-center gap-2 z-20">
-            <span className="font-medium">Assignment blocked.</span>
-            <span className="text-red-600 dark:text-red-500">{assignmentWarning}</span>
-            <button
-              className="ml-auto text-red-400 hover:text-red-600 dark:hover:text-red-300"
-              onClick={() => setAssignmentWarning(null)}
-            >
-              &times;
-            </button>
-          </div>
-        )}
         {/* Bulk import — uploads a file onto the current draft (server-side), then
              hands off to the Changes tab where the added/updated/deleted entities are
              reviewed and published just like manual edits. */}
@@ -5135,6 +5358,20 @@ export function ContextViewCanvas({
             and takes the Data loads header with it: the one control that closes
             Data loads, unreachable. The cap excludes the bottom offset, or a
             raised dock overflows the top by exactly the trace dock's height. */}
+        {/* What the canvas is holding, and what the actions will do with it.
+            Hidden during a trace: the trace dock is then the thing being read,
+            and the selection has already been spent on it. */}
+        {!traceActive && (
+          <SelectionBar
+            nodeIds={selectedNodeIds}
+            labelFor={(id) => displayMap.get(id)?.name || id}
+            onRemove={(id) => selectNode(id, true)}
+            onClear={clearSelection}
+            onTrace={() => startCanvasTrace(selectedNodeIds)}
+            onOpenLens={() => openLensForSelection(selectedNodeIds)}
+          />
+        )}
+
         <div
           ref={edgeLegendRef}
           // z-40, the floating-chrome tier (trace dock, lens pills): the
@@ -5151,6 +5388,38 @@ export function ContextViewCanvas({
             maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
+          {/* The tab's memory — shows itself once it is heavy, or always
+              when the reader asks (Display options). */}
+          <MemoryGauge />
+          {/* Minimized: one slim strip instead of two headers, so the
+              columns get their width and height back. Both counts stay
+              readable — minimizing must not hide what the panels were
+              telling you, only how much room they take to tell it. */}
+          {canvasDockMinimized ? (
+            <button
+              type="button"
+              onClick={() => setCanvasDockMinimized(false)}
+              className="self-end flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-canvas-elevated border border-glass-border shadow-lg text-[11.5px] text-ink-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              title="Show Data loads and Flows"
+            >
+              <History className="w-3.5 h-3.5 text-accent-lineage" />
+              <span>Data loads</span>
+              <span className="w-px h-3 bg-glass-border" />
+              <Workflow className="w-3.5 h-3.5 text-accent-lineage" />
+              <span className="tabular-nums">{connectionModel.relationships.toLocaleString()}</span>
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+          ) : (
+          <>
+          <button
+            type="button"
+            onClick={() => setCanvasDockMinimized(true)}
+            className="self-end -mb-0.5 flex items-center gap-1 px-2 py-1 rounded-lg bg-canvas-elevated border border-glass-border shadow text-[11px] text-ink-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            title="Minimize Data loads and Flows"
+          >
+            <ChevronDown className="w-3.5 h-3.5" />
+            Minimize
+          </button>
           <DataLoadsPanel dataSourceId={dataSourceId} />
           <ConnectionsPanel
             key={connectionsViewId}
@@ -5164,6 +5433,8 @@ export function ContextViewCanvas({
             onShowAll={showAllConnectionTypes}
             onHighlight={setConnectionHighlight}
           />
+          </>
+          )}
         </div>
 
         {/* Status chips — loaded-but-hidden data (unresolved edges,
@@ -5176,7 +5447,10 @@ export function ContextViewCanvas({
           // During a trace the external-scope chip speaks browse-view
           // language that contradicts the trace picture (and its counts
           // live in the trace dock) — suppressed until exit.
-          selectedExternal={traceActive ? null : selectedExternalLineage}
+          // Withheld for a multi-selection: it is computed for ONE entity
+          // (the first), and a chip that says "Selected:" while several are
+          // held would be reporting one entity's lineage as the group's.
+          selectedExternal={traceActive || selectedNodeIds.length > 1 ? null : selectedExternalLineage}
           onPreviewExternal={externalLineagePreview ? () => { void handlePreviewExternal() } : undefined}
           // The chip counts BROWSE connections the canvas could not place. A
           // drawing trace has none to report (see the projection call site);
@@ -5188,13 +5462,10 @@ export function ContextViewCanvas({
           aggDetailTotal={aggDetailStatus.total}
           onLoadMoreDetail={handleLoadMoreAggDetail}
           viewScope={activeEntityScope}
-          adaptiveShown={edgePresentation.ambientShown}
-          adaptiveTotal={edgePresentation.ambientTotal}
-          onShowAllEdges={() => setLineageRenderMode('raw')}
           focusShown={edgePresentation.focusShown}
           focusTotal={edgePresentation.focusTotal}
           onOpenFocusLens={() => {
-            const target = selectedNodeId ?? hoveredNodeId ?? drawerNodeId
+            const target = selectedNodeId ?? document.documentElement.dataset.hoveredNode ?? drawerNodeId
             if (target) openLens(target)
           }}
         />
@@ -5296,6 +5567,27 @@ export function ContextViewCanvas({
               el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
             } : undefined}
             onFit={handleFitToWidth}
+            fold={layerFold.active ? {
+              openIds: layerFold.openIds,
+              focusLayer: layerFold.focusLayer,
+              step: layerFold.step,
+              canStep: layerFold.canStep,
+            } : undefined}
+            foldToggle={layerFoldOffered && layerFold.overflows ? {
+              enabled: foldLayersEnabled,
+              onToggle: () => setFoldLayersEnabled(!foldLayersEnabled),
+            } : undefined}
+            // Adaptive drawing a subset: what is drawn, the most-connected
+            // entities, and the way to all of them — in the canvas's own bar.
+            trailing={edgePresentation.ambientTotal > edgePresentation.ambientShown && edgePresentation.ambientShown > 0 ? (
+              <LineageGuide
+                shown={edgePresentation.ambientShown}
+                total={edgePresentation.ambientTotal}
+                hubs={lineageHubs}
+                onFocusHub={focusHub}
+                onShowAll={() => setLineageRenderMode('raw')}
+              />
+            ) : undefined}
           />
         )}
 
@@ -5389,12 +5681,14 @@ export function ContextViewCanvas({
           // clientHeight, so a percentage-height child inside already stops
           // above it and the columns still end at the visible edge.
           className="flex-1 min-h-0 overflow-auto relative scroll-smooth custom-scrollbar"
+          // Row cards read this for their surface (`.nx-row-card`, globals.css).
+          data-frosted-cards={frostedCards || undefined}
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
           // dock, layer strip, edge legend) so a column's last row can always scroll
           // clear of it — and be clicked. Both variables are published by
           // the chrome itself and are 0 when it is not rendered.
-          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px)))' }}
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px), var(--selection-bar-height, 0px)))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
@@ -5418,14 +5712,26 @@ export function ContextViewCanvas({
               resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
+              motion={lineageMotion}
               expandingEdgeIds={expandingEdgeIds}
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
               flowRibbons={flowRibbons}
-              focusNodeId={railFocusId}
-              onAnchorProxies={handleAnchorProxies}
+              focusNodeId={selectedNodeId}
+              childMap={childMap}
+              // On Hover / Adaptive draw a hovered entity's lines from here.
+              hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
+              hoverBudget={autoStubThreshold}
+              offCanvasLineage={overlay.active ? undefined : offCanvasByNode}
+              // During a trace the reveal itself refuses to write the store
+              // (revealOnCanvas), so the click is safe to offer throughout.
+              onBringInOffCanvas={(nodeId, side) => { void bringInOffCanvas(nodeId, side) }}
+              layerNames={layerNameById}
             />
           )}
+
+          {/* What a lineage port means, on hover — one tip for every port. */}
+          <PortHoverTip scrollerRef={horizontalScrollRef} />
 
           {/* In-progress edge while dragging a connection (shares the overlay
               coordinate space — absolute sibling inside the scroll container). */}
@@ -5476,20 +5782,29 @@ export function ContextViewCanvas({
               (EXTREMITY_EDGE_GUTTER_PX) so the two stay in sync. The overlay
               SVG spans the full viewport, so insetting the columns keeps
               those curves within the visible box at the scroll extremes. */}
+          {/* Two neighbouring spines (folded layers) sit SPINE_GAP_PX apart,
+              not a column gap: no line runs between them, so the room a
+              line needs to curve would only push layers off screen. */}
           <div
-            className="flex h-full min-h-0 relative z-30 gap-12 pointer-events-none"
+            className="flex h-full min-h-0 relative z-30 gap-12 pointer-events-none [&>[data-folded]+[data-folded]]:-ml-[42px]"
             style={{
               paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
               paddingRight: EXTREMITY_EDGE_GUTTER_PX,
               // Canvas zoom — CSS `zoom` (NOT transform: scale). zoom is a
-              // LAYOUT-affecting scale: the wrapper's 100/zoom% size lays
-              // out back to exactly 100% of the scroll container, so the
-              // scrollable area always equals the visible content. A
-              // transform here left a 100/zoom% layout-sized ghost scroll
-              // region (transforms never affect layout), letting users
-              // scroll far past the canvas into emptiness — and wheel
-              // scrolls chained into that ghost area instead of the
-              // columns' internal lists.
+              // LAYOUT-affecting scale, so the wrapper lays out at exactly
+              // 100% of the scroll container and the scrollable area always
+              // equals the visible content. A transform here left a
+              // layout-sized ghost scroll region (transforms never affect
+              // layout), letting users scroll far past the canvas into
+              // emptiness — and wheel scrolls chained into that ghost area
+              // instead of the columns' internal lists.
+              //
+              // How to size it depends on the browser (lib/cssZoom.ts):
+              // legacy zoom scales percentages too, so the size is undone by
+              // the zoom (100/zoom%); standardised zoom — Chromium since 128,
+              // Firefox — scales only absolute lengths, and undoing it there
+              // left the columns at 1/zoom of the canvas's height over dead
+              // space (62.5% at 160%).
               //
               // The height is the container's CONTENT box, undone by the
               // zoom the same way the width is. A percentage already
@@ -5502,8 +5817,8 @@ export function ContextViewCanvas({
               // every column, its bottom periphery scrim and its
               // end-of-list sentinel 11px short of the visible edge.
               zoom: canvasZoom !== 1 ? canvasZoom : undefined,
-              width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: `calc(100% / ${canvasZoom})`,
+              width: canvasZoom !== 1 && zoomScalesPercentages() ? `${100 / canvasZoom}%` : undefined,
+              height: zoomScalesPercentages() ? `calc(100% / ${canvasZoom})` : '100%',
             }}
           >
             {sortedLayers.map((layer) => (
@@ -5522,6 +5837,8 @@ export function ContextViewCanvas({
                 expandedNodes={expandedForRender}
                 searchResults={advancedMatchUrns}
                 onSelect={selectNode}
+                onSelectRange={setSelection}
+                selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
@@ -5535,12 +5852,12 @@ export function ContextViewCanvas({
                 traceFocusId={traceActive && canvasTrace.tracedUrn
                   ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
                   : trace.focusId}
+                traceFocusIds={traceFocusIdSet}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
                 isTracing={overlay.active}
                 highlightedNodes={mergedHighlightNodes}
                 isHighlightActive={isHighlightActive}
-                isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadMoreChildren}
                 // The row box's inline hit rows are pointers into the
@@ -5579,13 +5896,20 @@ export function ContextViewCanvas({
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
                 externalCue={externalCueByNode}
+                lineageTotals={externalDegrees}
+                lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
-                anchorProxies={anchorProxyGroups.get(layer.id)}
                 onProxyReveal={scrollHitIntoView}
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? loadMoreRootsGuarded : undefined}
                 onResizeLayer={isDraft ? resizeLayer : undefined}
+                isFolded={layerFold.folded.has(layer.id)}
+                spineWidth={layerFold.spineWidth}
+                foldEpoch={foldEpoch}
+                foldPorts={foldLineage.ports.get(layer.id)}
+                foldUndrawnLines={foldLineage.undrawn.get(layer.id)}
+                onFoldChange={layerFold.setLayerFolded}
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
@@ -5667,6 +5991,7 @@ export function ContextViewCanvas({
             onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
             onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
             onFocusNode={revealOnCanvas}
+            onRevealPath={revealSearchHit}
             onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
         )}

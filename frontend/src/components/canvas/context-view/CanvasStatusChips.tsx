@@ -12,6 +12,9 @@
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
  *
+ * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
+ * the end of the layer strip (LineageGuide).
+ *
  * Every relationship counted here is a FLOW: every one of these numbers
  * comes from `useEdgeProjection`, which drops containment edges in all
  * three of its sections, or from `useExternalDegrees`, which asks the
@@ -28,7 +31,7 @@
  */
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { Unlink, Layers, ListPlus, GitBranch, Focus } from 'lucide-react'
+import { Unlink, Layers, ListPlus, Focus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
@@ -53,9 +56,7 @@ export function CanvasStatusChips({
   aggDetailTotal,
   onLoadMoreDetail,
   viewScope = 'all',
-  adaptiveShown,
-  adaptiveTotal,
-  onShowAllEdges,
+
   focusShown,
   focusTotal,
   onOpenFocusLens,
@@ -81,10 +82,7 @@ export function CanvasStatusChips({
    * instead of implying something is missing or broken.
    */
   viewScope?: 'all' | 'curated'
-  /** Adaptive ambient budget: strongest flows shown / total projected. */
-  adaptiveShown?: number
-  adaptiveTotal?: number
-  onShowAllEdges?: () => void
+
   /** Focus fan cap: strongest incident edges shown / node's full fan. */
   focusShown?: number
   focusTotal?: number
@@ -105,12 +103,11 @@ export function CanvasStatusChips({
   const showUnresolved = unresolvedEdgeCount > 0
   const showUnassigned = unassignedEntities.length > 0
   const showAggDetail = aggDetailTotal > aggDetailShown && aggDetailShown > 0
-  const showAdaptive = (adaptiveTotal ?? 0) > (adaptiveShown ?? 0) && (adaptiveShown ?? 0) > 0
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots && !showExternal) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -127,7 +124,7 @@ export function CanvasStatusChips({
     <div
       className="absolute z-30 flex flex-col items-end gap-1.5 pointer-events-none"
       style={{
-        bottom: 'calc(0.5rem + var(--edge-legend-height, 0px) + var(--trace-dock-height, 0px))',
+        bottom: 'calc(0.5rem + var(--edge-legend-height, 0px) + var(--trace-dock-height, 0px) + var(--selection-bar-height, 0px))',
         right: 'calc(1rem + 20rem + 0.5rem)',
       }}
       data-canvas-interactive
@@ -194,42 +191,6 @@ export function CanvasStatusChips({
                 onClick={onLoadMoreRoots}
               >
                 Load more
-              </button>
-            )}
-          </div>
-        </InfoTooltip>
-      )}
-
-      {showAdaptive && (
-        <InfoTooltip
-          side="right"
-          content={
-            <div>
-              <p className="font-semibold mb-1">Adaptive flow density</p>
-              <p className="text-ink-muted">
-                Showing the {adaptiveShown!.toLocaleString()} strongest{' '}
-                {unitNoun(adaptiveTotal!, 'lines')} of {adaptiveTotal!.toLocaleString()} on
-                this canvas. The in/out markers on each entity summarize the rest — hover
-                or select an entity to focus it, or show everything.
-              </p>
-              <p className="text-ink-muted/70 mt-1">{unitMeaning('lines')}</p>
-            </div>
-          }
-        >
-          <div className={CHIP_CLASS}>
-            <GitBranch className="w-3 h-3 text-accent-lineage/80" />
-            <span>
-              Top <span className="tabular-nums">{adaptiveShown!.toLocaleString()}</span> of{' '}
-              <span className="tabular-nums">{adaptiveTotal!.toLocaleString()}</span>{' '}
-              {unitNoun(adaptiveTotal!, 'lines')}
-            </span>
-            {onShowAllEdges && (
-              <button
-                type="button"
-                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                onClick={onShowAllEdges}
-              >
-                Show all
               </button>
             )}
           </div>

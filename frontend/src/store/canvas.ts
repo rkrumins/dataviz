@@ -127,6 +127,17 @@ interface CanvasState {
   selectedNodeIds: string[]
   selectedEdgeIds: string[]
   selectNode: (id: string, multi?: boolean) => void
+  /** Replace the whole node selection — what a shift-range and every bulk
+   *  action need. Logical groupings are filtered out: a group is a visual
+   *  container, not an entity, and bulk actions have nothing to walk from. */
+  setSelection: (ids: string[]) => void
+  /**
+   * Multi-select armed from the UI. Cmd/Ctrl-click is the shortcut for it,
+   * but a modifier nobody is told about is not a feature — with this on, a
+   * plain click adds to the selection instead of replacing it.
+   */
+  multiSelectArmed: boolean
+  setMultiSelectArmed: (armed: boolean) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
   /** Last selectNode() call. `drawerNodeId` is sticky, so click observers (the
@@ -141,6 +152,15 @@ interface CanvasState {
   drawerNodeId: string | null
   openNodeDrawer: (id: string) => void
   closeNodeDrawer: () => void
+  /**
+   * The drawer's own back/forward trail. Following lineage from the drawer —
+   * a consumer, then its consumer, then back — is a WALK, and a walk you
+   * cannot retrace is one people stop taking. `cursor` indexes `entries`;
+   * -1 is an empty trail.
+   */
+  drawerHistory: { entries: string[]; cursor: number }
+  drawerBack: () => void
+  drawerForward: () => void
 
   // Viewport
   viewport: Viewport
@@ -300,11 +320,17 @@ export const useCanvasStore = create<CanvasState>()(
       },
       addNodes: (newNodes) => set((state) => {
         const existingIds = state._nodeIndex
-        const uniqueNodes = newNodes.filter((n) => !existingIds.has(n.id))
-        if (uniqueNodes.length === 0) return state // No-op: prevent unnecessary re-render
-        const nextIndex = new Set(existingIds)
+        const uniqueNodes: LineageNode[] = []
+        const dupes = new Map<string, LineageNode>()
+        for (const n of newNodes) {
+          if (existingIds.has(n.id)) dupes.set(n.id, n)
+          else uniqueNodes.push(n)
+        }
+        const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
+        if (uniqueNodes.length === 0 && !enriched) return state
+        const nextIndex = uniqueNodes.length > 0 ? new Set(existingIds) : existingIds
         uniqueNodes.forEach((n) => nextIndex.add(n.id))
-        return { nodes: [...state.nodes, ...uniqueNodes], _nodeIndex: nextIndex }
+        return { nodes: [...(enriched ?? state.nodes), ...uniqueNodes], _nodeIndex: nextIndex }
       }),
       addEdges: (newEdges) => set((state) => {
         const existingIds = state._edgeIndex
@@ -341,15 +367,21 @@ export const useCanvasStore = create<CanvasState>()(
         }
       }),
       addGraph: (newNodes, newEdges) => set((state) => {
-        const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
+        const uniqueNodes: LineageNode[] = []
+        const dupes = new Map<string, LineageNode>()
+        for (const n of newNodes) {
+          if (state._nodeIndex.has(n.id)) dupes.set(n.id, n)
+          else uniqueNodes.push(n)
+        }
         const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
-        if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return state
-        const nodeIndex = new Set(state._nodeIndex)
-        const edgeIndex = new Set(state._edgeIndex)
+        const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
+        if (uniqueNodes.length === 0 && uniqueEdges.length === 0 && !enriched) return state
+        const nodeIndex = uniqueNodes.length > 0 ? new Set(state._nodeIndex) : state._nodeIndex
+        const edgeIndex = uniqueEdges.length > 0 ? new Set(state._edgeIndex) : state._edgeIndex
         uniqueNodes.forEach((n) => nodeIndex.add(n.id))
         uniqueEdges.forEach((e) => edgeIndex.add(e.id))
         return {
-          nodes: [...state.nodes, ...uniqueNodes],
+          nodes: [...(enriched ?? state.nodes), ...uniqueNodes],
           edges: [...state.edges, ...uniqueEdges],
           _nodeIndex: nodeIndex,
           _edgeIndex: edgeIndex,
@@ -361,9 +393,13 @@ export const useCanvasStore = create<CanvasState>()(
       selectedEdgeIds: [],
       selectNode: (id, multi = false) => set((state) => ({
         selectedNodeIds: multi
-          ? state.selectedNodeIds.includes(id)
-            ? state.selectedNodeIds.filter((nid) => nid !== id)
-            : [...state.selectedNodeIds, id]
+          // A logical grouping is a container, not an entity — it can be
+          // clicked, but it never joins a selection a bulk action reads.
+          ? isSelectableNode(id)
+            ? state.selectedNodeIds.includes(id)
+              ? state.selectedNodeIds.filter((nid) => nid !== id)
+              : [...state.selectedNodeIds, id]
+            : state.selectedNodeIds
           : state.selectedNodeIds.length === 1 && state.selectedNodeIds[0] === id
             ? [] // Toggle off: clicking the already-selected node deselects it
             : [id],
@@ -374,7 +410,13 @@ export const useCanvasStore = create<CanvasState>()(
         // Single-select of a real entity opens (or swaps) the sticky drawer.
         // Toggle-off keeps it open — only the X button closes it. Logical
         // groupings and multi-select never touch the drawer.
-        ...(!multi && !id.startsWith('logical:') ? { drawerNodeId: id } : {}),
+        // A single-select click opens the drawer on that entity, so it is a
+        // move like any other — otherwise Back would skip the steps taken on
+        // the canvas. A multi-selection never touches the drawer, so it is
+        // not a move.
+        ...(!multi && !id.startsWith('logical:')
+          ? { drawerNodeId: id, drawerHistory: pushDrawerHistory(state.drawerHistory, id) }
+          : {}),
       })),
       selectEdge: (id, multi = false) => set((state) => ({
         selectedEdgeIds: multi
@@ -387,13 +429,47 @@ export const useCanvasStore = create<CanvasState>()(
         // edge drawer.
         drawerNodeId: null,
       })),
-      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
+      setSelection: (ids) => set(() => {
+        const next = [...new Set(ids.filter(isSelectableNode))]
+        return {
+          selectedNodeIds: next,
+          // Node and edge selections are mutually exclusive, as in selectNode.
+          selectedEdgeIds: [],
+          // One node set this way reads as a plain click and opens the sticky
+          // drawer; a set of several must not, because the drawer shows ONE
+          // entity and a selection of five is not one entity.
+          ...(next.length === 1 ? { drawerNodeId: next[0] } : {}),
+        }
+      }),
+      multiSelectArmed: false,
+      setMultiSelectArmed: (multiSelectArmed) => set({ multiSelectArmed }),
+      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [], multiSelectArmed: false }),
       lastNodeClick: { nodeId: null, seq: 0 },
 
       // Sticky entity drawer
       drawerNodeId: null,
-      openNodeDrawer: (id) => set({ drawerNodeId: id }),
-      closeNodeDrawer: () => set({ drawerNodeId: null }),
+      drawerHistory: { entries: [], cursor: -1 },
+      openNodeDrawer: (id) => set((state) => ({
+        drawerNodeId: id,
+        drawerHistory: pushDrawerHistory(state.drawerHistory, id),
+      })),
+      closeNodeDrawer: () => set({ drawerNodeId: null, drawerHistory: { entries: [], cursor: -1 } }),
+      drawerBack: () => set((state) => {
+        const cursor = state.drawerHistory.cursor - 1
+        if (cursor < 0) return {}
+        return {
+          drawerNodeId: state.drawerHistory.entries[cursor]!,
+          drawerHistory: { ...state.drawerHistory, cursor },
+        }
+      }),
+      drawerForward: () => set((state) => {
+        const cursor = state.drawerHistory.cursor + 1
+        if (cursor >= state.drawerHistory.entries.length) return {}
+        return {
+          drawerNodeId: state.drawerHistory.entries[cursor]!,
+          drawerHistory: { ...state.drawerHistory, cursor },
+        }
+      }),
 
       // Viewport
       viewport: { x: 0, y: 0, zoom: 1 },
@@ -543,6 +619,74 @@ export const useCanvasStore = create<CanvasState>()(
     }
   )
 )
+
+/**
+ * Fill in what the store is MISSING about a node it already holds.
+ *
+ * `addNodes`/`addGraph` keep the first version of an id they are given, which
+ * is right for position and for anything the user has since edited — but it
+ * also meant a node first seen in a LEAN shape could never be completed. The
+ * ancestors `/ancestors` returns carry `childCount: null`, so a container
+ * first met that way kept no child count for the rest of the session: no `+N`
+ * badge, no chevron, no way to open it. That is a container losing its
+ * containment tree, and no amount of re-fetching fixed it.
+ *
+ * Fill-only, never overwrite: a value the store already has wins, so a richer
+ * earlier read, a live edit and a node's position are all safe. Returns the
+ * SAME object when nothing was missing, so React sees no change.
+ */
+function enrichNode(existing: LineageNode, incoming: LineageNode): LineageNode {
+  const from = incoming.data as Record<string, unknown> | undefined
+  if (!from) return existing
+  const have = existing.data as unknown as Record<string, unknown>
+  let filled: Record<string, unknown> | null = null
+  for (const key in from) {
+    const v = from[key]
+    if (v === undefined || v === null) continue
+    if (have[key] !== undefined && have[key] !== null) continue
+    filled ??= { ...have }
+    filled[key] = v
+  }
+  return filled ? ({ ...existing, data: filled } as LineageNode) : existing
+}
+
+/**
+ * One pass over the held nodes, filling whatever the incoming duplicates can
+ * complete. Returns null when nothing changed — the caller then keeps the
+ * existing array and React re-renders nothing. O(nodes + dupes), the same
+ * order as the copy the caller was doing anyway.
+ */
+function enrichAll(
+  nodes: LineageNode[],
+  dupes: Map<string, LineageNode>,
+): LineageNode[] | null {
+  let changed = false
+  const next = nodes.map((n) => {
+    const incoming = dupes.get(n.id)
+    if (!incoming) return n
+    const merged = enrichNode(n, incoming)
+    if (merged !== n) changed = true
+    return merged
+  })
+  return changed ? next : null
+}
+
+/** Record a drawer move. A move from the middle of the trail drops whatever
+ *  was ahead of it, the way every back/forward history does; re-opening the
+ *  entity already shown is not a move. */
+function pushDrawerHistory(
+  history: { entries: string[]; cursor: number },
+  id: string,
+): { entries: string[]; cursor: number } {
+  if (history.entries[history.cursor] === id) return history
+  const entries = [...history.entries.slice(0, history.cursor + 1), id]
+  return { entries, cursor: entries.length - 1 }
+}
+
+/** A logical grouping (`logical:<id>`) is a visual container the view config
+ *  declares, not an entity in the graph. It has no urn to trace, expand or
+ *  link, so it never belongs in a selection that bulk actions read. */
+const isSelectableNode = (id: string): boolean => !id.startsWith('logical:')
 
 // Selector hooks
 export const useNodes = () => useCanvasStore((s) => s.nodes)

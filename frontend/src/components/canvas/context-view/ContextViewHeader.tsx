@@ -57,6 +57,12 @@ export interface ContextViewHeaderProps {
   // per-node trace buttons remain for granular up/down/full control.
   traceActive: boolean
   canTrace: boolean
+  /** How many entities a press of Trace would walk (bulk trace). */
+  traceSeedCount?: number
+  multiSelectArmed?: boolean
+  onToggleMultiSelect?: () => void
+  /** The Lens stays single-focal; gated separately from Trace. */
+  canOpenLens?: boolean
   onStartTrace: () => void
   onExitTrace: () => void
   /** True once the canvas finishes hydrating (entities + edges). When
@@ -150,6 +156,10 @@ export function ContextViewHeader({
   onSetLineageRenderMode,
   traceActive,
   canTrace,
+  traceSeedCount,
+  multiSelectArmed,
+  onToggleMultiSelect,
+  canOpenLens,
   onStartTrace,
   onExitTrace,
   lineageReady,
@@ -212,6 +222,10 @@ export function ContextViewHeader({
     onToggleEdgeDirection,
     traceActive,
     canTrace,
+    traceSeedCount,
+    multiSelectArmed,
+    onToggleMultiSelect,
+    canOpenLens,
     onStartTrace,
     onExitTrace,
     lineageReady,

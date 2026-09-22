@@ -30,8 +30,9 @@ import { useCallback } from 'react'
 
 import { useCanvasStore } from '@/store/canvas'
 import { toCanvasNode, toCanvasEdge } from '@/hooks/useGraphHydration'
-import { useViewContainmentEdgeTypes } from '@/hooks/useViewSchema'
+import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 import { usePreferencesStore } from '@/store/preferences'
+import { primeLineageFor } from '@/lib/primeLineageFor'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
 
@@ -134,9 +135,11 @@ export type RevealSearchHit = (urn: string, ancestorPath: AncestorRef[]) => Prom
 export const LANDED_NOWHERE: RevealOutcome = { landedOn: 'ancestor', urn: '', displayName: '' }
 
 
+
 export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView, markFirstPageHandled }: UseRevealSearchHitDeps): RevealSearchHit {
     const selectNode = useCanvasStore((s) => s.selectNode)
     const containmentEdgeTypes = useViewContainmentEdgeTypes()
+    const lineageEdgeTypes = useViewLineageEdgeTypes()
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]): Promise<RevealOutcome> => {
         // Prime the spine: with lazy children loading, only top-level
@@ -200,6 +203,15 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView,
                 )
             }
         }
+
+        // The hit's own FLOWS. The spine prime above is containment only —
+        // it exists to attach the hit to its parents — so a hit landing on a
+        // canvas that had never loaded its lineage arrived with none: the
+        // drawer listed its connections while the canvas drew nothing, and
+        // Trace or the Focus Lens were the only ways to see them.
+        await primeLineageFor(provider, spineUrns as string[], lineageEdgeTypes)
+            .then((edges) => { if (edges.length > 0) useCanvasStore.getState().addGraph([], edges) })
+            .catch((e) => console.warn('[reveal] lineage priming failed', e))
 
         // The walk: open each level, top-down, and NOTHING else. No child
         // page is fetched — the level already holds its spine child, and
@@ -284,6 +296,7 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView,
  */
 export function usePrefetchSearchHitSpine(provider: GraphDataProvider) {
     const containmentEdgeTypes = useViewContainmentEdgeTypes()
+    const lineageEdgeTypes = useViewLineageEdgeTypes()
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]) => {
         const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
@@ -319,5 +332,10 @@ export function usePrefetchSearchHitSpine(provider: GraphDataProvider) {
         } catch (e) {
             console.warn('[reveal] prefetch edge priming failed', e)
         }
-    }, [provider, containmentEdgeTypes])
+        // Same reason as the reveal itself: a prefetched spine with no flows
+        // would paint the hit and none of its lineage.
+        await primeLineageFor(provider, spineUrns as string[], lineageEdgeTypes)
+            .then((edges) => { if (edges.length > 0) useCanvasStore.getState().addGraph([], edges) })
+            .catch((e) => console.warn('[reveal] lineage priming failed', e))
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes])
 }
