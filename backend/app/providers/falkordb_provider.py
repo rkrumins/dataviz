@@ -1537,7 +1537,7 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 #: ``falkordb_materialize._ROLLUP_ATTRIBUTE_NAMES`` /
 #: ``_META_ATTRIBUTE_NAMES`` / ``_PROJECTION_NODE_ATTRIBUTE_NAMES`` and are
 #: IMPORTED, not copied — one definition, per ``derived_artifacts``'s house
-#: rule. These four have no other home:
+#: rule. These have no other home:
 #:
 #: * ``confidence`` — every edge writer SETs it (``save_custom_graph``'s edge
 #:   batch, ``create_node``'s containment edge, ``create_edge``, and the
@@ -1549,8 +1549,11 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 #:   (``projection.py``). Covered by no pre-flight anywhere — the
 #:   materializer's capacity baseline checks its own nine names only.
 #: * ``purgedAt`` — the ``_AggMeta`` purge stamp.
+#: * ``gvHash`` / ``reconciling`` — the projector's in-place reconcile: the
+#:   content fingerprint on every projected node and edge, and the
+#:   ``_GVRollupMeta`` flag that marks a reconcile's rollup writes in flight.
 _PROJECTOR_ATTRIBUTE_NAMES: frozenset = frozenset({
-    "confidence", "gvSeq", "seq", "purgedAt",
+    "confidence", "gvSeq", "seq", "purgedAt", "gvHash", "reconciling",
 })
 
 
