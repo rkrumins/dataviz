@@ -121,7 +121,15 @@ export function useEdgeConnect({ onConnect, groupOf, onBulkDrop }: UseEdgeConnec
       return { ...s, hoverId, pointer: { x: e.clientX, y: e.clientY } }
     })
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setState(IDLE) }
-    const onUp = (e: PointerEvent) => resolveTarget(e.clientX, e.clientY)
+    const onUp = (e: PointerEvent) => {
+      // Pressed on one card, released over another: the browser fires the
+      // click on their common ancestor — the canvas background, whose click
+      // clears the selection this drag is carrying. The drag owns that click.
+      const swallow = (c: MouseEvent) => { c.stopPropagation(); c.preventDefault() }
+      window.addEventListener('click', swallow, { capture: true, once: true })
+      setTimeout(() => window.removeEventListener('click', swallow, true), 0)
+      resolveTarget(e.clientX, e.clientY)
+    }
     const onCancel = () => setState(IDLE)
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp, { once: true })

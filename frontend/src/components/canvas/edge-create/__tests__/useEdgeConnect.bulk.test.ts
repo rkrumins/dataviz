@@ -78,6 +78,24 @@ describe('useEdgeConnect — bulk', () => {
     expect(hook.result.current.state).toMatchObject({ mode: 'picking', sourceId: 'y', targetId: 'z' })
   })
 
+  it('swallows the click that ends the drag, so it cannot clear the selection it carried', () => {
+    // Pressed on one card's handle, released over another: the browser fires
+    // that click on their common ancestor — the canvas background, whose
+    // click clears the selection (and so closed the bulk card as it opened).
+    const background = vi.fn()
+    document.body.addEventListener('click', background)
+    const { hook, onBulkDrop } = setup()
+    act(() => hook.result.current.beginDrag('a', { x: 0, y: 0 }))
+    release('z')
+    act(() => { document.body.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(onBulkDrop).toHaveBeenCalled()
+    expect(background).not.toHaveBeenCalled()
+    // Only that one click: the next is the reader's own.
+    act(() => { document.body.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(background).toHaveBeenCalledTimes(1)
+    document.body.removeEventListener('click', background)
+  })
+
   it('Escape cancels a drag', () => {
     const { hook } = setup()
     act(() => hook.result.current.beginDrag('a', { x: 0, y: 0 }))
