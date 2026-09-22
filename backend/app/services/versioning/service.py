@@ -3293,6 +3293,12 @@ class GraphVersioningService:
         so no extra resolution is needed by the caller."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
+            if getattr(branch, "status", None) == "merged":
+                # Everything the draft changed is IN main now: reading it as main ⊕ its edits
+                # applied them twice — each added child counted again in its parent's count (a
+                # "Load 2 more" that loads nothing in a tab still showing the published draft).
+                return {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
+                        "nodesNew": []}
             main_id = await self._main_branch_id(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             base_seq = branch.base_commit_seq or 0
