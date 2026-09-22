@@ -166,4 +166,23 @@ describe('DataHealthTab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry rebuild' }))
     expect(rebuildMutate).toHaveBeenCalledTimes(2)
   })
+
+  it('says the lineage summaries need rebuilding when every item matches but they do not', () => {
+    reconcileResolve = { ok: true, report: baseReport({
+      rollups: { status: 'untrusted', aggregated: 2692, stubs: 2692 } }) }
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+    expect(screen.getByText(/lineage summaries between containers need rebuilding/)).toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Rebuild fast read layer' })[0])
+    expect(screen.getByRole('heading', { name: 'Rebuild fast read layer' })).toBeInTheDocument()
+  })
+
+  it('stays quiet about healthy summaries', () => {
+    reconcileResolve = { ok: true, report: baseReport({
+      rollups: { status: 'ok', aggregated: 12, stubs: 0 } }) }
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+    expect(screen.queryByText(/lineage summaries/)).toBeNull()
+    expect(screen.getByText(/The fast read layer matches the source of truth/)).toBeInTheDocument()
+  })
 })

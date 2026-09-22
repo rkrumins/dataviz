@@ -168,6 +168,63 @@ async def falkor_counts(client) -> Tuple[int, int]:
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
 
+@dataclass
+class RollupHealth:
+    """What a graph's ``:AGGREGATED`` rollups can be trusted for. The ONE reading of it —
+    the projector decides "move by delta vs hand to the batch job" on it, and "Check sync"
+    reports it — so the two can never disagree about a graph."""
+    aggregated: int            # rollup relationships stored
+    stubs: int                 # rollups with no aggKey: rows replayed from an old import, never computed
+    stamped: bool              # a platform writer (aggregation run or projector delta) vouches for them
+    reconcile_interrupted: bool  # a reconcile died between its raw and rollup writes
+
+    def trusted(self, lineage_edges: int) -> bool:
+        """Exactly what the raw edges imply, so a difference can be applied by delta."""
+        if self.stubs or self.reconcile_interrupted:
+            return False
+        return self.stamped or (self.aggregated == 0 and lineage_edges == 0)
+
+    @property
+    def status(self) -> str:
+        if self.stubs or self.reconcile_interrupted:
+            return "untrusted"
+        if self.aggregated == 0 and not self.stamped:
+            return "missing"
+        return "ok"
+
+
+def _iso_ms(value: str) -> int:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+async def rollup_health(client) -> RollupHealth:
+    """Read a graph's rollup health (four small reads; the stub count scans the rollup layer
+    only). A reconcile's ``reconciling`` flag is cleared by the reconcile that set it, or
+    superseded by any aggregation run that finished after it (which re-derived everything)."""
+    async def one(cypher: str):
+        res = await _bounded_query(client, cypher)
+        rows = getattr(res, "result_set", None) or []
+        return rows[0][0] if rows and rows[0] else None
+
+    aggregated = int(await one("MATCH ()-[r:AGGREGATED]->() RETURN count(r)") or 0)
+    stubs = int(await one(
+        "MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL RETURN count(r)") or 0) if aggregated else 0
+    reconciling = await one("MATCH (m:_GVRollupMeta) RETURN m.reconciling")
+    materialized = await one("MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.lastMaterializedAt")
+    marker = int(await one("MATCH (m:_GVRollupMeta) RETURN count(m)") or 0)
+    interrupted = bool(reconciling) and (
+        not materialized or _iso_ms(str(materialized)) <= int(reconciling))
+    return RollupHealth(aggregated=aggregated, stubs=stubs,
+                        stamped=materialized is not None or marker > 0,
+                        reconcile_interrupted=interrupted)
+
+
 # --- Scan cypher (streamed via SKIP/LIMIT; see docstring on the pagination cost) --- #
 # Ordered by the stable ``entityId`` / ``r.id`` so the Postgres keyset stream (also ordered by
 # entity_id) and this scan sorted-merge without either side materialising. SKIP/LIMIT re-scans per
@@ -219,6 +276,7 @@ class DriftReport:
     checked_at: str
     duration_ms: int
     skipped_reason: Optional[str] = None                 # "no projection target" | "projection in flight"
+    rollups: Optional[dict] = None                        # {status, aggregated, stubs} — see RollupHealth
 
 
 _SENTINEL = object()
@@ -346,7 +404,15 @@ class ProjectionReconciler:
             and not mismatched and not edge_mismatched
             and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
+        try:
+            health = await rollup_health(client)
+            rollups = {"status": health.status, "aggregated": health.aggregated,
+                       "stubs": health.stubs}
+        except Exception:                                # pragma: no cover - infra
+            logger.debug("rollup health unavailable for %s", graph_id, exc_info=True)
+            rollups = None
         return _report(
+            rollups=rollups,
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
             missing_edges=[], extra_edges=[],

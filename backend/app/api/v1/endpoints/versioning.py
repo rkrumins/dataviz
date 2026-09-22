@@ -817,6 +817,9 @@ class DriftReportModel(_ApiModel):
     checked_at: str = Field(alias="checkedAt")
     duration_ms: int = Field(alias="durationMs")
     skipped_reason: Optional[str] = Field(default=None, alias="skippedReason")
+    # Rollup health: {"status": "ok" | "missing" | "untrusted", "aggregated", "stubs"}.
+    # "missing"/"untrusted" → "Rebuild fast read layer" hands them to the aggregation job.
+    rollups: Optional[Dict[str, Any]] = None
 
 
 class StateResponse(_ApiModel):

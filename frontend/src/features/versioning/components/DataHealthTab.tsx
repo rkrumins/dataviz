@@ -295,6 +295,24 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
                     : 'This data source has no fast read layer yet.'}
                 </span>
               </div>
+            ) : report.inSync && report.rollups?.status && report.rollups.status !== 'ok' ? (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.07] px-3 py-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                  <p className="text-[12px] text-ink">
+                    Every item and connection matches the source of truth, but the lineage summaries
+                    between containers {report.rollups.status === 'missing'
+                      ? 'have not been built yet'
+                      : 'need rebuilding'}. A rebuild keeps every item in place and re-creates them.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setConfirmRebuild(true)}
+                  className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-amber-700 dark:text-amber-300 border border-amber-500/40 hover:bg-amber-500/10 transition-colors"
+                >
+                  Rebuild fast read layer
+                </button>
+              </div>
             ) : report.inSync ? (
               <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.07] px-3 py-2.5 text-[12px] text-ink">
                 <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />

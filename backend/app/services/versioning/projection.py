@@ -29,7 +29,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func, literal, or_, select
 
 from . import config, db
-from .reconcile import falkor_counts, pg_live_counts_projectable
+from .reconcile import falkor_counts, pg_live_counts_projectable, rollup_health
 from .projection_reconcile import (
     ActualEdge, ActualNode, EdgeKey, ExpectedEdge, ExpectedNode,
     _local_chain, diff_projection, fingerprint, plan_rollup_deltas,
@@ -250,20 +250,6 @@ def _group(pairs) -> Dict[str, List[str]]:
     for urn, label in pairs:
         out.setdefault(label, []).append(urn)
     return out
-
-
-def _iso_ms(value: str) -> int:
-    """Epoch ms of an ISO-8601 stamp (``_AggMeta.lastMaterializedAt``);
-    0 when it does not parse, so an unreadable stamp never vouches for a
-    later write."""
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return 0
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
 
 
 def _batches(seq, n):
@@ -1508,38 +1494,13 @@ class FalkorProjector:
         return nodes, edges, endpoint_labels
 
     async def _rollups_trusted(self, client, actual_lineage: int) -> bool:
-        """Whether the stored rollups are exactly what FalkorDB's raw edges
-        imply — the precondition for correcting them by delta. Not so when:
-
-        * stub rollups are present (committed ``AGGREGATED`` rows replayed as
-          raw edges: no weight, no aggKey);
-        * a reconcile died between its raw writes and its rollup writes (its
-          ``reconciling`` flag is still set and no aggregation run has since
-          re-derived the rollups);
-        * rollups exist that no platform writer stamped, or lineage exists that
-          no rollup was ever written for.
-
-        Any of these hands the rollups to the aggregation batch job, which
-        derives them from the raw graph and writes only the difference."""
-        async def one(cypher: str):
-            res = await _q(client, cypher, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
-            rows = getattr(res, "result_set", None) or []
-            return rows[0][0] if rows and rows[0] else None
-
-        if await one("MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL RETURN count(r)"):
-            return False
-        reconciling = await one("MATCH (m:_GVRollupMeta) RETURN m.reconciling")
-        materialized = await one("MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.lastMaterializedAt")
-        if reconciling:
-            if not materialized or _iso_ms(str(materialized)) <= int(reconciling):
-                return False
-        stamped = (materialized is not None
-                   or await one("MATCH (m:_GVRollupMeta) RETURN count(m)"))
-        if stamped:
-            return True
-        # Never stamped: trustworthy only as the empty set over no lineage.
-        rollups = await one("MATCH ()-[r:AGGREGATED]->() RETURN count(r)")
-        return not rollups and not actual_lineage
+        """Whether the stored rollups are exactly what FalkorDB's raw edges imply — the
+        precondition for correcting them by delta (``reconcile.RollupHealth``, the same
+        reading "Check sync" reports). Not so with stub rollups, after a reconcile that died
+        between its raw and rollup writes, or when rollups nobody stamped exist or lineage
+        exists that no rollup was ever written for: the batch job derives them instead,
+        writing only the difference."""
+        return (await rollup_health(client)).trusted(actual_lineage)
 
     async def _reconcile_in_place(self, client, graph_id, main_id, to_seq, is_fork,
                                   level_map, track_progress: bool = False) -> Dict[str, object]:
