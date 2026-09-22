@@ -1537,7 +1537,7 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 #: ``falkordb_materialize._ROLLUP_ATTRIBUTE_NAMES`` /
 #: ``_META_ATTRIBUTE_NAMES`` / ``_PROJECTION_NODE_ATTRIBUTE_NAMES`` and are
 #: IMPORTED, not copied — one definition, per ``derived_artifacts``'s house
-#: rule. These four have no other home:
+#: rule. These have no other home:
 #:
 #: * ``confidence`` — every edge writer SETs it (``save_custom_graph``'s edge
 #:   batch, ``create_node``'s containment edge, ``create_edge``, and the
@@ -1549,8 +1549,11 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
 #:   (``projection.py``). Covered by no pre-flight anywhere — the
 #:   materializer's capacity baseline checks its own nine names only.
 #: * ``purgedAt`` — the ``_AggMeta`` purge stamp.
+#: * ``gvHash`` / ``reconciling`` — the projector's in-place reconcile: the
+#:   content fingerprint on every projected node and edge, and the
+#:   ``_GVRollupMeta`` flag that marks a reconcile's rollup writes in flight.
 _PROJECTOR_ATTRIBUTE_NAMES: frozenset = frozenset({
-    "confidence", "gvSeq", "seq", "purgedAt",
+    "confidence", "gvSeq", "seq", "purgedAt", "gvHash", "reconciling",
 })
 
 
@@ -2135,6 +2138,10 @@ class FalkorDBProvider(GraphDataProvider):
         self._host = _normalize_falkordb_host(host)
         self._port = port
         self._graph_name = graph_name
+        # Notices when this graph was dropped and written again elsewhere (eviction,
+        # purge) — see ``graph_generation`` and ``_refresh_if_graph_rebuilt``.
+        from .graph_generation import GraphRebuildWatch
+        self._rebuild_watch = GraphRebuildWatch()
         # Connect-time index/projection reconcile. A READ-ONLY caller must
         # turn this off: the reconcile issues CREATE INDEX, which is a WRITE,
         # and a write to a graph key that does not exist CREATES it (this
@@ -4368,6 +4375,69 @@ class FalkorDBProvider(GraphDataProvider):
             # for an hour, so a long run read as untouched since minute zero.
             self._last_op_at = time.monotonic()
 
+    async def _graph_has_no_indexes(self) -> bool:
+        """True only when the graph DEFINITELY holds no index. The ensured-indexes
+        marker lives in Redis, outside the graph, and a GRAPH.DELETE takes every
+        index with it — after the 2026-09-22 heal the marker claimed a set the graph
+        no longer had, and every read was a full scan. Unanswerable → False, so the
+        marker keeps its old meaning."""
+        try:
+            res = await self._graph.query("CALL db.indexes() YIELD label RETURN count(label)")
+            rows = getattr(res, "result_set", None)
+            return bool(rows) and rows[0][0] == 0
+        except Exception:                               # noqa: BLE001 — never decides alone
+            return False
+
+    async def _refresh_if_graph_rebuilt(self) -> None:
+        """Forget everything this provider learned from a graph that has since been
+        dropped and written again, or retyped / re-parented by a publish: the handles' id tables (falkordb-py would otherwise
+        decode every node with the old names — Domain as "Schema Field") and the
+        graph-derived memos (rollup meta, regime, property names, casing maps, the
+        ensured-indexes latch — the drop took the indexes). At most one Redis read per
+        interval; never raises."""
+        try:
+            names = {self._graph_name}
+            try:
+                names.add(self._projection_graph_key())
+            except Exception:                           # noqa: BLE001 — half-built provider
+                pass
+            rebuilt = False
+            for name in names:
+                if name and await self._rebuild_watch.rebuilt(name):
+                    rebuilt = True
+            if not rebuilt:
+                return
+            for handle in (getattr(self, "_graph", None), getattr(self, "_proj_graph", None)):
+                schema = getattr(handle, "schema", None)
+                if schema is not None:
+                    schema.clear()
+            self._agg_meta_cached = None
+            self._regime_probe_cached = None
+            self._property_names_cache = None
+            self._casing_maps_cache = None
+            self._property_key_count_cache = None
+            self._save_indices_ensured = False
+            # The shared content caches keyed by what moved: urn → label (a stale label
+            # anchors a lookup on the OLD label and finds nothing — the node reads as
+            # missing) and ancestor chains (a moved container). Shared across processes;
+            # deleting twice is harmless.
+            if self._redis is not None:
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(
+                        cursor, match=f"{self._cache_ns}:ancestors:*", count=500)
+                    if keys:
+                        await self._redis.delete(*keys)
+                    if cursor == 0:
+                        break
+                await self._redis.delete(self._urn_label_key())
+            logger.info("graph %s changed structurally elsewhere (dropped, retyped or "
+                        "re-parented) — cleared this provider's id tables, graph memos "
+                        "and content caches", self._graph_name)
+        except Exception:                               # noqa: BLE001 — never fails a query
+            logger.debug("rebuild check skipped for %s", getattr(self, "_graph_name", "?"),
+                         exc_info=True)
+
     async def _guarded_timed(
         self,
         runner: Callable[[], Awaitable[Any]],
@@ -4392,6 +4462,7 @@ class FalkorDBProvider(GraphDataProvider):
         """
         from ..config.resilience import FALKORDB_SLOW_QUERY_MS
 
+        await self._refresh_if_graph_rebuilt()
         queued_at = time.monotonic()
         read_only = kind.endswith("ro")
         async with self._query_semaphore:
@@ -5084,7 +5155,8 @@ class FalkorDBProvider(GraphDataProvider):
                 marker_key = backoff_key = None
             if marker_key and not force:
                 try:
-                    if await self._redis.get(marker_key) == digest:
+                    if (await self._redis.get(marker_key) == digest
+                            and not await self._graph_has_no_indexes()):
                         logger.debug(
                             "ensure_indices on %s: %d statements already applied "
                             "(digest %s) — skipping",

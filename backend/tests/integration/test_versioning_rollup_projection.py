@@ -2,9 +2,9 @@
 Postgres + FalkorDB.
 
 Proves that committed lineage-edge changes reach the FalkorDB rollup layer WITHOUT a
-full aggregation run: a created lineage edge materialises weight-1 AGGREGATED pairs over
-the ancestor-pair product (self-inclusive chains, self-loops excluded — the aggregation
-worker's exact semantics); a retried window doesn't double-count (gvSeq guard); deleting
+full aggregation run: a created lineage edge materialises weight-1 AGGREGATED cells — the
+canonical depth-bridged selection on an unstamped (boundary-regime) graph, exactly what the
+aggregation worker stores; a retried window doesn't double-count (gvSeq guard); deleting
 the edge removes the rollups; a containment MOVE re-points them.
 
 Run inside the dev backend container:
@@ -69,6 +69,8 @@ async def _run() -> None:
     proj = FalkorProjector(make_falkor_graph_factory(), edge_types_resolver=_edge_types_stub,
                            on_rollups_stale=_stale_stub)
     client = make_falkor_graph_factory()(name)
+    if asyncio.iscoroutine(client):                      # the factory resolves topology async
+        client = await client
 
     A, B, C = "urn:t:aggA_" + sfx, "urn:t:aggB_" + sfx, "urn:t:aggC_" + sfx
     Ac, Bc = A + ".c", B + ".c"
@@ -79,15 +81,19 @@ async def _run() -> None:
             _edge("cA_" + sfx, A, Ac, "CONTAINS"), _edge("cB_" + sfx, B, Bc, "CONTAINS")])
         await proj.project_graph(gid)
         assert await _rollups(client) == {}, "full seed must not invent rollups"
-        assert stale_calls == [gid], "a full seed wipes rollups → must queue a rebuild"
-        stale_calls.clear()
+        # A full seed reconciles in place and wipes nothing: with no lineage there is nothing
+        # for an aggregation job to do, so none is queued.
+        assert stale_calls == [], f"a lineage-free first seed must not queue a rebuild: {stale_calls}"
 
         # (1) a committed lineage edge rolls up over the ancestor-pair product
         await svc.apply_ops(graph_id=gid, actor="bot", containment_edge_types=CONT,
                             ops=[_edge("lin_" + sfx, Ac, Bc, "FLOWS_TO")])
         await proj.project_graph(gid)
         got = await _rollups(client)
-        expect = {(Ac, Bc), (Ac, B), (A, Bc), (A, B)}
+        # A graph no aggregation run has stamped stores the CANONICAL cells (boundary regime —
+        # what the aggregation worker writes, via the same shared pair rules): here the one
+        # table-level cell. The full cube only applies to a graph stamped "cube".
+        expect = {(A, B)}
         assert set(got) == expect, got
         assert all(v == (1, ["FLOWS_TO"]) for v in got.values()), got
 
@@ -104,7 +110,7 @@ async def _run() -> None:
             _node(C, "Table"), _del("cB_" + sfx), _edge("cC_" + sfx, C, Bc, "CONTAINS")])
         await proj.project_graph(gid)
         got = await _rollups(client)
-        expect = {(Ac, Bc), (Ac, C), (A, Bc), (A, C)}
+        expect = {(A, C)}
         assert set(got) == expect, got
 
         # (4) deleting the lineage edge removes every rollup it fed
@@ -125,7 +131,7 @@ async def _run() -> None:
                          "properties": {"confidence_note": "edited"}}}])
         await proj.project_graph(gid)                    # one window spanning both commits
         got = await _rollups(client)
-        assert set(got) == {(Ac, Bc), (Ac, C), (A, Bc), (A, C)}, got
+        assert set(got) == {(A, C)}, got
         assert all(v[0] == 1 for v in got.values()), f"create+update window miscounted: {got}"
 
         # (6) delete + re-create (same id, same endpoints) across two commits, ONE window:
