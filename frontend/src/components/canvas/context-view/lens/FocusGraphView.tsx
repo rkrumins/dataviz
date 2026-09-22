@@ -82,6 +82,7 @@ import '@xyflow/react/dist/style.css'
 import * as LucideIcons from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { getEntityVisual } from '@/hooks/useEntityVisual'
+import { useLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusEdge, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
@@ -138,20 +139,23 @@ export function exportFrameFor(bounds: { x: number; y: number; width: number; he
   }
 }
 
-/** Direction tints — the house semantics: upstream = sky, downstream
- *  = amber (matches the list columns and the canvas). */
-const TINT_UP = '#0ea5e9'
-const TINT_DOWN = '#f59e0b'
-/**
- * Off-cone wire colour (Task 20, P2) — `TINT_UP`/`TINT_DOWN` run through
- * the exact matrix `filter: saturate(.35)` applies (the CSS/SVG spec's
- * luminance-preserving saturate matrix, not an HSL desaturation — the
- * two disagree visibly), computed once here rather than asked of the
- * compositor on every off-cone wire. `filter` forces its own render
- * layer per element; a precomputed colour is a plain paint property, and
- * a wide board can carry hundreds of off-cone wires when a cone is
- * active. Screenshot-verified against the `filter` version in the P2
- * report — the two are pixel-equivalent.
+/*
+ * Direction tints — upstream / downstream — are the product's lineage
+ * DIRECTION pair (lib/lineageDirectionColors.ts), read through
+ * `useLineageDirectionColors`: the canvas's ports, the drawer's lineage and a
+ * trace wear the same pair, and the reader chooses it (blue up, green down by
+ * default; sky / amber, this board's original, is a preset).
+ *
+ * The off-cone wire colour (Task 20, P2) is each tint run through the exact
+ * matrix `filter: saturate(.35)` applies (the CSS/SVG spec's luminance-
+ * preserving saturate matrix, not an HSL desaturation — the two disagree
+ * visibly), computed once per chosen pair (`saturateHex`) rather than asked
+ * of the compositor on every off-cone wire. `filter` forces its own render
+ * layer per element; a precomputed colour is a plain paint property, and a
+ * wide board can carry hundreds of off-cone wires when a cone is active.
+ * Screenshot-verified against the `filter` version in the P2 report — the
+ * two are pixel-equivalent, and `saturateHex` reproduces the baked
+ * `#5e93ab` / `#c2a370` exactly.
  */
 /** THE MINI MAP (2026-08-22) — offered once a board is big enough to get
  *  lost on. Below this a reader can see the whole picture at a glance and
@@ -159,8 +163,6 @@ const TINT_DOWN = '#f59e0b'
 const MINIMAP_MIN_CARDS = 8
 /** The lineage accent, for the map's focus dot and viewport frame. */
 const ACCENT_LINEAGE = '#6366f1'
-const MUTED_TINT_UP = '#5e93ab'
-const MUTED_TINT_DOWN = '#c2a370'
 
 /** Slate, for a card that stands for no entity: an unresolved type, or
  *  the focal's contains-stack, which is chrome rather than a thing. */
@@ -883,10 +885,11 @@ function TypeIcon({ ctx, typeId, color, className }: { ctx: CardCtx; typeId: str
  *  the only thing drawn as a wire — containment nests instead. */
 function PortHandles() {
   const dot = '!w-1.5 !h-1.5 !border-0 !min-w-0 !min-h-0 rounded-full'
+  const tints = useLineageDirectionColors()
   return (
     <>
-      <Handle type="target" position={Position.Left} className={dot} style={{ backgroundColor: `${TINT_UP}99` }} />
-      <Handle type="source" position={Position.Right} className={dot} style={{ backgroundColor: `${TINT_DOWN}99` }} />
+      <Handle type="target" position={Position.Left} className={dot} style={{ backgroundColor: `${tints.in}99` }} />
+      <Handle type="source" position={Position.Right} className={dot} style={{ backgroundColor: `${tints.out}99` }} />
       {/* The internal lane's own exit — a ROUTING ANCHOR, not a port, so
           it is invisible and shares the incoming port's position: a wire
           that stays inside this container leaves here, drops down its
@@ -3144,8 +3147,8 @@ function BandLabelNode({ data }: NodeProps) {
   return (
     <div style={{ width: CARD_W }} className="pointer-events-none flex items-baseline gap-1.5 whitespace-nowrap">
       {isUp
-        ? <LucideIcons.ArrowDownLeft className={cn('w-3 h-3 self-center text-sky-500', isolating && onPath === 0 && 'opacity-40')} />
-        : <LucideIcons.ArrowUpRight className={cn('w-3 h-3 self-center text-amber-500', isolating && onPath === 0 && 'opacity-40')} />}
+        ? <LucideIcons.ArrowDownLeft className={cn('w-3 h-3 self-center text-lineage-in', isolating && onPath === 0 && 'opacity-40')} />
+        : <LucideIcons.ArrowUpRight className={cn('w-3 h-3 self-center text-lineage-out', isolating && onPath === 0 && 'opacity-40')} />}
       <span className={cn(
         'text-[9.5px] font-bold uppercase tracking-[0.12em]',
         isolating && onPath === 0 ? 'text-ink-muted/40' : 'text-ink-muted/70',
@@ -3846,14 +3849,14 @@ function LensPeek({ card, host, ctx, onDismiss }: {
       <div className="px-2.5 py-2 space-y-0.5 text-[10px] tabular-nums">
         <p className="flex items-center gap-2.5">
           <span
-            className="flex items-center gap-1 text-sky-600 dark:text-sky-400"
+            className="flex items-center gap-1 text-lineage-in"
             title={`${card.drawnIn.toLocaleString()} on this board${card.flowsIn > card.drawnIn ? `, ${(card.flowsIn - card.drawnIn).toLocaleString()} not fetched yet` : ''}`}
           >
             <LucideIcons.ArrowDownLeft className="w-3 h-3" />
             {card.approx ? '≈' : ''}{card.flowsIn.toLocaleString()}{card.flowsInExact ? '' : '+'} in
           </span>
           <span
-            className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
+            className="flex items-center gap-1 text-lineage-out"
             title={`${card.drawnOut.toLocaleString()} on this board${card.flowsOut > card.drawnOut ? `, ${(card.flowsOut - card.drawnOut).toLocaleString()} not fetched yet` : ''}`}
           >
             <LucideIcons.ArrowUpRight className="w-3 h-3" />
@@ -4611,6 +4614,9 @@ export function FocusGraphView({
   const [pinnedBundle, setPinnedBundle] = useState<string | null>(null)
   const onBundleHover = useCallback((id: string | null) => setHoverBundle(id), [])
   const onBundleClick = useCallback((id: string) => setPinnedBundle(current => (current === id ? null : id)), [])
+  // The product's lineage direction pair — up / down wires, their arrows,
+  // and the map's cone marks (lib/lineageDirectionColors.ts).
+  const tints = useLineageDirectionColors()
   const { edges: baseEdges, toFlowEdge } = useMemo((): { edges: Edge[]; toFlowEdge: (e: FocusEdge) => Edge } => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     // For THE TRAIL: which urn each card id backs, so a bundle between
@@ -4645,12 +4651,12 @@ export function FocusGraphView({
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
       const up = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
-      const tint = up ? TINT_UP : TINT_DOWN
+      const tint = up ? tints.in : tints.out
       // The off-cone colour, baked in here rather than a `filter` at
       // render time (P2) — a static property of which SIDE the wire is
       // on, exactly like `tint` itself, so this costs nothing extra on a
       // rebuild and nothing at all on a hover.
-      const mutedTint = up ? MUTED_TINT_UP : MUTED_TINT_DOWN
+      const mutedTint = up ? tints.inMuted : tints.outMuted
       const sUrn = urnById.get(e.source)
       const tUrn = urnById.get(e.target)
       const trail = !!sUrn && !!tUrn && trailAdjacent.has([sUrn, tUrn].sort().join('|'))
@@ -4688,7 +4694,7 @@ export function FocusGraphView({
       }
     }
     return { edges: graph.edges.map(toFlowEdge), toFlowEdge }
-  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent, onBundleHover, onBundleClick, pinnedBundle])
+  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent, onBundleHover, onBundleClick, pinnedBundle, tints])
 
   const reachValue = useMemo(
     () => focalReach ?? null,
@@ -5101,7 +5107,7 @@ export function FocusGraphView({
                       if (!card) return 'transparent'
                       if (card.kind === 'focal') return ACCENT_LINEAGE
                       const band = card.band ?? 0
-                      return band < 0 ? TINT_UP : band > 0 ? TINT_DOWN : 'transparent'
+                      return band < 0 ? tints.in : band > 0 ? tints.out : 'transparent'
                     }}
                     maskColor="rgba(15,23,42,0.08)"
                     maskStrokeColor={ACCENT_LINEAGE}

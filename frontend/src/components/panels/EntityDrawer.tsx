@@ -62,6 +62,8 @@ import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
+import { Section } from './DrawerSection'
+import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 
 // ============================================
 // Types
@@ -85,10 +87,17 @@ interface EntityDrawerProps {
    *  collapsed ancestors (lazy-loading from the backend if needed), then
    *  pans/scrolls to the target. May return a promise; the drawer's
    *  neighbor row awaits it to show a loading spinner. */
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   /** Reveal a set of neighbors at once and fit the canvas around them.
    *  Used by the LineageNeighbors multi-select action bar. */
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  /** Open the canvas down a KNOWN containment path to an entity at any
+   *  depth — the reveal search uses. The lineage list knows every partner's
+   *  path, so a column five levels down opens exactly its own spine instead
+   *  of paging every level for it. */
+  onRevealPath?: RevealSearchHit
   /** External link URL builder */
   getExternalUrl?: (urn: string) => string | null
   /** Entities the surface is DRAWING that the canvas store does not hold —
@@ -112,6 +121,7 @@ export function EntityDrawer({
   onFullTrace,
   onFocusNode,
   onLocateMany,
+  onRevealPath,
   getExternalUrl,
   resolveNode,
 }: EntityDrawerProps) {
@@ -122,6 +132,24 @@ export function EntityDrawer({
   const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const drawerBackStep = useCanvasStore((s) => s.drawerBack)
+  const drawerForwardStep = useCanvasStore((s) => s.drawerForward)
+  const canDrawerBack = useCanvasStore((s) => s.drawerHistory.cursor > 0)
+  const canDrawerForward = useCanvasStore(
+    (s) => s.drawerHistory.cursor < s.drawerHistory.entries.length - 1)
+  // Retracing is a move on the CANVAS too: the drawer showing an entity the
+  // board is not looking at is how people lose their place. Select it (so the
+  // canvas highlight follows) and reveal it, exactly as clicking a neighbour
+  // row does — the reveal is best-effort and never blocks the panel swap.
+  const stepDrawer = useCallback((step: () => void) => {
+    step()
+    const target = useCanvasStore.getState().drawerNodeId
+    if (!target) return
+    useCanvasStore.getState().selectNode(target)
+    void onFocusNode?.(target)
+  }, [onFocusNode])
+  const drawerBack = useCallback(() => stepDrawer(drawerBackStep), [stepDrawer, drawerBackStep])
+  const drawerForward = useCallback(() => stepDrawer(drawerForwardStep), [stepDrawer, drawerForwardStep])
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
@@ -510,6 +538,47 @@ export function EntityDrawer({
           {/* Type Badge & Close */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
+              {/* The trail. Following lineage from here is a WALK — a
+                  consumer, then its consumer — and a walk you cannot retrace
+                  is one people stop taking. Rendered only once there is
+                  somewhere to go, so a drawer opened on one entity carries no
+                  dead controls. */}
+              {(canDrawerBack || canDrawerForward) && (
+                <div className="flex items-center gap-0.5 mr-0.5">
+                  <button
+                    type="button"
+                    onClick={drawerBack}
+                    disabled={!canDrawerBack}
+                    aria-label="Back to the previous entity"
+                    title="Back"
+                    className={cn(
+                      'p-1.5 rounded-lg transition-colors duration-150',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canDrawerBack
+                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
+                        : 'text-ink-muted opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    <LucideIcons.ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={drawerForward}
+                    disabled={!canDrawerForward}
+                    aria-label="Forward to the next entity"
+                    title="Forward"
+                    className={cn(
+                      'p-1.5 rounded-lg transition-colors duration-150',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canDrawerForward
+                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
+                        : 'text-ink-muted opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    <LucideIcons.ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
               <span
                 className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide"
                 style={{ backgroundColor: colors.bg, color: colors.text }}
@@ -579,26 +648,29 @@ export function EntityDrawer({
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceUp?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-colors duration-150 group"
+                // Upstream and downstream wear the product's lineage direction
+                // pair (lib/lineageDirectionColors.ts) — the canvas's ports,
+                // the lineage cards below, the Focus Lens and a trace.
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-lineage-in/10 border border-lineage-in/20 hover:bg-lineage-in/20 transition-colors duration-150 group"
               >
-                <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
-                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-blue-500" />
+                <div className="w-10 h-10 rounded-full bg-lineage-in/20 flex items-center justify-center group-hover:bg-lineage-in/30 transition-colors">
+                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-lineage-in" />
                 </div>
-                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Root Cause</span>
-                <span className="text-[10px] text-blue-500/60">Trace Upstream</span>
+                <span className="text-xs font-medium text-lineage-in">Root Cause</span>
+                <span className="text-[10px] text-lineage-in/60">Trace Upstream</span>
               </motion.button>
 
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceDown?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-green-500/10 border border-green-500/20 hover:bg-green-500/20 transition-colors duration-150 group"
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-lineage-out/10 border border-lineage-out/20 hover:bg-lineage-out/20 transition-colors duration-150 group"
               >
-                <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center group-hover:bg-green-500/30 transition-colors">
-                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-green-500" />
+                <div className="w-10 h-10 rounded-full bg-lineage-out/20 flex items-center justify-center group-hover:bg-lineage-out/30 transition-colors">
+                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-lineage-out" />
                 </div>
-                <span className="text-xs font-medium text-green-600 dark:text-green-400">Impact</span>
-                <span className="text-[10px] text-green-500/60">Trace Downstream</span>
+                <span className="text-xs font-medium text-lineage-out">Impact</span>
+                <span className="text-[10px] text-lineage-out/60">Trace Downstream</span>
               </motion.button>
 
               <motion.button
@@ -715,6 +787,7 @@ export function EntityDrawer({
               copiedUrn={copiedUrn}
               onFocusNode={onFocusNode}
               onLocateMany={onLocateMany}
+              onRevealPath={onRevealPath}
               wsId={historyWsId}
               graphId={historyGraphId}
               mainBranchId={historyMainBranch}
@@ -865,32 +938,6 @@ function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
   )
 }
 
-interface SectionProps {
-  title: string
-  icon?: React.ComponentType<{ className?: string }>
-  children: React.ReactNode
-  action?: React.ReactNode
-  /** Let content extend closer to the drawer edges (title stays aligned).
-   *  Used for the content-dense Properties section. */
-  flush?: boolean
-}
-
-function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
-  return (
-    <div className="px-5 py-4">
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <div className="flex items-center gap-2">
-          {Icon && <Icon className="w-4 h-4 text-ink-muted" />}
-          <h3 className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
-            {title}
-          </h3>
-        </div>
-        {action}
-      </div>
-      {flush ? <div className="-mx-3">{children}</div> : children}
-    </div>
-  )
-}
 
 // A rich freshness stat — icon chip + label (with an optional live pulse) + the relative time, and
 // the exact UTC timestamp on hover. Used for "Updated" (last change) and "Synced" (live layer).
@@ -1082,7 +1129,9 @@ function RelationshipSummary({
 }: {
   nodeId: string
   childCount: number
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
 }) {
   const { node, parentNode, parentName, currentEdgeType, childCountLoaded } = useContainmentPlacement(nodeId)
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
@@ -1101,7 +1150,7 @@ function RelationshipSummary({
   }
 
   return (
-    <Section title="Relationship" icon={LucideIcons.Network}>
+    <Section title="Relationship" icon={LucideIcons.Network} collapsible sectionKey="relationship">
       <div className="space-y-2">
         {parentNode ? (
           <button
@@ -1243,8 +1292,11 @@ interface ViewModeContentProps {
   propertiesBag: Record<string, any>
   onCopyUrn: () => void
   copiedUrn: boolean
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  onRevealPath?: RevealSearchHit
   wsId?: string
   graphId?: string | null
   mainBranchId?: string | null
@@ -1262,6 +1314,7 @@ function ViewModeContent({
   copiedUrn,
   onFocusNode,
   onLocateMany,
+  onRevealPath,
   wsId,
   graphId,
   mainBranchId,
@@ -1338,6 +1391,7 @@ function ViewModeContent({
         nodeId={nodeId}
         onFocusNode={onFocusNode}
         onLocateMany={onLocateMany}
+        onRevealPath={onRevealPath}
       />
 
       {/* History — real per-entity revision history (main line). Hidden when version control is off. */}

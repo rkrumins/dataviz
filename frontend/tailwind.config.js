@@ -70,6 +70,13 @@ export default {
         // rule. As bare `var()`s these tokens silently dropped EVERY alpha
         // suffix — 1,066 of them across 208 files — which is why accent tints,
         // rings and gradients rendered as nothing and the app read as grey.
+        // Lineage DIRECTION — incoming (upstream) / outgoing (downstream), one
+        // pair everywhere (lib/lineageDirectionColors.ts), raw channels so
+        // `lineage-in/10` emits a rule.
+        lineage: {
+          in: 'rgb(var(--nx-lineage-in-rgb) / <alpha-value>)',
+          out: 'rgb(var(--nx-lineage-out-rgb) / <alpha-value>)',
+        },
         accent: {
           lineage: 'rgb(var(--nx-accent-lineage-rgb) / <alpha-value>)',
           business: 'rgb(var(--nx-accent-business-rgb) / <alpha-value>)',

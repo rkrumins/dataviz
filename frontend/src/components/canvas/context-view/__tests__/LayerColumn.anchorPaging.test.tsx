@@ -58,6 +58,7 @@ function renderColumn(
                     expandedNodes={new Set()}
                     searchResults={new Set<string>()}
                     onSelect={vi.fn()}
+                    onSelectRange={vi.fn()}
                     onToggle={vi.fn()}
                     onContextMenu={vi.fn()}
                     onDoubleClick={vi.fn()}

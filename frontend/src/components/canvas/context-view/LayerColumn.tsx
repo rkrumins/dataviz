@@ -19,23 +19,27 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
+import { useCanvasStore } from '@/store/canvas'
 import {
   useAncestorMatchCounts,
   useCanvasFilterMode,
   useMatchUrnSet,
 } from '@/store/searchStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
-import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
-import { FlatTreeItem } from './FlatTreeItem'
+import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
+import { FlatTreeItem, type RowSelectModifiers } from './FlatTreeItem'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
+import { SPINE_MAX_WIDTH_PX } from './layerFold'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
+import { useAnchorRailStore } from '@/store/anchorRail'
+import { sideVolume, type NodePorts } from './lineagePorts'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
 import { matchesQuick } from '../search/session/quickPredicate'
@@ -46,9 +50,17 @@ interface LayerColumnProps {
   nodes: HierarchyNode[]
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   selectedNodeId: string | null
+  /** Every selected row. `selectedNodeId` stays the ONE row the keyboard and
+   *  the drawer reason about; this is what the rows paint from, so a
+   *  multi-selection does not render as one highlighted row and four that
+   *  look untouched. Omitted = just `selectedNodeId`. */
+  selectedNodeIds?: ReadonlySet<string>
   expandedNodes: Set<string>
   searchResults: ReadonlySet<string>
-  onSelect: (id: string) => void
+  onSelect: (id: string, multi?: boolean) => void
+  /** Shift-range result: the visible rows from the last-clicked one to the
+   *  clicked one, resolved HERE because this column owns the visible order. */
+  onSelectRange: (ids: string[]) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
@@ -71,12 +83,15 @@ interface LayerColumnProps {
   /** Right-click on empty space in this layer column (draft/authoring mode). */
   onLayerContextMenu?: (e: React.MouseEvent, layerId: string) => void
   traceFocusId: string | null
+  /** Every seed of the current trace. A bulk trace has several, and all of
+   *  them are focus nodes; `traceFocusId` remains the ONE the column would
+   *  centre on. Omitted = just `traceFocusId`. */
+  traceFocusIds?: ReadonlySet<string>
   traceNodes: Set<string>
   traceContextSet: Set<string>
   isTracing?: boolean
   highlightedNodes?: Set<string>
   isHighlightActive?: boolean
-  isHoverHighlight?: boolean
   onAnimationComplete?: () => void
   onLoadMore?: (parentId: string, auto?: boolean) => void
   /** Walk a search hit's ancestors open and scroll to it. The inline hit
@@ -143,14 +158,17 @@ interface LayerColumnProps {
   lineageCounts?: Map<string, { in: number; out: number }>
   /** Per-node out-of-view lineage counts (curated views) — sky cue. */
   externalCue?: Map<string, { in: number; out: number }>
+  /** Lineage in/out per entity over the whole graph (`/nodes/degree`) —
+   *  absent = not known. Lets a card's port say "lineage exists" even when
+   *  none of it leads to anything on this canvas. */
+  lineageTotals?: ReadonlyMap<string, { in: number; out: number }>
+  /** Where each card's lines plug in, by side and direction (lineagePorts.ts). */
+  lineagePorts?: ReadonlyMap<string, NodePorts>
   /** Render the per-row ambient in/out hairlines (follows the lineage-
    *  flow master switch). Now anchored to the row box, not the overlay. */
   showLineageIndicators?: boolean
   /** Show the flow-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
-  /** Anchor Rail — the selected node's off-screen partners that live in
-   *  THIS column, docked as proxy chips the edge overlay anchors to. */
-  anchorProxies?: AnchorProxyGroup
   /** Chip click — scroll the real row into view (per-partner Frame). */
   onProxyReveal?: (nodeId: string) => void
   /** "+N more" overflow — open the Lineage Lens for the full list. */
@@ -169,7 +187,39 @@ interface LayerColumnProps {
   /** Why an anchored column can never fill — see anchorIssueByLayer. Changes
    *  the empty state from "nothing assigned" (untrue here) to the real reason. */
   anchorIssue?: 'missing' | 'duplicate'
+  /** Folded into a spine. The canvas's fold window decides (useLayerFold);
+   *  the column only asks, through `onFoldChange`. */
+  isFolded?: boolean
+  /** A spine's width, px — one width for every spine on the canvas. */
+  spineWidth?: number
+  /** Changes whenever ANY column's fold changes, so a neighbour slides into
+   *  the room a fold opens instead of jumping (see `layoutDependency`). */
+  foldEpoch?: string
+  /** Folded only: this layer's rows with a line to an OPEN layer, and how
+   *  many lines arrive at (`in`) and leave (`out`) each — where the lineage
+   *  lands on the spine. */
+  foldPorts?: ReadonlyMap<string, { in: number; out: number }>
+  /** Folded only: lines between this layer and another folded one (or
+   *  inside it). Not drawn, but counted on the spine. */
+  foldUndrawnLines?: number
+  /** Fold or unfold this column. Absent, the column has no fold control. */
+  onFoldChange?: (layerId: string, folded: boolean) => void
 }
+
+/** Where an open column's first row starts: below its header (measured
+ *  74px in Chromium, the header's `py-3` around the title and the count).
+ *  A folded layer's lines land at the heights its rows WOULD have, so a
+ *  line does not jump when the layer folds or unfolds. */
+const FOLD_LIST_TOP_PX = 74
+
+/** A spine narrower than this drops to its compact type and padding. */
+const NARROW_SPINE_PX = 36
+
+const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
+
+/** A pin: where lines meet a folded layer's spine, half outside its edge. */
+const FOLD_PIN =
+  'absolute top-1/2 -translate-y-1/2 w-1 h-2.5 rounded-full ring-[1.5px] ring-canvas'
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
 function getItemKey(item: FlatTreeNode, _index: number): string {
@@ -207,9 +257,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   nodes,
   schema,
   selectedNodeId,
+  selectedNodeIds,
   expandedNodes,
   searchResults,
   onSelect,
+  onSelectRange,
   onToggle,
   onContextMenu,
   onDoubleClick,
@@ -220,12 +272,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   onBeginConnect,
   onLayerContextMenu,
   traceFocusId,
+  traceFocusIds,
   traceNodes: _traceNodes,
   traceContextSet,
   isTracing = false,
   highlightedNodes,
   isHighlightActive = false,
-  isHoverHighlight = false,
   onAnimationComplete: _onAnimationComplete,
   onLoadMore,
   onRevealSearchHit,
@@ -255,15 +307,22 @@ export const LayerColumn = React.memo(function LayerColumn({
   overscan = 15,
   lineageCounts,
   externalCue,
+  lineageTotals,
+  lineagePorts,
   showLineageIndicators = false,
   showDensityGutter = false,
-  anchorProxies,
   onProxyReveal,
   onProxyMore,
   onEndReached,
   onResizeLayer,
   anchorMore,
   anchorIssue,
+  isFolded = false,
+  spineWidth = SPINE_MAX_WIDTH_PX,
+  foldEpoch = '',
+  foldPorts,
+  foldUndrawnLines = 0,
+  onFoldChange,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -313,7 +372,8 @@ export const LayerColumn = React.memo(function LayerColumn({
 
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
-  const [isCollapsed, setIsCollapsed] = useState(false)
+  const isCollapsed = isFolded
+  const requestFold = (folded: boolean) => onFoldChange?.(layer.id, folded)
   const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
   const [isDragOver, setIsDragOver] = useState(false)
   const [focusIndex, setFocusIndex] = useState(-1)
@@ -676,7 +736,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     const isVisibleNode = (n: HierarchyNode): boolean => {
       // Selection always wins so the user can never accidentally
       // make their inspected row vanish.
-      if (selectedNodeId === n.id) return true
+      if (selectedNodeId === n.id || selectedNodeIds?.has(n.id)) return true
       const key = n.urn ?? n.id
       const isMatch = matchUrnSet.has(key)
       const onSpine = (ancestorMatchCounts.get(key) ?? 0) > 0
@@ -785,6 +845,30 @@ export const LayerColumn = React.memo(function LayerColumn({
     navigableItems.forEach((item, idx) => map.set(item.node.id, idx))
     return map
   }, [navigableItems])
+
+  // Row click → selection. Cmd/Ctrl toggles; Shift takes everything between
+  // the last-clicked row and this one, in the order the column is DRAWN
+  // (navigableItems, so a collapsed subtree contributes nothing — a range is
+  // what the user can see, not what the tree happens to hold).
+  //
+  // The anchor is the store's lastNodeClick, which bumps on every click. When
+  // it names a row in another column — or nothing has been clicked yet — a
+  // shift-click falls through to a plain select rather than silently doing
+  // nothing.
+  const handleRowSelect = useCallback((id: string, modifiers: RowSelectModifiers) => {
+    if (modifiers.range) {
+      const anchorId = useCanvasStore.getState().lastNodeClick.nodeId
+      const from = anchorId ? navigableIndexMap.get(anchorId) : undefined
+      const to = navigableIndexMap.get(id)
+      if (from !== undefined && to !== undefined) {
+        const [lo, hi] = from <= to ? [from, to] : [to, from]
+        onSelectRange(navigableItems.slice(lo, hi + 1).map((item) => item.node.id))
+        return
+      }
+    }
+    // Armed from the UI, a plain click behaves as a modifier-click would.
+    onSelect(id, modifiers.multi || useCanvasStore.getState().multiSelectArmed)
+  }, [navigableItems, navigableIndexMap, onSelect, onSelectRange])
 
   // O(1) lookup: node ID → flatTree index (for virtualizer.scrollToIndex)
   const nodeToFlatIndexMap = useMemo(() => {
@@ -905,6 +989,10 @@ export const LayerColumn = React.memo(function LayerColumn({
     if (lastRevealPulseRef.current === revealTarget.pulse) return
     const flatIndex = nodeToFlatIndexMap.get(revealTarget.id)
     if (flatIndex === undefined) return  // Wait for flatTree to update
+    // Folded: the canvas opens a folded layer for a reveal into it. Spending
+    // the pulse now would scroll a list that is not mounted, and the row
+    // would never be reached once the column opened.
+    if (isCollapsed) return
     lastRevealPulseRef.current = revealTarget.pulse
     const targetId = revealTarget.id
     // Tiny delay so the virtualizer has its post-expand size estimates
@@ -938,7 +1026,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       })
     }, 50)
     return () => clearTimeout(timer)
-  }, [revealTarget, nodeToFlatIndexMap, virtualizer])
+  }, [revealTarget, nodeToFlatIndexMap, virtualizer, isCollapsed])
 
   // Auto-scroll trace focus node into view — runs ONCE per focus change.
   // Without the ref guard the effect re-fires every time nodeToFlatIndexMap
@@ -959,8 +1047,15 @@ export const LayerColumn = React.memo(function LayerColumn({
       return
     }
     if (lastCenteredFocusRef.current === traceFocusId) return
+    // A BULK trace has no single focus to centre on. Centring the first seed
+    // scrolled the canvas off every other one the user had just picked — so
+    // when there are several, the viewport stays where they left it.
+    if ((traceFocusIds?.size ?? 0) > 1) return
     const flatIndex = nodeToFlatIndexMap.get(traceFocusId)
     if (flatIndex === undefined) return
+    // Folded: no list to centre in, and the id belongs to a fold anchor —
+    // wait for the column to open rather than mark the focus centred.
+    if (isCollapsed) return
     const targetId = traceFocusId
     const timer = setTimeout(() => {
       virtualizer.scrollToIndex(flatIndex, { align: 'center', behavior: 'smooth' })
@@ -979,7 +1074,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       })
     }, 100)
     return () => clearTimeout(timer)
-  }, [traceFocusId, nodeToFlatIndexMap, virtualizer])
+  }, [traceFocusId, traceFocusIds, nodeToFlatIndexMap, virtualizer, isCollapsed])
 
   // ── Expansion reveal ────────────────────────────────────────────────
   // When a node is expanded, its subtree materializes BELOW it — if the
@@ -1167,6 +1262,21 @@ export const LayerColumn = React.memo(function LayerColumn({
   // ("↑ 97 rows · 306 lines") instead of two unlabeled numbers in
   // different units floating near each other.
   const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
+  // Anchor Rail — the focused entity's off-screen partners that live in THIS
+  // column, docked as proxy chips the edge overlay anchors to. A store read,
+  // so the rail following the pointer re-renders only the columns it moves in.
+  const anchorProxies = useAnchorRailStore(s => s.groups.get(layer.id))
+  // Trays, or a hint that opens one (Display > Lineage). A tray opened from
+  // its hint stays open for the entity it lists, and folds back when the
+  // focus moves on — adjusted as the change arrives, not in an effect.
+  const showConnectedTrays = usePreferencesStore(s => s.showConnectedTrays) ?? true
+  const railFocusId = useAnchorRailStore(s => s.focusId)
+  const [openRail, setOpenRail] = useState<'up' | 'down' | null>(null)
+  const [railFocusSeen, setRailFocusSeen] = useState(railFocusId)
+  if (railFocusSeen !== railFocusId) {
+    setRailFocusSeen(railFocusId)
+    setOpenRail(null)
+  }
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in
@@ -1200,11 +1310,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   // out. Per-column and across ALL rows so intensity is stable regardless
   // of which rows are scrolled into view. 0 = no lineage / indicators off.
   const lineageLogMax = useMemo(() => {
-    if (!showLineageIndicators || !lineageCounts || lineageCounts.size === 0) return 0
+    if (!showLineageIndicators || !lineagePorts || lineagePorts.size === 0) return 0
     let maxCount = 0
-    for (const c of lineageCounts.values()) maxCount = Math.max(maxCount, c.in, c.out)
+    for (const p of lineagePorts.values()) maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
     return Math.log2(1 + Math.max(1, maxCount))
-  }, [showLineageIndicators, lineageCounts])
+  }, [showLineageIndicators, lineagePorts])
 
   // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
@@ -1240,6 +1350,43 @@ export const LayerColumn = React.memo(function LayerColumn({
     const fraction = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
     scrollToFlatIndex(Math.min(flatTree.length - 1, Math.floor(fraction * flatTree.length)), 'start')
   }, [flatTree.length, scrollToFlatIndex])
+
+  // ── Fold anchors — where a FOLDED layer's lineage lands ────────────────
+  // One per row with a line to an open layer (the canvas says which, as
+  // `foldPorts`), at the height the row would have in the open column: the
+  // virtualizer still knows every row's offset with nothing mounted. A list
+  // taller than the spine is scaled down to it, so a small folded layer
+  // keeps its lines level and a long one reads as a miniature of itself —
+  // never a pile-up at the top.
+  const foldAnchors = useMemo(() => {
+    if (!isCollapsed || !foldPorts || foldPorts.size === 0) return []
+    const listHeight = virtualizer.getTotalSize()  // also refreshes measurementsCache
+    if (listHeight <= 0) return []
+    const anchors: Array<{ id: string; name: string; offset: number; share: number; in: number; out: number }> = []
+    foldPorts.forEach((port, id) => {
+      const idx = nodeToFlatIndexMap.get(id)
+      const m = idx === undefined ? undefined : virtualizer.measurementsCache[idx]
+      if (idx === undefined || !m) return
+      const offset = m.start + m.size / 2
+      anchors.push({ id, name: flatTree[idx].node.name, offset, share: offset / listHeight, in: port.in, out: port.out })
+    })
+    return anchors
+    // `flatTree` stands in for the virtualizer's row set: the instance is
+    // stable, its measurements are not.
+  }, [isCollapsed, foldPorts, nodeToFlatIndexMap, virtualizer, flatTree])
+  const foldLines = useMemo(
+    () => foldAnchors.reduce((lines, anchor) => lines + anchor.in + anchor.out, 0),
+    [foldAnchors],
+  )
+  // The spine's icon tile shrinks with it, keeping 7px either side.
+  const spineTile = Math.max(16, Math.min(32, spineWidth - 14))
+  // Everything the spine speaks for: the lines drawn onto it, and those to
+  // other folded layers that appear once one end opens.
+  const spineLines = foldLines + foldUndrawnLines
+  const spineLinesSaid = spineLines === 0 ? '' : [
+    foldLines > 0 && `${foldLines.toLocaleString()} ${unitNoun(foldLines, 'lines')} from the open layers ${foldLines === 1 ? 'lands' : 'land'} here`,
+    foldUndrawnLines > 0 && `${foldUndrawnLines.toLocaleString()} ${unitNoun(foldUndrawnLines, 'lines')} ${foldUndrawnLines === 1 ? 'runs' : 'run'} to other folded layers, drawn once one end opens`,
+  ].filter(Boolean).join('; ')
 
   // ── Geometry API registration ─────────────────────────────────────────────
   // Exposes estimated row rects to the edge overlay WITHOUT mounting rows.
@@ -1282,6 +1429,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   return (
     <motion.div
       data-layer-id={layer.id}
+      data-folded={isCollapsed || undefined}
       className={cn(
         // pointer-events-auto re-establishes interactivity for all descendants.
         // The parent columns wrapper is pointer-events-none (so inter-column
@@ -1289,13 +1437,59 @@ export const LayerColumn = React.memo(function LayerColumn({
         // inherited CSS property, so without this explicit `auto` chevrons,
         // headers, and node cards would inherit `none` and become inert.
         "flex flex-col relative group/column transition-all duration-300 pointer-events-auto",
-        isCollapsed ? "min-w-[60px] max-w-[60px]" : "flex-1"
+        isCollapsed ? "flex-none" : "flex-1"
       )}
-      style={!isCollapsed ? { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 } : undefined}
+      style={isCollapsed
+        ? { width: spineWidth, minWidth: spineWidth, maxWidth: spineWidth }
+        : { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 }}
       layout
+      // Measure for a layout animation only when the column's box can have
+      // moved: its fold, width or place — or any other column's fold. Left
+      // to itself framer measures after EVERY render, and the virtualizer
+      // renders the column on every scroll frame: `measureScroll` alone was
+      // ~120ms of a 3s column scroll, forcing layout each frame.
+      layoutDependency={`${isCollapsed}|${spineWidth}|${effectiveWidth}|${layer.order}|${foldEpoch}`}
     >
       {/* Subtle column separator line with gradient fade */}
       <div className="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-glass-border/50 to-transparent" />
+
+      {/* ── Fold anchors — where a FOLDED layer's lineage lands. ──
+          A folded layer renders no rows, so a line into it had nowhere to
+          land and simply stopped being drawn. Each row with a line to an
+          open layer gets an invisible anchor across the spine, carrying the
+          row's own `layer-node-<id>`: the edge overlay finds it like any row
+          and draws the line by the SAME path as every other — colour, arrow,
+          hover and trace unchanged — ending at the spine's edge the way a
+          line ends at a card's. The pins mark the spot: left for lines
+          arriving, right for lines leaving. The anchors exist only while the
+          column is folded, so an id is never mounted twice. */}
+      {isCollapsed && foldAnchors.length > 0 && (
+        <div
+          aria-hidden
+          className="absolute inset-x-0 bottom-4 z-20 pointer-events-none"
+          style={{ top: FOLD_LIST_TOP_PX }}
+        >
+          {foldAnchors.map(({ id, name, offset, share, in: arriving, out: leaving }) => (
+            <div
+              key={id}
+              id={`layer-node-${id}`}
+              data-fold-anchor
+              // The edge overlay's hover card names a line's two ends from
+              // their rows; an anchor has no row text to read.
+              data-label={name}
+              className="absolute inset-x-0 h-px"
+              style={{ top: `min(${offset}px, ${share * 100}%)` }}
+            >
+              {arriving > 0 && (
+                <span className={cn(FOLD_PIN, 'left-0 -translate-x-1/2')} style={{ backgroundColor: layer.color }} />
+              )}
+              {leaving > 0 && (
+                <span className={cn(FOLD_PIN, 'right-0 translate-x-1/2')} style={{ backgroundColor: layer.color }} />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ── Resize handle — drag the column's right edge (260–560px);
           double-click resets to the default width. Width persists per
@@ -1364,14 +1558,26 @@ export const LayerColumn = React.memo(function LayerColumn({
       )}
 
       {/* Layer Header - Glass morphism style + drag target (4.3).
-          When collapsed, the header is the only content in the column; it
-          stretches (`flex-1`) so every collapsed column shares the same
-          vertical extent as its expanded siblings regardless of count
-          digit count or icon size. */}
+          When folded, the header IS the spine: the only content in the
+          column, stretched (`flex-1`) to its siblings' height, and one
+          button — anywhere on it unfolds the layer. */}
       <div
+        role={isCollapsed ? 'button' : undefined}
+        tabIndex={isCollapsed ? 0 : undefined}
+        aria-label={isCollapsed
+          ? `Unfold ${layer.name}${spineLinesSaid ? ` — ${spineLinesSaid}` : ''}`
+          : undefined}
+        title={isCollapsed ? `Unfold ${layer.name}` : undefined}
+        onKeyDown={isCollapsed ? (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return
+          e.preventDefault()
+          requestFold(false)
+        } : undefined}
         className={cn(
           "sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
-          isCollapsed ? "flex-1 px-2 py-4" : "flex-shrink-0 px-4 py-3",
+          isCollapsed
+            ? "flex-1 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/50"
+            : "flex-shrink-0 px-4 py-3",
           isDragOver
             ? "border-white/30"
             : "border-white/[0.08] dark:border-white/[0.05]"
@@ -1383,7 +1589,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%), var(--nx-bg-elevated)`,
           boxShadow: isDragOver ? `inset 0 0 0 2px ${layer.color}80, 0 0 20px ${layer.color}20` : undefined,
         }}
-        onClick={() => isCollapsed && setIsCollapsed(false)}
+        onClick={() => isCollapsed && requestFold(false)}
         onDragOver={(e) => {
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
@@ -1416,28 +1622,35 @@ export const LayerColumn = React.memo(function LayerColumn({
             className="absolute inset-0 flex items-center justify-center rounded-sm pointer-events-none"
             style={{ backgroundColor: `${layer.color}15` }}
           >
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 border border-white/20">
+            <div className={cn(
+              "flex items-center gap-2 rounded-xl bg-black/40 border border-white/20",
+              isCollapsed ? "p-1" : "px-3 py-1.5",
+            )}>
               <LucideIcons.MoveRight className="w-3.5 h-3.5" style={{ color: layer.color }} />
-              <span className="text-xs font-medium" style={{ color: layer.color }}>
-                {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
-              </span>
+              {/* A spine has no room for the sentence; the tint and the
+                  arrow carry it. */}
+              {!isCollapsed && (
+                <span className="text-xs font-medium" style={{ color: layer.color }}>
+                  {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
+                </span>
+              )}
             </div>
           </div>
         )}
         <div className={cn(
           "flex items-center",
-          isCollapsed ? "flex-col gap-3 h-full" : "gap-3"
+          isCollapsed ? "flex-col gap-2.5 h-full" : "gap-3"
         )}>
-          {/* Collapse/Expand Toggle + Icon Container */}
+          {/* Fold Toggle + Icon Container */}
           <div className="flex items-center gap-2">
-            {!isCollapsed && (
+            {!isCollapsed && onFoldChange && (
               <button
                 onClick={(e) => {
                   e.stopPropagation()
-                  setIsCollapsed(true)
+                  requestFold(true)
                 }}
                 className="p-1 rounded-lg hover:bg-white/[0.1] text-ink-muted hover:text-ink transition-all"
-                title="Collapse layer"
+                title="Fold this layer"
               >
                 <LucideIcons.PanelLeftClose className="w-4 h-4" />
               </button>
@@ -1451,43 +1664,73 @@ export const LayerColumn = React.memo(function LayerColumn({
               } : undefined}
               title={onReorderLayer ? `Drag to reorder ${layer.name}` : undefined}
               className={cn(
-                "rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
-                isCollapsed ? "w-10 h-10" : "w-9 h-9 group-hover/column:scale-105 group-hover/column:shadow-md",
+                "flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
+                isCollapsed
+                  ? (spineWidth < NARROW_SPINE_PX ? "rounded-md" : "rounded-lg")
+                  : "rounded-xl w-9 h-9 group-hover/column:scale-105 group-hover/column:shadow-md",
                 onReorderLayer && "cursor-grab active:cursor-grabbing"
               )}
               style={{
                 background: `linear-gradient(145deg, ${layer.color}25 0%, ${layer.color}15 100%)`,
-                boxShadow: `0 2px 8px ${layer.color}20`
+                boxShadow: `0 2px 8px ${layer.color}20`,
+                ...(isCollapsed ? { width: spineTile, height: spineTile } : null),
               }}
             >
               <DynamicIcon
                 name={layer.icon ?? 'Layers'}
                 className={cn(
                   "transition-transform duration-300",
-                  isCollapsed ? "w-5 h-5" : "w-4 h-4 group-hover/column:scale-110"
+                  isCollapsed
+                    ? (spineWidth < NARROW_SPINE_PX ? "w-2.5 h-2.5" : "w-4 h-4")
+                    : "w-4 h-4 group-hover/column:scale-110"
                 )}
                 style={{ color: layer.color }}
               />
             </div>
           </div>
 
-          {/* Collapsed state - vertical text.
-              `h-full` on the inner stack + `mt-auto` on the expand button
-              anchors the expand affordance to the bottom of the column
-              while the name/count sit at the top. With multiple collapsed
-              columns side by side the spine alignment now matches even
-              when entity counts differ in width. */}
+          {/* Folded — the spine. Top to bottom: how many lines land here
+              (the reason to look at a folded layer at all), the name, the
+              entity count, and the unfold mark. `mt-auto` on the mark keeps
+              it at the foot, so neighbouring spines line up whatever their
+              names' lengths. A name longer than the spine ends in an
+              ellipsis rather than running under the pins. */}
           {isCollapsed ? (
-            <div className="flex flex-col items-center gap-2 h-full w-full">
+            <div className="flex flex-col items-center gap-2 flex-1 min-h-0 w-full">
+              {/* The lineage mark — the Lineage toggle's own glyph over the
+                  count, so it cannot be read as the entity count below.
+                  Solid when lines land on this spine; hollow when all of
+                  them run to other folded layers and none is drawn yet. */}
+              {spineLines > 0 && (
+                <span
+                  className={cn(
+                    "shrink-0 flex flex-col items-center gap-0.5 rounded-lg font-semibold tabular-nums leading-none border",
+                    foldLines > 0
+                      ? "text-accent-lineage bg-accent-lineage/15 border-accent-lineage/30"
+                      : "text-ink-muted border-dashed border-black/15 dark:border-white/20",
+                    spineWidth < NARROW_SPINE_PX ? "px-0.5 py-1 text-[9px]" : "px-1 py-1 text-[10px]",
+                  )}
+                  title={`${layer.name}: ${spineLinesSaid}. ${unitMeaning('lines')}`}
+                >
+                  <LucideIcons.GitBranch aria-hidden className="w-2.5 h-2.5" />
+                  {compactCount.format(spineLines)}
+                </span>
+              )}
               <span
-                className="text-xs font-semibold writing-mode-vertical transform rotate-180"
+                className={cn(
+                  "min-h-0 overflow-hidden text-ellipsis whitespace-nowrap font-semibold rotate-180",
+                  spineWidth < NARROW_SPINE_PX ? "text-[10px]" : "text-[11px]",
+                )}
                 style={{ color: layer.color, writingMode: 'vertical-rl' }}
                 title={layer.name}
               >
                 {layer.name}
               </span>
               <div
-                className="relative px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
+                className={cn(
+                  "relative shrink-0 rounded-full font-semibold tabular-nums",
+                  spineWidth < NARROW_SPINE_PX ? "px-1 py-0.5 text-[9px]" : "px-1.5 py-1 text-[10px]",
+                )}
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
                 title={isTracing
                   ? onLineageLabel
@@ -1503,16 +1746,16 @@ export const LayerColumn = React.memo(function LayerColumn({
                   />
                 )}
               </div>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setIsCollapsed(false)
-                }}
-                className="p-1.5 rounded-lg hover:bg-white/[0.1] text-ink-muted hover:text-ink transition-all mt-auto"
-                title="Expand layer"
-              >
-                <LucideIcons.PanelLeftOpen className="w-4 h-4" />
-              </button>
+              {/* A mark, not a button: the whole spine is the button, and a
+                  control inside a control is one a screen reader cannot
+                  reach cleanly. */}
+              <LucideIcons.PanelLeftOpen
+                aria-hidden
+                className={cn(
+                  "mt-auto shrink-0 text-ink-muted group-hover/column:text-ink transition-colors",
+                  spineWidth < NARROW_SPINE_PX ? "w-3 h-3" : "w-4 h-4",
+                )}
+              />
             </div>
           ) : (
             <>
@@ -1879,41 +2122,101 @@ export const LayerColumn = React.memo(function LayerColumn({
               surfaces never collide. ── */}
           <AnimatePresence>
             {anchorProxies && anchorProxies.proxies.length > 0 && (() => {
+              // The focused entity's partners scrolled out of THIS column,
+              // gathered on one opaque tray at the edge they are beyond — its
+              // lines dock to the entries. Chips once floated here one by one
+              // on a background that painted nothing (`bg-canvas-elevated/95`
+              // is alpha on a CSS-variable token), so the rows behind showed
+              // through and their names ran into the chips' own.
               const upProxies = anchorProxies.proxies.filter(p => p.direction === 'up')
               const downProxies = anchorProxies.proxies.filter(p => p.direction === 'down')
-              const renderChip = (p: typeof anchorProxies.proxies[number]) => (
+              const renderEntry = (p: typeof anchorProxies.proxies[number]) => (
                 <button
                   key={p.nodeId}
                   id={`anchor-proxy-${p.nodeId}`}
                   type="button"
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
-                  title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
-                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
-                  style={{ borderLeft: `2px solid ${p.color}` }}
+                  title={`${proxyLabel(p.nodeId)} — ${p.count.toLocaleString()} ${p.count === 1 ? 'line' : 'lines'}, off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
+                  className="pointer-events-auto w-full flex items-center gap-2 pl-2 pr-1.5 py-1 rounded-lg text-[11px] font-medium text-ink hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors min-w-0"
                 >
-                  {p.direction === 'up'
-                    ? <LucideIcons.ChevronUp className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />
-                    : <LucideIcons.ChevronDown className="w-3 h-3 flex-shrink-0 text-ink-muted/70" />}
+                  <span className="w-1 h-3.5 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
                   <span className="truncate">{proxyLabel(p.nodeId)}</span>
-                  {p.count > 1 && (
-                    <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted/70">×{p.count}</span>
-                  )}
+                  <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>
                 </button>
               )
-              const moreChip = anchorProxies.moreCount > 0 && onProxyMore && (
+              const moreEntry = anchorProxies.moreCount > 0 && onProxyMore && (
                 <button
                   key="anchor-more"
                   type="button"
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
-                  title="Every flow of the selected entity, grouped and searchable"
-                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  title="Every flow of the focused entity, grouped and searchable"
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
-                  +{anchorProxies.moreCount} more · Open lens
+                  {anchorProxies.moreCount.toLocaleString()} more in the lens
                 </button>
               )
+              const tray = (direction: 'up' | 'down', entries: typeof upProxies, withMore: boolean) => {
+                // Hint mode (Display > Lineage): one small pill at the edge,
+                // which the focused entity's lines dock to, until a click
+                // opens the tray. The tray itself is the default.
+                if (!showConnectedTrays && openRail !== direction) {
+                  const count = entries.length + (withMore ? anchorProxies.moreCount : 0)
+                  return (
+                    <button
+                      id={`anchor-rail-${layer.id}-${direction}`}
+                      type="button"
+                      data-canvas-interactive
+                      onClick={(e) => { e.stopPropagation(); setOpenRail(direction) }}
+                      title={`${count.toLocaleString()} connected ${direction === 'up' ? 'above' : 'below'} — click to list them`}
+                      className={cn(
+                        'absolute left-2.5 z-30 pointer-events-auto inline-flex items-center gap-1 pl-1.5 pr-2 py-0.5 rounded-full',
+                        'bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-md',
+                        'text-[10.5px] font-medium text-ink-muted hover:text-ink',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors',
+                        direction === 'up' ? 'top-12' : 'bottom-12',
+                      )}
+                    >
+                      {direction === 'up'
+                        ? <LucideIcons.ArrowUp className="w-3 h-3" />
+                        : <LucideIcons.ArrowDown className="w-3 h-3" />}
+                      <span className="tabular-nums">{count.toLocaleString()}</span> connected
+                    </button>
+                  )
+                }
+                return (
+                  <div
+                    className={cn(
+                      'absolute left-2.5 right-2.5 z-30 pointer-events-auto p-1 rounded-xl',
+                      'bg-canvas-elevated border border-black/10 dark:border-white/10',
+                      'shadow-lg shadow-black/10 dark:shadow-black/40',
+                      direction === 'up' ? 'top-12' : 'bottom-12',
+                    )}
+                  >
+                    <p className="flex items-center gap-1 px-2 pt-0.5 pb-1 text-[10.5px] font-medium text-ink-muted">
+                      {direction === 'up'
+                        ? <LucideIcons.ArrowUp className="w-3 h-3" />
+                        : <LucideIcons.ArrowDown className="w-3 h-3" />}
+                      {direction === 'up' ? 'Connected, above' : 'Connected, below'}
+                      {!showConnectedTrays && (
+                        <button
+                          type="button"
+                          data-canvas-interactive
+                          onClick={(e) => { e.stopPropagation(); setOpenRail(null) }}
+                          aria-label="Fold back to the hint"
+                          className="ml-auto p-0.5 rounded-md hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                        >
+                          <LucideIcons.X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </p>
+                    {entries.map(renderEntry)}
+                    {withMore && moreEntry}
+                  </div>
+                )
+              }
               return (
                 <motion.div
                   key="anchor-rail"
@@ -1923,18 +2226,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                   transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                   className="pointer-events-none"
                 >
-                  {(upProxies.length > 0 || (downProxies.length === 0 && moreChip)) && (
-                    <div className="absolute top-12 left-3 right-3 z-30 flex flex-col gap-1">
-                      {upProxies.map(renderChip)}
-                      {downProxies.length === 0 && moreChip}
-                    </div>
-                  )}
-                  {(downProxies.length > 0) && (
-                    <div className="absolute bottom-12 left-3 right-3 z-30 flex flex-col gap-1">
-                      {downProxies.map(renderChip)}
-                      {moreChip}
-                    </div>
-                  )}
+                  {(upProxies.length > 0 || (downProxies.length === 0 && moreEntry)) &&
+                    tray('up', upProxies, downProxies.length === 0)}
+                  {downProxies.length > 0 && tray('down', downProxies, true)}
                 </motion.div>
               )
             })()}
@@ -2333,18 +2627,19 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentIsLast={parentIsLast}
                         layer={layer}
                         schema={schema}
-                        isSelected={selectedNodeId === node.id}
+                        isSelected={selectedNodeIds ? selectedNodeIds.has(node.id) : selectedNodeId === node.id}
+                        isBulkSelected={(selectedNodeIds?.size ?? 0) > 1 && !!selectedNodeIds?.has(node.id)}
+                        isDimmedBySelection={(selectedNodeIds?.size ?? 0) > 1 && !selectedNodeIds?.has(node.id)}
                         isExpanded={expandedNodes.has(node.id)}
                         isLoading={loadingNodes?.has(node.id) ?? false}
                         isSearchResult={searchResults.has(node.id)}
                         isHighlighted={traceContextSet.has(node.id)}
-                        isFocusNode={traceFocusId === node.id}
+                        isFocusNode={traceFocusIds ? traceFocusIds.has(node.id) : traceFocusId === node.id}
                         isTracing={isTracing}
-                        isClickHighlighted={isHighlightActive && !isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
-                        isHoverHighlighted={isHighlightActive && isHoverHighlight && (highlightedNodes?.has(node.id) ?? false)}
+                        isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
                         isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                         isFocused={focusIndex >= 0 && navIdx === focusIndex}
-                        onSelect={onSelect}
+                        onSelect={handleRowSelect}
                         onToggle={onToggle}
                         onContextMenu={onContextMenu}
                         onDoubleClick={onDoubleClick}
@@ -2355,10 +2650,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
-                        lineageIn={showLineageIndicators ? (lineageCounts?.get(node.id)?.in ?? 0) : 0}
-                        lineageOut={showLineageIndicators ? (lineageCounts?.get(node.id)?.out ?? 0) : 0}
-                        lineageIntensityIn={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.in ?? 0)) / lineageLogMax : 0}
-                        lineageIntensityOut={lineageLogMax > 0 ? Math.log2(1 + (lineageCounts?.get(node.id)?.out ?? 0)) / lineageLogMax : 0}
+                        ports={showLineageIndicators ? lineagePorts?.get(node.id) : undefined}
+                        portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
+                        portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
+                        lineageTotals={showLineageIndicators ? lineageTotals?.get(node.id) : undefined}
                         externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
                         externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />

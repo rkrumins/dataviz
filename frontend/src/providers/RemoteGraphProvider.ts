@@ -147,6 +147,41 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     /** Short-lived response cache for GET requests (prevents rapid re-fetches during re-renders) */
     private _responseCache = new Map<string, { data: unknown; ts: number; ttl: number }>()
+    /**
+     * The response cache's ceiling. Entries live 2–60 s, but the map used to
+     * KEEP every one it was given — a read skipped a stale entry, nothing
+     * removed it — so a session spent expanding and scrolling held every
+     * children page and node query it had ever fetched, for the life of the
+     * tab. Now a stale entry is dropped when read, stale ones are swept when
+     * the map passes this size, and past it the oldest go first.
+     */
+    static readonly RESPONSE_CACHE_MAX = 256
+
+    private _cacheResponse(key: string, data: unknown, ttl: number): void {
+        const now = Date.now()
+        // Re-inserted at the end, so insertion order is recency order.
+        this._responseCache.delete(key)
+        this._responseCache.set(key, { data, ts: now, ttl })
+        if (this._responseCache.size <= RemoteGraphProvider.RESPONSE_CACHE_MAX) return
+        for (const [k, v] of this._responseCache) {
+            if (now - v.ts >= v.ttl) this._responseCache.delete(k)
+        }
+        for (const k of this._responseCache.keys()) {
+            if (this._responseCache.size <= RemoteGraphProvider.RESPONSE_CACHE_MAX) break
+            this._responseCache.delete(k)
+        }
+    }
+
+    /** Drop every cached response — the memory gauge's "Free memory". A
+     *  cache, not state: the next read simply asks the server. */
+    releaseCaches(): void {
+        this._responseCache.clear()
+    }
+
+    /** How many responses are cached — for the memory gauge. */
+    get cachedResponseCount(): number {
+        return this._responseCache.size
+    }
     /** Fallback TTL for endpoints not matched in {@link responseCacheTtlMs}. */
     private static DEFAULT_RESPONSE_CACHE_TTL_MS = 2000
 
@@ -252,6 +287,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             if (cached && Date.now() - cached.ts < cached.ttl) {
                 return cached.data as T
             }
+            if (cached) this._responseCache.delete(cacheKey)
         }
 
         // Deduplicate identical in-flight requests — skipped when the
@@ -391,8 +427,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 // metadata 60s, default 2s) so a "expand all" doesn't re-fire
                 // the same children query on every render.
                 if (method === 'GET') {
-                    const ttl = RemoteGraphProvider.responseCacheTtlMs(url)
-                    this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl })
+                    this._cacheResponse(cacheKey, data, RemoteGraphProvider.responseCacheTtlMs(url))
                 }
 
                 circuitBreaker.recordSuccess()
@@ -473,6 +508,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify({ urns, edgeTypes }),
         })
+    }
+
+    async getAncestorChains(urns: string[]): Promise<Record<string, string[]>> {
+        // Absent = unknown, [] = a root: see GraphDataProvider.
+        const res = await this.fetch<{ chains: Record<string, string[]> }>('/nodes/ancestor-chains', {
+            method: 'POST',
+            body: JSON.stringify({ urns }),
+        })
+        return res.chains
     }
 
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {

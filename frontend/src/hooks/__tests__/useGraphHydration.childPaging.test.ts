@@ -13,15 +13,15 @@
  *  - O(page): cross-page sibling lineage comes back WITH each page
  *    (`lineageScope: 'siblings'`) instead of re-sending every loaded sibling to
  *    /edges/between — the old supplement was quadratic per parent.
- *  - HONEST: an edge whose far end is not loaded yet is held back (it returns
- *    with that sibling's own page), so the store never holds dangling edges.
+ *  - HONEST: a sibling edge whose far end is not loaded yet is held back (it
+ *    returns with that sibling's own page).
  *  - STALL-PROOF: a page that brings nothing new (its rows arrived out of band)
  *    does not end the call — the pager walks on until something lands.
  *  - RESUMABLE: a failed page is retried from the SAME position.
  *  - FENCED: a page that lands after the graph was replaced is dropped.
  */
 import { renderHook, act } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Page = {
   children: Array<{ urn: string; displayName: string; entityType: string; childCount?: number }>
@@ -348,5 +348,59 @@ describe('loadChildren — lossless paging', () => {
     unsubscribe()
     expect(loadedKids()).toHaveLength(PAGE)
     expect(updates).toBe(1)   // nodes, edges and the pager position together
+  })
+
+  it('with the count UNKNOWN, a server that ignores the offset gets a short walk, not an endless one', async () => {
+    // A parent seeded from /ancestors has childCount null, and unknown means
+    // "ask". A server that ignores the offset and reports no position returns
+    // page 1 forever while saying "more"; with no count to bound the walk,
+    // nothing else would stop it.
+    seedParentOnly(Array.from({ length: PAGE }, (_, i) => i))   // page 1 held
+    useCanvasStore.getState().updateNode(PARENT, { childCount: null } as never)
+    const page1 = serve()
+    mockProvider.getChildrenWithEdges.mockImplementation((async (u: string, o: Opts) => ({
+      ...(await page1(u, { ...o, offset: 0 })),
+      nextOffset: null,
+    })) as never)
+    const { result } = renderHook(() => useGraphHydration())
+    await act(async () => { await result.current.loadChildren(PARENT) })
+    expect(mockProvider.getChildrenWithEdges).toHaveBeenCalledTimes(5)
+    // The ground covered is kept: the next ask carries on, it does not restart.
+    await act(async () => { await result.current.loadChildren(PARENT) })
+    expect(callOpts(5).offset).toBe(5 * PAGE)
+  })
+
+  describe("a page's lineage to the rest of the canvas", () => {
+    const FAR = 'urn:demo:column:elsewhere'
+    let open: () => void = () => {}
+    beforeEach(() => {
+      const gate = new Promise<void>(r => { open = r })
+      Object.assign(mockProvider, {
+        getEdges: vi.fn(async (q: { sourceUrns?: string[] }) => {
+          await gate
+          return q.sourceUrns ? [{ id: 'far-1', sourceUrn: kid(0), targetUrn: FAR, edgeType: 'FLOWS_TO' }] : []
+        }),
+      })
+      mockProvider.getChildrenWithEdges.mockImplementation(serve() as never)
+    })
+    afterEach(() => { delete (mockProvider as { getEdges?: unknown }).getEdges })
+    const hasFar = () => useCanvasStore.getState().edges.some(e => e.target === FAR)
+
+    it('lands after the page', async () => {
+      const { result } = renderHook(() => useGraphHydration())
+      await act(async () => { await result.current.loadChildren(PARENT) })
+      expect(hasFar()).toBe(false)                 // the rows paint first…
+      await act(async () => { open(); await new Promise(r => setTimeout(r, 0)) })
+      expect(hasFar()).toBe(true)                  // …and their flows follow
+    })
+
+    it('is dropped when the graph was replaced before it arrived', async () => {
+      const { result } = renderHook(() => useGraphHydration())
+      await act(async () => { await result.current.loadChildren(PARENT) })
+      const parent = useCanvasStore.getState().nodes.find(n => n.id === PARENT)!
+      act(() => { useCanvasStore.getState().setGraph([parent], []) })
+      await act(async () => { open(); await new Promise(r => setTimeout(r, 0)) })
+      expect(hasFar()).toBe(false)
+    })
   })
 })

@@ -5034,3 +5034,96 @@ class TestScanPageHydrationBudget:
         assert page.deadline_exceeded is False
         assert len(page.hits) == 10
         assert decode_cursor(page.cursor)["offset"] == 10
+
+
+# ---------------------------------------------------------------------------
+# The pagination tie-break.
+#
+# Pagination is an OFFSET into the ranked list, and that list is rebuilt
+# whenever the match-set cache misses (no cache Redis, a TTL that expired
+# mid-"Load all", or a match set past the cache ceiling). If rows whose sort
+# key is EQUAL can come back in a different order, the next offset repeats
+# some rows and skips others — which is what "the results disappear while I
+# page through a thousand account_id columns" is: score and name are
+# identical for every one of them.
+# ---------------------------------------------------------------------------
+
+class TestRankingIsTotallyOrdered:
+    @staticmethod
+    def _rows(urns, display_name="account_id"):
+        from backend.app.providers.falkordb_deep_search import _CandidateRow
+        return [
+            _CandidateRow(
+                urn=urn,
+                display_name=display_name,
+                qualified_name=display_name,
+                description=None,
+                tags=[],
+                properties={},
+            )
+            for urn in urns
+        ]
+
+    @staticmethod
+    def _query(sort="relevance", sort_dir="asc"):
+        return SearchQuery(
+            predicate=TextPredicate(value="account_id", target="name"),
+            scope=_TEST_SCOPE,
+            options={"sort": sort, "sortDir": sort_dir, "pageSize": 100},  # type: ignore[arg-type]
+        )
+
+    def _sorted(self, urns, **kw):
+        from backend.app.providers.falkordb_deep_search import _rank_candidate_rows
+        _, _, _, sorted_urns = _rank_candidate_rows(self._rows(urns), self._query(**kw))
+        return sorted_urns
+
+    def test_identical_rows_rank_in_a_stable_order(self):
+        """Every row here has the same score AND the same name."""
+        urns = [f"urn:col:{i:03d}" for i in range(20)]
+        assert self._sorted(urns) == sorted(urns)
+
+    def test_a_rebuild_in_a_different_scan_order_ranks_identically(self):
+        """The whole point: a cache miss re-scans, and the scan order is
+        whatever the graph returned. The ranking must not depend on it."""
+        urns = [f"urn:col:{i:03d}" for i in range(20)]
+        forward = self._sorted(urns)
+        reversed_scan = self._sorted(list(reversed(urns)))
+        shuffled = self._sorted([urns[i] for i in (7, 3, 19, 0, 11, 2, 15, 8, 4, 1,
+                                                   18, 6, 13, 5, 17, 9, 12, 10, 16, 14)])
+        assert forward == reversed_scan == shuffled
+
+    def test_ties_hold_their_order_under_a_name_sort(self):
+        urns = [f"urn:col:{i:03d}" for i in range(10)]
+        assert self._sorted(urns, sort="displayName") == sorted(urns)
+        assert self._sorted(list(reversed(urns)), sort="displayName") == sorted(urns)
+
+    def test_a_descending_sort_does_not_flip_the_tie_order(self):
+        """`sortDir` orders the SORT FIELD. Rows that tie on it are still
+        read in one fixed order, so the pages stay disjoint."""
+        urns = [f"urn:col:{i:03d}" for i in range(10)]
+        desc = self._sorted(urns, sort="displayName", sort_dir="desc")
+        assert desc == self._sorted(list(reversed(urns)), sort="displayName", sort_dir="desc")
+        assert desc == sorted(urns)
+
+    def test_offset_pages_stay_disjoint_across_a_rebuild(self):
+        """Page 2 taken from a re-scanned list must not repeat page 1."""
+        from backend.app.providers.falkordb_deep_search import _rank_candidate_rows
+        urns = [f"urn:col:{i:03d}" for i in range(20)]
+        q = SearchQuery(
+            predicate=TextPredicate(value="account_id", target="name"),
+            scope=_TEST_SCOPE,
+            options={"sort": "relevance", "pageSize": 10},  # type: ignore[arg-type]
+        )
+        page1, offset_after, _, _ = _rank_candidate_rows(self._rows(urns), q)
+
+        q2 = SearchQuery(
+            predicate=TextPredicate(value="account_id", target="name"),
+            scope=_TEST_SCOPE,
+            options={"sort": "relevance", "pageSize": 10,
+                     "cursor": encode_cursor({"offset": offset_after})},  # type: ignore[arg-type]
+        )
+        # The rebuild sees the rows in a different order, as a re-scan would.
+        page2, _, _, _ = _rank_candidate_rows(self._rows(list(reversed(urns))), q2)
+
+        assert set(page1).isdisjoint(set(page2))
+        assert sorted(page1 + page2) == sorted(urns)

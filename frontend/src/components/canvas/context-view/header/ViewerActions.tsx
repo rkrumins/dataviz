@@ -56,6 +56,15 @@ export interface ComprehensionToolsProps {
   // per-node trace buttons remain for granular up/down/full control.
   traceActive: boolean
   canTrace: boolean
+  /** How many entities a press of Trace would walk. 1 for an ordinary trace;
+   *  more for a bulk trace of a multi-selection. */
+  traceSeedCount?: number
+  /** Multi-select armed from the UI (plain clicks add to the selection). */
+  multiSelectArmed?: boolean
+  onToggleMultiSelect?: () => void
+  /** The Focus Lens is single-focal by construction, so it stays gated on a
+   *  selection of exactly one rather than quietly focusing the first of five. */
+  canOpenLens?: boolean
   onStartTrace: () => void
   onExitTrace: () => void
   /** True once the canvas finishes hydrating (entities + edges). When
@@ -111,6 +120,10 @@ export function ComprehensionTools({
   onToggleEdgeDirection,
   traceActive,
   canTrace,
+  traceSeedCount = 1,
+  multiSelectArmed = false,
+  onToggleMultiSelect,
+  canOpenLens,
   onStartTrace,
   onExitTrace,
   lineageReady,
@@ -132,6 +145,9 @@ export function ComprehensionTools({
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
   const traceLauncherRef = useRef<HTMLDivElement>(null)
   const hasTraceHistory = traceHistory.length > 0 && !!onResumeTraceHistory
+  // The Lens focuses ONE entity by construction; Trace can take a whole
+  // selection. Defaults to canTrace so a caller that never sets it is unchanged.
+  const lensAllowed = canOpenLens ?? canTrace
 
   // The server now REFUSES POST /graph/trace* when this is off (feature_gate.py), so leaving
   // the button here would hand the user an action that 403s. HIDDEN, not disabled: a greyed-out
@@ -219,20 +235,45 @@ export function ComprehensionTools({
           trace: open the Lens on the selection and walk its connections
           hop by hop. Same gating as Trace (single non-logical entity);
           same feature flag (the lens rides the same trace backend). */}
+      {onToggleMultiSelect && !traceActive && (
+        <HoverTip
+          className="inline-flex"
+          label={multiSelectArmed
+            ? 'Clicking a row adds it to the selection'
+            : 'Pick several entities, then trace or focus all of them'}
+          detail={multiSelectArmed ? 'Turn off to go back to single select' : 'Cmd-click does the same thing'}
+        >
+          <button
+            type="button"
+            onClick={onToggleMultiSelect}
+            aria-pressed={multiSelectArmed}
+            className={cn(
+              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+              multiSelectArmed
+                ? 'bg-accent-lineage/20 text-accent-lineage border border-accent-lineage/50 hover:bg-accent-lineage/30'
+                : 'bg-black/[0.03] border border-black/[0.06] text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:bg-white/[0.03] dark:border-white/[0.06] dark:hover:bg-white/[0.08]',
+            )}
+          >
+            <LucideIcons.SquareCheckBig className="w-4 h-4" strokeWidth={2.2} />
+            {multiSelectArmed ? 'Selecting' : 'Select'}
+          </button>
+        </HoverTip>
+      )}
+
       {traceEnabled && onOpenLens && !traceActive && (
         <HoverTip
           className="inline-flex"
-          label={canTrace
+          label={lensAllowed
             ? 'Walk this entity’s connections one hop at a time'
             : 'Select a single entity to focus its connections'}
-          detail={canTrace ? 'Opens the Lineage Lens over the canvas' : undefined}
+          detail={lensAllowed ? 'Opens the Lineage Lens over the canvas' : undefined}
         >
         <button
-          onClick={canTrace ? onOpenLens : undefined}
-          disabled={!canTrace}
+          onClick={lensAllowed ? onOpenLens : undefined}
+          disabled={!lensAllowed}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-            canTrace
+            lensAllowed
               ? "bg-gradient-to-r from-teal-500/15 to-accent-lineage/10 text-teal-700 dark:text-teal-300 border border-teal-500/40 hover:from-teal-500/25 hover:to-accent-lineage/20 hover:border-teal-400/60 dark:hover:shadow-lg dark:hover:shadow-teal-500/20"
               : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
           )}
@@ -292,10 +333,12 @@ export function ComprehensionTools({
             className="inline-flex"
             label={
               canTrace
-                ? 'Map everything upstream and downstream of the selected entity'
+                ? traceSeedCount > 1
+                  ? `Map everything upstream and downstream of all ${traceSeedCount} selected entities`
+                  : 'Map everything upstream and downstream of the selected entity'
                 : hasTraceHistory
                   ? 'Pick up a trace you ran earlier in this view'
-                  : 'Select a single entity to trace its lineage'
+                  : 'Select an entity to trace its lineage'
             }
           >
           <button
@@ -317,7 +360,7 @@ export function ComprehensionTools({
             )}
           >
             <LucideIcons.Workflow className="w-4 h-4" strokeWidth={2.2} />
-            <span>Trace Lineage</span>
+            <span>{traceSeedCount > 1 ? `Trace ${traceSeedCount} Entities` : 'Trace Lineage'}</span>
           </button>
           </HoverTip>
           {hasTraceHistory && (

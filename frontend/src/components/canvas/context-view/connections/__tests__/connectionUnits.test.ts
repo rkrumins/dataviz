@@ -151,7 +151,9 @@ const KIND: Array<[string, RegExp[], string[]]> = [
       'flows not on canvas',
       'flows outside this view',
       'Large flow fan',
-      'Adaptive flow density',
+      // Adaptive's "strongest N of M" moved out of the chips into the lineage
+      // guide at the end of the layer strip (LineageGuide), which counts in
+      // `lines` through unitNoun like the chip it replaced.
       "unitNoun(selectedExternal!.in + selectedExternal!.out, 'flows')",
     ],
   ],

@@ -87,6 +87,7 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # feature. Both fail OPEN (a database hiccup must not black out a product area); only the
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
+require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
 
 
@@ -2050,6 +2051,43 @@ async def get_node_ancestors(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     return await engine.get_ancestors(urn, limit=limit, offset=offset)
+
+
+class AncestorChainsRequest(BaseModel):
+    """Up to 1,000 urns: the canvas sends the lineage endpoints it holds but
+    never loaded, a few hundred at a time."""
+    urns: List[str] = Field(..., min_length=1, max_length=1000)
+
+
+@router.post(
+    "/nodes/ancestor-chains",
+    response_model=Dict[str, Dict[str, List[str]]],
+    dependencies=[Depends(require_lineage_rollup)],
+)
+async def get_node_ancestor_chains(
+    body: AncestorChainsRequest,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Containment chains for many urns: ``{"chains": {urn: [parent, …, root]}}``.
+
+    The canvas holds lineage edges whose far end it never loaded — a partner
+    inside a collapsed container. Without that end's chain it cannot draw the
+    line to the container the reader CAN see, and counts the flow as
+    "outside this view" when it is not. Urns only; nothing is loaded.
+
+    An urn absent from ``chains`` is UNKNOWN — the provider could not answer
+    — never a root; a root maps to ``[]``. The same containment the
+    single-urn ``/nodes/{urn}/ancestors`` already serves, batched and
+    slot-bounded like ``/nodes/degree``.
+    """
+    async def compute() -> Dict[str, List[str]]:
+        return await engine.get_ancestor_chains(body.urns)
+
+    try:
+        chains = await _bounded_compute(engine, compute)()
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    return {"chains": chains}
 
 
 @router.get("/nodes/{urn}/descendants", response_model=List[GraphNode], response_model_by_alias=True)

@@ -20,7 +20,7 @@ import { motion } from 'framer-motion'
 import { ChevronDown, RotateCcw, Settings2, Sliders, SlidersHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
-import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
+import { usePreferencesStore, type CanvasDensity, type LineageRenderMode } from '@/store/preferences'
 import { DisplaySettingsSections, isDefaultState } from '../DisplaySettingsPopover'
 import { LineageDisplaySections } from '../LineageDisplayPopover'
 
@@ -117,7 +117,8 @@ export function DisplayMenu({
     }
   }, [open])
 
-  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines })
+  const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
+  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons })
 
   return (
     <>

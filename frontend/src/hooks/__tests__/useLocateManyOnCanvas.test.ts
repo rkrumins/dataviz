@@ -197,3 +197,46 @@ describe('useLocateManyOnCanvas — best-effort union centring', () => {
     await act(async () => { await expect(result.current(['a'])).resolves.toBeDefined() })
   })
 })
+
+describe('useLocateManyOnCanvas — cost of the verification pass', () => {
+  it('does not scroll to a row that is already painted', async () => {
+    // A direction with twenty partners used to pay a flat settle for every
+    // one of them, most of which were already on screen after the parallel
+    // reveal.
+    const scrollHitIntoView = vi.fn()
+    const { result } = renderHook(() =>
+      useLocateManyOnCanvas({
+        revealAndFocus: vi.fn(async () => {}),
+        scrollHitIntoView,
+        getElementById: () => ({}) as HTMLElement,   // everything already there
+        getScrollContainer: () => null,
+        notify: vi.fn(),
+        settleMs: 1000,
+      }),
+    )
+
+    const outcome = await act(async () => result.current(['a', 'b', 'c']))
+    expect(scrollHitIntoView).not.toHaveBeenCalled()
+    expect(outcome).toEqual({ revealed: 3, requested: 3 })
+  })
+
+  it('stops waiting as soon as a row appears', async () => {
+    let painted = false
+    const { result } = renderHook(() =>
+      useLocateManyOnCanvas({
+        revealAndFocus: vi.fn(async () => {}),
+        scrollHitIntoView: () => { painted = true },
+        getElementById: () => (painted ? ({} as HTMLElement) : null),
+        getScrollContainer: () => null,
+        notify: vi.fn(),
+        // A budget it must NOT spend: the row is there on the next frame.
+        settleMs: 5000,
+      }),
+    )
+
+    const started = Date.now()
+    const outcome = await act(async () => result.current(['a']))
+    expect(outcome.revealed).toBe(1)
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+})

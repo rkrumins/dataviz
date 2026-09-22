@@ -57,7 +57,7 @@ export const CONNECTION_COUNT_UNITS: Record<ConnectionCountUnit, UnitWords> = {
     one: 'connected entity',
     many: 'connected entities',
     meaning:
-      'Connected entities: one per neighbor and kind of flow — a neighbor reached by two kinds of flow counts twice.',
+      'Connected entities: one per neighbouring entity, however many kinds of flow reach it — and a container counts what its contents reach. The same walk the Focus Lens reads, so the two always agree.',
   },
 }
 

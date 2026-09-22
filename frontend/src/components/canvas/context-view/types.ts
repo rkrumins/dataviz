@@ -83,6 +83,9 @@ export type OverflowBadge = {
    *  connections; the tooltip's "+N more" must subtract entities from
    *  entities, never from `count`. */
   partnerTotal: number
+  /** Sideways badges: the layers the partners live in — the portal chip
+   *  names them. Empty for up/down. */
+  partnerLayerIds: string[]
 }
 
 /** A partial edge drawn from a visible node toward the container boundary,

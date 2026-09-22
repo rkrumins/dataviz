@@ -199,6 +199,7 @@ const READ_ONLY_POST_PATHS = [
   /^\/nodes\/query$/,
   /^\/nodes\/page$/,
   /^\/nodes\/degree$/,
+  /^\/nodes\/ancestor-chains$/,
   /^\/edges\/query$/,
   /^\/edges\/between$/,
   /^\/edges\/aggregated$/,

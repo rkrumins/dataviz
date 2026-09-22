@@ -14024,6 +14024,13 @@ class FalkorDBProvider(GraphDataProvider):
         urn_to_node = {n.urn: n for n in nodes}
         return [urn_to_node[u] for u in chain if u in urn_to_node]
 
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """Many chains in one pass: one pipelined read of the precomputed
+        chain cache, one bulk Cypher for whatever missed it (see
+        ``_compute_and_store_ancestors_bulk``). Urns only — no node fetch."""
+        await self._ensure_connected()
+        return await self._compute_and_store_ancestors_bulk(list(dict.fromkeys(urns)))
+
     async def get_descendants(
         self,
         urn: str,

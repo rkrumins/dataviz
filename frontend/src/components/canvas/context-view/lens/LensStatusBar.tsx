@@ -18,10 +18,8 @@
  * the board has settled a viewport.
  */
 import { cn } from '@/lib/utils'
+import { useLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 
-/** The wire tints, as FocusGraphView lands them. */
-const TINT_UP = '#0ea5e9'
-const TINT_DOWN = '#f59e0b'
 
 /** The gestures, most essential first. A narrow bar DROPS the last ones
  *  rather than clipping one mid-word ("Esc ·" was the 1,280px reading);
@@ -47,7 +45,10 @@ function Keycap({ children }: { children: string }) {
 }
 
 function Swatch({ kind }: { kind: 'up' | 'down' | 'coarse' | 'bundle' }) {
-  const stroke = kind === 'up' ? TINT_UP : TINT_DOWN
+  // The wire tints, as FocusGraphView lands them — the product's lineage
+  // direction pair (lib/lineageDirectionColors.ts).
+  const tints = useLineageDirectionColors()
+  const stroke = kind === 'up' ? tints.in : tints.out
   return (
     <svg aria-hidden="true" viewBox="0 0 28 8" className="w-7 h-2 flex-shrink-0">
       <line

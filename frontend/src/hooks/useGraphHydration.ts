@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useCanvasStore, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
+import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useActiveView,
@@ -1398,9 +1399,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const { nodes, edges, _nodeIndex, childPaging } = useCanvasStore.getState()
             const parentNode = nodes.find(n => n.id === parentId)
             if (!parentNode) return null
-            const nodeData = parentNode.data as { childCount?: number; metadata?: { childCount?: number } }
-            const childCount = nodeData.childCount ?? nodeData.metadata?.childCount ?? 0
-            if (childCount === 0) return null
+            const nodeData = parentNode.data as { childCount?: number | null; metadata?: { childCount?: number | null } }
+            // UNKNOWN IS NOT ZERO.
+            //
+            // `childCount` is deliberately null on any read path that cannot count
+            // containment edges live — `/ancestors` is one, and it is exactly the
+            // path a deep reveal seeds its chain from. Folding that null into 0
+            // meant every such ancestor was treated as childless and its page was
+            // never fetched: the reveal stopped partway, the target never landed,
+            // and the container rendered with no children and no way to open it.
+            //
+            // Only a counted zero means "nothing to load". Unknown means "ask".
+            const rawChildCount = nodeData.childCount ?? nodeData.metadata?.childCount
+            if (rawChildCount === 0) return null
+            const childCount = typeof rawChildCount === 'number' ? rawChildCount : Number.POSITIVE_INFINITY
             const live = childPaging[parentId]
             const resumable = !!live && live.direction === direction && live.childCount === childCount
                 && (live.lastUrn === null || _nodeIndex.has(live.lastUrn))
@@ -1457,8 +1469,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 // rows are already held (search reveals, a restart from the top)
                 // brings nothing new; stopping there would leave the "load more"
                 // row where it was — a silent stall. Bounded by the pages this
-                // parent can have.
-                const maxPages = Math.ceil(childCount / CHILDREN_PAGE_SIZE) + 2
+                // parent can have; with its count unknown there is no such bound,
+                // so it walks as far as a feed does (a server that ignores the
+                // offset would otherwise be asked for the same page forever). The
+                // ground covered is kept, so the next ask carries on from there.
+                const maxPages = Number.isFinite(childCount)
+                    ? Math.ceil(childCount / CHILDREN_PAGE_SIZE) + 2
+                    : FEED_WALK_MAX_PAGES
                 for (let page = 0; page < maxPages; page++) {
                     const offset = pos.offset
                     // Single round-trip: children + containment edges + lineage edges
@@ -1495,9 +1512,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                     }
 
-                    // An edge whose far end is not loaded yet is held back — it
-                    // comes again with that sibling's own page — so nothing is
-                    // lost and the store never holds a dangling edge.
+                    // A sibling edge whose far end is not loaded yet is held back —
+                    // it comes again with that sibling's own page — so nothing is
+                    // lost.
                     const isLoaded = (u: string) => u === parentId || u === urn || held.has(u) || newIds.has(u)
                     const edgesToAdd = [
                         ...result.containmentEdges,
@@ -1513,6 +1530,30 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         uncommitted = true
                     }
                     added += nodesToAdd.length
+
+                    // The page's lineage to the REST of the canvas. The server
+                    // answers this request with cross-child lineage only —
+                    // edges between the children it returned, deliberately, to
+                    // keep that query O(pageSize²) — so a row from "Load 13
+                    // more" arrived with no flow to anything already on screen.
+                    // Fired after the commit so the rows paint immediately and
+                    // their wires follow; a failure costs those rows their
+                    // flows, not the page.
+                    if (nodesToAdd.length > 0) {
+                        void primeLineageFor(
+                            provider,
+                            nodesToAdd.map((n) => n.id),
+                            lineageEdgeTypes,
+                        ).then((extra) => {
+                            // stale(), not only the signal: flows read for a graph
+                            // that has since been replaced do not belong in the new one.
+                            if (extra.length > 0 && !stale()) {
+                                useCanvasStore.getState().addGraph([], extra)
+                            }
+                        }).catch((e) => {
+                            console.warn('[children] lineage priming failed', e)
+                        })
+                    }
 
                     // A revealed child this page actually delivered is now a
                     // normal loaded child — clear the flag.

@@ -68,6 +68,7 @@ function renderColumnWithCanvasKeyboard() {
                         expandedNodes={new Set()}
                         searchResults={new Set<string>()}
                         onSelect={(id) => { onSelect(id); setSelected(id) }}
+                        onSelectRange={vi.fn()}
                         onToggle={vi.fn()}
                         onContextMenu={vi.fn()}
                         onDoubleClick={vi.fn()}

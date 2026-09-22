@@ -685,14 +685,35 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         if (ancestorCounts) {
             overlayServerAncestorCounts(counts, breakdowns, ancestorCounts)
         }
+        // KEEP THE USER'S PLACE ACROSS A CONTINUATION.
+        //
+        // "Load all" republishes the merged match set after EVERY page, so
+        // clearing the focus here wiped the row the user had just picked —
+        // once per page, for as long as the pages kept coming. That is the
+        // "results jump away, as if they disappear" report.
+        //
+        // A continuation is not a new query, and `queryHash` is what tells
+        // them apart. The focus is carried by URN rather than by index: the
+        // ordering a page arrives in can put new matches ahead of the
+        // focused one, and an index alone would then point at a different
+        // match — the very thing the old reset was guarding against.
+        const prev = get()
+        const focusedUrn = prev.focusedMatchIndex !== null
+            ? prev.orderedMatchUrns[prev.focusedMatchIndex]
+            : undefined
+        const sameQuery = prev.queryHash === queryHash
+        const carriedFocus = sameQuery && focusedUrn !== undefined
+            ? ordered.indexOf(focusedUrn)
+            : -1
+
         set({
             viewId,
             matchUrnSet: next,
             orderedMatchUrns: ordered.length === 0 ? EMPTY_ORDERED_URNS : ordered,
-            // Reset focus on every new result set — carrying over a
-            // stale index across queries would land the user on a
-            // different match than they expected.
-            focusedMatchIndex: null,
+            // A new query, or a focused match this result set no longer
+            // holds, still resets: landing the user on a different match
+            // than they expected is worse than landing them on none.
+            focusedMatchIndex: carriedFocus >= 0 ? carriedFocus : null,
             ancestorMatchCounts: counts,
             ancestorMatchTypeBreakdowns: breakdowns,
             queryHash,

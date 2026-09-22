@@ -3492,6 +3492,23 @@ def _rank_candidate_rows(
         for row in candidates
     ]
 
+    # THE TIE-BREAK, and it has to come first.
+    #
+    # Pagination here is an OFFSET into this list, and the list is rebuilt
+    # whenever the match-set cache misses (no cache Redis, a TTL that expired
+    # mid-"Load all", or a match set past the cache ceiling). None of the
+    # three sorts below distinguished rows whose key was equal, so a rebuild
+    # could order them differently and the next offset would then repeat some
+    # rows and skip others — reported as results disappearing while paging
+    # through a thousand identically-named columns, where score AND name are
+    # identical for every row.
+    #
+    # `urn` is unique, and every sort below is STABLE, so one ascending pass
+    # here survives underneath all of them as the final tie-break — including
+    # the reversed ones, where stability keeps ties in urn order rather than
+    # flipping them.
+    scored.sort(key=lambda e: e[0].urn or "")
+
     sort_dir = query.options.sort_dir
     reverse = (sort_dir == "desc")
 

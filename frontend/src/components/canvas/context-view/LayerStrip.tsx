@@ -28,6 +28,12 @@
  *
  * The rail and the steps exist ONLY while the canvas actually overflows.
  * A view whose layers all fit gets exactly the strip it always had.
+ *
+ * When the layers FOLD to fit (useLayerFold) nothing overflows — every layer
+ * is on screen, open or as a spine — so the strip navigates the fold window
+ * instead: the lit pills are the OPEN layers, a pill opens its layer, and
+ * ‹ › slide the window one layer. And while the layers do not all fit, it
+ * offers the choice between folding them and scrolling past them.
  */
 import { useEffect, useRef, useState } from 'react'
 import * as LucideIcons from 'lucide-react'
@@ -48,11 +54,21 @@ const STEP_BUTTON =
   + ' transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-muted/70'
   + ' focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
 
+export interface LayerStripFold {
+  openIds: ReadonlySet<string>
+  focusLayer: (layerId: string) => void
+  step: (direction: 1 | -1) => void
+  canStep: { back: boolean; forward: boolean }
+}
+
 export function LayerStrip({
   layers,
   scrollRef,
   onAddLayer,
   onFit,
+  fold,
+  foldToggle,
+  trailing,
 }: {
   layers: LayerStripLayer[]
   /** The canvas's horizontal scroll container. */
@@ -60,6 +76,14 @@ export function LayerStrip({
   /** Draft mode only — append the "+ layer" chip. */
   onAddLayer?: () => void
   onFit?: () => void
+  /** The fold window, while layers are folded to fit. */
+  fold?: LayerStripFold
+  /** Folding on or off — passed only while the layers do not all fit. */
+  foldToggle?: { enabled: boolean; onToggle: () => void }
+  /** Status that belongs to the whole canvas, at the bar's end — Adaptive's
+   *  lineage guide. In the bar, not floating over the columns: the bar's band
+   *  is already reserved, so nothing it shows can cover a card. */
+  trailing?: React.ReactNode
 }) {
   // Layer ids whose columns are currently (mostly) inside the viewport.
   const [visibleIds, setVisibleIds] = useState<Set<string>>(() => new Set())
@@ -81,9 +105,12 @@ export function LayerStrip({
   // is narrower than its pills, and a lit chip scrolled out of it is a map
   // with the "you" rubbed off. A DOM write in an effect, never a state one.
   const pillsRef = useRef<HTMLDivElement>(null)
+  // Folded, every column is on screen and "in view" would light every pill:
+  // the you-are-here is the open window instead.
+  const litIds = fold?.openIds ?? visibleIds
   useEffect(() => {
     const el = scrollRef.current
-    const lit = layers.filter(layer => visibleIds.has(layer.id))
+    const lit = layers.filter(layer => litIds.has(layer.id))
     if (!el || lit.length === 0) return
     // Of the lit run, show the end you are heading for: at the right of the
     // canvas that is the LAST one — the pill that proves you reached it.
@@ -91,7 +118,7 @@ export function LayerStrip({
     pillsRef.current
       ?.querySelector(`[data-layer-pill="${CSS.escape(here.id)}"]`)
       ?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' })
-  }, [layers, visibleIds, scrollRef])
+  }, [layers, litIds, scrollRef])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -205,6 +232,13 @@ export function LayerStrip({
 
   if (layers.length < 2 && !onAddLayer) return null
 
+  // Folded, ‹ › slide the fold window; otherwise they scroll.
+  const showSteps = overflows || !!fold
+  const stepBack = () => (fold ? fold.step(-1) : step(-1))
+  const stepForward = () => (fold ? fold.step(1) : step(1))
+  const backDisabled = fold ? !fold.canStep.back : scrollLeft <= 1
+  const forwardDisabled = fold ? !fold.canStep.forward : scrollLeft >= maxScroll - 1
+
   return (
     <div
       // Width-capped against the canvas frame so the bar never reaches the
@@ -228,11 +262,11 @@ export function LayerStrip({
         )}
       >
         <div className="flex items-center gap-1 min-w-0">
-          {overflows && (
+          {showSteps && (
             <button
               type="button"
-              onClick={() => step(-1)}
-              disabled={scrollLeft <= 1}
+              onClick={stepBack}
+              disabled={backDisabled}
               aria-label="Previous layer"
               title="Previous layer"
               className={STEP_BUTTON}
@@ -249,14 +283,14 @@ export function LayerStrip({
             className="flex items-center gap-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
             {layers.map(layer => {
-              const active = visibleIds.has(layer.id)
+              const active = litIds.has(layer.id)
               return (
                 <button
                   key={layer.id}
                   type="button"
-                  onClick={() => jumpTo(layer.id)}
+                  onClick={() => (fold ? fold.focusLayer(layer.id) : jumpTo(layer.id))}
                   data-layer-pill={layer.id}
-                  title={`Jump to ${layer.name}`}
+                  title={fold && !active ? `Unfold ${layer.name}` : `Jump to ${layer.name}`}
                   aria-current={active}
                   className={cn(
                     'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium whitespace-nowrap transition-[background-color,color,transform] hover:scale-[1.03] active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
@@ -272,11 +306,11 @@ export function LayerStrip({
               )
             })}
           </div>
-          {overflows && (
+          {showSteps && (
             <button
               type="button"
-              onClick={() => step(1)}
-              disabled={scrollLeft >= maxScroll - 1}
+              onClick={stepForward}
+              disabled={forwardDisabled}
               aria-label="Next layer"
               title="Next layer"
               className={STEP_BUTTON}
@@ -294,9 +328,31 @@ export function LayerStrip({
               <LucideIcons.Plus className="w-3 h-3" />
             </button>
           )}
+          {(onFit || foldToggle) && (
+            <div className="w-px self-stretch my-0.5 bg-black/10 dark:bg-white/10" />
+          )}
+          {foldToggle && (
+            // Names what a press DOES: folded, it lays every layer out at
+            // full width (and the canvas scrolls); unfolded, it folds the
+            // layers outside the window so all of them stay on screen.
+            <button
+              type="button"
+              onClick={foldToggle.onToggle}
+              data-fold-toggle
+              aria-pressed={foldToggle.enabled}
+              title={foldToggle.enabled
+                ? 'Show every layer at full width and scroll sideways instead'
+                : 'Fold the layers outside the window, so every layer and its flows stay on screen'}
+              className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              {foldToggle.enabled
+                ? <LucideIcons.UnfoldHorizontal className="w-3 h-3" />
+                : <LucideIcons.FoldHorizontal className="w-3 h-3" />}
+              {foldToggle.enabled ? 'Unfold all' : 'Fold'}
+            </button>
+          )}
           {onFit && (
             <>
-              <div className="w-px self-stretch my-0.5 bg-black/10 dark:bg-white/10" />
               <button
                 type="button"
                 onClick={onFit}
@@ -306,6 +362,12 @@ export function LayerStrip({
                 <LucideIcons.Maximize2 className="w-3 h-3" />
                 Fit
               </button>
+            </>
+          )}
+          {trailing && (
+            <>
+              <div className="w-px self-stretch my-0.5 bg-black/10 dark:bg-white/10" />
+              {trailing}
             </>
           )}
         </div>

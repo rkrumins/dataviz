@@ -8,7 +8,7 @@
  * store (assignEntityToLayer) is isolated and separately tested here. A Context View node's id IS its
  * urn, so the assignment keys are the same ids the canvas renders from.
  */
-import type { AssignmentConflict, LayerAssignmentEntry } from '@/types/schema'
+import type { LayerAssignmentEntry } from '@/types/schema'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { generateNKeysBetween } from '@/utils/orderKeys'
 
@@ -104,9 +104,10 @@ export function lastOrderKeyInLayer(
  * appended after the largest key already in THIS set — so key order matches
  * what the user sees. A sibling that lacks an assignment entry (children
  * normally inherit their layer and have none) gets a bare orderKey-carrier
- * entry; this is layer-safe because a containment child always inherits its
- * parent's layer and never consults its own entry for placement. Returns the
- * same layout when every sibling is already keyed.
+ * entry; this is layer-safe because the carrier names the SAME layer the
+ * sibling set renders in, so it resolves to the layer the child would inherit
+ * anyway and the child stays nested. Returns the same layout when every
+ * sibling is already keyed.
  */
 export function ensureSiblingOrderKeys(
   layout: NormalizedReferenceLayout,
@@ -238,38 +239,4 @@ export function remapAssignmentUrn(
   assignments[newUrn] = assignments[oldUrn]
   delete assignments[oldUrn]
   return { ...layout, assignments }
-}
-
-/**
- * Containment hard rule: a child cannot be placed in a different layer than its parent subtree —
- * children ALWAYS inherit. Walks up `parentMap` to the nearest ancestor with an explicit assignment
- * (the subtree's effective layer); if that layer differs from the target, the move is blocked. Returns
- * null when there is no such ancestor or it already sits in the target layer. Ported verbatim from the
- * store's `assignEntityToLayer` block — no new conflict UX is introduced.
- */
-export function checkAssignmentConflict(
-  parentMap: Map<string, string>,
-  assignments: Record<string, LayerAssignmentEntry>,
-  urn: string,
-  layerId: string,
-): AssignmentConflict | null {
-  const seen = new Set<string>([urn])
-  let ancestor = parentMap.get(urn)
-  while (ancestor && !seen.has(ancestor)) {
-    seen.add(ancestor)
-    const entry = assignments[ancestor]
-    if (entry?.layerId) {
-      if (entry.layerId === layerId) return null
-      return {
-        entityId: urn,
-        conflictingEntityId: ancestor,
-        type: 'containment_locked',
-        message:
-          "Cannot assign child to a different layer than its parent. Children always inherit their parent's layer assignment.",
-        conflictingLayerId: entry.layerId,
-      }
-    }
-    ancestor = parentMap.get(ancestor)
-  }
-  return null
 }

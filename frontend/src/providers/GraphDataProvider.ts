@@ -785,6 +785,14 @@ export interface GraphDataProvider {
     getNodeDegrees?(urns: URN[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>>
 
     /**
+     * Containment chains for many URNs — optional capability. Each chain is
+     * parent first, root last, as URNs: nothing is loaded. A URN absent from
+     * the result is UNKNOWN (the provider could not answer), never a root;
+     * a root maps to `[]`.
+     */
+    getAncestorChains?(urns: URN[]): Promise<Record<string, string[]>>
+
+    /**
      * Search nodes by text query
      */
     searchNodes(query: string, limit?: number): Promise<GraphNode[]>

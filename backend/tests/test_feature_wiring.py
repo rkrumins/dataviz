@@ -146,6 +146,21 @@ def test_every_seeded_flag_declares_its_wiring():
     )
 
 
+def test_every_definition_states_every_column_the_table_requires():
+    """One definition missing a NOT NULL column does not fail alone. The startup reconcile writes
+    NULL into it, the WHOLE seed transaction rolls back, and no flag added after it can ever reach
+    the database — which is how `analyticsShowEmailAddresses`, seeded without a `sort_order`, kept
+    every newer flag off Admin → Features on a deployment that looked perfectly healthy (the
+    failure is a startup WARNING, and the page simply lists fewer switches)."""
+    required = ("key", "name", "description", "category_id", "type", "default_value", "sort_order")
+    missing = {
+        d.get("key", "?"): [column for column in required if d.get(column) is None]
+        for d in SEED_DEFINITIONS
+    }
+    missing = {key: columns for key, columns in missing.items() if columns}
+    assert not missing, f"seeded definitions missing required columns: {missing}"
+
+
 def test_every_flag_belongs_to_a_real_category():
     known = {c["id"] for c in SEED_CATEGORIES}
     unknown = {d["key"]: d["category_id"] for d in SEED_DEFINITIONS if d["category_id"] not in known}

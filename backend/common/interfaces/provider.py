@@ -2,6 +2,7 @@
 Abstract GraphDataProvider interface — shared kernel.
 Both the visualization service and graph service import from here.
 """
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional, Dict, Any
@@ -533,6 +534,30 @@ class GraphDataProvider(ABC):
     @abstractmethod
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         pass
+
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """Each urn's containment chain as urns, parent first and root last.
+
+        What lets a client place an entity it has NOT loaded — the far end of
+        a lineage edge, say — under the container it HAS loaded, without
+        fetching the entity itself. This default asks ``get_ancestors`` once
+        per urn, a few at a time; a provider with a bulk path overrides it.
+
+        An urn the provider could not answer for is ABSENT from the result
+        rather than mapped to ``[]``: ``[]`` means "a root", and a transient
+        failure must not be remembered as one.
+        """
+        gate = asyncio.Semaphore(8)
+
+        async def one(urn: str):
+            async with gate:
+                try:
+                    return urn, [n.urn for n in await self.get_ancestors(urn, limit=100)]
+                except Exception:
+                    return urn, None
+
+        pairs = await asyncio.gather(*(one(u) for u in dict.fromkeys(urns)))
+        return {urn: chain for urn, chain in pairs if chain is not None}
 
     @abstractmethod
     async def get_descendants(

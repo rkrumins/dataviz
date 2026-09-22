@@ -92,7 +92,6 @@ function project(initial: Props, edges: ReturnType<typeof edge>[]) {
         isTracing: false,
         traceContextSet: new Set(),
         isContainmentEdge: () => false,
-        hoveredNodeId: null,
       })
     },
     { initialProps: initial },
