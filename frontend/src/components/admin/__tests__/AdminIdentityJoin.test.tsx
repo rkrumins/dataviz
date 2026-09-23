@@ -18,7 +18,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/adminUserService', () => ({
-    adminUserService: { listUsers: vi.fn() },
+    adminUserService: { listUsers: vi.fn(), getStats: vi.fn() },
 }))
 vi.mock('@/services/permissionsService', () => ({
     permissionsService: { getUserAccess: vi.fn() },
@@ -50,10 +50,24 @@ function user(over: Partial<AdminUserResponse> = {}): AdminUserResponse {
     }
 }
 
+/** Stands in for the server's search (id / name / email substring) — the
+ *  real matching is pinned in backend/tests/test_admin_users_paging.py. */
+function serve(all: AdminUserResponse[]) {
+    listUsers.mockImplementation(async ({ search }) => {
+        const q = (search ?? '').toLowerCase()
+        const items = all.filter(u =>
+            !q || [u.id, u.displayName, u.email].some(s => s.toLowerCase().includes(q)))
+        return { items, total: items.length }
+    })
+}
+
 beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(permissionsService.getUserAccess).mockResolvedValue({} as never)
-    listUsers.mockResolvedValue([user()])
+    vi.mocked(adminUserService.getStats).mockResolvedValue({
+        total: 2, pending: 0, active: 2, suspended: 0, admins: 0, resetRequested: 0,
+    })
+    serve([user()])
     window.history.replaceState({}, '', '/admin/users')
 })
 
@@ -75,7 +89,7 @@ describe('/admin/users — the id is on the row', () => {
     it('FINDS a user by the id pasted from a log', async () => {
         // Matching name, email, role and provider but not the identifier made
         // this list unsearchable by the one string that brings people to it.
-        listUsers.mockResolvedValue([
+        serve([
             user(),
             user({ id: 'usr_other', email: 'ada@example.com', displayName: 'Ada Lovelace' }),
         ])
@@ -87,8 +101,13 @@ describe('/admin/users — the id is on the row', () => {
             screen.getByPlaceholderText(/search by name, email, user id, role, or provider/i),
             'usr_ac3f19',
         )
+        await waitFor(() =>
+            expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument())
         expect(screen.getByText('John Doe')).toBeInTheDocument()
-        expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument()
+        // The id is what went to the server, which searches every account.
+        expect(listUsers).toHaveBeenLastCalledWith(
+            expect.objectContaining({ search: 'usr_ac3f19', offset: 0 }),
+        )
     })
 
     it('arrives pre-filtered when the audit log links here with ?q=', async () => {
@@ -96,13 +115,17 @@ describe('/admin/users — the id is on the row', () => {
         // /admin/users?q=<id>, and landing on an unfiltered list of everybody
         // would waste the link.
         window.history.replaceState({}, '', '/admin/users?q=usr_ac3f19')
-        listUsers.mockResolvedValue([
+        serve([
             user(),
             user({ id: 'usr_other', email: 'ada@example.com', displayName: 'Ada Lovelace' }),
         ])
         render(<AdminUsers />)
         expect(await screen.findByText('John Doe')).toBeInTheDocument()
         expect(screen.queryByText('Ada Lovelace')).not.toBeInTheDocument()
+        // Filtered from the very first request, not after an unfiltered one.
+        expect(listUsers).toHaveBeenNthCalledWith(
+            1, expect.objectContaining({ search: 'usr_ac3f19' }),
+        )
     })
 
     it('renders without a Router, which is how it has always been mounted', async () => {

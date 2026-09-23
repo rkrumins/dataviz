@@ -20,6 +20,7 @@ import {
 import {
     adminUserService,
     type AdminUserResponse,
+    type AdminUserStats,
     type BulkCreateUsersRequest,
     type BulkCreateUsersResponse,
     type BulkInviteResponse,
@@ -29,6 +30,7 @@ import {
     type InviteResponse,
 } from '@/services/adminUserService'
 import { useFeature } from '@/store/features'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { AdminInvites } from './AdminInvites'
 import { InviteWizard } from './InviteWizard'
 import { CreateUserWizard } from './CreateUserWizard'
@@ -44,11 +46,7 @@ import { presetById } from '@/components/admin/sso/vendorPresets'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
-import {
-    ROLE_NAMES,
-    PLATFORM_ADMIN_ROLES,
-    type RoleName,
-} from '@/lib/roleNames'
+import { ROLE_NAMES } from '@/lib/roleNames'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 
@@ -68,6 +66,9 @@ type ModalType =
     | { kind: 'createUser' }
     | { kind: 'editProfile'; userId: string; firstName: string; lastName: string; email: string }
     | null
+
+/** Rows per page. The server pages, searches and sorts; this page only asks. */
+const PAGE_SIZE = 25
 
 const STATUS_TABS: { value: StatusFilter; label: string; icon: typeof Clock }[] = [
     { value: 'all', label: 'All Users', icon: Users },
@@ -319,8 +320,16 @@ export function AdminUsers() {
         [canGrantSuperAdmin],
     )
 
+    /** The page on screen — the server pages, so this is never "everyone". */
     const [users, setUsers] = useState<AdminUserResponse[]>([])
+    /** How many accounts match the tab + search across EVERY page. */
+    const [matching, setMatching] = useState(0)
+    /** Counts across every account, for the cards, tab badges and banners.
+     *  Null until they arrive, so nothing shows a false zero meanwhile. */
+    const [stats, setStats] = useState<AdminUserStats | null>(null)
     const [loading, setLoading] = useState(true)
+    /** The first page has been answered, either way. Until then: a spinner. */
+    const [loaded, setLoaded] = useState(false)
     /** The LIST failed to load — still true while it is read, so it stays on the
      *  page. Everything that merely happened speaks through the app's one
      *  notification stack instead. */
@@ -348,10 +357,13 @@ export function AdminUsers() {
         }
     }, [])
     const [search, setSearch] = useState(() => deepLink.user ?? deepLink.q ?? '')
+    // The server searches, so it gets the term once typing settles rather
+    // than on every keystroke. Starts as the seeded term, so a deep link's
+    // very first request is already filtered.
+    const debouncedSearch = useDebouncedValue(search.trim(), 300)
     const [sortField, setSortField] = useState<SortField>('createdAt')
     const [sortDir, setSortDir] = useState<SortDir>('desc')
     const [page, setPage] = useState(0)
-    const PAGE_SIZE = 25
     const [actionLoading, setActionLoading] = useState<string | null>(null)
 
     // Modal state (unified)
@@ -414,20 +426,57 @@ export function AdminUsers() {
 
     // ── Data fetching ────────────────────────────────────────────────
 
+    // Only the newest request may paint the table: responses can land out
+    // of order while someone types, or pages during a refresh.
+    const latestRequest = useRef(0)
     const fetchUsers = useCallback(async () => {
+        const request = ++latestRequest.current
         setLoading(true)
         setError(null)
         try {
-            const data = await adminUserService.listUsers()
-            setUsers(data)
+            const { items, total } = await adminUserService.listUsers({
+                status: filter === 'all' ? undefined : filter,
+                search: debouncedSearch,
+                sort: sortField,
+                order: sortDir,
+                limit: PAGE_SIZE,
+                offset: page * PAGE_SIZE,
+            })
+            if (request !== latestRequest.current) return
+            // The page emptied under us — its last rows were approved or
+            // suspended out of this tab. Step back to the new last page.
+            if (items.length === 0 && page > 0 && total > 0) {
+                setPage(Math.ceil(total / PAGE_SIZE) - 1)
+                return
+            }
+            setUsers(items)
+            setMatching(total)
         } catch (err: any) {
+            if (request !== latestRequest.current) return
             setError(err.message || 'Failed to load users')
         } finally {
-            setLoading(false)
+            if (request === latestRequest.current) {
+                setLoading(false)
+                setLoaded(true)
+            }
         }
-    }, [])
+    }, [filter, debouncedSearch, sortField, sortDir, page])
+
+    // A failed refresh keeps the last known counts — stale-but-true beats a
+    // false zero, and the list's own error banner speaks for the backend.
+    const fetchStats = useCallback(
+        () => adminUserService.getStats().then(setStats, () => {}),
+        [],
+    )
+
+    /** After anything that can change who is in which bucket. */
+    const refresh = useCallback(
+        () => Promise.all([fetchUsers(), fetchStats()]),
+        [fetchUsers, fetchStats],
+    )
 
     useEffect(() => { fetchUsers() }, [fetchUsers])
+    useEffect(() => { fetchStats() }, [fetchStats])
 
     // Open the linked person's details once, after the list arrives — the
     // drawer needs the full user object, which only exists then. `useRef`
@@ -446,69 +495,21 @@ export function AdminUsers() {
     // cross-tab BroadcastChannel) so a binding/role mutation made
     // elsewhere refreshes this page in place without a manual reload.
     useEffect(() => {
-        const onChange = () => { void fetchUsers() }
+        const onChange = () => { void refresh() }
         window.addEventListener('permissions:changed', onChange)
         return () => window.removeEventListener('permissions:changed', onChange)
-    }, [fetchUsers])
-
-    // ── KPI computation ──────────────────────────────────────────────
-
-    const kpis = useMemo(() => ({
-        total: users.length,
-        pending: users.filter(u => u.status === 'pending').length,
-        active: users.filter(u => u.status === 'active').length,
-        // Phase 5: count global-tier admins (super_admin + org_admin).
-        // Workspace-scoped admins (workspace_admin bindings) aren't in
-        // this number — they're not "platform" admins, just workspace
-        // admins. Surface that distinction in the tooltip on the KPI.
-        admins: users.filter(
-            u => PLATFORM_ADMIN_ROLES.has(u.role as RoleName),
-        ).length,
-    }), [users])
-
-    const resetRequestCount = useMemo(() => users.filter(u => u.resetRequested).length, [users])
+    }, [refresh])
 
     // ── Filtering, search, sort ──────────────────────────────────────
-
-    const processedUsers = useMemo(() => {
-        let list = [...users]
-        if (filter !== 'all') list = list.filter(u => u.status === filter)
-        if (search) {
-            const q = search.toLowerCase()
-            list = list.filter(u =>
-                u.displayName.toLowerCase().includes(q) ||
-                u.email.toLowerCase().includes(q) ||
-                // The id is the whole reason someone arrives here from an
-                // audit row or a support ticket holding `usr_ac3f19`. Matching
-                // everything BUT the identifier made this list unsearchable by
-                // the one string that brought them.
-                u.id.toLowerCase().includes(q) ||
-                u.role.toLowerCase().includes(q) ||
-                (u.identities ?? []).some(i =>
-                    i.displayName.toLowerCase().includes(q) ||
-                    i.slug.toLowerCase().includes(q))
-            )
-        }
-        list.sort((a, b) => {
-            let cmp = 0
-            switch (sortField) {
-                case 'name': cmp = a.displayName.localeCompare(b.displayName); break
-                case 'email': cmp = a.email.localeCompare(b.email); break
-                case 'status': cmp = a.status.localeCompare(b.status); break
-                case 'role': cmp = a.role.localeCompare(b.role); break
-                case 'createdAt': cmp = a.createdAt.localeCompare(b.createdAt); break
-            }
-            return sortDir === 'asc' ? cmp : -cmp
-        })
-        return list
-    }, [users, filter, search, sortField, sortDir])
-
-    const pageCount = Math.max(1, Math.ceil(processedUsers.length / PAGE_SIZE))
-    const clampedPage = Math.min(page, pageCount - 1)
-    const pagedUsers = processedUsers.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE)
+    //
+    // All server-side, across every account. Filtering the one page the
+    // server had sent (its default limit was fifty) is how this table came
+    // to stop at fifty people. The search matches name, email, role, linked
+    // provider and the user id — the id being the whole reason someone
+    // arrives here from an audit row or a ticket holding `usr_ac3f19`.
 
     // Back to page one whenever the visible set changes shape.
-    useEffect(() => { setPage(0) }, [filter, search, sortField, sortDir])
+    useEffect(() => { setPage(0) }, [filter, debouncedSearch, sortField, sortDir])
 
     // ── Actions ──────────────────────────────────────────────────────
 
@@ -530,7 +531,7 @@ export function AdminUsers() {
         try {
             await fn()
             if (msg) notify('success', msg)
-            await fetchUsers()
+            await refresh()
         } catch (err: any) {
             notify('error', err?.message || failureMsg || `Could not complete that change to ${nameOf(userId)}.`)
         } finally {
@@ -606,7 +607,7 @@ export function AdminUsers() {
                 const resp = await adminUserService.generateResetToken(modal.userId)
                 setGeneratedToken({ token: resp.resetToken, expiresAt: resp.expiresAt })
                 notify('success', `Reset link created for ${nameOf(modal.userId)} — copy it before you close this.`)
-                await fetchUsers()
+                await refresh()
             } catch (err: any) {
                 notify('error', err?.message || `Could not create a reset link for ${nameOf(modal.userId)}.`)
             } finally {
@@ -649,7 +650,7 @@ export function AdminUsers() {
             // No notify: the wizard shows the account it just made, on its own
             // success screen. Saying it twice is the noise this sweep removes.
             setCreatedUser(resp)
-            void fetchUsers()
+            void refresh()
         } catch (err: any) {
             setCreateError(err.message || 'Could not create the account')
         } finally {
@@ -663,7 +664,7 @@ export function AdminUsers() {
         try {
             const resp = await adminUserService.createUsersBulk(body)
             setBulkCreated(resp)
-            void fetchUsers()
+            void refresh()
         } catch (err: any) {
             setCreateError(err.message || 'Could not create the accounts')
         } finally {
@@ -756,16 +757,19 @@ export function AdminUsers() {
 
     // ── Tab counts ───────────────────────────────────────────────────
 
+    // Zero hides a badge, so unknown counts simply don't show.
     const tabCounts: Record<StatusFilter, number> = {
-        all: users.length,
-        pending: kpis.pending,
-        active: kpis.active,
-        suspended: users.filter(u => u.status === 'suspended').length,
+        all: stats?.total ?? 0,
+        pending: stats?.pending ?? 0,
+        active: stats?.active ?? 0,
+        suspended: stats?.suspended ?? 0,
     }
 
     // ── Loading state ────────────────────────────────────────────────
 
-    if (loading && users.length === 0) {
+    // Only before the first answer: a search that matches nobody must not
+    // swap the whole page (search box included) for a spinner.
+    if (!loaded) {
         return (
             <div className="flex items-center justify-center h-full">
                 <Loader2 className="w-6 h-6 animate-spin text-ink-muted" />
@@ -827,7 +831,7 @@ export function AdminUsers() {
                         Manage links
                     </button>
                     <button
-                        onClick={fetchUsers}
+                        onClick={() => void refresh()}
                         disabled={loading}
                         className="px-4 py-2 border border-glass-border bg-canvas-elevated hover:bg-black/5 dark:hover:bg-white/5 rounded-xl font-medium text-sm text-ink transition-colors flex items-center gap-2 disabled:opacity-50"
                     >
@@ -841,7 +845,7 @@ export function AdminUsers() {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                 {KPI_CARDS.map(kpi => {
                     const Icon = kpi.icon
-                    const value = kpis[kpi.key as keyof typeof kpis]
+                    const value = stats ? stats[kpi.key as keyof AdminUserStats] : '—'
                     return (
                         <div key={kpi.key} className={cn(
                             "relative overflow-hidden border border-glass-border rounded-xl p-5 bg-canvas-elevated",
@@ -862,7 +866,7 @@ export function AdminUsers() {
 
             {/* Alert banners */}
             <AnimatePresence>
-                {kpis.pending > 0 && filter !== 'pending' && (
+                {stats && stats.pending > 0 && filter !== 'pending' && (
                     <motion.div
                         initial={{ opacity: 0, y: -8 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -875,7 +879,7 @@ export function AdminUsers() {
                         </div>
                         <div className="flex-1">
                             <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">
-                                {kpis.pending} user{kpis.pending !== 1 ? 's' : ''} awaiting approval
+                                {stats.pending} user{stats.pending !== 1 ? 's' : ''} awaiting approval
                             </p>
                             <p className="text-xs text-amber-600/80 dark:text-amber-400/80 mt-0.5">
                                 Review and approve new signups to grant access.
@@ -890,7 +894,7 @@ export function AdminUsers() {
             </AnimatePresence>
 
             <AnimatePresence>
-                {resetRequestCount > 0 && (
+                {stats && stats.resetRequested > 0 && (
                     <motion.div
                         initial={{ opacity: 0, y: -8 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -903,7 +907,7 @@ export function AdminUsers() {
                         </div>
                         <div className="flex-1">
                             <p className="text-sm font-semibold text-sky-700 dark:text-sky-300">
-                                {resetRequestCount} password reset request{resetRequestCount !== 1 ? 's' : ''}
+                                {stats.resetRequested} password reset request{stats.resetRequested !== 1 ? 's' : ''}
                             </p>
                             <p className="text-xs text-sky-600/80 dark:text-sky-400/80 mt-0.5">
                                 Users have requested password resets. Generate tokens or set passwords directly.
@@ -970,17 +974,17 @@ export function AdminUsers() {
             </AnimatePresence>
 
             {/* User table */}
-            {processedUsers.length === 0 ? (
+            {users.length === 0 ? (
                 <div className="border border-glass-border rounded-xl bg-canvas-elevated">
                     <div className="flex flex-col items-center justify-center py-20">
                         <div className="w-16 h-16 rounded-2xl bg-black/5 dark:bg-white/5 flex items-center justify-center mb-4">
-                            {search ? <Search className="w-7 h-7 text-ink-muted/60" /> : <Users className="w-7 h-7 text-ink-muted/60" />}
+                            {debouncedSearch ? <Search className="w-7 h-7 text-ink-muted/60" /> : <Users className="w-7 h-7 text-ink-muted/60" />}
                         </div>
                         <p className="text-sm font-medium text-ink-secondary mb-1">
-                            {search ? 'No matching users' : `No ${filter === 'all' ? '' : filter + ' '}users`}
+                            {debouncedSearch ? 'No matching users' : `No ${filter === 'all' ? '' : filter + ' '}users`}
                         </p>
                         <p className="text-xs text-ink-muted">
-                            {search ? 'Try adjusting your search query.' : filter !== 'all' ? 'No users match this status filter.' : 'Users will appear here after signing up.'}
+                            {debouncedSearch ? 'Try adjusting your search query.' : filter !== 'all' ? 'No users match this status filter.' : 'Users will appear here after signing up.'}
                         </p>
                     </div>
                 </div>
@@ -998,7 +1002,7 @@ export function AdminUsers() {
                             </tr>
                         </thead>
                         <tbody>
-                            {pagedUsers.map((user, i) => {
+                            {users.map((user, i) => {
                                 const sc = STATUS_CONFIG[user.status]
                                 const rc = roleVisualFor(user.role)
                                 const RoleIcon = rc.icon
@@ -1202,17 +1206,17 @@ export function AdminUsers() {
                     {/* Table footer — total count (left) + page controls (right) */}
                     <div className="px-5 py-3 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] flex items-center justify-between gap-3">
                         <p className="text-xs text-ink-muted">
-                            Showing <span className="font-semibold text-ink-secondary">{processedUsers.length}</span>
-                            {processedUsers.length !== users.length && (
-                                <> of <span className="font-semibold text-ink-secondary">{users.length}</span></>
-                            )} user{users.length !== 1 ? 's' : ''}
+                            Showing <span className="font-semibold text-ink-secondary">{matching}</span>
+                            {stats && matching !== stats.total && (
+                                <> of <span className="font-semibold text-ink-secondary">{stats.total}</span></>
+                            )} user{(stats?.total ?? matching) !== 1 ? 's' : ''}
                         </p>
                         <div className="flex items-center gap-4">
                             {(search || filter !== 'all') && (
                                 <button onClick={() => { setSearch(''); setFilter('all') }}
                                     className="text-xs font-medium text-accent-lineage hover:underline">Clear filters</button>
                             )}
-                            <TablePagination page={clampedPage} pageSize={PAGE_SIZE} total={processedUsers.length} onPageChange={setPage} />
+                            <TablePagination page={page} pageSize={PAGE_SIZE} total={matching} onPageChange={setPage} />
                         </div>
                     </div>
                 </div>

@@ -237,6 +237,20 @@ class AdminUserResponse(BaseModel):
     is_system_account: bool = Field(False, alias="isSystemAccount")
 
 
+class AdminUserStatsResponse(BaseModel):
+    """Counts across every account, for the admin user list's KPI cards and
+    status tabs — the list itself is paged, so it can only count its page."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    total: int
+    pending: int
+    active: int
+    suspended: int
+    # Platform admins: super_admin + org_admin.
+    admins: int
+    reset_requested: int = Field(alias="resetRequested")
+
+
 class LoginResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
