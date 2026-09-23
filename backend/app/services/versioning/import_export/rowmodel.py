@@ -15,7 +15,8 @@ assembled from ``prop.*`` + ``properties_json``, **empty cells are dropped** (a 
 a field — PATCH semantics), and ``tags``/``confidence`` are coerced. ``denormalize_node`` /
 ``denormalize_edge`` do the reverse for export, spilling nested/complex property values into
 ``properties_json`` (mirroring the projector's native-vs-``propertiesRaw`` split so round-trips are
-lossless).
+lossless). In TEXT formats a flat-list ``prop.*`` value is written by ``cell_text`` as JSON and read
+back by ``parse_list_cells``.
 """
 from __future__ import annotations
 
@@ -174,4 +175,35 @@ def denormalize_edge(
     if payload.get("confidence") is not None:
         rec["confidence"] = payload["confidence"]
     _spill_properties(rec, payload.get("properties"))
+    return rec
+
+
+def cell_text(value: Any) -> str:
+    """A flat-record value as a TEXT cell (csv/tsv, xlsx string cells). A flat list is written as
+    JSON so :func:`parse_list_cells` reads it back as the same list — ``str`` would give Python's
+    ``"['a', 'b']"``, which re-imports as a string. Scalars stay ``str`` (``5`` vs ``"5"`` already
+    compare equal on re-import)."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def parse_list_cells(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """The TEXT-format inverse of :func:`cell_text` (csv/tsv/xlsx parsers only): a ``prop.*`` cell
+    holding a JSON list of scalars becomes that list again; anything else (``"[draft]"``) stays the
+    string. ndjson/json values are already typed, so a ``"[1,2]"`` string there stays a string."""
+    for key, val in rec.items():
+        if not key.startswith(_PROP_PREFIX) or not isinstance(val, str):
+            continue
+        text = val.strip()
+        if not (text.startswith("[") and text.endswith("]")):
+            continue
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(parsed, list) and _is_scalar_or_flat_list(parsed):
+            rec[key] = parsed
     return rec

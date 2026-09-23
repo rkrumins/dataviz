@@ -17,6 +17,8 @@ import io
 import json
 from typing import Any, AsyncIterator, Dict, List, Protocol, Sequence
 
+from .rowmodel import parse_list_cells
+
 
 class FormatAdapter(Protocol):
     fmt: str
@@ -124,7 +126,7 @@ class DelimitedAdapter:
             if header is None:
                 header = row
                 continue
-            yield {header[i]: row[i] for i in range(min(len(header), len(row)))}
+            yield parse_list_cells({header[i]: row[i] for i in range(min(len(header), len(row)))})
 
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str]

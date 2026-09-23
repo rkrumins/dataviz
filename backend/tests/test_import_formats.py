@@ -6,10 +6,14 @@ whole); ``write`` serializes records back. The registry resolves a format name t
 Parsing stays linear in the file size. Pure — runs under the per-file runner.
 """
 import asyncio
+import csv
+import io
 import json
 import time
 
 from backend.app.services.versioning.import_export.formats import _lines, get_adapter
+from backend.app.services.versioning.import_export.resolve import _changed_props
+from backend.app.services.versioning.import_export.rowmodel import cell_text, normalize
 
 
 async def _achunks(*parts: bytes):
@@ -84,6 +88,30 @@ async def _run() -> None:
         b'entity_id,prop.note\nent_1,"He said ""hi""\n', b'\nand left"\nent_2,plain\n')))
     assert recs == [{"entity_id": "ent_1", "prop.note": 'He said "hi"\n\nand left'},
                     {"entity_id": "ent_2", "prop.note": "plain"}], recs
+
+    # ---- list properties round-trip through csv/tsv: cell_text renders a flat list as JSON (the
+    #      writers' job) and the parse reads it back as the SAME list, so re-importing an unchanged
+    #      export changes nothing (str() gave "['a', 'b']", re-imported as a string "update").
+    #      A bracketed non-JSON string stays a string; scalars keep their str rendering. ----
+    stored = {"tags": ["a", "b"], "mixed": [1, 2.5, True, None, 'x, "y"\nz'], "label": "[draft]",
+              "n": 5}
+    for fmt, delim in (("csv", ","), ("tsv", "\t")):
+        buf = io.StringIO()
+        out = csv.writer(buf, delimiter=delim, lineterminator="\n")
+        out.writerow(["entity_id", *(f"prop.{k}" for k in stored)])
+        out.writerow(["ent_1", *(cell_text(v) for v in stored.values())])
+        recs = await _collect(get_adapter(fmt).parse(_achunks(buf.getvalue().encode())))
+        assert recs == [{"entity_id": "ent_1", "prop.tags": ["a", "b"],
+                         "prop.mixed": [1, 2.5, True, None, 'x, "y"\nz'],
+                         "prop.label": "[draft]", "prop.n": "5"}], (fmt, recs)
+        assert _changed_props(normalize(recs[0], "node")["properties"], stored) == {}, fmt
+
+    # ---- ndjson/json values are already typed: a "[1,2]" STRING stays a string there ----
+    recs = await _collect(get_adapter("ndjson").parse(_achunks(
+        b'{"prop.s": "[1,2]", "prop.l": [1, 2]}\n')))
+    assert recs == [{"prop.s": "[1,2]", "prop.l": [1, 2]}], recs
+    recs = await _collect(get_adapter("json").parse(_achunks(b'[{"prop.s": "[1,2]"}]')))
+    assert recs == [{"prop.s": "[1,2]"}], recs
 
 
 async def _run_scale() -> None:

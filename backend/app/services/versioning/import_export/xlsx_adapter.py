@@ -13,6 +13,8 @@ from __future__ import annotations
 import io
 from typing import Any, AsyncIterator, Dict, List, Sequence
 
+from .rowmodel import parse_list_cells
+
 # Identity / system columns — greyed in the header so users know not to touch them.
 _LOCKED = {"entity_id", "urn", "baseVersion", "source_entity_id", "target_entity_id"}
 _NODE_SHEET = "Nodes"
@@ -85,7 +87,7 @@ def _read_sheet(ws) -> List[Dict[str, Any]]:
             if i < len(header) and header[i] and val is not None and str(val).strip() != "":
                 rec[header[i]] = val             # empty cells dropped (PATCH semantics)
         if rec:
-            out.append(rec)
+            out.append(parse_list_cells(rec))
     return out
 
 
