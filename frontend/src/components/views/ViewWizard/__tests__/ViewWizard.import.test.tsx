@@ -92,6 +92,13 @@ vi.mock('@/features/versioning/components/PublishDraftDialog', () => ({
   ),
 }))
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
+// Steps swap at once. Under framer-motion's AnimatePresence, an import that answers in the same
+// render the previous step finishes leaving mounts its progress already leaving, and framer-motion 11
+// never plays an exit for a child that mounts absent: the step then never changes (Node 20, as in CI).
+vi.mock('framer-motion', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('framer-motion')>()),
+  AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}))
 vi.mock('../import/useDraftStaging', () => ({
   DRAFT_PERMISSION: 'workspace:datasource:manage',
   useDraftStaging: () => staging,
