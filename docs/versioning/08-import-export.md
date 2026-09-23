@@ -313,18 +313,36 @@ restore or clone the graph.
 
 ## 9. Object store & artifacts
 
-All import/export blobs (uploaded source, export result, preview/rejected reports) are stored under a
-self-describing `{workspace}/{data_source}/{graph}/{job}/{name}` key (`storage_key`,
-`object_store.py:25-27`), attributable to their origin at a glance. Everything streams at a 1 MiB
-chunk size, so a 5M-row file is never buffered whole (`LocalFsObjectStore`,
-`object_store.py:75-100`); a path-escape guard rejects keys that resolve outside the root
-(`:67-73`).
+All import/export blobs (uploaded source, export result, preview/rejected reports, view packages and
+their uploads) are stored under a self-describing `{workspace}/{data_source}/{graph}/{job}/{name}`
+key (`storage_key`, `object_store.py:40-42`), attributable to their origin at a glance. Everything
+streams at a 1 MiB chunk size, so a 5M-row file is never buffered whole.
 
-> **Limitation — local only in v1.** `get_object_store` returns a filesystem store rooted at
-> `IMPORT_STORE_ROOT`; `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
-> (`object_store.py:121-133`). Cloud backends implement the same `ObjectStore` Protocol and differ
-> only in `upload_target` (a presigned PUT vs the backend-streamed blob), so callers don't change —
-> but the presigned path is modeled, not yet backed (`UploadTarget`, `:37-49`).
+**The store is the management database** (`DatabaseObjectStore`, `object_store.py:202-330`; the
+default, `OBJECT_STORE_BACKEND=database`). Production runs several API pods with no shared volume,
+so an artifact written to one pod's disk was missing on the others: an export download, or a view
+package's data import (`/packages/inspect` keeps the upload, `/packages/{uploadId}/data` reads it
+back), failed whenever the load balancer sent the next request to another pod. The database is the
+one place every pod shares:
+
+- `object_store_objects` has a row per key naming a blob; `object_store_chunks` holds the blob's
+  bytes in 1 MiB chunks, in order. A put coalesces whatever sizes arrive into 1 MiB chunks and
+  commits every few of them, so a multi-GB artifact never sits in one transaction. Only after the
+  last chunk does a single transaction point the key at the new blob and drop the blob it replaced,
+  so a reader gets the previous version, whole, until then. A put that fails deletes what it wrote.
+- A read fetches one chunk per short query, from any byte offset (`open_stream(start=…)`).
+- The versioning worker's daily sweep deletes objects older than `OBJECT_STORE_TTL_HOURS`
+  (default 24), and chunks no object names once they are an hour old (a put that died mid-way).
+
+`OBJECT_STORE_BACKEND=local` keeps the filesystem store rooted at `IMPORT_STORE_ROOT`
+(`LocalFsObjectStore`, `object_store.py:79-173`) for a single-node stack; a path-escape guard
+rejects keys that resolve outside the root (`:85-91`), and the same sweep deletes its files by age.
+
+> **Limitation — no cloud store yet.** `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
+> (`get_object_store`, `object_store.py:333-348`). Cloud backends implement the same `ObjectStore`
+> Protocol and differ only in `upload_target` (a presigned PUT vs the backend-streamed blob), so
+> callers don't change — but the presigned path is modeled, not yet backed (`UploadTarget`,
+> `:52-64`).
 
 ---
 
@@ -359,8 +377,8 @@ chunk size, so a 5M-row file is never buffered whole (`LocalFsObjectStore`,
   the 5M+ follow-up (`export_worker.py:9-10`); **JSON and xlsx are buffered** on both parse and write
   (`formats.py:120-122`, `xlsx_adapter.py:26-32`), so they're human-scale formats — use ndjson/csv
   for millions.
-- **Object store is local-only**; S3/GCS and the presigned-upload path are stubbed
-  (`object_store.py:121-133`).
+- **No cloud object store yet**: artifacts live in the management database (§9); S3/GCS and the
+  presigned-upload path are stubbed (`object_store.py:333-348`).
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow

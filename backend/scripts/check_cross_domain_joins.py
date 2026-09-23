@@ -58,6 +58,8 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "ViewORM": "visualization",
     "ViewFavouriteORM": "visualization",
     "ViewVersionORM": "visualization",
+    "ObjectStoreObjectORM": "visualization",
+    "ObjectStoreChunkORM": "visualization",
     # aggregation
     "AggregationJobORM": "aggregation",
     "DataSourcePollingConfigORM": "aggregation",

@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
     and_,
@@ -1147,6 +1148,37 @@ class ViewVersionORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewVersion view_id={self.view_id!r} v{self.version} {self.content_hash[:15]!r}>"
+
+
+# ------------------------------------------------------------------ #
+# object_store_objects / object_store_chunks (import/export artifacts) #
+# ------------------------------------------------------------------ #
+
+class ObjectStoreObjectORM(Base):
+    """One import/export artifact (an upload, an export, a view package) in the shared store.
+
+    Every API pod reads and writes these rows, so a file stored by one pod is there for the
+    next request whichever pod serves it. The bytes are ``object_store_chunks`` rows of
+    ``blob_id``. An overwrite writes a new blob and repoints this row in one transaction, so a
+    reader never sees half an object (``services/storage/object_store.DatabaseObjectStore``).
+    """
+    __tablename__ = "object_store_objects"
+
+    key = Column(Text, primary_key=True)                      # {ws}/{ds}/{graph}/{job}/{name}
+    blob_id = Column(Text, nullable=False)
+    size = Column(BigInteger, nullable=False)
+    chunk_count = Column(Integer, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+
+class ObjectStoreChunkORM(Base):
+    """Chunk ``seq`` of blob ``blob_id``: 1 MiB of an artifact's bytes (the last may be shorter)."""
+    __tablename__ = "object_store_chunks"
+
+    blob_id = Column(Text, primary_key=True)
+    seq = Column(Integer, primary_key=True)
+    data = Column(LargeBinary, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
 
 
 # ------------------------------------------------------------------ #
