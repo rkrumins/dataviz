@@ -2357,6 +2357,21 @@ class _TrustedHostMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _route_candidates(path: str) -> list[str]:
+    """``path``, and ``path`` with its workspace segment collapsed. Workspace-scoped routes are
+    mounted under /api/v{1,2}/{ws_id}/..., so the literal prefixes the middlewares below match
+    on (``/api/v1/versioning/``, ``/api/v1/graph/``) can still find them."""
+    candidates = [path]
+    for api_prefix in ("/api/v1/", "/api/v2/"):
+        if path.startswith(api_prefix):
+            tail = path[len(api_prefix):]
+            sep = tail.find("/")
+            if sep > 0:
+                candidates.append(api_prefix.rstrip("/") + tail[sep:])
+            break
+    return candidates
+
+
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Refuse a request body larger than the cap, before parsing it.
 
@@ -2380,10 +2395,13 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """
 
     #: Routes that legitimately take large payloads (bulk import, graph
-    #: save). Everything else gets the ordinary cap.
+    #: save, a view package). Everything else gets the ordinary cap.
+    #: Matched with the workspace segment collapsed too, so the bulk
+    #: import at /api/v1/{ws_id}/versioning/graphs/{gid}/imports counts.
     _LARGE_BODY_PREFIXES = (
         "/api/v1/import",
         "/api/v1/versioning",
+        "/api/v1/views/transfer/packages/inspect",
     )
 
     def __init__(self, app, *, default_bytes: int, large_bytes: int):
@@ -2393,7 +2411,9 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
 
     def _cap_for(self, path: str) -> int:
         if path.endswith("/graph/save") or any(
-            path.startswith(p) for p in self._LARGE_BODY_PREFIXES
+            candidate.startswith(p)
+            for candidate in _route_candidates(path)
+            for p in self._LARGE_BODY_PREFIXES
         ):
             return self._large
         return self._default
@@ -2519,17 +2539,7 @@ class _TimeoutMiddleware:
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
     def _resolve_timeout(self, path: str) -> float:
-        # Workspace-scoped routes are mounted under
-        # /api/v{1,2}/{ws_id}/graph/... — collapse the dynamic segment
-        # so the literal-prefix tiers above can still match.
-        candidates = [path]
-        for api_prefix in ("/api/v1/", "/api/v2/"):
-            if path.startswith(api_prefix):
-                tail = path[len(api_prefix):]
-                sep = tail.find("/")
-                if sep > 0:
-                    candidates.append(api_prefix.rstrip("/") + tail[sep:])
-                break
+        candidates = _route_candidates(path)
         for pattern, timeout in self._tiers:
             for candidate in candidates:
                 if candidate.startswith(pattern):
