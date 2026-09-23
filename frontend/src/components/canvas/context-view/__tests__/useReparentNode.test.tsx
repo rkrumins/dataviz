@@ -7,7 +7,7 @@
  *   • a cycle (dropping a node into its own descendant) is blocked.
  */
 import { renderHook } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const notify = vi.fn()
 
@@ -166,5 +166,50 @@ describe('useReparentNode', () => {
     expect(parentLinks('D')).toHaveLength(1)            // exactly one parent link on the canvas
     useStagedChangesStore.getState().discard(moves()[0].id)
     expect(parentLinks('D').map((e) => e.id)).toEqual(['E0'])   // discard restores the ORIGINAL
+  })
+})
+
+describe('useReparentNode — returning a PLACED entity to its parent (view only)', () => {
+  // D sits inside S in the data; the view places it in another column (a layout pin).
+  let layout: any
+  let unregister: () => void
+  beforeEach(async () => {
+    notify.mockClear(); resetStaged()
+    useBranchStore.setState({ currentBranchId: 'br_1' } as never)
+    layout = { layers: [{ id: 'L1', name: 'L1' }, { id: 'L3', name: 'Layer 3' }], assignments: { D: { layerId: 'L3' } } }
+    const { registerLayoutWriter } = await import('@/store/canvasLayoutBridge')
+    unregister = registerLayoutWriter({ current: () => layout, persist: (next) => { layout = next } })
+    setCanvas([node('S', 'system'), node('D', 'dataset')],
+      [{ id: 'S-D', source: 'S', target: 'D', data: { edgeType: 'CONTAINS' } }])
+  })
+  afterEach(() => unregister())
+
+  it('dropping it onto its own parent removes the placement — a layout change, undoable', () => {
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S')
+    expect(layout.assignments.D).toBeUndefined()                  // back under its parent
+    expect(staged().map((c) => c.type)).toEqual(['assign_layer'])  // listed for review, no data op
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['S-D'])     // the data link is untouched
+    useStagedChangesStore.getState().discard(staged()[0].id)
+    expect(layout.assignments.D).toEqual({ layerId: 'L3' })        // undo restores the placement
+  })
+
+  it('a placement made in this session is simply cancelled', () => {
+    const before = layout
+    useStagedChangesStore.getState().stage({
+      type: 'assign_layer', targetId: 'D', after: { layerId: 'L3' }, summary: 'place',
+      discard: () => { layout = { ...before, assignments: {} } },
+    })
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.returnToParent('D', 'S')).toBe(true)
+    expect(staged()).toHaveLength(0)
+    expect(layout.assignments.D).toBeUndefined()
+  })
+
+  it('does nothing for an entity that is not placed', () => {
+    layout = { ...layout, assignments: {} }
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.returnToParent('D', 'S')).toBe(false)
+    expect(staged()).toHaveLength(0)
   })
 })

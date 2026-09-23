@@ -126,6 +126,46 @@ export function useReparentNode() {
     [isContainment, containmentEdgeTypes],
   )
 
+  // returnToParent — undo a VIEW placement: the entity shows under its parent again. The data is
+  // untouched (it never left its parent there). A placement made in this session is simply
+  // cancelled — its own undo restores the layout; a saved one is removed as a layout change that
+  // Review & Save lists and discard reverts. Returns false when the entity has no placement.
+  const returnToParent = useCallback((entityId: string, parentLabel?: string): boolean => {
+    const { nodes } = useCanvasStore.getState()
+    const node = nodes.find((n) => n.id === entityId || (n.data?.urn as string) === entityId)
+    const key = node?.id ?? entityId
+    const name = (node?.data?.label as string) || 'This entity'
+    const staged = useStagedChangesStore.getState()
+    const done = () => notify('success', `'${name}' is back under ${parentLabel ? `'${parentLabel}'` : 'its parent'}.`)
+    const prior = staged.changes.find(
+      (c) => (c.type === 'assign_layer' || c.type === 'move_to_layer') && c.targetId === key,
+    )
+    if (prior) {
+      staged.discard(prior.id)
+      useReferenceModelStore.getState().removeEntityAssignment(key)
+      done()
+      return true
+    }
+    const w = layoutWriter()
+    const before = w?.current()
+    if (!w || !before?.assignments[key]) return false
+    const after = unassignEntities(before, [key])
+    w.persist(after)
+    useReferenceModelStore.getState().removeEntityAssignment(key)
+    staged.stage({
+      type: 'assign_layer',
+      targetId: key,
+      targetUrn: (node?.data?.urn as string) ?? key,
+      before: { layerId: before.assignments[key].layerId },
+      after: { layerId: null },
+      summary: `Return '${name}' to its parent${parentLabel ? ` '${parentLabel}'` : ''}`,
+      discard: () => layoutWriter()?.persist(before),
+      reapply: () => layoutWriter()?.persist(after),
+    })
+    done()
+    return true
+  }, [notify])
+
   const reparent = useCallback((draggedId: string, newParentId: string) => {
     if (!draggedId || !newParentId || draggedId === newParentId) return
     const { nodes, edges } = useCanvasStore.getState()
@@ -166,7 +206,12 @@ export function useReparentNode() {
       notify('error', "Can't move an entity inside one of its own descendants.")
       return
     }
-    if (parentOf.get(childKey) === parentKey) return  // already there — no-op
+    // Already its parent in the data: a drop here means "show it under its parent again" — undo a
+    // view placement that holds it elsewhere (a no-op when there is none).
+    if (parentOf.get(childKey) === parentKey) {
+      returnToParent(childKey, (newParent.data?.label as string) || undefined)
+      return
+    }
 
     const childType = dragged.data?.type as string
     const parentType = newParent.data?.type as string
@@ -198,7 +243,7 @@ export function useReparentNode() {
 
     restageContainment(childKey, parentKey, (newParent.data?.label as string) || parentKey, containmentType)
     notify('success', `Moved under ${(newParent.data?.label as string) || parentKey}.`)
-  }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment])
+  }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment, returnToParent])
 
   // retypeContainment — keep the SAME parent, switch the containment relationship
   // TYPE. The backend edge_type is immutable, so this is a delete-old + create-new
@@ -246,5 +291,5 @@ export function useReparentNode() {
     notify('success', 'Relationship updated.')
   }, [relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment])
 
-  return { reparent, retypeContainment }
+  return { reparent, retypeContainment, returnToParent }
 }

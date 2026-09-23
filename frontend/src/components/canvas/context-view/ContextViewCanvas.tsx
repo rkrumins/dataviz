@@ -31,6 +31,7 @@ import {
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
+import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
@@ -1869,7 +1870,7 @@ export function ContextViewCanvas({
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -1892,17 +1893,20 @@ export function ContextViewCanvas({
         return d ? { name: String(d.label ?? id), type: String(d.type ?? '') } : undefined
       },
       layerName: (id: string) => layerName.get(id) ?? 'another layer',
+      groupOf: (id: string) => nodeGroupMap.get(id),
     }
-  }, [parentMap, nodeLayerMap, nodeMap, sortedLayers])
+  }, [parentMap, nodeLayerMap, nodeGroupMap, nodeMap, sortedLayers])
   const placementTops = useMemo(
     () => buildPlacements({ ...placementInputs, ancestry: new Map() }).unknownTops,
     [placementInputs],
   )
   const placementAncestry = usePlacementAncestry(placementTops)
-  const placedApart = useMemo(
-    () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }).placements,
+  const placementResult = useMemo(
+    () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }),
     [placementInputs, placementAncestry],
   )
+  const placedApart = placementResult.placements
+  const placedOut = placementResult.placedOut
 
   // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
   // sort handlers keep a stable identity and LayerColumn's memo holds).
@@ -3544,6 +3548,7 @@ export function ContextViewCanvas({
     return revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
 
+  const { returnToParent } = useReparentNode()
   // A placed entity's path → its parent in the data, opened and scrolled to (the reveal walk expands
   // each ancestor on the way, exactly as for a search hit).
   const revealPlacementParent = useCallback((placement: PlacementInfo) => {
@@ -6073,7 +6078,9 @@ export function ContextViewCanvas({
                 exhaustedParents={exhaustedParents}
                 loadedChildren={childMap}
                 placedApart={placedApart}
+                placedOut={placedOut}
                 onRevealPlacement={revealPlacementParent}
+                onReturnPlacement={returnToParent}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
                 onScroll={handleLayerScroll}

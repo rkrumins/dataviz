@@ -28,7 +28,7 @@ import {
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type RowSelectModifiers } from './FlatTreeItem'
-import type { PlacementInfo } from './placement'
+import type { PlacedOut, PlacementInfo } from './placement'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -117,8 +117,12 @@ interface LayerColumnProps {
   loadedChildren?: Map<string, string[]>
   /** Entities PLACED in a column apart from their parent, with their full path in the data. */
   placedApart?: Map<string, PlacementInfo>
+  /** Parents whose children are placed in other columns (the other end of a placement). */
+  placedOut?: Map<string, PlacedOut>
   /** Take the reader to a placed entity's parent (expanding its path on the way). */
   onRevealPlacement?: (placement: PlacementInfo) => void
+  /** Undo a row's view placement (show it under its parent again). */
+  onReturnPlacement?: (entityId: string, parentName?: string) => void
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
@@ -295,7 +299,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   exhaustedParents,
   loadedChildren,
   placedApart,
+  placedOut,
   onRevealPlacement,
+  onReturnPlacement,
   feedMore,
   onFeedMore,
   onScroll,
@@ -2636,7 +2642,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <FlatTreeItem
                         node={node}
                         placement={depth === 0 ? placedApart?.get(node.id) : undefined}
+                        placedOut={placedOut?.get(node.id)}
                         onRevealPlacement={onRevealPlacement}
+                        onReturnPlacement={onReturnPlacement}
                         depth={depth}
                         isLast={isLast}
                         parentIsLast={parentIsLast}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import type { PlacementInfo } from './placement'
+import type { PlacedOut, PlacementInfo } from './placement'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
@@ -35,7 +35,11 @@ export interface RowSelectModifiers {
 interface FlatTreeItemProps {
   /** Set when this row is PLACED in this column apart from its parent: its path in the data. */
   placement?: PlacementInfo
+  /** Set on a parent whose children are placed in other columns (the other end of a placement). */
+  placedOut?: PlacedOut
   onRevealPlacement?: (placement: PlacementInfo) => void
+  /** Undo this row's view placement: show it under its parent again. */
+  onReturnPlacement?: (entityId: string, parentName?: string) => void
   node: HierarchyNode
   depth: number
   isLast: boolean
@@ -109,7 +113,9 @@ const FLAT_ROW_STYLE: Record<string, string> = {
 export const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
   placement,
+  placedOut,
   onRevealPlacement,
+  onReturnPlacement,
   depth,
   isLast,
   parentIsLast,
@@ -761,8 +767,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             placement={placement}
             entityName={node.name}
             onReveal={onRevealPlacement}
+            onReturn={onReturnPlacement ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
           />
         )}
+        {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}
         {/* Display-rule tags — shared chip cluster (premium chips +
             overflow popover) so all canvases render identically. */}
         <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" className="mt-1" />
@@ -974,36 +982,71 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 // alongside the tooltip rendering that consumes them.
 
 /**
- * "Placed" + the entity's path in the data. The tag says this column is a view arrangement; the path
- * says where the entity really sits (root → parent), and a click goes there. A long path keeps its
- * start and its last two steps; the tooltip carries all of it.
+ * The placed end: "Placed · Part of <path> · in <parent's layer>". The tag says this column is a view
+ * arrangement; "Part of" says where the entity really sits in the data (root → parent); a click goes
+ * there. A long path keeps its start and its last two steps; the tooltip carries all of it.
  */
-function PlacementPath({ placement, entityName, onReveal }: {
+function PlacementPath({ placement, entityName, onReveal, onReturn }: {
   placement: PlacementInfo
   entityName: string
   onReveal?: (placement: PlacementInfo) => void
+  onReturn?: () => void
 }) {
   const names = placement.path.map((a) => a.displayName)
   const shown = names.length > 3 ? [names[0], '…', ...names.slice(-2)] : names
   const lead = placement.complete ? '' : '… › '
-  const full = `${placement.complete ? '' : '… › '}${names.join(' › ')}`
-  const explain = `Placed in ${placement.placedLayerName} for this view only. In the data, ${entityName} sits inside `
-    + `${full} (shown in ${placement.parentLayerName}). Click to go to its parent.`
+  const full = `${lead}${names.join(' › ')}`
+  const parentName = names[names.length - 1] ?? 'its parent'
+  const explain = `Placed in ${placement.placedLayerName} for this view only — the data source is unchanged. `
+    + `In the data, ${entityName} is part of ${full} (shown in ${placement.parentLayerName}). `
+    + 'Click to go to its parent.'
   return (
-    <button
-      type="button"
-      onClick={(e) => { e.stopPropagation(); onReveal?.(placement) }}
+    <span className="mt-1 flex items-center gap-1 min-w-0 max-w-full">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onReveal?.(placement) }}
+        title={explain}
+        aria-label={explain}
+        className="flex items-center gap-1.5 min-w-0 text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+      >
+        <span className="inline-flex items-center gap-1 flex-shrink-0 px-1.5 py-px rounded-md border border-violet-400/30 bg-violet-500/10 text-violet-600 dark:text-violet-300 text-[9.5px] font-semibold tracking-wide">
+          <LucideIcons.LayoutGrid className="w-2.5 h-2.5" aria-hidden />
+          Placed
+        </span>
+        <span className="text-[10.5px] text-ink-muted truncate">
+          Part of <span className="text-ink font-medium">{lead}{shown.join(' › ')}</span>
+          <span className="text-ink-muted/70"> · in {placement.parentLayerName}</span>
+        </span>
+      </button>
+      {onReturn && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReturn() }}
+          title={`Return to ${parentName} — show it under its parent again (this view only)`}
+          aria-label={`Return ${entityName} to ${parentName}`}
+          className="flex-shrink-0 p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+        >
+          <LucideIcons.Undo2 className="w-3 h-3" aria-hidden />
+        </button>
+      )}
+    </span>
+  )
+}
+
+/** The parent's end: which of its children this view shows in other columns. */
+function PlacedOutNote({ placedOut, parentName }: { placedOut: PlacedOut; parentName: string }) {
+  const n = placedOut.children.length
+  const where = placedOut.layerNames.join(', ')
+  const explain = `${placedOut.children.join(', ')} ${n === 1 ? 'is' : 'are'} placed in ${where} for this view only. `
+    + `In the data, ${n === 1 ? 'it is' : 'they are'} still part of ${parentName}.`
+  return (
+    <span
       title={explain}
       aria-label={explain}
-      className="mt-1 flex items-center gap-1.5 min-w-0 max-w-full text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+      className="mt-1 flex items-center gap-1 min-w-0 text-[10.5px] text-violet-600/80 dark:text-violet-300/80 truncate"
     >
-      <span className="inline-flex items-center gap-1 flex-shrink-0 px-1.5 py-px rounded-md border border-violet-400/30 bg-violet-500/10 text-violet-600 dark:text-violet-300 text-[9.5px] font-semibold tracking-wide">
-        <LucideIcons.LayoutGrid className="w-2.5 h-2.5" aria-hidden />
-        Placed
-      </span>
-      <span className="text-[10.5px] text-ink-muted truncate">
-        {lead}{shown.join(' › ')}
-      </span>
-    </button>
+      <LucideIcons.LayoutGrid className="w-2.5 h-2.5 flex-shrink-0" aria-hidden />
+      {n} {n === 1 ? 'child' : 'children'} placed in {where}
+    </span>
   )
 }

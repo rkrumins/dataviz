@@ -34,4 +34,15 @@ describe('placement: an entity placed apart from its parent carries its path in 
     expect(known.placements.get('A')!.path.map((a) => a.displayName)).toEqual(['Org', 'My Data Domain', 'Apps'])
     expect(known.unknownTops).toEqual([])
   })
+
+  it("a child in a group its parent is not in is placed, even in the parent's own column", () => {
+    const sameColumn = new Map([['D', 'dom'], ['G', 'dom'], ['A', 'dom'], ['B', 'dom']])
+    const { placements, placedOut } = buildPlacements({
+      ...base, nodeLayerMap: sameColumn, ancestry: new Map([['D', []]]),
+      groupOf: (id) => (id === 'B' ? { id: 'logical:crit', name: 'Critical apps' } : undefined),
+    })
+    expect([...placements.keys()]).toEqual(['B'])
+    expect(placements.get('B')!.placedLayerName).toBe('Critical apps (Domains)')
+    expect(placedOut.get('G')).toEqual({ children: ['App B'], layerNames: ['Critical apps (Domains)'] })
+  })
 })

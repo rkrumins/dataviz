@@ -16,6 +16,12 @@ export interface PlacementInfo {
   placedLayerName: string
 }
 
+/** A parent whose children are placed in other columns: which, and where. */
+export interface PlacedOut {
+  children: string[]
+  layerNames: string[]
+}
+
 interface NodeFacts { name: string; type: string }
 
 /**
@@ -28,15 +34,23 @@ export function buildPlacements(args: {
   nodeLayerMap: ReadonlyMap<string, string>
   facts: (id: string) => NodeFacts | undefined
   layerName: (id: string) => string
+  /** The group (view-only container) an entity is drawn in, if any. */
+  groupOf?: (id: string) => { id: string; name: string } | undefined
   ancestry: ReadonlyMap<string, readonly AncestorRef[]>
-}): { placements: Map<string, PlacementInfo>; unknownTops: string[] } {
-  const { parentMap, nodeLayerMap, facts, layerName, ancestry } = args
+}): { placements: Map<string, PlacementInfo>; placedOut: Map<string, PlacedOut>; unknownTops: string[] } {
+  const { parentMap, nodeLayerMap, facts, layerName, groupOf, ancestry } = args
   const placements = new Map<string, PlacementInfo>()
+  const placedOut = new Map<string, PlacedOut>()
   const unknownTops = new Set<string>()
   for (const [child, parent] of parentMap) {
     const own = nodeLayerMap.get(child)
     const theirs = nodeLayerMap.get(parent)
-    if (!own || !theirs || own === theirs) continue
+    if (!own || !theirs) continue
+    // Apart from its parent: in another column, or in a group its parent is not in.
+    const group = groupOf?.(child)
+    const inOtherGroup = !!group && group.id !== groupOf?.(parent)?.id
+    if (own === theirs && !inOtherGroup) continue
+    const placedIn = inOtherGroup ? `${group!.name} (${layerName(own)})` : layerName(own)
     const loaded: AncestorRef[] = []
     const seen = new Set<string>()
     let at: string | undefined = parent
@@ -50,12 +64,16 @@ export function buildPlacements(args: {
     }
     const above = ancestry.get(top)
     if (!above) unknownTops.add(top)
+    const out = placedOut.get(parent) ?? { children: [], layerNames: [] }
+    out.children.push(facts(child)?.name ?? child)
+    if (!out.layerNames.includes(placedIn)) out.layerNames.push(placedIn)
+    placedOut.set(parent, out)
     placements.set(child, {
       path: [...(above ?? []), ...loaded],
       complete: above !== undefined,
       parentLayerName: layerName(theirs),
-      placedLayerName: layerName(own),
+      placedLayerName: placedIn,
     })
   }
-  return { placements, unknownTops: [...unknownTops] }
+  return { placements, placedOut, unknownTops: [...unknownTops] }
 }
