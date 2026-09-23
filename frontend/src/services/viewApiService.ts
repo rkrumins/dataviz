@@ -154,6 +154,8 @@ export interface View {
     health?: ViewHealth | null
     /** A pending ask to publish this view to everyone. Null when none. */
     publishRequest?: ViewPublishRequest | null
+    /** The identity this view carries between environments (kept by export and import). */
+    portableId?: string | null
 }
 
 export interface ViewCreateRequest {

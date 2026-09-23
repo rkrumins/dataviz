@@ -18,7 +18,7 @@
  * so the UI can hint "not found in graph" without ever re-fetching.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { LayerAssignmentEntry } from '@/types/schema'
 import type { BrowserSnapshot } from './WizardAssignmentTree'
@@ -52,6 +52,14 @@ export function fallbackNameFromUrn(urn: string): string {
     return urn.split(',').pop()?.replace(')', '') ?? urn
 }
 
+/**
+ * Identities the wizard already knows before the index looks anything up. The Import journey
+ * provides the entities its reconcile found MISSING here, named as the exporting environment
+ * named them: their rows read "orders_v2 — not found here" instead of a URN fragment, and no
+ * getNode() is spent confirming what the reconcile already established.
+ */
+export const WizardEntitySeedContext = createContext<ReadonlyMap<string, EntityIdentity> | null>(null)
+
 const RESOLVE_CONCURRENCY = 5
 const CHILDREN_PAGE_SIZE = 50
 
@@ -64,8 +72,10 @@ export function useWizardEntityIndex(opts: {
     assignments: Record<string, LayerAssignmentEntry>
     /** Live directory published by WizardAssignmentTree (null until first publish). */
     snapshot: BrowserSnapshot | null
+    /** Identities already known (see WizardEntitySeedContext). */
+    seed?: ReadonlyMap<string, EntityIdentity> | null
 }): WizardEntityIndex {
-    const { provider, containmentEdgeTypes, assignments, snapshot } = opts
+    const { provider, containmentEdgeTypes, assignments, snapshot, seed } = opts
 
     // Caches are refs (no re-render churn per entry); `tick` bumps once per
     // settled batch/children-load so consumers re-render with fresh data.
@@ -91,6 +101,11 @@ export function useWizardEntityIndex(opts: {
 
     // ── Batch-resolve assigned URNs the browser hasn't seen (edit mode) ──
     useEffect(() => {
+        if (seed) {
+            for (const [urn, identity] of seed) {
+                if (!resolvedRef.current.has(urn)) resolvedRef.current.set(urn, identity)
+            }
+        }
         const missing = Object.keys(assignments).filter(urn =>
             !snapshot?.directory.has(urn)
             && !resolvedRef.current.has(urn)
@@ -121,7 +136,7 @@ export function useWizardEntityIndex(opts: {
         }
         void run()
         return () => { cancelled = true }
-    }, [assignments, snapshot, provider])
+    }, [assignments, snapshot, provider, seed])
 
     // ── Public surface ──
 

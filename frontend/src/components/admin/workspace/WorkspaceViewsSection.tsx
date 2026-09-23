@@ -29,7 +29,7 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
-    Check, Loader2,
+    Check, Loader2, FileUp,
 } from 'lucide-react'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
@@ -181,6 +181,7 @@ export default function WorkspaceViewsSection({
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
     const exportEnabled = useFeature('viewExportEnabled')
+    const importEnabled = useFeature('viewImportEnabled')
     const [shareView, setShareView] = useState<{ id: string; name: string; visibility: string } | null>(null)
     const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
     const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -605,6 +606,15 @@ export default function WorkspaceViewsSection({
                     >
                         <Compass className="w-4 h-4" /> Browse in Explorer
                     </Link>
+                    {importEnabled && (
+                        <button
+                            onClick={() => openViewEditor(undefined, { journey: 'import' })}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
+                            title="Import a view exported from another environment"
+                        >
+                            <FileUp className="w-4 h-4" /> Import view
+                        </button>
+                    )}
                     <button
                         onClick={() => openViewEditor()}
                         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"

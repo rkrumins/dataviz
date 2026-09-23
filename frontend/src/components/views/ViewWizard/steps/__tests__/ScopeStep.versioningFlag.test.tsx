@@ -33,8 +33,8 @@ vi.mock('@/store/providerHealthModel', () => ({
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { ScopeStep } from '../ScopeStep'
 
-function setVersioning(on: boolean) {
-  useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: on } })
+function setVersioning(on: boolean, viewImportEnabled = true) {
+  useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: on, viewImportEnabled } })
 }
 
 function renderScope() {
@@ -77,9 +77,17 @@ describe('ScopeStep · the versioningEnabled gate', () => {
   })
 
   it('does not leave a lone "Use existing data" toggle with nothing to toggle to', () => {
-    setVersioning(false)
+    setVersioning(false, false)
     renderScope()
     // With only one mode left there is no choice to present, so the whole control goes.
     expect(screen.queryByText('Use existing data')).not.toBeInTheDocument()
+  })
+
+  it('still offers importing a view when only blank models are off', () => {
+    setVersioning(false, true)
+    renderScope()
+    expect(screen.getByText('Use existing data')).toBeInTheDocument()
+    expect(screen.getByText('Import a view')).toBeInTheDocument()
+    expect(screen.queryByText('Start from blank')).not.toBeInTheDocument()
   })
 })

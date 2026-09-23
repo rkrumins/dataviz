@@ -48,6 +48,9 @@ interface EntitiesStepProps {
     dataSourceId?: string
     /** Create mode may prune its OWN seed; an existing view's selection is the user's. */
     mode?: 'create' | 'edit'
+    /** Fill an empty containment scope with this source's containment edges. Off for imports:
+     *  the file's layers carry their own scope, and filling it in would change the design. */
+    autoScopeEdges?: boolean
 }
 
 // interface ActiveFilter moved to ViewWizard.tsx
@@ -81,7 +84,7 @@ const countKey = (id: string) => id.trim().toLowerCase()
 // Component
 // ============================================
 
-export function EntitiesStep({ formData, updateFormData, dataSourceId, mode = 'create' }: EntitiesStepProps) {
+export function EntitiesStep({ formData, updateFormData, dataSourceId, mode = 'create', autoScopeEdges = true }: EntitiesStepProps) {
     const provider = useGraphProvider()
     const { workspaceId } = useGraphProviderContext()
     const {
@@ -173,7 +176,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId, mode = 'c
                 setStats(schemaStats)
 
                 // Initialize scope if empty
-                if (!formData.scopeEdges?.edgeTypes.length) {
+                if (autoScopeEdges && !formData.scopeEdges?.edgeTypes.length) {
                     updateFormData({
                         scopeEdges: {
                             edgeTypes: containmentEdgeTypes,
@@ -188,7 +191,7 @@ export function EntitiesStep({ formData, updateFormData, dataSourceId, mode = 'c
             }
         }
         loadDynamicData()
-    }, [provider, workspaceId, dataSourceId, containmentEdgeTypes, formData.scopeEdges?.edgeTypes.length, updateFormData])
+    }, [provider, workspaceId, dataSourceId, containmentEdgeTypes, formData.scopeEdges?.edgeTypes.length, updateFormData, autoScopeEdges])
 
     // Physical graph counts, keyed so declared↔physical case drift can't hide them.
     const entityCounts = useMemo(() => indexCounts(stats?.entityTypeStats), [stats])

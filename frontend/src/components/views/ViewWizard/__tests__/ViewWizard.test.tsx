@@ -232,6 +232,27 @@ describe('ViewWizard — submit (edit path)', () => {
     expect(body.entityScope).toBe('curated')
   })
 
+  it('keeps the display rules and anything else the reference layout carries', async () => {
+    // The layout write replaces referenceLayout wholesale; a save from the wizard, which edits
+    // only layers and placements, used to delete the view's display rules with it.
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
+      assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true } },
+      displayRules: [{ id: 'hot', op: 'color', value: '#f00' }],
+      futureField: { kept: true },
+    })))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    const [, body] = updateViewLayoutMock.mock.calls[0]
+    expect(body.referenceLayout.displayRules).toEqual([{ id: 'hot', op: 'color', value: '#f00' }])
+    expect(body.referenceLayout.futureField).toEqual({ kept: true })
+    expect(body.referenceLayout.assignments).toEqual({ 'urn:a': { layerId: 'l1', inheritsChildren: true } })
+  })
+
   it('preserves an explicit editingView.content.entityScope rather than deriving it', async () => {
     const config = baseConfig({
       layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],

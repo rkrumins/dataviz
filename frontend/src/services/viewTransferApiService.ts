@@ -278,6 +278,9 @@ export interface ImportViewRequest {
   /** The definition to write: `effectiveDefinition` from reconcile, plus any edits since. */
   definition: Record<string, unknown>
   origin: ImportOrigin
+  /** The file's own definition, when `definition` differs from it (choices made on the way in, a
+   *  merge, edits in the wizard): kept with the version so later files still find it. */
+  originDefinition?: Record<string, unknown>
   manifest?: BundleManifest
   history?: BundleHistoryEntry[]
   resolutions?: Resolutions

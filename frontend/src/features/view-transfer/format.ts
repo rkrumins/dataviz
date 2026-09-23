@@ -5,6 +5,7 @@
  * control's words (commit, publish, revert): the two sit side by side in the product and must not
  * be mistaken for each other.
  */
+import type { UpdateStatus } from '@/services/viewTransferApiService'
 import type { ViewVersionSource } from '@/services/viewVersionsApiService'
 
 /** Mirrors the server's filename slug (`view_transfer._slug`), so the preview names the file the
@@ -52,4 +53,25 @@ export const VERSION_SOURCE_LABEL: Record<ViewVersionSource, string> = {
 
 export function pluralize(count: number, one: string, many = `${one}s`): string {
   return `${count.toLocaleString()} ${count === 1 ? one : many}`
+}
+
+/** How a file stands against a view here that it already is. */
+export const UPDATE_STATUS_META: Record<UpdateStatus, {
+  label: string
+  detail: string
+  tone: 'emerald' | 'indigo' | 'amber' | 'slate'
+}> = {
+  up_to_date: { label: 'Already up to date', detail: 'This view already has exactly this design.', tone: 'emerald' },
+  fast_forward: { label: 'The file is newer', detail: 'Nothing has changed here since they last matched, so importing it loses nothing here.', tone: 'indigo' },
+  diverged: { label: 'Both changed', detail: 'Both this view and the file changed since they last matched.', tone: 'amber' },
+  file_is_older: { label: 'The file is older', detail: 'This view has moved on since this file was made. Importing it goes back.', tone: 'amber' },
+  unrelated: { label: 'No shared history', detail: 'This view and the file have no version in common.', tone: 'slate' },
+}
+
+export const TONE_CHIP: Record<'emerald' | 'indigo' | 'amber' | 'slate' | 'rose', string> = {
+  emerald: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  indigo: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
+  amber: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
+  rose: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
 }

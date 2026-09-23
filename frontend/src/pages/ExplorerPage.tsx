@@ -12,7 +12,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus,
+  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus, FileUp,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
@@ -40,6 +40,8 @@ import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/expl
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useViewFileDrop } from '@/features/view-transfer/useViewFileDrop'
+import { ViewFileDropOverlay } from '@/features/view-transfer/ViewFileDropOverlay'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
@@ -104,6 +106,14 @@ export function ExplorerPage() {
   const parsed = parseSearchParams(searchParams)
   const currentUser = useAuthStore(s => s.user)
   const { openViewEditor } = useViewEditorModal()
+  // A view from another environment: the wizard's Import journey, from the button or a file
+  // dropped anywhere on the page.
+  const importEnabled = useFeature('viewImportEnabled')
+  const openImport = useCallback(
+    (file?: File) => openViewEditor(undefined, { journey: 'import', importFile: file }),
+    [openViewEditor],
+  )
+  const { dragging: fileOverPage, dropProps } = useViewFileDrop(openImport, importEnabled)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   const density = usePreferencesStore(s => s.explorerDensity)
 
@@ -535,8 +545,9 @@ export function ExplorerPage() {
   // ─── Render ─────────────────────────────────────────────────────────
 
   return (
-    <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
+    <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar" {...dropProps}>
       <style>{STAGGER_STYLE}</style>
+      <ViewFileDropOverlay show={fileOverPage} />
       <PageContainer className="pb-28">
 
         {/* ── Header ──────────────────────────────────────────── */}
@@ -551,6 +562,16 @@ export function ExplorerPage() {
               <p className="text-[11px] text-ink-muted">Discover views across workspaces</p>
             </div>
             <TourLaunchButton tourId="explore-lineage" />
+            {importEnabled && (
+              <button
+                onClick={() => openImport()}
+                className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold border border-glass-border text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                title="Import a view exported from another environment (or drop its file on this page)"
+              >
+                <FileUp className="w-4 h-4" />
+                Import view
+              </button>
+            )}
             <button
               data-tour="explorer-new-view"
               onClick={() => openViewEditor()}

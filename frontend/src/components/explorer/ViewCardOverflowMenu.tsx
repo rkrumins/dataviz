@@ -2,9 +2,9 @@
  * ViewCardOverflowMenu — "..." overflow menu on view cards with
  * lifecycle actions: Delete, Change Visibility, Share.
  */
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useContext } from 'react'
 import {
-  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown,
+  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
@@ -17,6 +17,7 @@ import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { useFeature } from '@/store/features'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -56,6 +57,9 @@ export function ViewCardOverflowMenu({
   const [activityOpen, setActivityOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const exportEnabled = useFeature('viewExportEnabled')
+  // Updating a view from a file runs in the wizard, which only exists inside the app layout.
+  const viewEditor = useContext(ViewEditorContext)
+  const importEnabled = useFeature('viewImportEnabled') && viewEditor !== null
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close on click outside
@@ -209,6 +213,16 @@ export function ViewCardOverflowMenu({
                 >
                   <FileDown className="w-3.5 h-3.5" />
                   Export…
+                </button>
+              )}
+              {importEnabled && !editDisabled && (
+                <button
+                  onClick={() => { setIsOpen(false); viewEditor?.openViewEditor(undefined, { journey: 'import', importIntoViewId: viewId }) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <FileUp className="w-3.5 h-3.5" />
+                  Update from file…
                 </button>
               )}
               <div className="border-t border-glass-border/50 my-1" />
