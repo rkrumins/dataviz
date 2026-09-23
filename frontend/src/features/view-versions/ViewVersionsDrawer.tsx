@@ -127,9 +127,9 @@ export function ViewVersionsDrawer({ viewId, viewName, isOpen, onClose, canEdit 
                 <div className="flex items-center gap-2 rounded-xl border border-indigo-200/70 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/20 px-3 py-2 text-[11px] text-ink-secondary">
                   <FileDown className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
                   <span className="min-w-0 truncate">
-                    Came from <span className="font-semibold">{origin.environment || 'another environment'}</span>
-                    {origin.version ? <> v{origin.version}</> : null}
-                    {' '}as v{origin.importedAsVersion}, {timeAgo(origin.importedAt)}
+                    Came from {origin.version ? <>v{origin.version} in </> : null}
+                    <span className="font-semibold">{origin.environment || 'another environment'}</span>
+                    {' '}as v{origin.importedAsVersion} here, {timeAgo(origin.importedAt)}
                   </span>
                 </div>
               )}
