@@ -498,11 +498,13 @@ export function useLayerAssignment({
     // wrappers stay in config order and entities inside a wrapper sort by
     // childCmp (which honours orderKeys, so a manually-ordered group is
     // internally consistent, but the wrappers themselves aren't reorderable).
-    if (entityLogicalMap.size > 0) {
+    // Every CONFIGURED group renders, empty or not: a group made on the canvas is a place to drop
+    // entities into, so it must be there before anything is in it.
+    {
       sortedLayers.forEach(layer => {
         if (!layer.logicalNodes || layer.logicalNodes.length === 0) return
         const layerNodes = grouped.get(layer.id)
-        if (!layerNodes || layerNodes.length === 0) return
+        if (!layerNodes) return
 
         // Build a flat lookup of all logical nodes in this layer (recursive)
         const logicalLookup = new Map<string, LogicalNodeConfig>()
@@ -532,7 +534,6 @@ export function useLayerAssignment({
         })
 
         // Only restructure if at least one entity is assigned to a logical group
-        if (logicalChildren.size === 0) return
 
         // Build logical group wrapper HierarchyNodes (recursive for nested groups)
         const buildLogicalHierarchy = (configs: LogicalNodeConfig[], depth: number): HierarchyNode[] => {
@@ -555,7 +556,7 @@ export function useLayerAssignment({
               isLogical: true,
               logicalConfig: config,
             } satisfies HierarchyNode
-          }).filter(g => g.children.length > 0 || logicalChildren.has(g.id.replace('logical:', '')))
+          })
         }
 
         const logicalWrappers = buildLogicalHierarchy(layer.logicalNodes, 0)

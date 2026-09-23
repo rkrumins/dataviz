@@ -155,3 +155,113 @@ export function clearLayerOrderKeys(
   }
   return { ...layout, layers, assignments }
 }
+
+// ── Groups (a layer's `logicalNodes` tree — view-only containers) ─────────────────────────────────
+
+type GroupNode = NonNullable<ViewLayerConfig['logicalNodes']>[number]
+
+const mapGroups = (
+  layers: ViewLayerConfig[], layerId: string, fn: (groups: GroupNode[]) => GroupNode[],
+): ViewLayerConfig[] => layers.map((l) => (l.id === layerId ? { ...l, logicalNodes: fn(l.logicalNodes ?? []) } : l))
+
+const editTree = (groups: GroupNode[], fn: (g: GroupNode) => GroupNode | null): GroupNode[] =>
+  groups.flatMap((g) => {
+    const next = fn(g)
+    if (!next) return []
+    return [{ ...next, ...(next.children ? { children: editTree(next.children, fn) } : {}) }]
+  })
+
+/** Add a group to a layer — at its top, or inside `parentGroupId` (a group of groups). */
+export function addGroup(
+  layers: ViewLayerConfig[], layerId: string, group: GroupNode, parentGroupId?: string,
+): ViewLayerConfig[] {
+  if (!parentGroupId) return mapGroups(layers, layerId, (gs) => [...gs, group])
+  return mapGroups(layers, layerId, (gs) =>
+    editTree(gs, (g) => (g.id === parentGroupId ? { ...g, children: [...(g.children ?? []), group] } : g)))
+}
+
+/** Rename one group anywhere in a layer's tree. */
+export function renameGroup(layers: ViewLayerConfig[], layerId: string, groupId: string, name: string): ViewLayerConfig[] {
+  return mapGroups(layers, layerId, (gs) => editTree(gs, (g) => (g.id === groupId ? { ...g, name } : g)))
+}
+
+/** Every group id at or below `groupId` in a layer (what deleting it removes). */
+export function groupSubtreeIds(layers: ViewLayerConfig[], layerId: string, groupId: string): string[] {
+  const out: string[] = []
+  const walk = (gs: GroupNode[] | undefined, inside: boolean) => gs?.forEach((g) => {
+    const here = inside || g.id === groupId
+    if (here) out.push(g.id)
+    walk(g.children, here)
+  })
+  walk(layers.find((l) => l.id === layerId)?.logicalNodes, false)
+  return out
+}
+
+/** Remove a group (and the groups inside it) from a layer. Members are released separately. */
+export function removeGroup(layers: ViewLayerConfig[], layerId: string, groupId: string): ViewLayerConfig[] {
+  return mapGroups(layers, layerId, (gs) => editTree(gs, (g) => (g.id === groupId ? null : g)))
+}
+
+/** Every group in a layer, depth-first, with its path of names ("Critical › Tier 1"). */
+export function listGroups(layers: ViewLayerConfig[], layerId: string): Array<{ id: string; name: string; path: string }> {
+  const out: Array<{ id: string; name: string; path: string }> = []
+  const walk = (gs: GroupNode[] | undefined, trail: string[]) => gs?.forEach((g) => {
+    const path = [...trail, g.name]
+    out.push({ id: g.id, name: g.name, path: path.join(' › ') })
+    walk(g.children, path)
+  })
+  walk(layers.find((l) => l.id === layerId)?.logicalNodes, [])
+  return out
+}
+
+/** The group a group sits in (null = the layer's top level; undefined = not found). */
+export function parentGroupOf(layers: ViewLayerConfig[], layerId: string, groupId: string): string | null | undefined {
+  let found: string | null | undefined
+  const walk = (gs: GroupNode[] | undefined, parent: string | null) => gs?.forEach((g) => {
+    if (g.id === groupId) found = parent
+    walk(g.children, g.id)
+  })
+  walk(layers.find((l) => l.id === layerId)?.logicalNodes, null)
+  return found
+}
+
+const findGroup = (gs: GroupNode[] | undefined, id: string): GroupNode | undefined => {
+  for (const g of gs ?? []) {
+    if (g.id === id) return g
+    const inner = findGroup(g.children, id)
+    if (inner) return inner
+  }
+  return undefined
+}
+
+/** Move a group (with everything inside it) into another group, or to the layer's top level
+ *  (`null`). No-op for a move into itself or its own descendants — a group can't contain itself. */
+export function moveGroup(
+  layers: ViewLayerConfig[], layerId: string, groupId: string, newParentId: string | null,
+): ViewLayerConfig[] {
+  if (newParentId && groupSubtreeIds(layers, layerId, groupId).includes(newParentId)) return layers
+  const moving = findGroup(layers.find((l) => l.id === layerId)?.logicalNodes, groupId)
+  if (!moving) return layers
+  return addGroup(removeGroup(layers, layerId, groupId), layerId, moving, newParentId ?? undefined)
+}
+
+/** Dismantle a group: it disappears and its sub-groups move up one level, in its place. (Its
+ *  entities are lifted by `reassignGroupMembers` — to the parent group, or the layer.) */
+export function ungroup(layers: ViewLayerConfig[], layerId: string, groupId: string): ViewLayerConfig[] {
+  const lift = (gs: GroupNode[]): GroupNode[] => gs.flatMap((g) =>
+    g.id === groupId ? (g.children ?? []) : [{ ...g, ...(g.children ? { children: lift(g.children) } : {}) }])
+  return mapGroups(layers, layerId, lift)
+}
+
+/** Move a group's sub-groups under another group (the entities move via `reassignGroupMembers`).
+ *  No-op into itself or its own descendants. The emptied group stays until deleted. */
+export function moveGroupContents(
+  layers: ViewLayerConfig[], layerId: string, fromId: string, toId: string,
+): ViewLayerConfig[] {
+  if (fromId === toId || groupSubtreeIds(layers, layerId, fromId).includes(toId)) return layers
+  const subs = findGroup(layers.find((l) => l.id === layerId)?.logicalNodes, fromId)?.children ?? []
+  if (subs.length === 0) return layers
+  const emptied = mapGroups(layers, layerId, (gs) => editTree(gs, (g) => (g.id === fromId ? { ...g, children: [] } : g)))
+  return mapGroups(emptied, layerId, (gs) =>
+    editTree(gs, (g) => (g.id === toId ? { ...g, children: [...(g.children ?? []), ...subs] } : g)))
+}
