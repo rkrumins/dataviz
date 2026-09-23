@@ -741,7 +741,9 @@ export function commitDraft(
 /** One typed canvas edit for the atomic `/graph/changes` save. `update` payloads are
  *  partial — the server merges them onto current state. */
 export interface GraphChangeOp {
-  op: 'create' | 'update' | 'delete'
+  /** `move` (node only): `payload = { parentEntityId | null, edgeType }` — the server replaces
+   *  whatever parent link the node has; `ref` names the client's pending link. */
+  op: 'create' | 'update' | 'delete' | 'move'
   kind: 'node' | 'edge'
   id?: string
   ref?: string

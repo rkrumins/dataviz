@@ -540,6 +540,10 @@ class GraphVersioningService:
             ).scalar_one()
             seq = int(start)
             for op in ops:
+                if op.get("op") not in ("create", "update", "delete"):
+                    # Staged changes are folded op by op at checkpoint; anything else (a `move` is
+                    # resolved against stored state only by apply_ops) would be misread there.
+                    raise ValueError(f"unsupported staged op {op.get('op')!r}: create | update | delete")
                 seq += 1
                 entity_id = op.get("entity_id") or prefixed_id("ent")
                 ref = op.get("ref", entity_id)
@@ -5032,6 +5036,8 @@ class GraphVersioningService:
             if branch.kind == "main":
                 await self._lock_graph(s, graph_id)
 
+            ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
+
             # Resolve ops → new payloads for the AFFECTED entities only.
             new_vals: Dict[str, Optional[dict]] = {}
             kind_by_entity: Dict[str, str] = {}
@@ -5546,6 +5552,52 @@ class GraphVersioningService:
                 cand.update(rows)
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _expand_moves(
+        self, s, graph_id: str, branch_id: str, ops: Sequence[Mapping],
+        containment_edge_types: Optional[Sequence[str]],
+    ) -> List[Mapping]:
+        """Expand each ``move`` op — ``{op: "move", entity_id: child, payload: {parentEntityId,
+        edgeType, edgeId}}`` — into the edits it means, resolved against what is STORED: delete
+        every containment link the child has (on this branch, plus any this batch created before
+        the move), then, unless the move is to the top level (no parent), create the new one.
+
+        A move used to be expressed by the client as "delete the old link I can see + create the
+        new one"; a link the canvas had not loaded was never deleted, and the node kept two
+        parents. Here the server finds the links, so a move is exact whatever the client loaded."""
+        if not any(o.get("op") == "move" for o in ops):
+            return list(ops)
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not cset:
+            raise ValueError("a move needs the ontology's containment relationship types")
+
+        def _is_cont(p: Optional[Mapping]) -> bool:
+            return bool(p) and str(p.get("edgeType") or p.get("edge_type") or "").upper() in cset
+
+        children = [o["entity_id"] for o in ops if o.get("op") == "move"]
+        stored = await self._incident_live_edges(s, graph_id, branch_id, children)
+        out: List[Mapping] = []
+        for o in ops:
+            if o.get("op") != "move":
+                out.append(o)
+                continue
+            child = o["entity_id"]
+            p = o.get("payload") or {}
+            links = {eid for eid, v in stored.items()
+                     if _is_cont(v) and _edge_src_tgt(v)[1] == child}
+            links |= {x["entity_id"] for x in out            # created earlier in this batch
+                      if x.get("op") == "create" and x.get("entity_kind") == "edge"
+                      and _is_cont(x.get("payload")) and _edge_src_tgt(x["payload"])[1] == child}
+            for eid in sorted(links):
+                out.append({"op": "delete", "entity_kind": "edge", "entity_id": eid, "payload": None})
+            parent = p.get("parentEntityId")
+            if parent:
+                if not p.get("edgeType") or not p.get("edgeId"):
+                    raise ValueError("a move under a parent needs edgeType and edgeId")
+                out.append({"op": "create", "entity_kind": "edge", "entity_id": p["edgeId"],
+                            "payload": {"sourceEntityId": parent, "targetEntityId": child,
+                                        "edgeType": p["edgeType"]}})
+        return out
 
     async def _effective_incident_edges(
         self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int],

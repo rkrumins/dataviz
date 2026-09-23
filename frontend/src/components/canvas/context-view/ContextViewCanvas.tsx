@@ -30,6 +30,7 @@ import {
 } from '@/hooks/useViewSchema'
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
+import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
@@ -1091,6 +1092,12 @@ export function ContextViewCanvas({
     pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope, branchId: effectiveBranchId }
     armLayoutSave()
   }, [canManage, armLayoutSave, effectiveBranchId])
+
+  // Hooks rendered below the canvas (a move from the drawer or a tree row) write layout through this.
+  useEffect(
+    () => registerLayoutWriter({ current: currentLayout, persist: persistReferenceLayout }),
+    [currentLayout, persistReferenceLayout],
+  )
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -5423,6 +5430,16 @@ export function ContextViewCanvas({
                 remapEntityId: (oldId, newId) => {
                   remapEntityId(oldId, newId)
                   persistReferenceLayout(assignmentOps.remapAssignmentUrn(currentLayout(), oldId, newId))
+                  // An entity open before the save stays open after it: its expanded state was
+                  // keyed by the temp urn, so a saved parent came back collapsed ("my children
+                  // vanished").
+                  setExpandedNodes(prev => {
+                    if (!prev.has(oldId)) return prev
+                    const next = new Set(prev)
+                    next.delete(oldId)
+                    next.add(newId)
+                    return next
+                  })
                 },
                 // After the remaps, drop any placement still keyed by a temp urn — a create that was
                 // staged (writing its placement) then discarded before this Save (see assignmentMutations).
@@ -6098,16 +6115,14 @@ export function ContextViewCanvas({
             key="hierarchy-builder-panel"
             onClose={() => useHierarchyBuilderStore.getState().close()}
             onEntityStaged={(tempUrn, parentUrn) => {
-              // The layered view only renders nodes that resolve to a layer, so
-              // a freshly-staged node is invisible until assigned. Assign it to
-              // the creation layer → else the parent's layer → else the first
-              // layer. Writes the canonical view-config entry (keyed by the temp
-              // urn, remapped to the real urn on save) plus the optimistic
-              // session assignment (an instanceAssignment wins even in
-              // closed-scope views, before the canonical write's render lands).
-              const layer = builderLayerId
-                ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
-                ?? sortedLayers[0]?.id
+              // Only a TOP-LEVEL entity is pinned to a layer (the creation column, else the
+              // first): it has nothing to inherit from. A child is never pinned — it follows its
+              // parent's layer by containment inheritance. Pinning a child to the column the panel
+              // was opened from split it out of its parent whenever that column differed (an
+              // orphan-looking root), and kept it there after it was moved. The pin writes the
+              // canonical view-config entry (keyed by the temp urn, remapped on save) plus the
+              // optimistic session assignment.
+              const layer = parentUrn ? undefined : (builderLayerId ?? sortedLayers[0]?.id)
               if (layer) {
                 assignEntityToLayer(tempUrn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [tempUrn], layer))
@@ -6124,11 +6139,14 @@ export function ContextViewCanvas({
             onClose={() => useHierarchyBuilderStore.getState().close()}
             layerId={buildLayerId}
             typeLayerMap={buildTypeLayerMapMemo}
-            onRowStaged={(row, urn) => {
-              // Auto-by-type per row: writes the canonical view-config entry
-              // (keyed by the row's temp urn, remapped to its real urn on save)
+            onRowStaged={(row, urn, hasParent) => {
+              // A top-level row is placed auto-by-type; a row with a parent follows its parent (see
+              // onEntityStaged) unless the user chose its layer explicitly. Writes the canonical
+              // view-config entry (keyed by the row's temp urn, remapped to its real urn on save)
               // plus the optimistic session assignment for immediate display.
-              const layer = resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
+              const layer = hasParent && !row.layerId
+                ? undefined
+                : resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
               if (layer) {
                 assignEntityToLayer(urn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [urn], layer))

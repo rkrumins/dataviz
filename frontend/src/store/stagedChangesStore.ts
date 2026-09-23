@@ -36,6 +36,9 @@ export type StagedChangeType =
   | 'edit_edge'
   | 'delete_edge'
   | 'reverse_edge'
+  // Re-parent a node: ONE server-resolved `move` op (the backend replaces whatever containment the
+  // node has — the canvas need not have loaded the old link). `after` is a `MoveAfter`.
+  | 'move_entity'
   // View-layout change (add/rename/delete/reorder a layer). Decoupled from the data source: it has
   // NO apply hook, so applyAll drops it (local-only) and saveStagedChangesToDraft/stagedChangesToOps
   // never turn it into a /graph/changes op. It persists to the VIEW via saveToBackend, and is
@@ -151,6 +154,7 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   reorder_nodes: 3,
   create_entity: 4,
   create_edge: 5,
+  move_entity: 5,          // after creates: the new parent may be created in the same save
 }
 
 const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
@@ -428,6 +432,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       delete_entity: 0,
       assign_layer: 0,
       move_to_layer: 0,
+      move_entity: 0,
       create_edge: 0,
       edit_edge: 0,
       delete_edge: 0,
