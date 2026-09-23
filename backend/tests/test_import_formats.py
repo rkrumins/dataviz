@@ -77,6 +77,14 @@ async def _run() -> None:
     except ValueError:
         pass
 
+    # ---- csv: a quoted cell holding a newline (and an empty line) + a doubled quote is ONE record
+    #      with the exact value, even with a chunk boundary inside the cell — the csv writer emits
+    #      such cells, and a per-line parse used to split them into two broken rows ----
+    recs = await _collect(get_adapter("csv").parse(_achunks(
+        b'entity_id,prop.note\nent_1,"He said ""hi""\n', b'\nand left"\nent_2,plain\n')))
+    assert recs == [{"entity_id": "ent_1", "prop.note": 'He said "hi"\n\nand left'},
+                    {"entity_id": "ent_2", "prop.note": "plain"}], recs
+
 
 async def _run_scale() -> None:
     # ---- _lines: a large multi-chunk file with a BOM + CRLF endings yields exactly the written

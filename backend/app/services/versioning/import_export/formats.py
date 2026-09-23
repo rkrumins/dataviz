@@ -7,8 +7,8 @@ boundaries so an arbitrarily large file is never buffered whole.
 
 v1 ships ndjson, json-lines' sibling csv/tsv here; xlsx and the zip bundle plug in as further
 adapters (they need heavier libs, so they live in their own modules and register the same way).
-CSV cells must not contain raw newlines — nested/complex property values belong in the single-line
-``properties_json`` column.
+A quoted CSV cell may span lines (a record is read until its quotes balance); nested/complex
+property values belong in the single-line ``properties_json`` column.
 """
 from __future__ import annotations
 
@@ -77,6 +77,23 @@ async def _lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
         yield _decode_line(rest, first=not seen)
 
 
+async def _csv_records(lines: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Group physical lines into logical CSV records: a quoted cell may contain newlines, so lines
+    are joined until the record's quotes balance (the csv dialect doubles embedded quotes)."""
+    record: List[str] = []
+    quotes = 0
+    async for line in lines:
+        if line == "" and not record:
+            continue
+        record.append(line)
+        quotes += line.count('"')
+        if quotes % 2 == 0:
+            yield "\n".join(record)
+            record, quotes = [], 0
+    if record:
+        yield "\n".join(record)   # unbalanced to EOF: the csv reader closes the open cell
+
+
 class NdjsonAdapter:
     fmt = "ndjson"
 
@@ -102,10 +119,8 @@ class DelimitedAdapter:
 
     async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
         header: List[str] | None = None
-        async for line in _lines(chunks):
-            if line == "":
-                continue
-            row = next(csv.reader([line], delimiter=self._delim))
+        async for record in _csv_records(_lines(chunks)):
+            row = next(csv.reader([record], delimiter=self._delim))
             if header is None:
                 header = row
                 continue
