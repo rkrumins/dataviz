@@ -262,6 +262,7 @@ import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
@@ -4453,6 +4454,18 @@ export function ContextViewCanvas({
 
   // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  // Placements that point at nothing here (recorded by the load: see useGraphHydration). Only
+  // what the load asked for and didn't get, still placed, and still absent: an entity that has
+  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported.
+  const placementsCheck = useCanvasStore((s) => s.placementsNotFound)
+  const notFoundPlacements = useMemo(() => {
+    if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || traceActive) return []
+    const assignments = activeReferenceLayout.assignments
+    const layerNames = new Map(sortedLayers.map((l) => [l.id, l.name]))
+    return placementsCheck.urns
+      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
+      .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
+  }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -5480,6 +5493,7 @@ export function ContextViewCanvas({
           // during the walk the browse picture — and its count — still stand.
           unresolvedEdgeCount={!overlay.active && showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
+          notFoundPlacements={notFoundPlacements}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}

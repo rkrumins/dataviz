@@ -32,7 +32,7 @@ import {
   useCompareViewVersions, useRestoreViewVersion, useSaveViewVersion, useViewVersionHistory, useViewVersionStatus,
 } from '@/hooks/useViewVersions'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
-import { VERSION_SOURCE_LABEL, pluralize, shortHash } from '@/features/view-transfer/format'
+import { VERSION_SOURCE_LABEL, percent, pluralize, shortHash } from '@/features/view-transfer/format'
 import { VersionDiffView } from './VersionDiffView'
 
 const SOURCE_ICON: Record<ViewVersionSource, typeof Flag> = {
@@ -255,7 +255,13 @@ function VersionRow({ version: v, previous, isHead, canEdit, canExport, onCompar
   const Icon = SOURCE_ICON[v.source] ?? Save
   const placements = v.stats.assignments ?? 0
   const delta = previous ? placements - (previous.stats.assignments ?? 0) : 0
-  const provenance = (v.provenance ?? {}) as { origin?: { environment?: string; version?: number }; restoredFrom?: number }
+  const provenance = (v.provenance ?? {}) as {
+    origin?: { environment?: string; version?: number }
+    restoredFrom?: number
+    report?: { summary?: { matchRate?: number | null; entities?: { missing?: number } } }
+  }
+  const imported = provenance.report?.summary
+  const notFound = imported?.entities?.missing ?? 0
   return (
     <li className="relative flex gap-3 rounded-xl px-1 py-2 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] group">
       <span className={cn('relative z-10 w-8 h-8 rounded-full border flex items-center justify-center shrink-0 bg-canvas-elevated',
@@ -284,6 +290,12 @@ function VersionRow({ version: v, previous, isHead, canEdit, canExport, onCompar
         <div className="flex items-center gap-2 mt-1 text-[10px] text-ink-muted">
           <span>{pluralize(v.stats.layers ?? 0, 'layer')} · {pluralize(placements, 'placement')}</span>
           {delta !== 0 && <span className={delta > 0 ? 'text-emerald-600' : 'text-rose-600'}>{delta > 0 ? `+${delta}` : delta}</span>}
+          {imported && (
+            <span title="How well the file matched this data source when it was imported">
+              {percent(imported.matchRate)} matched
+              {notFound > 0 && <span className="text-amber-600"> · {notFound.toLocaleString()} not found</span>}
+            </span>
+          )}
           <span className="font-mono" title={v.contentHash}>#{shortHash(v.contentHash)}</span>
         </div>
         <div className="flex items-center gap-1 mt-1.5 opacity-70 group-hover:opacity-100 transition-opacity">

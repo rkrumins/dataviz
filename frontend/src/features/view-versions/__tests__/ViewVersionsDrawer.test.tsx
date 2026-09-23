@@ -56,7 +56,13 @@ const EMPTY_DIFF = {
 function page(): ViewVersionPage {
   return {
     items: [
-      version(3, { source: 'import', provenance: { origin: { environment: 'dev', version: 12 } } }),
+      version(3, {
+        source: 'import',
+        provenance: {
+          origin: { environment: 'dev', version: 12 },
+          report: { summary: { matchRate: 0.955, entities: { missing: 12 } } },
+        },
+      }),
       version(2, { message: 'Tidy layers' }),
       version(1, { source: 'create' }),
     ],
@@ -98,6 +104,8 @@ describe('ViewVersionsDrawer', () => {
     renderDrawer()
     expect(await screen.findByText('from dev v12')).toBeInTheDocument()
     expect(screen.getByText('Imported')).toBeInTheDocument()
+    expect(screen.getByText(/95\.5% matched/)).toBeInTheDocument()
+    expect(screen.getByText(/12 not found/)).toBeInTheDocument()
     expect(screen.getByText(/Tidy layers/)).toBeInTheDocument()
   })
 

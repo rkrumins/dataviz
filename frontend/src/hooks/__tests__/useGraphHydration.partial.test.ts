@@ -10,6 +10,8 @@
  *    CanvasRouter shows a pill over the data rather than the blocking card.
  *  - A retry of the SAME view does not clear the canvas between attempts.
  *  - A genuinely new view still starts from an empty canvas.
+ *  - Placements the load asked for and didn't get are recorded as not found, but never those in
+ *    a batch that failed (unknown, not absent) and never a temporary URN.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -147,5 +149,37 @@ describe('useGraphHydration — partial loads and retries keep data on screen', 
     act(() => release())
     await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
     expect(useCanvasStore.getState().nodes.map(n => n.id)).toEqual(['urn:e:7'])
+  })
+})
+
+describe('useGraphHydration — placements that point at nothing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    viewState.id = 'v1'
+    useCanvasStore.getState().setGraph([], [])
+    useCanvasStore.getState().clearNodeFetchFailures()
+  })
+
+  it('records assigned entities the graph was asked for and didn’t return', async () => {
+    assignUrns(5)
+    viewState.assignments['urn:staged:object:tmp1'] = { layerId: 'L1' }
+    mockProvider.getNodes.mockResolvedValue([node(0), node(1), node(2)])
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
+    expect(useCanvasStore.getState().placementsNotFound).toEqual({ viewId: 'v1', urns: ['urn:e:3', 'urn:e:4'] })
+  })
+
+  it('leaves out the entities of a batch that failed: those are unknown, not absent', async () => {
+    assignUrns(150) // batches: 100 + 50
+    mockProvider.getNodes.mockImplementation(async (...args: unknown[]) => {
+      const q = args[0] as { urns?: string[] }
+      if (q.urns && q.urns.length === 50) throw apiError(504, 'PROVIDER_TIMEOUT')
+      return [node(0)]
+    })
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('slow'))
+    const urns = useCanvasStore.getState().placementsNotFound?.urns ?? []
+    expect(urns).toHaveLength(99)
+    expect(urns.some((u) => Number(u.split(':')[2]) >= 100)).toBe(false)
   })
 })
