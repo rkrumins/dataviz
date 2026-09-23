@@ -191,6 +191,23 @@ export function stagedChangesToOps(
         }
         break
       }
+      case 'move_entity': {
+        // ONE server-resolved move: the backend removes whatever parent link the node has (loaded on
+        // this canvas or not) and adds the new one, under the same ontology/integrity gate. The
+        // pending link's temp id rides as `ref`, so the save echoes its real id back.
+        const m = asObj(c.after)
+        ops.push({
+          op: 'move',
+          kind: 'node',
+          id: resolveId(String(m.childId)),
+          ref: m.edgeId != null ? String(m.edgeId) : undefined,
+          payload: {
+            parentEntityId: m.parentId != null ? resolveId(String(m.parentId)) : null,
+            edgeType: m.edgeType ?? null,
+          },
+        })
+        break
+      }
       // assign_layer / move_to_layer / layer_config / reorder_nodes → VIEW config, not graph data.
       // They persist to referenceLayout via persistReferenceLayout and produce ZERO graph ops here.
       default:

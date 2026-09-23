@@ -78,6 +78,8 @@ export interface UseLayerAssignmentResult {
   /** Final effective layer per node id — exposed for layer-ordinal lookups
    *  by the canvas (e.g. left/right neighbor sort for trace pinning). */
   nodeLayerMap: Map<string, string>
+  /** Each rendered entity's nearest group (view-only container), if any. */
+  nodeGroupMap: Map<string, { id: string; name: string }>
   /** Loaded nodes that resolved to NO layer and therefore render nowhere.
    *  Surfaced so the canvas can tell the user instead of hiding them. */
   unassignedNodes: Array<{ id: string; data?: Record<string, unknown> }>
@@ -310,6 +312,61 @@ export function useLayerAssignment({
     // The recursive step above should cover all reachable from roots.
     // If there are unparented nodes that are not in `roots` (impossible by definition), they are covered.
 
+    const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
+    // The LEGACY per-layer arrays, for entities the canonical record below
+    // does not cover.
+    sortedLayers.forEach(l => {
+      l.entityAssignments?.forEach(a => {
+        if (a.logicalNodeId) entityLogicalMap.set(a.entityId, a.logicalNodeId)
+      })
+    })
+    // The canonical `referenceLayout.assignments` record — the same entry
+    // that carries `layerId`, and where `assignEntities` stamps
+    // `logicalNodeId`. It was not read here at all, so a group's membership
+    // rendered while the session's drag was still in memory and quietly came
+    // apart once the canonical record was the only thing left.
+    //
+    // A canonical entry that NAMES a group wins over the legacy array. One
+    // that omits `logicalNodeId` is deliberately left alone rather than
+    // treated as "not in a group": `normalizeReferenceLayout` strips the
+    // legacy array from persisted views, so a view holding BOTH is
+    // transitional — and there the grouping the user can actually see came
+    // from the legacy entry. Clearing it on load would dissolve a visible
+    // group without being asked to. (The cost is the mirror case: in such a
+    // transitional view, moving an entity OUT of a group does not take
+    // effect until the legacy entry is gone.)
+    for (const [urn, entry] of Object.entries(assignments)) {
+      if (entry?.logicalNodeId) entityLogicalMap.set(urn, entry.logicalNodeId)
+    }
+    // Also check instanceAssignments (user drag in current session)
+    instanceAssignments.forEach((a, entityId) => {
+      if ('logicalNodeId' in a && (a as { logicalNodeId?: string }).logicalNodeId) {
+        entityLogicalMap.set(entityId, (a as { logicalNodeId?: string }).logicalNodeId!)
+      }
+    })
+
+    // Group ids per layer (recursive — groups of groups), so a membership is honoured only in a
+    // layer that actually defines that group.
+    const groupIdsByLayer = new Map<string, Set<string>>()
+    sortedLayers.forEach(l => {
+      const ids = new Set<string>()
+      const walk = (cs?: LogicalNodeConfig[]) => cs?.forEach(c => { ids.add(c.id); walk(c.children) })
+      walk(l.logicalNodes)
+      groupIdsByLayer.set(l.id, ids)
+    })
+    const groupHere = (nodeId: string, layerId: string | undefined): string | undefined => {
+      const g = entityLogicalMap.get(nodeId)
+      return g && layerId && groupIdsByLayer.get(layerId)?.has(g) ? g : undefined
+    }
+    // A child PLACED into a group its parent is not in leaves the parent's subtree and becomes a
+    // root of its layer, so the group can wrap it — also when the group is in the parent's own layer
+    // (it used to stay nested under the parent, and the group never received it). View arrangement
+    // only: the data is unchanged.
+    const splitByGroup = (childId: string, parentId: string | undefined, layerId: string | undefined) => {
+      const g = groupHere(childId, layerId)
+      return !!g && g !== (parentId ? groupHere(parentId, layerId) : undefined)
+    }
+
     // 3. Construct Hierarchy Trees per Layer
     // A node is a "Visual Root" in Layer L if:
     // - It is effectively in Layer L
@@ -336,7 +393,7 @@ export function useLayerAssignment({
         // Push in reverse so first child is processed first
         for (let i = childrenIds.length - 1; i >= 0; i--) {
           const cid = childrenIds[i]
-          if (effectiveLayer.get(cid) === rootLayer) {
+          if (effectiveLayer.get(cid) === rootLayer && !splitByGroup(cid, item.nodeId, rootLayer)) {
             dfsStack.push({ nodeId: cid, depth: item.depth + 1, parentIdx: idx })
           }
         }
@@ -395,7 +452,7 @@ export function useLayerAssignment({
       const parentId = parentMap.get(node.id)
       const parentLayerId = parentId ? effectiveLayer.get(parentId) : undefined
 
-      if (layerId !== parentLayerId) {
+      if (layerId !== parentLayerId || splitByGroup(node.id, parentId, layerId)) {
         const list = grouped.get(layerId)
         if (!list) return
 
@@ -441,44 +498,13 @@ export function useLayerAssignment({
     // wrappers stay in config order and entities inside a wrapper sort by
     // childCmp (which honours orderKeys, so a manually-ordered group is
     // internally consistent, but the wrappers themselves aren't reorderable).
-    const entityLogicalMap = new Map<string, string>() // entityId -> logicalNodeId
-    // The LEGACY per-layer arrays, for entities the canonical record below
-    // does not cover.
-    sortedLayers.forEach(l => {
-      l.entityAssignments?.forEach(a => {
-        if (a.logicalNodeId) entityLogicalMap.set(a.entityId, a.logicalNodeId)
-      })
-    })
-    // The canonical `referenceLayout.assignments` record — the same entry
-    // that carries `layerId`, and where `assignEntities` stamps
-    // `logicalNodeId`. It was not read here at all, so a group's membership
-    // rendered while the session's drag was still in memory and quietly came
-    // apart once the canonical record was the only thing left.
-    //
-    // A canonical entry that NAMES a group wins over the legacy array. One
-    // that omits `logicalNodeId` is deliberately left alone rather than
-    // treated as "not in a group": `normalizeReferenceLayout` strips the
-    // legacy array from persisted views, so a view holding BOTH is
-    // transitional — and there the grouping the user can actually see came
-    // from the legacy entry. Clearing it on load would dissolve a visible
-    // group without being asked to. (The cost is the mirror case: in such a
-    // transitional view, moving an entity OUT of a group does not take
-    // effect until the legacy entry is gone.)
-    for (const [urn, entry] of Object.entries(assignments)) {
-      if (entry?.logicalNodeId) entityLogicalMap.set(urn, entry.logicalNodeId)
-    }
-    // Also check instanceAssignments (user drag in current session)
-    instanceAssignments.forEach((a, entityId) => {
-      if ('logicalNodeId' in a && (a as { logicalNodeId?: string }).logicalNodeId) {
-        entityLogicalMap.set(entityId, (a as { logicalNodeId?: string }).logicalNodeId!)
-      }
-    })
-
-    if (entityLogicalMap.size > 0) {
+    // Every CONFIGURED group renders, empty or not: a group made on the canvas is a place to drop
+    // entities into, so it must be there before anything is in it.
+    {
       sortedLayers.forEach(layer => {
         if (!layer.logicalNodes || layer.logicalNodes.length === 0) return
         const layerNodes = grouped.get(layer.id)
-        if (!layerNodes || layerNodes.length === 0) return
+        if (!layerNodes) return
 
         // Build a flat lookup of all logical nodes in this layer (recursive)
         const logicalLookup = new Map<string, LogicalNodeConfig>()
@@ -508,7 +534,6 @@ export function useLayerAssignment({
         })
 
         // Only restructure if at least one entity is assigned to a logical group
-        if (logicalChildren.size === 0) return
 
         // Build logical group wrapper HierarchyNodes (recursive for nested groups)
         const buildLogicalHierarchy = (configs: LogicalNodeConfig[], depth: number): HierarchyNode[] => {
@@ -531,7 +556,7 @@ export function useLayerAssignment({
               isLogical: true,
               logicalConfig: config,
             } satisfies HierarchyNode
-          }).filter(g => g.children.length > 0 || logicalChildren.has(g.id.replace('logical:', '')))
+          })
         }
 
         const logicalWrappers = buildLogicalHierarchy(layer.logicalNodes, 0)
@@ -595,6 +620,23 @@ export function useLayerAssignment({
     return map
   }, [nodesByLayer])
 
+  // Each rendered entity's nearest GROUP (logical wrapper) — the view-only container it is placed
+  // in, if any. Mirrors nodeLayerMap: read off the emitted hierarchy.
+  const nodeGroupMap = useMemo(() => {
+    const map = new Map<string, { id: string; name: string }>()
+    nodesByLayer.forEach((layerNodes) => {
+      const stack: Array<{ node: HierarchyNode; group?: { id: string; name: string } }> =
+        layerNodes.map(node => ({ node }))
+      while (stack.length > 0) {
+        const { node, group } = stack.pop()!
+        const here = node.isLogical ? { id: node.id, name: node.name } : group
+        if (!node.isLogical && here) map.set(node.id, here)
+        for (const child of node.children) stack.push({ node: child, group: here })
+      }
+    })
+    return map
+  }, [nodesByLayer])
+
   // Loaded nodes that render nowhere — absent from every layer's emitted
   // hierarchy. Derived from nodeLayerMap so it exactly mirrors what the
   // canvas actually shows.
@@ -606,5 +648,5 @@ export function useLayerAssignment({
     [nodeEdgeFingerprint, nodeLayerMap, layerGrouping],
   )
 
-  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes }
+  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes }
 }

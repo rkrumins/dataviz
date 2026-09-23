@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useCanvasStore } from '@/store/canvas'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
   useStagedChangesStore,
@@ -29,6 +30,7 @@ const TYPE_LABELS: Record<StagedChangeType, string> = {
   delete_entity: 'Deletions',
   assign_layer: 'Layer assignments',
   move_to_layer: 'Layer rules',
+  move_entity: 'Moves',
   create_edge: 'New edges',
   edit_edge: 'Edge edits',
   delete_edge: 'Edge deletions',
@@ -44,12 +46,36 @@ const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
   delete_entity: 'Trash2',
   assign_layer: 'Move',
   move_to_layer: 'ArrowRightLeft',
+  move_entity: 'CornerDownRight',
   create_edge: 'GitBranchPlus',
   edit_edge: 'Cable',
   delete_edge: 'Unlink',
   reverse_edge: 'Repeat',
   layer_config: 'Layers',
   reorder_nodes: 'ListOrdered',
+}
+
+// Where each change type is listed, in presentation order: creates → edits → moves → layout →
+// deletes. A Record over EVERY type, so a new type that is not placed here fails the type check —
+// the list used to be a plain array that had silently left out `update_entity` (every multi-field
+// drawer edit) and `move_entity`: staged and saved, but never shown for review.
+const SECTION_RANK: Record<StagedChangeType, number> = {
+  create_entity: 0, create_edge: 1,
+  rename_entity: 2, update_entity: 3, edit_edge: 4, reverse_edge: 5,
+  move_entity: 6,
+  assign_layer: 7, move_to_layer: 8, reorder_nodes: 9,
+  delete_edge: 10, delete_entity: 11,
+  layer_config: 12,
+}
+const SECTION_ORDER = (Object.keys(SECTION_RANK) as StagedChangeType[])
+  .sort((a, b) => SECTION_RANK[a] - SECTION_RANK[b])
+
+// Which header chip counts each type (layout changes have their own banner).
+const SUMMARY_KIND: Record<StagedChangeType, 'create' | 'edit' | 'delete' | null> = {
+  create_entity: 'create', create_edge: 'create',
+  rename_entity: 'edit', update_entity: 'edit', edit_edge: 'edit', reverse_edge: 'edit', move_entity: 'edit',
+  delete_entity: 'delete', delete_edge: 'delete',
+  assign_layer: null, move_to_layer: null, reorder_nodes: null, layer_config: null,
 }
 
 // View-layout changes (layer definitions AND entity placement) are VIEW presentation, not data-source
@@ -137,15 +163,7 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
         list.push(c)
         groups.set(c.type, list)
       })
-    // Stable presentation order: creates → edits → moves → relations → deletes.
-    const ORDER: StagedChangeType[] = [
-      'create_entity', 'create_edge',
-      'rename_entity', 'edit_edge', 'reverse_edge',
-      'assign_layer', 'move_to_layer', 'reorder_nodes',
-      'delete_edge', 'delete_entity',
-      'layer_config',
-    ]
-    return ORDER
+    return SECTION_ORDER
       .map(type => [type, groups.get(type) ?? []] as const)
       .filter(([, items]) => items.length > 0)
   }, [changes, filter])
@@ -160,9 +178,9 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
   const failedCount = changes.filter(c => c.error).length
 
   const summaryStats = useMemo(() => ({
-    creates: changes.filter(c => c.type === 'create_entity' || c.type === 'create_edge').length,
-    edits: changes.filter(c => c.type === 'rename_entity' || c.type === 'edit_edge' || c.type === 'reverse_edge').length,
-    deletes: changes.filter(c => c.type === 'delete_entity' || c.type === 'delete_edge').length,
+    creates: changes.filter(c => SUMMARY_KIND[c.type] === 'create').length,
+    edits: changes.filter(c => SUMMARY_KIND[c.type] === 'edit').length,
+    deletes: changes.filter(c => SUMMARY_KIND[c.type] === 'delete').length,
   }), [changes])
 
   const handleConfirm = async () => {
@@ -612,7 +630,9 @@ function ChangeRow({
                 transition={{ duration: 0.18, ease: 'easeOut' }}
                 className="overflow-hidden"
               >
-                {change.type === 'delete_entity' && (change.before as any)?.cascade ? (
+                {change.type === 'move_entity' ? (
+                  <MoveDetail change={change} />
+                ) : change.type === 'delete_entity' && (change.before as any)?.cascade ? (
                   // Itemised cascade impact — the full set of contained entities + edges
                   // this delete will remove (from the live delete-impact preview).
                   <CascadeImpactList
@@ -648,6 +668,30 @@ function ChangeRow({
           <LucideIcons.X className="w-3.5 h-3.5" />
         </button>
       </div>
+    </div>
+  )
+}
+
+/** A move, in words: where the entity sits now and where the save puts it. (Its raw `before` holds
+ *  the undo state — the whole view layout — which is no reading matter.) */
+function MoveDetail({ change }: { change: StagedChange }) {
+  const nodes = useCanvasStore(s => s.nodes)
+  const label = (id: string | null | undefined) =>
+    id ? ((nodes.find(n => n.id === id)?.data?.label as string | undefined) ?? id) : null
+  const after = change.after as { parentId?: string | null; edgeType?: string | null }
+  const removed = ((change.before as { removedLinks?: Array<{ source: string }> } | undefined)?.removedLinks ?? [])
+  const from = [...new Set(removed.map(e => label(e.source)))].filter(Boolean).join(', ')
+  const cell = (title: string, value: string, hint?: string) => (
+    <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
+      <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">{title}</p>
+      <p className="text-[12px] text-white/80 break-words">{value}</p>
+      {hint && <p className="text-[10.5px] text-white/45 mt-0.5">{hint}</p>}
+    </div>
+  )
+  return (
+    <div className="mt-2.5 grid grid-cols-2 gap-2">
+      {cell('From', from || 'Its current parent', from ? undefined : 'Replaced on save, wherever it is')}
+      {cell('To', label(after.parentId) ?? 'Top level', after.edgeType ? `as ${after.edgeType}` : undefined)}
     </div>
   )
 }

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
+import { useStagedChangesStore } from './stagedChangesStore'
+import { filterIncomingEdges, overlayOnReplace } from './stagedOverlay'
 
 export interface LineageNode extends Node {
   data: {
@@ -339,7 +341,9 @@ function mergeGraph(
       uniqueNodes.push(n)
     }
   }
-  const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id) && !batchEdges.has(e.id) && !!batchEdges.add(e.id))
+  // A page never brings back a relationship the user's pending edits removed (see stagedOverlay).
+  const uniqueEdges = filterIncomingEdges(newEdges, useStagedChangesStore.getState().changes)
+    .filter((e) => !state._edgeIndex.has(e.id) && !batchEdges.has(e.id) && !!batchEdges.add(e.id))
   const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
   if (uniqueNodes.length === 0 && uniqueEdges.length === 0 && !enriched) return null
   const nodeIndex = uniqueNodes.length > 0 ? new Set(state._nodeIndex) : state._nodeIndex
@@ -427,7 +431,13 @@ export const useCanvasStore = create<CanvasState>()(
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
-      setGraph: (nodes, edges) => set((state) => {
+      setGraph: (serverNodes, serverEdges) => set((state) => {
+        // The server's view ⊕ the user's pending edits — a reload never wipes unsaved work.
+        const { nodes, edges } = overlayOnReplace(
+          { nodes: serverNodes, edges: serverEdges },
+          { nodes: state.nodes, edges: state.edges },
+          useStagedChangesStore.getState().changes,
+        )
         // Dedup by id to prevent React duplicate-key warnings when callers
         // pass arrays with overlapping entries (e.g. assigned + child nodes).
         const seenNodes = new Set<string>()

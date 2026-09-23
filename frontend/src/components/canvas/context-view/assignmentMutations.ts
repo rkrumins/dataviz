@@ -240,3 +240,45 @@ export function remapAssignmentUrn(
   delete assignments[oldUrn]
   return { ...layout, assignments }
 }
+
+/**
+ * Release every member of `groupIds` (a deleted group and the groups inside it): the entries keep
+ * their layer — the entity stays in that column, ungrouped (and, placed in its parent's own layer,
+ * back under its parent) — and lose only the group. Same layout when nothing names those groups.
+ */
+export function releaseGroupMembers(
+  layout: NormalizedReferenceLayout,
+  groupIds: string[],
+): NormalizedReferenceLayout {
+  const ids = new Set(groupIds)
+  let changed = false
+  const assignments = { ...layout.assignments }
+  for (const [urn, entry] of Object.entries(layout.assignments)) {
+    if (entry.logicalNodeId && ids.has(entry.logicalNodeId)) {
+      const { logicalNodeId: _drop, ...rest } = entry
+      assignments[urn] = rest as LayerAssignmentEntry
+      changed = true
+    }
+  }
+  return changed ? { ...layout, assignments } : layout
+}
+
+/** Re-home the entities placed in `fromIds` into group `toId`, or out of any group (`null` — they
+ *  stay in their column). Same layout when nothing names those groups. */
+export function reassignGroupMembers(
+  layout: NormalizedReferenceLayout,
+  fromIds: string[],
+  toId: string | null,
+): NormalizedReferenceLayout {
+  if (toId === null) return releaseGroupMembers(layout, fromIds)
+  const ids = new Set(fromIds)
+  let changed = false
+  const assignments = { ...layout.assignments }
+  for (const [urn, entry] of Object.entries(layout.assignments)) {
+    if (entry.logicalNodeId && ids.has(entry.logicalNodeId) && entry.logicalNodeId !== toId) {
+      assignments[urn] = { ...entry, logicalNodeId: toId }
+      changed = true
+    }
+  }
+  return changed ? { ...layout, assignments } : layout
+}

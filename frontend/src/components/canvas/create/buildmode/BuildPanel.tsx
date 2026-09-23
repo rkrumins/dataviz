@@ -50,7 +50,7 @@ export interface BuildPanelProps {
   typeLayerMap?: Map<string, string>
   /** Fired per staged row (full row + urn) so the canvas can make the matching
    *  optimistic layer assignment / expand parents. */
-  onRowStaged?: (row: BuildRow, urn: string) => void
+  onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void
 }
 
 type BuildTab = 'outline' | 'grid' | 'paste'
