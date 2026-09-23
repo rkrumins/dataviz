@@ -2,7 +2,7 @@
  * The import, summed up on the Preview step: what will happen, to what, how well it matched,
  * which choices were made on the way, and what the import will prove about itself.
  */
-import { CopyPlus, Fingerprint, GitMerge, Info, PlusCircle, Replace, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { CopyPlus, Fingerprint, GitMerge, GitPullRequestDraft, Info, PlusCircle, Replace, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { IntegrityBadge } from '@/features/view-transfer/BundleDropzone'
 import { MatchScoreRing } from '@/features/view-transfer/reconcile/MatchScoreRing'
@@ -10,10 +10,12 @@ import { percent, pluralize, shortHash } from '@/features/view-transfer/format'
 import type { ImportViewResult } from '@/services/viewTransferApiService'
 import { useImportSession } from './importSession'
 
-export function ImportSummaryCard({ targetLabel, editedSinceCheck }: {
+export function ImportSummaryCard({ targetLabel, editedSinceCheck, staged = false }: {
   targetLabel: string
   /** The design was changed in the wizard after the Match step checked it. */
   editedSinceCheck: boolean
+  /** It waits in a draft, to go live with it. */
+  staged?: boolean
 }) {
   const session = useImportSession()
   if (!session?.reconcile || !session.action || !session.inspect) return null
@@ -51,7 +53,7 @@ export function ImportSummaryCard({ targetLabel, editedSinceCheck }: {
         <div className="min-w-0 flex-1 space-y-2">
           <p className="flex items-start gap-2 text-sm text-ink-secondary">
             <WhatIcon className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
-            <span>{what.text}.</span>
+            <span>{what.text}{staged ? <>, <span className="font-semibold text-ink">in a draft</span> until it’s published</> : null}.</span>
           </p>
           <p className="text-xs text-ink-muted">
             {summary.entities.found.toLocaleString()} of {summary.entities.checked.toLocaleString()} entities found ({percent(summary.matchRate)})
@@ -62,7 +64,7 @@ export function ImportSummaryCard({ targetLabel, editedSinceCheck }: {
             <IntegrityBadge integrity={inspect.integrity} environment={environment} />
             <span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold',
               'bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary')}>
-              <ShieldCheck className="w-3 h-3" /> Saved as a version, with where it came from
+              <ShieldCheck className="w-3 h-3" /> {staged ? 'A version, with where it came from, once it’s live' : 'Saved as a version, with where it came from'}
             </span>
             <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary">
               <Fingerprint className="w-3 h-3" /> The import proves what it stored
@@ -84,6 +86,20 @@ export function ImportResultNote({ result }: { result: ImportViewResult }) {
   const { integrity, notices } = result
   return (
     <div className="max-w-xl mx-auto mt-6 space-y-2">
+      {result.staged && (
+        <div className="flex items-start gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50/50 dark:bg-indigo-950/20 px-4 py-3">
+          <GitPullRequestDraft className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+          <div className="min-w-0 text-xs">
+            <p className="font-semibold text-ink">Waiting in a draft</p>
+            <p className="text-ink-secondary mt-0.5">
+              {result.version
+                ? 'It’s private and in no list until the draft is published or its review request merges.'
+                : 'The view here is unchanged until the draft is published or its review request merges.'}
+              {' '}Open the draft to look it over, then publish it or send it for review.
+            </p>
+          </div>
+        </div>
+      )}
       <div className={cn('flex items-start gap-3 rounded-xl border px-4 py-3',
         integrity.verified ? 'border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20'
           : 'border-amber-200 dark:border-amber-900 bg-amber-50/50 dark:bg-amber-950/20')}>

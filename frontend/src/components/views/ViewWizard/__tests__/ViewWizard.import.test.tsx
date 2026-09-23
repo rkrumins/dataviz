@@ -11,10 +11,12 @@
  *   - a view that changed since it was reviewed is sent back to the Match step to check again;
  *   - a file of several views: every view checked in one request, then imported one request per
  *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
- *     rest and is retried under the same request id; a view switched to a copy is checked again.
+ *     rest and is retried under the same request id; a view switched to a copy is checked again;
+ *   - on a version-controlled data source, an import waits in a draft by default (or goes live,
+ *     if chosen), and the view then opens on that draft.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -26,6 +28,8 @@ const reconcileMock = vi.fn()
 const importMock = vi.fn()
 const getViewMock = vi.fn()
 let requestIds = 0
+const NOT_VERSIONED = { versioned: false, allowed: false, checking: false }
+let staging = NOT_VERSIONED
 
 vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewTransferApiService')>()
@@ -42,6 +46,12 @@ vi.mock('@/services/viewApiService', async (importOriginal) => {
   return { ...actual, getView: (...args: unknown[]) => getViewMock(...args), listViews: vi.fn().mockResolvedValue({ items: [] }) }
 })
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
+vi.mock('../import/useDraftStaging', () => ({
+  DRAFT_PERMISSION: 'workspace:datasource:manage',
+  useDraftStaging: () => staging,
+  useDraftStagingFor: (targets: Array<{ dataSourceId: string | null }>) =>
+    Object.fromEntries(targets.filter(t => t.dataSourceId).map(t => [t.dataSourceId, staging])),
+}))
 vi.mock('@/components/schema/SchemaScope', () => ({
   SchemaScope: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
@@ -156,6 +166,11 @@ function imported(viewId: string): ImportViewResult {
   }
 }
 
+function LocationProbe() {
+  const location = useLocation()
+  return <span data-testid="location">{location.pathname + location.search}</span>
+}
+
 function renderImport(props: Partial<React.ComponentProps<typeof ViewWizard>> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const file = new File([JSON.stringify({ format: 'view-bundle' })], 'finance.v7.view.json', { type: 'application/json' })
@@ -164,6 +179,7 @@ function renderImport(props: Partial<React.ComponentProps<typeof ViewWizard>> = 
       <MemoryRouter>
         <ViewWizard mode="create" isOpen onClose={vi.fn()} journey="import" importFile={file}
           initialWorkspaceId="ws1" initialDataSourceId="ds1" {...props} />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   )
@@ -177,6 +193,7 @@ async function next() {
 beforeEach(() => {
   vi.clearAllMocks()
   requestIds = 0
+  staging = NOT_VERSIONED
 })
 
 describe('ViewWizard — Import journey', () => {
@@ -391,5 +408,87 @@ describe('ViewWizard — importing every view of a file', () => {
       action: 'copy', target: { workspaceId: 'ws1', dataSourceId: 'ds1' },
       metadata: { name: 'Sales pipeline', visibility: 'private' }, expectedTargetHash: null,
     })
+  })
+})
+
+// ── Into a draft ─────────────────────────────────────────────────────────────
+
+async function throughToPreview() {
+  await screen.findByText('Create a new view')
+  await next()                                            // → Target
+  await next()                                            // → Match
+  await screen.findByText('How it fits here')
+  for (const step of ['basics-step', 'layout-step', 'assignment-step', 'entities-step', 'preview-step']) {
+    await next()
+    await screen.findByTestId(step)
+  }
+}
+
+describe('ViewWizard — importing into a draft', () => {
+  beforeEach(() => {
+    staging = { versioned: true, allowed: true, checking: false }
+    inspectMock.mockResolvedValue(inspected())
+    reconcileMock.mockResolvedValue(reconciled())
+  })
+
+  it('waits in a draft by default on a version-controlled data source, and opens there', async () => {
+    importMock.mockResolvedValue({ ...imported('view_new'), staged: { branchId: 'br_9' } })
+    renderImport()
+    await throughToPreview()
+
+    expect(screen.getByText('When it goes live')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /In a draft, after review/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0]).toMatchObject({ action: 'create', stage: true })
+    expect(await screen.findByText('Waiting in a draft')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Open view now/ }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/views/view_new?branch=br_9')
+  })
+
+  it('goes live at once when that is chosen', async () => {
+    importMock.mockResolvedValue(imported('view_new'))
+    renderImport()
+    await throughToPreview()
+
+    fireEvent.click(screen.getByRole('radio', { name: /Now/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0].stage).toBeUndefined()
+  })
+
+  it('offers no draft without the right to open one', async () => {
+    staging = { versioned: true, allowed: false, checking: false }
+    importMock.mockResolvedValue(imported('view_new'))
+    renderImport()
+    await throughToPreview()
+
+    expect(screen.getByRole('radio', { name: /In a draft, after review/ })).toBeDisabled()
+    expect(screen.getByText(/needs permission to manage it/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0].stage).toBeUndefined()
+  })
+
+  it('stages every view of a file in drafts, each opened on its own', async () => {
+    inspectMock.mockResolvedValue(inspectedPair())
+    getViewMock.mockResolvedValue({
+      id: 'view_uat', name: 'Sales (UAT)', description: 'Pipeline, as UAT has it', workspaceId: 'ws1', dataSourceId: 'ds1',
+      viewType: 'reference', config: { icon: 'Workflow' }, tags: ['uat'], visibility: 'workspace',
+    })
+    reconcileEach()
+    importMock.mockImplementation(async (req: { target: { viewId?: string } }) => ({
+      ...imported(req.target.viewId ?? 'view_new'), staged: { branchId: `br_${req.target.viewId ?? 'new'}` },
+    }))
+    renderImport()
+    await throughToReview()
+    await next()                                          // → Review
+    expect(await screen.findByText('When they go live')).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
+    expect(importMock.mock.calls.map(([r]) => r.stage)).toEqual([true, true])
+    expect(await screen.findAllByRole('button', { name: 'Open in draft' })).toHaveLength(2)
   })
 })

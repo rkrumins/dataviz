@@ -158,6 +158,8 @@ export interface View {
     publishRequest?: ViewPublishRequest | null
     /** The identity this view carries between environments (kept by export and import). */
     portableId?: string | null
+    /** Set while the view exists only in a draft (an import waiting for the draft to go live). */
+    draftBranchId?: string | null
 }
 
 export interface ViewCreateRequest {

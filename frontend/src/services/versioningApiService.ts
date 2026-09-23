@@ -12,6 +12,7 @@
  * `409 merge_conflict` (main moved) or `422 ontology_violation`; both surface as typed
  * errors so the UI can route to a resolution flow instead of a generic notification.
  */
+import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 
@@ -885,6 +886,37 @@ export function getDiffVsMain(wsId: string, graphId: string, branchId: string): 
 // ============================================
 // Hierarchical (containment-tree) diff — lazy, capped, business-friendly
 // ============================================
+
+/** What a draft changes in views, beside its graph changes. They go live when the draft does. */
+export interface BranchViewChange {
+  viewId: string
+  workspaceId: string
+  name: string
+  /** `create`: a view that exists only in the draft (an import waiting to go live); `update`: an
+   *  import staged for a view here; `layout`: layer edits made in the draft. */
+  change: 'create' | 'update' | 'layout'
+  origin: { environment?: string | null; version?: number | null; name?: string | null } | null
+  matchRate: number | null
+  stagedBy?: string | null
+  stagedByName?: string | null
+  stagedAt?: string | null
+  /** create: its headline counts, and who it goes live for. */
+  stats?: { layers?: number; assignments?: number }
+  goesLiveAs?: 'private' | 'workspace'
+  /** update / layout: what it changes. */
+  diff?: ViewDefinitionDiff
+}
+
+export interface BranchViewChanges {
+  branchId: string
+  views: BranchViewChange[]
+  /** Changes to views the caller can't read: counted, never shown. */
+  hidden: number
+}
+
+export function getBranchViewChanges(wsId: string, graphId: string, branchId: string): Promise<BranchViewChanges> {
+  return vfetch<BranchViewChanges>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/view-changes`)
+}
 
 /** Top-level groups of a draft's changes as a containment tree (canvas Changes panel). */
 export function getBranchDiffSummary(

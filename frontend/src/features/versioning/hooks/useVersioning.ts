@@ -46,6 +46,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'prDiffSummary', ws, prId] as const,
   branchDiffSummary: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'branchDiffSummary', ws, gid, bid] as const,
+  branchViewChanges: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchViewChanges', ws, gid, bid] as const,
   commitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commitDiffSummary', ws, gid, cid] as const,
   viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
@@ -272,6 +274,17 @@ export function useBranchDiffSummary(
   return useQuery({
     queryKey: VERSIONING_KEYS.branchDiffSummary(wsId, graphId, branchId),
     queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
+    enabled: !!wsId && !!graphId && !!branchId,
+    staleTime: 10_000,
+  })
+}
+
+/** What a draft changes in views: views it creates (imports waiting to go live), imports staged
+ *  for views here, and layer edits. A draft with only these is still worth publishing. */
+export function useBranchViewChanges(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchViewChanges(wsId, graphId, branchId),
+    queryFn: () => api.getBranchViewChanges(wsId!, graphId!, branchId!),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
   })

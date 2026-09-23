@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { cn } from '@/lib/utils'
 import {
@@ -402,6 +402,23 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             >
                                 {view.name}
                             </h1>
+                        )}
+                        {view.draftBranchId && (
+                            /* An import waiting in its draft: not in any list, and private,
+                               until that draft is published. The badge opens it on the draft. */
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label="Not live yet: this view waits in a draft"
+                                detail="It goes live when the draft is published or its review request merges"
+                            >
+                                <Link
+                                    to={`/views/${view.id}?branch=${view.draftBranchId}`}
+                                    className="inline-flex items-center gap-1 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 shrink-0 hover:bg-indigo-500/15"
+                                >
+                                    <GitPullRequestDraft className="w-3 h-3" aria-hidden />
+                                    In a draft
+                                </Link>
+                            </HoverTip>
                         )}
                         {readOnly && (
                             <HoverTip

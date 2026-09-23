@@ -100,6 +100,8 @@ import { ScopeStep, ScopeModeToggle } from './steps/ScopeStep'
 import { viewTypeLabel } from '@/lib/domainLabels'
 import { ImportSessionProvider, useImportSession, useImportSessionState } from './import/importSession'
 import { BatchImport } from './import/BatchImport'
+import { StageChoice } from './import/StageChoice'
+import { useDraftStaging } from './import/useDraftStaging'
 import { ImportStep } from './import/ImportStep'
 import { ReconcileStep } from './import/ReconcileStep'
 import { TargetSuggestions } from './import/TargetSuggestions'
@@ -864,6 +866,8 @@ function ViewWizardBody({
     const [importFailure, setImportFailure] = useState<ViewTransferError | null>(null)
     /** One request id per distinct import request, reused by its retries (safe to repeat). */
     const importRequestRef = useRef<{ fingerprint: string; id: string } | null>(null)
+    /** The draft an import was staged in: the view opens there. */
+    const createdBranchRef = useRef<string | null>(null)
     const importTarget = useMemo(() => (importTargetViewId
         ? { viewId: importTargetViewId }
         : { workspaceId: resolvedWorkspaceId, dataSourceId: resolvedDataSourceId }),
@@ -1178,7 +1182,12 @@ function ViewWizardBody({
     }, [currentStep, activeSteps, mode, onBackToScope, onBackToFile])
 
     // ── Import submit ──
-    const importWantsPublication = isImport && !isImportUpdate
+    // An import into a version-controlled data source can wait in a draft, to go live with it:
+    // offered there, and the default.
+    const importStaging = useDraftStaging(isImport ? resolvedWorkspaceId : null, isImport ? resolvedDataSourceId : null)
+    const [stageChoice, setStageChoice] = useState<boolean | null>(null)
+    const importStaged = isImport && importStaging.versioned && importStaging.allowed && (stageChoice ?? true)
+    const importWantsPublication = isImport && !isImportUpdate && !importStaged
         && formData.visibility === 'enterprise' && !canPublishHere
 
     const handleImportSubmit = useCallback(async () => {
@@ -1202,8 +1211,12 @@ function ViewWizardBody({
                     metadata: {
                         ...formToMetadata(formData, viewType),
                         // A member who picked Enterprise but can't publish gets the widest tier
-                        // they can set; the request below asks for the rest.
-                        ...(isImportUpdate ? {} : { visibility: importWantsPublication ? 'workspace' : formData.visibility }),
+                        // they can set; the request below asks for the rest. A view waiting in a
+                        // draft goes live shared with its workspace at most.
+                        ...(isImportUpdate ? {} : {
+                            visibility: (importWantsPublication || (importStaged && formData.visibility === 'enterprise'))
+                                ? 'workspace' : formData.visibility,
+                        }),
                     },
                     definition,
                     // What is written differs from the file: send the file's design, so the
@@ -1224,6 +1237,7 @@ function ViewWizardBody({
                     history: view.history,
                     resolutions: session.resolutions,
                     expectedTargetHash: session.reconcile.update?.targetWorkingHash ?? null,
+                    ...(importStaged ? { stage: true } : {}),
                 }
                 const fingerprint = JSON.stringify(request)
                 if (importRequestRef.current?.fingerprint !== fingerprint) {
@@ -1231,6 +1245,7 @@ function ViewWizardBody({
                 }
                 result = await importView({ ...request, requestId: importRequestRef.current.id })
                 createdViewIdRef.current = result.viewId
+                createdBranchRef.current = result.staged?.branchId ?? null
                 setImportResult(result)
                 const saved = viewToViewConfig(result.view)
                 useSchemaStore.getState().addOrUpdateView(saved)
@@ -1243,6 +1258,7 @@ function ViewWizardBody({
                 recordEvent('view.import', {
                     action: session.action,
                     strategy: session.strategy,
+                    staged: !!result.staged,
                     match: rate === null ? 'unchecked' : rate >= 0.95 ? '95+' : rate >= 0.8 ? '80-95' : rate >= 0.5 ? '50-80' : '<50',
                 })
             }
@@ -1267,7 +1283,7 @@ function ViewWizardBody({
             setIsSubmitting(false)
         }
     }, [importSession, importFilled, importResult, formData, importBuildable, importViewType, importTarget,
-        isImportUpdate, importWantsPublication, queryClient, notify])
+        isImportUpdate, importWantsPublication, importStaged, queryClient, notify])
 
     /** The view changed since it was reviewed (409): check it again from the Match step. */
     const handleCheckAgain = useCallback(() => {
@@ -1572,7 +1588,9 @@ function ViewWizardBody({
     // user just asked for.
     const handleOpenNow = useCallback(() => {
         const id = createdViewIdRef.current
-        if (id) navigate(`/views/${id}`)
+        // A view waiting in a draft opens on that draft.
+        const branch = createdBranchRef.current
+        if (id) navigate(branch ? `/views/${id}?branch=${branch}` : `/views/${id}`)
         const saved = createdViewRef.current
         if (saved) onComplete?.(saved)
         onClose()
@@ -1601,8 +1619,12 @@ function ViewWizardBody({
     const creationStages: CreationStage[] = useMemo(() => isImport ? [
         {
             id: 'import' as const,
-            label: isImportUpdate ? `Updating ${importTargetLabel}` : 'Importing the view',
-            detail: 'Writing its design, checking every entity once more, and saving it as a version',
+            label: importStaged
+                ? (isImportUpdate ? `Proposing the update of ${importTargetLabel} in your draft` : 'Importing the view into its own draft')
+                : isImportUpdate ? `Updating ${importTargetLabel}` : 'Importing the view',
+            detail: importStaged
+                ? 'Writing its design into the draft and checking every entity once more; it goes live with the draft'
+                : 'Writing its design, checking every entity once more, and saving it as a version',
             state: stageStates.import,
         },
         ...(importWantsPublication ? [{
@@ -1630,14 +1652,16 @@ function ViewWizardBody({
             detail: 'Writing the layout this view opens with',
             state: stageStates.layout,
         },
-    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication])
+    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication, importStaged])
 
     /** What the user just built — shown on the success step. */
     const successStats: CreationSummaryStat[] = useMemo(() => {
         const stats: CreationSummaryStat[] = []
         if (isImport && importResult) {
             const summary = importResult.report.summary
-            stats.push({ label: 'Version', value: `v${importResult.version.version}` })
+            stats.push(importResult.version
+                ? { label: 'Version', value: `v${importResult.version.version}` }
+                : { label: 'Goes live', value: 'With its draft' })
             stats.push({ label: 'Matched', value: percent(summary.matchRate) })
             stats.push({ label: 'Not found, kept', value: summary.entities.missing })
             stats.push({ label: 'Integrity', value: importResult.integrity.verified ? 'Verified' : 'Adjusted' })
@@ -1709,11 +1733,11 @@ function ViewWizardBody({
             onSubmit={handleSubmit}
             terminalPhase={isTerminal ? phase : undefined}
             terminalLabel={phase === 'success'
-                ? (isImport ? (isImportUpdate ? 'Updated' : 'Imported') : 'Created')
+                ? (isImport ? (importResult?.staged ? 'In a draft' : isImportUpdate ? 'Updated' : 'Imported') : 'Created')
                 : (isImport ? (isImportUpdate ? 'Update' : 'Import') : 'Create')}
             terminalSubtitle={
                 phase === 'success'
-                    ? 'All done — opening it next'
+                    ? (importResult?.staged ? 'Waiting in a draft — opening it next' : 'All done — opening it next')
                     : submitError
                         ? 'Something went wrong — nothing was lost'
                         : isImport ? 'Importing your view…' : 'Saving your view…'
@@ -1865,13 +1889,23 @@ function ViewWizardBody({
                 />
             )}
             {currentStep === 'preview' && isImport && (
-                <ImportSummaryCard
-                    targetLabel={importTargetLabel}
-                    editedSinceCheck={!!importFilled && !sameJson(
-                        formToDefinition(importFilled.base, importFilled.initial, formData),
-                        importFilled.base,
+                <>
+                    <ImportSummaryCard
+                        targetLabel={importTargetLabel}
+                        staged={importStaged}
+                        editedSinceCheck={!!importFilled && !sameJson(
+                            formToDefinition(importFilled.base, importFilled.initial, formData),
+                            importFilled.base,
+                        )}
+                    />
+                    {importStaging.versioned && (
+                        <div className="mb-6">
+                            <StageChoice staging={importStaging} stage={importStaged} onChange={setStageChoice}
+                                kind={isImportUpdate ? 'update' : 'new'}
+                                wantsEveryone={!isImportUpdate && formData.visibility === 'enterprise'} />
+                        </div>
                     )}
-                />
+                </>
             )}
             {currentStep === 'preview' && (
                 <PreviewStep

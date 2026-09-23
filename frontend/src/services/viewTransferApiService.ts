@@ -288,6 +288,9 @@ export interface ImportViewRequest {
   expectedTargetHash?: string | null
   requestId?: string
   batchId?: string | null
+  /** Import into a draft of the (version-controlled) data source instead of live: the view
+   *  changes, or appears, when the draft is published or its review merges. */
+  stage?: boolean
 }
 
 export interface ImportIntegrity {
@@ -303,13 +306,18 @@ export interface ImportIntegrity {
 }
 
 export interface ImportViewResult {
+  /** As it now reads: on its draft, when the import was staged. */
   view: View
   viewId: string
-  version: ViewVersionSummary
+  /** The version written; none for an update staged in a draft (it's written when the draft
+   *  goes live). */
+  version: ViewVersionSummary | null
   /** The full report, or on a replayed retry, its summary and layers. */
   report: Partial<ReconcileReport> & Pick<ReconcileReport, 'summary'>
   notices: string[]
   integrity: ImportIntegrity
+  /** Set when the import waits in a draft: the draft it's in. */
+  staged?: { branchId: string } | null
 }
 
 export interface ExportedFile {

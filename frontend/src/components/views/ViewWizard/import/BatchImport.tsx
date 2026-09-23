@@ -9,7 +9,8 @@
  *   Match    every view checked in one request (one identity lookup per data source); an
  *            aggregate score, and per view its score, verdict and what to do with it (update,
  *            copy, create, skip), with the full account a click away.
- *   Review   per view: its name (duplicates flagged) and who sees it.
+ *   Review   per view: its name (duplicates flagged) and who sees it; and, where a data source is
+ *            under version control, whether the views go live now or wait in drafts for review.
  *   Import   one request per view, each with its own request id (a retry is safe) and the batch
  *            id that ties them together; live progress; a failure never stops the rest.
  */
@@ -34,6 +35,8 @@ import { ReconciliationPanel } from '@/features/view-transfer/reconcile/Reconcil
 import { sameResolutions, withDecisions } from '@/features/view-transfer/reconcile/resolutions'
 import { TONE_CHIP, percent, pluralize } from '@/features/view-transfer/format'
 import { useImportSession } from './importSession'
+import { StageChoice } from './StageChoice'
+import { useDraftStagingFor, type DraftStaging } from './useDraftStaging'
 
 /** The wizard's own step ids: target(s), reconcile (Match), preview (Review). */
 type Step = 'target' | 'reconcile' | 'preview'
@@ -58,7 +61,12 @@ interface Entry {
    *  so a check already in flight for the old inputs can't land on the new ones. */
   epoch: number
   requestId: string
-  run: { state: RunState; viewId?: string; version?: number; matchRate?: number | null; verified?: boolean; error?: string }
+  run: {
+    state: RunState; viewId?: string; version?: number | null; matchRate?: number | null; verified?: boolean
+    /** The draft it waits in, when it was imported into one. */
+    branchId?: string | null
+    error?: string
+  }
 }
 
 const VERDICT_LABEL: Record<ReconcileVerdict, string> = { ready: 'Ready', attention: 'Worth a look', blocked: 'Can’t import' }
@@ -95,6 +103,13 @@ function initialTargets(inspect: InspectResult): Record<string, SourceTarget> {
   return out
 }
 
+/** The data source an entry lands in: the one of the view it updates, or its source's target. */
+function scopeFor(e: Entry, targets: Record<string, SourceTarget>): { workspaceId: string; dataSourceId: string | null } | null {
+  if (e.action === 'update' && e.here) return { workspaceId: e.here.workspaceId, dataSourceId: e.here.dataSourceId }
+  const t = targets[e.view.source]
+  return t ? { workspaceId: t.workspaceId, dataSourceId: t.dataSourceId } : null
+}
+
 /** Where an entry goes: the view it updates, or its source's data source here. */
 function targetFor(e: Entry, targets: Record<string, SourceTarget>): TransferTarget | null {
   if (e.action === 'update' && e.here) return { viewId: e.here.viewId }
@@ -119,6 +134,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   const [checksInFlight, setChecksInFlight] = useState(0)
   const [reconcileError, setReconcileError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
+  const [stageChoice, setStageChoice] = useState<boolean | null>(null)
   const [batchId] = useState(newRequestId)
   const environment = inspect.bundle.generator.environment
   const reconciling = checksInFlight > 0
@@ -256,6 +272,23 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
     return counts
   }, [active, targets])
 
+  // ── Drafts: where a data source is under version control, views can wait in drafts for review ──
+  const staging = useDraftStagingFor(active.map(e => scopeFor(e, targets)).filter((t): t is NonNullable<typeof t> => !!t))
+  const stagingOf = (e: Entry): DraftStaging | undefined => {
+    const ds = scopeFor(e, targets)?.dataSourceId
+    return ds ? staging[ds] : undefined
+  }
+  const stageable = active.filter(e => stagingOf(e)?.versioned)
+  const stagesAll = stageChoice ?? true
+  const staged = (e: Entry) => stagesAll && !!stagingOf(e)?.versioned && !!stagingOf(e)?.allowed
+  const batchStaging: DraftStaging = {
+    versioned: stageable.length > 0,
+    allowed: stageable.every(e => stagingOf(e)?.allowed),
+    checking: active.some(e => stagingOf(e)?.checking),
+  }
+  const stageKind = stageable.every(e => e.action === 'update') ? 'update'
+    : stageable.every(e => e.action !== 'update') ? 'new' : 'mixed'
+
   // ── Import ──
   const importAll = async () => {
     setPhase('importing')
@@ -292,10 +325,12 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
           expectedTargetHash: r.update?.targetWorkingHash ?? null,
           requestId: e.requestId,
           batchId,
+          ...(staged(e) ? { stage: true } : {}),
         })
         setEntry(e.view.index, { run: {
-          state: 'done', viewId: result.viewId, version: result.version.version,
+          state: 'done', viewId: result.viewId, version: result.version?.version ?? null,
           matchRate: result.report.summary.matchRate, verified: result.integrity.verified,
+          branchId: result.staged?.branchId ?? null,
         } })
       } catch (err) {
         setEntry(e.view.index, { run: { state: 'failed', error: err instanceof Error ? err.message : 'Import failed' } })
@@ -303,7 +338,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
     }
     void queryClient.invalidateQueries({ queryKey: ['views'] })
     void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })
-    recordEvent('view.import', { action: 'batch', views: queue.length })
+    recordEvent('view.import', { action: 'batch', views: queue.length, staged: queue.filter(staged).length })
     setPhase('done')
   }
 
@@ -365,7 +400,10 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
       wide
     >
       {phase !== 'steps' ? (
-        <ProgressList entries={active} onOpen={(viewId) => { navigate(`/views/${viewId}`); onClose() }} />
+        <ProgressList entries={active} onOpen={(viewId, branchId) => {
+          navigate(branchId ? `/views/${viewId}?branch=${branchId}` : `/views/${viewId}`)
+          onClose()
+        }} />
       ) : step === 'target' ? (
         <div className="space-y-5">
           <div>
@@ -537,6 +575,18 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
               you give them. To share a view with everyone, use its Share once it’s here.
             </p>
           </div>
+          {batchStaging.versioned && (
+            <div className="space-y-2">
+              <StageChoice staging={batchStaging} stage={stagesAll && batchStaging.allowed} onChange={setStageChoice}
+                kind={stageKind} count={stageable.length} />
+              {stageable.length < active.length && (
+                <p className="text-[11px] text-ink-muted px-1">
+                  {pluralize(active.length - stageable.length, 'view')} {active.length - stageable.length === 1 ? 'goes' : 'go'} live
+                  now either way: {active.length - stageable.length === 1 ? 'its data source isn’t' : 'their data sources aren’t'} under version control.
+                </p>
+              )}
+            </div>
+          )}
           <div className="rounded-2xl border border-glass-border divide-y divide-glass-border/60">
             {active.map(e => (
               <ReviewRow key={e.view.index} entry={e}
@@ -613,7 +663,7 @@ function ReviewRow({ entry: e, workspaceId, where, sharedInBatch, environment, o
   )
 }
 
-function ProgressList({ entries, onOpen }: { entries: Entry[]; onOpen: (viewId: string) => void }) {
+function ProgressList({ entries, onOpen }: { entries: Entry[]; onOpen: (viewId: string, branchId?: string | null) => void }) {
   return (
     <div className="max-w-2xl mx-auto space-y-2" aria-live="polite">
       {entries.map(e => (
@@ -632,13 +682,16 @@ function ProgressList({ entries, onOpen }: { entries: Entry[]; onOpen: (viewId: 
             {e.run.state === 'failed' && <p className="text-[11px] text-rose-600 dark:text-rose-400 truncate" title={e.run.error}>{e.run.error}</p>}
             {e.run.state === 'done' && (
               <p className="text-[11px] text-ink-muted">
-                v{e.run.version} · {percent(e.run.matchRate)} matched · {e.run.verified ? 'integrity verified' : 'adjusted here'}
+                {e.run.branchId ? 'In a draft, live when it’s published' : `v${e.run.version}`}
+                {' · '}{percent(e.run.matchRate)} matched · {e.run.verified ? 'integrity verified' : 'adjusted here'}
               </p>
             )}
           </div>
           {e.run.state === 'done' && e.run.viewId && (
-            <button type="button" onClick={() => onOpen(e.run.viewId!)}
-              className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0">Open</button>
+            <button type="button" onClick={() => onOpen(e.run.viewId!, e.run.branchId)}
+              className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0">
+              {e.run.branchId ? 'Open in draft' : 'Open'}
+            </button>
           )}
         </div>
       ))}
