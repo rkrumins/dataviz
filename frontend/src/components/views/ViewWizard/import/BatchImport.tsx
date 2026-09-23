@@ -413,7 +413,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
               Views that are already here are updated where they are.
             </p>
           </div>
-          <div className="rounded-2xl border border-glass-border divide-y divide-glass-border/60">
+          <div className="rounded-2xl border border-glass-border divide-y divide-glass-border">
             {Object.entries(inspect.bundle.sources).map(([key, source]) => {
               const views = entries.filter(e => e.view.source === key)
               const updatingHere = views.filter(e => e.action === 'update' && !e.skipped).length
@@ -498,7 +498,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
               <AlertTriangle className="w-3.5 h-3.5" /> {pluralize(blocked.length, 'view')} can’t be imported where they’re going. Skip them, or choose another target.
             </p>
           )}
-          <div className="rounded-2xl border border-glass-border divide-y divide-glass-border/60">
+          <div className="rounded-2xl border border-glass-border divide-y divide-glass-border">
             {entries.map(e => {
               const r = e.reconciled
               const s = r?.report.summary
@@ -587,7 +587,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
               )}
             </div>
           )}
-          <div className="rounded-2xl border border-glass-border divide-y divide-glass-border/60">
+          <div className="rounded-2xl border border-glass-border divide-y divide-glass-border">
             {active.map(e => (
               <ReviewRow key={e.view.index} entry={e}
                 workspaceId={e.action === 'update' ? e.here?.workspaceId ?? null : targets[e.view.source]?.workspaceId ?? null}

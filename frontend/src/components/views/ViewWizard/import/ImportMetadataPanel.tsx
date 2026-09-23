@@ -71,11 +71,11 @@ function PerFieldChoice({ formData, updateFormData, file, current, environment }
   }
   return (
     <div className="rounded-2xl border border-glass-border overflow-hidden">
-      <div className="px-4 py-2.5 bg-black/[0.015] dark:bg-white/[0.02] border-b border-glass-border/60">
+      <div className="px-4 py-2.5 bg-black/[0.015] dark:bg-white/[0.02] border-b border-glass-border">
         <p className="text-xs font-bold text-ink">Where the file and this view differ</p>
         <p className="text-[11px] text-ink-muted">This view’s current details are kept unless you choose the file’s.</p>
       </div>
-      <div className="divide-y divide-glass-border/50">
+      <div className="divide-y divide-glass-border">
         {fields.map(field => {
           const fromFile = fileValue(file, field)
           const now = currentValue(current, field)

@@ -32,7 +32,7 @@ export function UpdatePanel({ update, targetName, onStrategy }: {
 
   return (
     <div className="rounded-2xl border border-glass-border overflow-hidden">
-      <div className="flex items-start gap-3 px-4 py-3 bg-black/[0.015] dark:bg-white/[0.02] border-b border-glass-border/60">
+      <div className="flex items-start gap-3 px-4 py-3 bg-black/[0.015] dark:bg-white/[0.02] border-b border-glass-border">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <p className="text-xs font-bold text-ink">Updating “{targetName}”</p>

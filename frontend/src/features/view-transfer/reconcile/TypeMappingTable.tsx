@@ -26,7 +26,7 @@ export function TypeMappingTable({ entityTypes, relationshipTypes, available, dr
   if (rows.length === 0) return null
 
   return (
-    <div className="rounded-xl border border-glass-border divide-y divide-glass-border/50">
+    <div className="rounded-xl border border-glass-border divide-y divide-glass-border">
       {rows.map(({ kind, row }) => {
         const decision = typeDecisionOf(draft, kind, row.id)
         const value = decision === null ? DROP : decision === undefined ? KEEP : decision

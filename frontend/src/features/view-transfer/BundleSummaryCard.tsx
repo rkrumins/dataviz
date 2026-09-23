@@ -45,7 +45,7 @@ export function BundleSummaryCard({ view, bundle }: { view: InspectedView; bundl
         </div>
       </div>
 
-      <div className="grid grid-cols-4 border-t border-glass-border/60 divide-x divide-glass-border/60">
+      <div className="grid grid-cols-4 border-t border-glass-border divide-x divide-glass-border">
         {([
           ['layers', counts.layers], ['placements', counts.assignments], ['rules', counts.rules],
           ['display rules', counts.displayRules],
@@ -58,7 +58,7 @@ export function BundleSummaryCard({ view, bundle }: { view: InspectedView; bundl
       </div>
 
       {source && (
-        <div className="flex items-center gap-2 flex-wrap border-t border-glass-border/60 bg-black/[0.015] dark:bg-white/[0.02] px-4 py-2.5 text-[11px] text-ink-secondary">
+        <div className="flex items-center gap-2 flex-wrap border-t border-glass-border bg-black/[0.015] dark:bg-white/[0.02] px-4 py-2.5 text-[11px] text-ink-secondary">
           <span className="text-ink-muted">Built on</span>
           {source.workspace.name && (
             <span className="inline-flex items-center gap-1 font-medium"><Boxes className="w-3 h-3 text-ink-muted" />{source.workspace.name}</span>

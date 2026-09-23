@@ -97,7 +97,7 @@ function Section({ title, detail, children }: { title: string; detail?: string; 
         <h5 className="text-xs font-bold text-ink">{title}</h5>
         {detail && <span className="text-[11px] text-ink-muted">{detail}</span>}
       </div>
-      <div className="rounded-xl border border-glass-border divide-y divide-glass-border/50">{children}</div>
+      <div className="rounded-xl border border-glass-border divide-y divide-glass-border">{children}</div>
     </section>
   )
 }

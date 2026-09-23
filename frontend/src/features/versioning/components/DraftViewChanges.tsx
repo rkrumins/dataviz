@@ -49,7 +49,7 @@ export function DraftViewChanges({ changes, branchId, onNavigate, className }: {
   const navigate = useNavigate()
   if (!changes.views.length && !changes.hidden) return null
   return (
-    <div className={cn('rounded-xl border border-glass-border divide-y divide-glass-border/60', className)}>
+    <div className={cn('rounded-xl border border-glass-border divide-y divide-glass-border', className)}>
       {changes.views.map(c => {
         const kind = KIND[c.change]
         const Icon = kind.icon

@@ -99,7 +99,7 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
 
   return (
     <div className="rounded-xl border border-glass-border overflow-hidden">
-      <div className="flex items-center gap-1 px-2 pt-2 border-b border-glass-border/60 overflow-x-auto" role="tablist">
+      <div className="flex items-center gap-1 px-2 pt-2 border-b border-glass-border overflow-x-auto" role="tablist">
         {visibleTabs.map(t => (
           <button key={t} role="tab" aria-selected={tab === t} type="button" onClick={() => { setTab(t); setSelected(new Set()) }}
             className={cn('px-3 py-1.5 rounded-t-lg text-xs font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors',
@@ -109,7 +109,7 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
         ))}
       </div>
 
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-glass-border/60 bg-black/[0.01] dark:bg-white/[0.01]">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-glass-border bg-black/[0.01] dark:bg-white/[0.01]">
         <div className="relative flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or URN"
@@ -144,7 +144,7 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
         onDecide={(urn, d) => setDecision([urn], d)} />
 
       {truncated && (
-        <p className="px-3 py-2 text-[11px] text-ink-muted border-t border-glass-border/60">
+        <p className="px-3 py-2 text-[11px] text-ink-muted border-t border-glass-border">
           Showing the first {entities.length.toLocaleString()}. Decisions made here apply to these; drop or keep the rest in bulk after re-checking.
         </p>
       )}
@@ -179,14 +179,14 @@ function RowList({ rows, draft, layerNames, selected, onToggle, onDecide }: {
   )
 
   if (!virtual) {
-    return <div className="max-h-[360px] overflow-y-auto divide-y divide-glass-border/50">{rows.map(render)}</div>
+    return <div className="max-h-[360px] overflow-y-auto divide-y divide-glass-border">{rows.map(render)}</div>
   }
   return (
     <div ref={scrollRef} className="max-h-[360px] overflow-y-auto">
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map(item => (
           <div key={item.key} style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${item.start}px)` }}
-            className="border-b border-glass-border/50">
+            className="border-b border-glass-border">
             {render(rows[item.index])}
           </div>
         ))}

@@ -104,7 +104,7 @@ export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
       />
 
       {(dirty || reconciling) && (
-        <div className="sticky bottom-0 flex items-center gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-canvas-elevated/95 backdrop-blur px-4 py-3 shadow-lg">
+        <div className="sticky bottom-0 flex items-center gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-canvas-elevated px-4 py-3 shadow-lg">
           <p className="text-xs text-ink flex-1">
             {reconciling ? 'Checking your choices…'
               : `${pluralize(pendingCount, 'choice')} made. Re-check to see the result and continue.`}

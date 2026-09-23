@@ -147,7 +147,7 @@ export function ViewVersioningPanel({
                 <PendingChanges />
                 {viewChangesQ.data && (viewChangesQ.data.views.length + viewChangesQ.data.hidden) > 0 && (
                   <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2 px-0.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider mb-2 px-0.5">
                       Views in this branch
                     </p>
                     <DraftViewChanges changes={viewChangesQ.data} branchId={branchId} onNavigate={onClose} />

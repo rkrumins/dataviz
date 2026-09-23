@@ -417,7 +417,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
               {viewChanges && viewChangeCount > 0 && pr.sourceBranchId && (
                 <Section icon={LayoutTemplate} title={`Views (${viewChangeCount})`}
-                  right={<span className="text-[10px] text-ink-muted/70 normal-case font-normal">go live when this merges</span>}>
+                  right={<span className="text-[10px] normal-case font-normal">go live when this merges</span>}>
                   <DraftViewChanges changes={viewChanges} branchId={pr.sourceBranchId} onNavigate={onClose} />
                 </Section>
               )}

@@ -111,7 +111,7 @@ export function ReconciliationPanel({
       {report.layers.length > 0 && (
         <section className="space-y-2">
           <SectionTitle title="Layers" detail="How much of each layer's placements are here." />
-          <div className="rounded-xl border border-glass-border divide-y divide-glass-border/50">
+          <div className="rounded-xl border border-glass-border divide-y divide-glass-border">
             {report.layers.map(layer => {
               const placed = layer.total
               const pct = (n: number) => (placed ? (n / placed) * 100 : 0)

@@ -161,7 +161,7 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
           tabIndex={-1}
           className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col animate-in zoom-in-95 fade-in duration-200 overflow-hidden pointer-events-auto outline-none"
         >
-          <div className="border-b border-glass-border/50 px-8 py-5 flex items-center justify-between flex-shrink-0">
+          <div className="border-b border-glass-border px-8 py-5 flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-4 min-w-0">
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 flex-shrink-0">
                 {withData ? <Package className="w-6 h-6" /> : <FileJson2 className="w-6 h-6" />}
@@ -229,7 +229,7 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
             )}
           </div>
 
-          <div className="flex items-center justify-end gap-2 px-8 py-4 border-t border-glass-border/50 bg-black/[0.01] dark:bg-white/[0.01] flex-shrink-0">
+          <div className="flex items-center justify-end gap-2 px-8 py-4 border-t border-glass-border bg-black/[0.01] dark:bg-white/[0.01] flex-shrink-0">
             <button onClick={onClose} disabled={phase === 'running'} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
               {phase === 'done' ? 'Done' : 'Cancel'}
             </button>
@@ -260,7 +260,7 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
 
 function WhatTravels({ withData = false }: { withData?: boolean }) {
   return (
-    <div className="px-8 py-6 border-b md:border-b-0 md:border-r border-glass-border/50 bg-gradient-to-br from-indigo-50/40 to-transparent dark:from-indigo-950/15 space-y-5">
+    <div className="px-8 py-6 border-b md:border-b-0 md:border-r border-glass-border bg-gradient-to-br from-indigo-50/40 to-transparent dark:from-indigo-950/15 space-y-5">
       <div>
         <h4 className="text-sm font-bold text-ink">{withData ? 'What’s in the package' : 'What’s in the file'}</h4>
         <p className="text-[11px] text-ink-muted mt-0.5">
@@ -405,7 +405,7 @@ function FilePreview({ filename, stats, extra, withData = false }: {
       {stats && (
         <div className="grid grid-cols-4 gap-2 mt-3">
           {rows.map(([label, value]) => (
-            <div key={label} className="rounded-lg bg-canvas-elevated border border-glass-border/60 px-2 py-1.5 text-center">
+            <div key={label} className="rounded-lg bg-canvas-elevated border border-glass-border px-2 py-1.5 text-center">
               <p className="text-sm font-bold text-ink tabular-nums">{(value ?? 0).toLocaleString()}</p>
               <p className="text-[10px] text-ink-muted">{label}</p>
             </div>
@@ -439,7 +439,7 @@ function ManyViewsChoice({ views, note, setNote, withData = false }: {
     <>
       <div>
         <label className="block text-xs font-medium text-ink-secondary mb-2">{pluralize(views.length, 'view')}, each at its current design</label>
-        <ul className="rounded-xl border border-glass-border divide-y divide-glass-border/60 max-h-72 overflow-y-auto">
+        <ul className="rounded-xl border border-glass-border divide-y divide-glass-border max-h-72 overflow-y-auto">
           {rows.map(({ view, status }) => {
             const head = status.data?.headVersion ?? null
             const dirty = !!status.data?.dirty
