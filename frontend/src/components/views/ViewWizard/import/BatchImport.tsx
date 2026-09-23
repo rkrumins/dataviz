@@ -12,12 +12,13 @@
  *   Review   per view: its name (duplicates flagged) and who sees it; and, where a data source is
  *            under version control, whether the views go live now or wait in drafts for review.
  *   Import   one request per view, each with its own request id (a retry is safe) and the batch
- *            id that ties them together; live progress; a failure never stops the rest.
+ *            id that ties them together; live progress; a failure never stops the rest. Views
+ *            that wait in drafts (one draft per view) can then all be submitted for review.
  */
 import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Loader2, RefreshCw, X } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, GitPullRequest, Loader2, RefreshCw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -29,6 +30,8 @@ import {
   type Resolutions, type TransferTarget, type UpdateStrategy,
 } from '@/services/viewTransferApiService'
 import { recordEvent } from '@/services/telemetryService'
+import { PullRequestExistsError, openMergeRequest } from '@/services/versioningApiService'
+import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { MatchScoreRing } from '@/features/view-transfer/reconcile/MatchScoreRing'
 import { ReconciliationPanel } from '@/features/view-transfer/reconcile/ReconciliationPanel'
@@ -67,6 +70,8 @@ interface Entry {
     branchId?: string | null
     error?: string
   }
+  /** Its draft's review request, once it's submitted for review. */
+  review?: { state: 'sending' | 'sent' | 'failed'; prId?: string; workspaceId?: string; error?: string }
 }
 
 /** How many exceptions a report lists at most (the server's `MAX_EXCEPTIONS`). */
@@ -371,6 +376,35 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   const toImport = active.length - done.length
   const checkAgain = failed.some(e => !e.reconciled)
 
+  // ── Review: each view that waits in a draft goes to review on its own (a draft per view) ──
+  const reviewing = active.some(e => e.review?.state === 'sending')
+  const reviewable = done.filter(e => e.run.branchId && stagingOf(e)?.graphId && stagingOf(e)?.allowed
+    && e.review?.state !== 'sent' && e.review?.state !== 'sending')
+  const submitForReview = async () => {
+    for (const e of reviewable) {
+      const workspaceId = scopeFor(e, targets)!.workspaceId
+      const graphId = stagingOf(e)!.graphId!
+      setEntry(e.view.index, { review: { state: 'sending' } })
+      try {
+        const { prId } = await openMergeRequest(workspaceId, graphId, e.run.branchId!, {
+          title: `Import “${e.name.trim()}”`,
+          description: `Imported from ${environment || 'another environment'}${e.view.version ? ` v${e.view.version}` : ''}, `
+            + `${percent(e.run.matchRate)} matched.`,
+        })
+        setEntry(e.view.index, { review: { state: 'sent', prId, workspaceId } })
+      } catch (err) {
+        // Already in review (a second click, another tab): that review is the one.
+        setEntry(e.view.index, { review: err instanceof PullRequestExistsError
+          ? { state: 'sent', prId: err.prId, workspaceId }
+          : { state: 'failed', error: err instanceof Error ? err.message : 'Couldn’t submit it for review' } })
+      }
+      void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(workspaceId, graphId) })
+    }
+    for (const list of ['viewPrs', 'dataSourcePrs', 'viewPrCounts']) {
+      void queryClient.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, list] })
+    }
+  }
+
   const footer = phase === 'importing' ? (
     <div className="flex items-center gap-2 text-sm text-ink-muted">
       <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
@@ -378,6 +412,13 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
     </div>
   ) : phase === 'done' ? (
     <div className="flex items-center justify-end gap-2 w-full">
+      {(reviewable.length > 0 || reviewing) && (
+        <button type="button" onClick={() => void submitForReview()} disabled={reviewing}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-60">
+          {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitPullRequest className="w-4 h-4" />}
+          {reviewing ? 'Submitting for review…' : `Submit ${pluralize(reviewable.length, 'draft')} for review`}
+        </button>
+      )}
       {failed.length > 0 && (
         <button type="button"
           onClick={() => {
@@ -424,6 +465,9 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
       {phase !== 'steps' ? (
         <ProgressList entries={active} onOpen={(viewId, branchId) => {
           navigate(branchId ? `/views/${viewId}?branch=${branchId}` : `/views/${viewId}`)
+          onClose()
+        }} onOpenReview={(workspaceId, prId) => {
+          navigate(`/workspaces/${workspaceId}/reviews?pr=${prId}`)
           onClose()
         }} />
       ) : step === 'target' ? (
@@ -708,7 +752,11 @@ function ReviewRow({ entry: e, workspaceId, where, sharedInBatch, environment, o
   )
 }
 
-function ProgressList({ entries, onOpen }: { entries: Entry[]; onOpen: (viewId: string, branchId?: string | null) => void }) {
+function ProgressList({ entries, onOpen, onOpenReview }: {
+  entries: Entry[]
+  onOpen: (viewId: string, branchId?: string | null) => void
+  onOpenReview: (workspaceId: string, prId: string) => void
+}) {
   return (
     <div className="max-w-2xl mx-auto space-y-2" aria-live="polite">
       {entries.map(e => (
@@ -727,11 +775,25 @@ function ProgressList({ entries, onOpen }: { entries: Entry[]; onOpen: (viewId: 
             {e.run.state === 'failed' && <p className="text-[11px] text-rose-600 dark:text-rose-400 truncate" title={e.run.error}>{e.run.error}</p>}
             {e.run.state === 'done' && (
               <p className="text-[11px] text-ink-muted">
-                {e.run.branchId ? 'In a draft, live when it’s published' : `v${e.run.version}`}
+                {!e.run.branchId ? `v${e.run.version}`
+                  : e.review?.state === 'sent' ? 'In review, live when its review request merges'
+                    : 'In a draft, live when it’s published'}
                 {' · '}{percent(e.run.matchRate)} matched · {e.run.verified ? 'integrity verified' : 'adjusted here'}
               </p>
             )}
+            {e.review?.state === 'failed' && (
+              <p className="text-[11px] text-rose-600 dark:text-rose-400 truncate" title={e.review.error}>
+                Not submitted for review: {e.review.error}
+              </p>
+            )}
           </div>
+          {e.review?.state === 'sending' && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500 shrink-0" aria-label="Submitting for review" />}
+          {e.review?.state === 'sent' && e.review.prId && e.review.workspaceId && (
+            <button type="button" onClick={() => onOpenReview(e.review!.workspaceId!, e.review!.prId!)}
+              className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0">
+              Open review
+            </button>
+          )}
           {e.run.state === 'done' && e.run.viewId && (
             <button type="button" onClick={() => onOpen(e.run.viewId!, e.run.branchId)}
               className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0">

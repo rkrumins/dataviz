@@ -21,6 +21,7 @@ measured on a sample of its own entities ("49 of 50 found here"), then looks up 
 view places and shows the match percentage. Anything not found is kept and marked, and goes live
 if the entity appears later; you can also drop it, remap it to another entity, or map a missing
 type to one that exists. Then the usual wizard steps let you change anything before it writes.
+On the canvas, a chip counts the placements not found here and lists them with their layers.
 
 **Importing a view that is already here updates it.** Each view carries an identity that crosses
 environments and the hashes of its whole history. So a newer file of the same view becomes its next
@@ -41,9 +42,11 @@ this release doesn't know are carried through untouched.
 Saving in the wizard, importing, restoring, a draft going live and exporting unsaved changes each
 keep one, and **Save version** keeps one with a note. The view header's **Versions** opens the
 history: compare any two versions (or one with the current design), restore one (the current
-design is saved first, and sharing is left alone), or export it. Canvas autosaves show as
-"unsaved changes since vN" rather than a version each. A view that predates this gets its first
-version the first time it is needed.
+design is saved first, and sharing is left alone), or export it. An imported version shows how
+much of its file matched. Canvas autosaves show as "unsaved changes since vN" rather than a
+version each. A view that predates this gets its first version the first time it is needed.
+Anyone who can read a view can export it; someone who can't edit it exports its latest version
+as it stands, and nothing is written for them.
 
 **A file of several views imports in one go.** Export several views from the Explorer's (or Views
 manager's) selection bar. On import, map each source to a data source, check every view at once,
@@ -55,13 +58,16 @@ failed** is safe to press.
 can go into a draft and go live when the draft is published or its review request merges. This is
 the default where you can open drafts. Until then a new view is private and appears in no list,
 count or search. The draft's Changes tab, its review request and the publish dialog show its
-views, and a draft that changes only views can now be published.
+views, and a draft that changes only views can now be published. **Submit for review** is offered
+as soon as the import finishes; a file's views each wait in their own draft, and are submitted
+together, one review each.
 
 **A view can travel with its data.** **View + data** in the export dialog packages the view with
 its data source's own export (the view's entities or the whole source, published or from your
 draft) as a `.view-package.zip`. Importing one brings the data into a new draft of the target
 (adding and updating only, never deleting), checks the view against that draft so the entities the
 data brought count as found, and puts the view in the same draft, so the two go live together.
+If the data import fails, **Try again** runs it again into the same draft.
 
 **Wherever a view is, so are these actions.** The view header has **Versions** and **Export**. A
 view's card menu in the Explorer has **Export…**, **Versions** and **Update from file…**. The

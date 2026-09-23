@@ -16,7 +16,9 @@
  *     rest and is retried under the same request id; a view switched to a copy is checked again, as
  *     is one that changed here during the import; a view to update that can't be read says so;
  *   - on a version-controlled data source, an import waits in a draft by default (or goes live,
- *     if chosen), and the view then opens on that draft;
+ *     if chosen), and the view then opens on that draft; the draft can be submitted for review
+ *     from there (the view opens live once it's published), and a file's views all at once,
+ *     one review per view's draft;
  *   - a view with its data (a package): its data goes into a new draft of a version-controlled
  *     target, the view is checked against that draft and goes into it too, and opens there; a
  *     target that can't take the data is refused (the view alone still can be imported); and data
@@ -40,9 +42,10 @@ const inspectPackageMock = vi.fn()
 const packageDataMock = vi.fn()
 const getImportMock = vi.fn()
 const importPreviewMock = vi.fn()
+const openReviewMock = vi.fn()
 let requestIds = 0
 const NOT_VERSIONED = { versioned: false, allowed: false, checking: false }
-let staging = NOT_VERSIONED
+let staging: typeof NOT_VERSIONED & { graphId?: string | null } = NOT_VERSIONED
 
 vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewTransferApiService')>()
@@ -72,6 +75,19 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => {
     getImportPreview: (...args: unknown[]) => importPreviewMock(...args),
   }
 })
+vi.mock('@/services/versioningApiService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/versioningApiService')>()
+  return { ...actual, openMergeRequest: (...args: unknown[]) => openReviewMock(...args) }
+})
+// The publish dialog is the canvas's own (tested there): stood in for at its boundary.
+vi.mock('@/features/versioning/components/PublishDraftDialog', () => ({
+  PublishDraftDialog: (p: { wsId: string; graphId: string; branchId: string; onClose: () => void; onPublished?: () => void }) => (
+    <div data-testid="publish-draft">
+      {`${p.wsId}/${p.graphId}/${p.branchId}`}
+      <button type="button" onClick={() => { p.onClose(); p.onPublished?.() }}>Publish (stub)</button>
+    </div>
+  ),
+}))
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 vi.mock('../import/useDraftStaging', () => ({
   DRAFT_PERMISSION: 'workspace:datasource:manage',
@@ -110,6 +126,7 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
 })
 
 import { ViewTransferError } from '@/services/viewTransferApiService'
+import { PullRequestExistsError } from '@/services/versioningApiService'
 import { ViewWizard } from '../ViewWizard'
 
 const DEFINITION = {
@@ -540,7 +557,7 @@ async function throughToPreview() {
 
 describe('ViewWizard — importing into a draft', () => {
   beforeEach(() => {
-    staging = { versioned: true, allowed: true, checking: false }
+    staging = { versioned: true, allowed: true, checking: false, graphId: 'g1' }
     inspectMock.mockResolvedValue(inspected())
     reconcileMock.mockResolvedValue(reconciled())
   })
@@ -604,6 +621,61 @@ describe('ViewWizard — importing into a draft', () => {
     await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
     expect(importMock.mock.calls.map(([r]) => r.stage)).toEqual([true, true])
     expect(await screen.findAllByRole('button', { name: 'Open in draft' })).toHaveLength(2)
+  })
+
+  it('submits the draft for review from where it landed, and opens the view live once published', async () => {
+    importMock.mockResolvedValue({ ...imported('view_new'), staged: { branchId: 'br_9' } })
+    renderImport()
+    await throughToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+
+    fireEvent.click(await screen.findByRole('button', { name: /Submit for review/ }))
+    expect(screen.getByTestId('publish-draft')).toHaveTextContent('ws1/g1/br_9')
+    // It doesn't open the view under the dialog: the countdown stops.
+    expect(screen.getByText(/Open it whenever you’re ready/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Publish (stub)' }))
+    expect(screen.getByTestId('location')).toHaveTextContent(/^\/views\/view_new$/)
+  })
+
+  it('offers no review without the right to open one', async () => {
+    staging = { ...staging, allowed: false }
+    importMock.mockResolvedValue({ ...imported('view_new'), staged: { branchId: 'br_9' } })
+    renderImport()
+    await throughToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+    expect(await screen.findByText('Waiting in a draft')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Submit for review/ })).not.toBeInTheDocument()
+  })
+
+  it('submits every view of a file for review, one review per view’s draft', async () => {
+    inspectMock.mockResolvedValue(inspectedPair())
+    getViewMock.mockResolvedValue({
+      id: 'view_uat', name: 'Sales (UAT)', description: 'Pipeline, as UAT has it', workspaceId: 'ws1', dataSourceId: 'ds1',
+      viewType: 'reference', config: { icon: 'Workflow' }, tags: ['uat'], visibility: 'workspace',
+    })
+    reconcileEach()
+    importMock.mockImplementation(async (req: { target: { viewId?: string } }) => ({
+      ...imported(req.target.viewId ?? 'view_new'), staged: { branchId: `br_${req.target.viewId ?? 'new'}` },
+    }))
+    // The second is already in review (another tab): that review is the one.
+    openReviewMock
+      .mockResolvedValueOnce({ prId: 'pr_1' })
+      .mockRejectedValueOnce(new PullRequestExistsError({ prId: 'pr_2', branchId: 'br_new' }))
+    renderImport()
+    await throughToReview()
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Submit 2 drafts for review/ }))
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Open review' })).toHaveLength(2))
+    expect(openReviewMock.mock.calls.map(([ws, graph, branch]) => `${ws}/${graph}/${branch}`).sort())
+      .toEqual(['ws1/g1/br_new', 'ws1/g1/br_view_uat'])
+    expect(openReviewMock.mock.calls[0][3].title).toMatch(/^Import “/)
+    expect(screen.queryByRole('button', { name: /for review/ })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Open review' })[0])
+    expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspaces\/ws1\/reviews\?pr=pr_/)
   })
 })
 

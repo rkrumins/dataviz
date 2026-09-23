@@ -29,15 +29,20 @@ import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
 import type { ChangeSet } from '../model/changeModel'
 
-interface CommitDialogProps {
+export interface CommitDialogProps {
   workspaceId: string
   graphId: string
   branchId: string
   changeSet: ChangeSet
   onClose: () => void
+  /** For a host that is itself a dialog (an import's success step): called once this dialog has
+   *  taken the person elsewhere (to the review, or to a view on the draft), so the host closes too. */
+  onLeave?: () => void
+  /** Called once the draft is published. */
+  onPublished?: () => void
 }
 
-export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose }: CommitDialogProps) {
+export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished }: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
   const [conflicts, setConflicts] = useState<number | null>(null)
@@ -70,6 +75,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const goToReview = (prId: string) => {
     onClose()
     navigate(`/workspaces/${workspaceId}/reviews?pr=${prId}`)
+    onLeave?.()
   }
 
   const handleError = (e: unknown) => {
@@ -93,8 +99,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       {
         onSuccess: (res) => {
           notify('success', 'Sent for review.')
-          onClose()
-          navigate(`/workspaces/${workspaceId}/reviews?pr=${res.prId}`)
+          goToReview(res.prId)
         },
         onError: handleError,
       },
@@ -124,6 +129,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
           setReceipt({ commitId: res.commitId, graphId, counts: changeSet.counts, via: 'publish' })
           switchToMain()
           onClose()
+          onPublished?.()
         },
         onError: handleError,
       },
@@ -171,7 +177,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
               <p className="text-xs text-ink-muted">
                 {changeSet.changes.length > 0 ? 'And views, which go live with it:' : 'This draft changes views, which go live with it:'}
               </p>
-              <DraftViewChanges changes={viewChanges} branchId={branchId} onNavigate={onClose}
+              <DraftViewChanges changes={viewChanges} branchId={branchId} onNavigate={() => { onClose(); onLeave?.() }}
                 className="max-h-40 overflow-y-auto" />
             </div>
           )}

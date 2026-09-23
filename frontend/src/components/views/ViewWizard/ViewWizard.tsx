@@ -106,6 +106,7 @@ import { ImportSessionProvider, sameDataTarget, useImportSession, useImportSessi
 import { BatchImport } from './import/BatchImport'
 import { StageChoice } from './import/StageChoice'
 import { useDraftStaging } from './import/useDraftStaging'
+import { PublishDraftDialog } from '@/features/versioning/components/PublishDraftDialog'
 import { ImportStep } from './import/ImportStep'
 import { PackageDataStep } from './import/PackageDataStep'
 import { ReconcileStep } from './import/ReconcileStep'
@@ -1667,6 +1668,13 @@ function ViewWizardBody({
 
     const isTerminal = mode === 'create' && (phase === 'creating' || phase === 'success')
 
+    // An import waiting in a draft can be sent for review from here (the draft's owner may).
+    const [reviewing, setReviewing] = useState(false)
+    const stagedBranch = importResult?.staged?.branchId
+    const reviewDraft = stagedBranch && importStaging.graphId && importStaging.allowed
+        ? { workspaceId: importResult.view.workspaceId, graphId: importStaging.graphId, branchId: stagedBranch }
+        : null
+
     // Auto-open: the view is saved and there is nowhere else to go, so open it for
     // the user unless they say otherwise ("Stay here").
     const countdown = useAutoOpenCountdown({
@@ -1828,7 +1836,16 @@ function ViewWizardBody({
                             stats={successStats}
                         />
                         {isImport && importResult && (
-                            <ImportResultNote result={importResult} withData={importWithData ? importData?.started?.draftName : undefined} />
+                            <ImportResultNote result={importResult} withData={importWithData ? importData?.started?.draftName : undefined}
+                                onSubmitForReview={reviewDraft ? () => { countdown.cancel(); setReviewing(true) } : undefined} />
+                        )}
+                        {reviewing && reviewDraft && (
+                            <PublishDraftDialog wsId={reviewDraft.workspaceId} graphId={reviewDraft.graphId} branchId={reviewDraft.branchId}
+                                onClose={() => setReviewing(false)}
+                                // Sent for review, or gone to a view on the draft: the dialog went there, so close.
+                                onLeave={handleStayHere}
+                                // Published: the view is live, so open it there rather than on the draft.
+                                onPublished={() => { createdBranchRef.current = null; handleOpenNow() }} />
                         )}
                     </>
                 )

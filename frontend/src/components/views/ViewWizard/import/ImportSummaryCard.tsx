@@ -2,7 +2,7 @@
  * The import, summed up on the Preview step: what will happen, to what, how well it matched,
  * which choices were made on the way, and what the import will prove about itself.
  */
-import { CopyPlus, Fingerprint, GitMerge, GitPullRequestDraft, Info, PlusCircle, Replace, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { CopyPlus, Fingerprint, GitMerge, GitPullRequest, GitPullRequestDraft, Info, PlusCircle, Replace, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { IntegrityBadge } from '@/features/view-transfer/BundleDropzone'
 import { MatchScoreRing } from '@/features/view-transfer/reconcile/MatchScoreRing'
@@ -82,10 +82,12 @@ export function ImportSummaryCard({ targetLabel, editedSinceCheck, staged = fals
 }
 
 /** After the import: what was stored, proven — or what this environment changed, and why. */
-export function ImportResultNote({ result, withData }: {
+export function ImportResultNote({ result, withData, onSubmitForReview }: {
   result: ImportViewResult
   /** The draft the view went into with its data (a package), by name. */
   withData?: string | null
+  /** Offered when the import waits in a draft this person may send for review. */
+  onSubmitForReview?: () => void
 }) {
   const { integrity, notices } = result
   return (
@@ -103,6 +105,12 @@ export function ImportResultNote({ result, withData }: {
                   : 'The view here is unchanged until the draft is published or its review request merges.'}
               {' '}Open the draft to look it over, then publish it or send it for review.
             </p>
+            {onSubmitForReview && (
+              <button type="button" onClick={onSubmitForReview}
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-500 hover:bg-indigo-600">
+                <GitPullRequest className="w-3.5 h-3.5" /> Submit for review
+              </button>
+            )}
           </div>
         </div>
       )}

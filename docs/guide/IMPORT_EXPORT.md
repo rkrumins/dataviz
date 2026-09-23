@@ -138,7 +138,9 @@ check them all at once, then review each one — create, update, copy, or skip.
 > draft**: the new View, or the update, goes live when the draft is published or
 > its review request merges, and stays private until then. It's the default where
 > you can open drafts, and the draft's review shows the View beside any data
-> changes.
+> changes. Choose **Submit for review** when the import finishes to send the draft
+> straight to review; from a file of several Views, each waits in its own draft,
+> and **Submit for review** sends them all, one review each.
 
 ### Importing a View with its data
 

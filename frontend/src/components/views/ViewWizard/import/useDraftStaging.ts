@@ -17,13 +17,18 @@ export interface DraftStaging {
   /** ...and this person may open drafts on it. */
   allowed: boolean
   checking: boolean
+  /** The versioned graph the drafts are on. */
+  graphId?: string | null
 }
 
 export function useDraftStaging(workspaceId?: string | null, dataSourceId?: string | null): DraftStaging {
   const versioningOn = useFeature('versioningEnabled')
   const allowed = usePermission(DRAFT_PERMISSION, workspaceId)
   const resolved = useResolveGraph(workspaceId ?? undefined, versioningOn ? dataSourceId : null)
-  return { versioned: versioningOn && !!resolved.data?.graphId, allowed, checking: resolved.isLoading }
+  return {
+    versioned: versioningOn && !!resolved.data?.graphId, allowed, checking: resolved.isLoading,
+    graphId: versioningOn ? resolved.data?.graphId ?? null : null,
+  }
 }
 
 /** The same, for each of several targets at once (a file of several views), keyed by data source. */
@@ -44,5 +49,6 @@ export function useDraftStagingFor(targets: Array<{ workspaceId: string; dataSou
     versioned: versioningOn && !!results[i]?.data?.graphId,
     allowed: checkPermission(claims, DRAFT_PERMISSION, t.workspaceId),
     checking: !!results[i]?.isLoading,
+    graphId: versioningOn ? results[i]?.data?.graphId ?? null : null,
   }]))
 }
