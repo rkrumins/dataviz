@@ -1,6 +1,7 @@
 /**
  * The Import journey's state: the file, what the server read in it, what the person chose to do
- * with it, and what reconciling it against the target found.
+ * with it, and what reconciling it against the target found. For a view with its data (a
+ * package), also the data's way into a draft of the target, which the view then follows.
  *
  * Held by the wizard's create resolver, above both of its phases, so going back from the
  * reconcile step to the file (or to the target) keeps everything; shared with the steps through
@@ -8,10 +9,12 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  inspectViewFile, reconcileViews, ViewTransferError,
-  type IdentityMatch, type ImportAction, type InspectResult, type InspectedView, type ReconciledView,
-  type Resolutions, type TargetSuggestion, type TransferTarget, type UpdateStrategy,
+  importPackageData, inspectViewFile, inspectViewPackage, isViewPackage, reconcileViews, ViewTransferError,
+  type IdentityMatch, type ImportAction, type InspectResult, type InspectedView, type PackageDataStarted,
+  type PackageInspectResult, type ReconciledView, type Resolutions, type TargetSuggestion, type TransferTarget,
+  type UpdateStrategy,
 } from '@/services/viewTransferApiService'
+import { getImport, getImportPreview, pollJob, type ImportPreview, type Job } from '@/services/importExportApiService'
 import { getView } from '@/services/viewApiService'
 
 /** The view an update or overwrite writes into. */
@@ -24,6 +27,36 @@ export interface ImportTargetView {
   dataSourceName?: string | null
   headVersion?: number | null
   canEdit?: boolean
+}
+
+/** Where a package's data goes: a data source here, and the view the package will update, if any
+ *  (the draft is then that view's). */
+export interface PackageDataTarget {
+  workspaceId: string
+  dataSourceId: string
+  viewId?: string | null
+  /** What the new draft is called (the server names it after the package's view otherwise). */
+  draftName?: string | null
+}
+
+/** A package's data on its way into a draft of the target. */
+export interface PackageData {
+  /** Where it was asked into. */
+  target: PackageDataTarget | null
+  /** The draft and the import job, once the server has started it. */
+  started: PackageDataStarted | null
+  job: Job | null
+  /** What the job did, once it has finished. */
+  preview: ImportPreview | null
+  running: boolean
+  error: string | null
+}
+
+const NO_DATA: PackageData = { target: null, started: null, job: null, preview: null, running: false, error: null }
+
+export function sameDataTarget(a: PackageDataTarget | null, b: PackageDataTarget | null): boolean {
+  return !!a && !!b && a.workspaceId === b.workspaceId && a.dataSourceId === b.dataSourceId
+    && (a.viewId ?? null) === (b.viewId ?? null)
 }
 
 export interface ImportSession {
@@ -68,6 +101,17 @@ export interface ImportSession {
 
   /** Set when the journey was opened to update one particular view ("Update from file…"). */
   intoViewId: string | null
+
+  /** The file is a view with its data (a package), kept on the server until its data comes in. */
+  pkg: { uploadId: string; info: PackageInspectResult['package'] } | null
+  /** A package's data comes with its view (the default). Without it, the package imports as a
+   *  view file would. False for any other file. */
+  withData: boolean
+  setWithData: (withData: boolean) => void
+  data: PackageData
+  /** Bring the package's data into a new draft of `target`. Once only: the data goes with that
+   *  job, so another target needs the file again. */
+  startData: (target: PackageDataTarget) => Promise<void>
 }
 
 const ImportSessionContext = createContext<ImportSession | null>(null)
@@ -118,9 +162,15 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   const [reconcile, setReconcile] = useState<ReconciledView | null>(null)
   const [reconciling, setReconciling] = useState(false)
   const [reconcileError, setReconcileError] = useState<string | null>(null)
+  const [pkg, setPkg] = useState<ImportSession['pkg']>(null)
+  const [dataChoice, setDataChoice] = useState(true)
+  const [data, setData] = useState<PackageData>(NO_DATA)
   // A later file (or a later reconcile) wins over an earlier one still in flight.
   const inspectSeq = useRef(0)
   const reconcileSeq = useRef(0)
+  // The data import being followed, stopped when the file changes or the journey closes.
+  const dataRun = useRef<AbortController | null>(null)
+  const withData = pkg !== null && dataChoice
 
   const view = inspect?.views[viewIndex] ?? null
   const matches = useMemo(() => (view && inspect ? inspect.identityMatches[view.portableId] ?? [] : []), [view, inspect])
@@ -157,12 +207,16 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
    *  file was loaded meanwhile. */
   const inspectFile = useCallback(async (file: File, seq: number) => {
     try {
-      const result = await inspectViewFile(file)
+      const packaged = await isViewPackage(file)
+      const result: InspectResult = packaged ? await inspectViewPackage(file) : await inspectViewFile(file)
       if (seq !== inspectSeq.current) return
       setInspect(result)
+      setPkg(packaged ? { uploadId: (result as PackageInspectResult).uploadId, info: (result as PackageInspectResult).package } : null)
+      setDataChoice(true)
       setViewIndexState(0)
       // Several views, and not opened to update one of them: importing them all is the likely aim.
-      setBatch(result.views.length > 1 && !intoViewId)
+      // A package's data goes into one draft with one view, so it brings one of its views.
+      setBatch(!packaged && result.views.length > 1 && !intoViewId)
       await applyDefaults(result, 0)
     } catch (err) {
       if (seq !== inspectSeq.current) return
@@ -175,6 +229,13 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     }
   }, [applyDefaults, intoViewId])
 
+  const forgetData = useCallback(() => {
+    dataRun.current?.abort()
+    dataRun.current = null
+    setPkg(null)
+    setData(NO_DATA)
+  }, [])
+
   const loadFile = useCallback(async (file: File) => {
     const seq = ++inspectSeq.current
     setFileName(file.name)
@@ -182,9 +243,10 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     setInspecting(true)
     setInspectError(null)
     setInspect(null)
+    forgetData()
     invalidateReconcile()
     await inspectFile(file, seq)
-  }, [inspectFile, invalidateReconcile])
+  }, [inspectFile, invalidateReconcile, forgetData])
 
   const clearFile = useCallback(() => {
     inspectSeq.current += 1
@@ -195,8 +257,42 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     setInspecting(false)
     setAction(null)
     setTargetView(null)
+    forgetData()
     invalidateReconcile()
-  }, [invalidateReconcile])
+  }, [invalidateReconcile, forgetData])
+
+  const setWithData = useCallback((next: boolean) => {
+    setDataChoice(next)
+    // Without the data, a package of several views imports like a file of several views.
+    setBatch(!next && (inspect?.views.length ?? 0) > 1 && !intoViewId)
+    // Checked against the data's draft, or not: a reconcile answers for one of the two.
+    invalidateReconcile()
+  }, [inspect, intoViewId, invalidateReconcile])
+
+  const startData = useCallback(async (target: PackageDataTarget) => {
+    if (!pkg) return
+    dataRun.current?.abort()
+    const run = new AbortController()
+    dataRun.current = run
+    setData({ ...NO_DATA, target, running: true })
+    try {
+      const started = await importPackageData(pkg.uploadId, target)
+      if (run.signal.aborted) return
+      setData(d => ({ ...d, started }))
+      const job = await pollJob(() => getImport(started.workspaceId, started.graphId, started.jobId), {
+        intervalMs: 1000,
+        signal: run.signal,
+        onTick: (tick) => { if (!run.signal.aborted) setData(d => ({ ...d, job: tick })) },
+      })
+      if (job.status !== 'completed') throw new Error(job.errorMessage || "The data couldn't be imported.")
+      const preview = await getImportPreview(started.workspaceId, started.graphId, started.jobId)
+      if (run.signal.aborted) return
+      setData(d => ({ ...d, job, preview, running: false }))
+    } catch (err) {
+      if (run.signal.aborted) return
+      setData(d => ({ ...d, running: false, error: err instanceof Error ? err.message : "The data couldn't be imported." }))
+    }
+  }, [pkg])
 
   const setViewIndex = useCallback((index: number) => {
     setViewIndexState(index)
@@ -260,12 +356,16 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     if (file) void inspectFile(file, ++inspectSeq.current)
   }, [inspectFile])
 
+  // Closing the journey stops following a data import (the import itself carries on).
+  useEffect(() => () => dataRun.current?.abort(), [])
+
   return useMemo<ImportSession>(() => ({
     fileName, fileSize, inspect, inspecting, inspectError, loadFile, clearFile,
     batch, setBatch, viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft, setDraft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
     intoViewId,
+    pkg, withData, setWithData, data, startData,
   }), [
     batch,
     fileName, fileSize, inspect, inspecting, inspectError, loadFile, clearFile,
@@ -273,5 +373,6 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     action, targetView, choose, strategy, setStrategy, resolutions, draft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
     intoViewId,
+    pkg, withData, setWithData, data, startData,
   ])
 }

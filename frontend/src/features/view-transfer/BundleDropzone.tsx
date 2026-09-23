@@ -1,11 +1,12 @@
 /**
- * The file well for view files: drop or browse, then it says what it found.
+ * The file well for view files, and for views with their data (packages): drop or browse, then it
+ * says what it found.
  *
  * Five states, one component: waiting, a file dragged over it, checking, checked, refused. The
  * file is only ever READ here (the server inspects it); nothing is written until the last step.
  */
 import { useCallback, useRef, useState } from 'react'
-import { AlertTriangle, FileJson2, FileUp, Loader2, RefreshCw, Shield, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, FileArchive, FileJson2, FileUp, Loader2, RefreshCw, Shield, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { BundleIntegrity } from '@/services/viewTransferApiService'
 import { fileSize } from './format'
@@ -38,7 +39,7 @@ export function IntegrityBadge({ integrity, environment }: { integrity: BundleIn
 }
 
 export function BundleDropzone({
-  fileName, size, busy, error, integrity, environment, onFile,
+  fileName, size, busy, error, integrity, environment, packaged = false, onFile,
 }: {
   fileName: string | null
   size: number
@@ -46,6 +47,8 @@ export function BundleDropzone({
   error: string | null
   integrity: BundleIntegrity | null
   environment?: string | null
+  /** The file is a view with its data. */
+  packaged?: boolean
   onFile: (file: File) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
@@ -63,7 +66,7 @@ export function BundleDropzone({
     <input
       ref={inputRef}
       type="file"
-      accept=".json,application/json"
+      accept=".json,application/json,.zip,application/zip"
       className="sr-only"
       aria-label="Choose a view file"
       onChange={(e) => {
@@ -79,12 +82,13 @@ export function BundleDropzone({
       <div className="flex items-center gap-3 rounded-2xl border border-glass-border bg-canvas-elevated px-4 py-3">
         {input}
         <span className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-500 flex items-center justify-center shrink-0">
-          {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileJson2 className="w-5 h-5" />}
+          {busy ? <Loader2 className="w-5 h-5 animate-spin" />
+            : packaged ? <FileArchive className="w-5 h-5" /> : <FileJson2 className="w-5 h-5" />}
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-ink truncate" title={fileName}>{fileName}</p>
           <p className="text-[11px] text-ink-muted">
-            {busy ? 'Checking the file…' : fileSize(size)}
+            {busy ? 'Checking the file…' : `${packaged ? 'A view with its data · ' : ''}${fileSize(size)}`}
           </p>
         </div>
         {!busy && integrity && <IntegrityBadge integrity={integrity} environment={environment} />}
@@ -131,6 +135,9 @@ export function BundleDropzone({
           <p className="text-sm font-semibold text-ink">{dragging ? 'Release to check the file' : 'Drop a view file here'}</p>
           <p className="text-xs text-ink-muted">
             or <span className="font-semibold text-indigo-600 dark:text-indigo-400">browse</span> for a <span className="font-mono">.view.json</span> exported from any environment
+          </p>
+          <p className="text-[11px] text-ink-muted">
+            A view with its data (<span className="font-mono">.view-package.zip</span>) comes in here too, through a draft
           </p>
         </>
       )}

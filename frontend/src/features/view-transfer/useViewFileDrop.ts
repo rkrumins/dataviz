@@ -1,5 +1,5 @@
 /**
- * Drop a view file anywhere on a page to import it.
+ * Drop a view file (or a view with its data, a `.view-package.zip`) anywhere on a page to import it.
  *
  * Returns handlers to spread on the page's root element and whether a file is over it;
  * `ViewFileDropOverlay` shows where to let go. Only drags carrying files count, and only over
@@ -42,7 +42,7 @@ export function useViewFileDrop(onFile: (file: File) => void, enabled = true) {
     depth.current = 0
     setDragging(false)
     const file = e.dataTransfer.files?.[0]
-    if (file && /\.json$/i.test(file.name)) onFile(file)
+    if (file && /\.(json|zip)$/i.test(file.name)) onFile(file)
   }, [enabled, onFile])
 
   return { dragging, dropProps: { onDragEnter, onDragOver, onDragLeave, onDrop } }

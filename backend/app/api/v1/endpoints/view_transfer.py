@@ -388,8 +388,15 @@ async def import_package_data(
     record = await _read_json(ie.store, _upload_key(upload_id, package.UPLOAD_RECORD))
     if record is None or record.get("owner") != user.id:
         raise expired
-    if record.get("data"):
-        return record["data"]
+    done = record.get("data")
+    if done:
+        if (done.get("workspaceId"), done.get("dataSourceId"), done.get("viewId")) != \
+                (body.workspaceId, body.dataSourceId, body.viewId):
+            # The upload's data went with that job: taking it somewhere else needs the file again.
+            raise HTTPException(status_code=409, detail=(
+                f"This package's data already went into the draft “{done.get('draftName')}”. "
+                "Choose the file again to bring it in here."))
+        return done
 
     workspace = await session.get(WorkspaceORM, body.workspaceId)
     if workspace is None or workspace.deleted_at is not None:
@@ -420,7 +427,8 @@ async def import_package_data(
     await ie.store.put_stream(created["source_uri"],
                               ie.store.open_stream(_upload_key(upload_id, package.UPLOAD_DATA)))
     data = {"jobId": created["job_id"], "branchId": branch_id, "graphId": graph["graph_id"],
-            "workspaceId": body.workspaceId, "dataSourceId": body.dataSourceId, "draftName": name}
+            "workspaceId": body.workspaceId, "dataSourceId": body.dataSourceId, "viewId": body.viewId,
+            "draftName": name}
     await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
                               _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
     await ie.store.delete(_upload_key(upload_id, package.UPLOAD_DATA))     # the job has its own copy

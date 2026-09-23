@@ -192,6 +192,12 @@ async def test_a_package_brings_its_data_into_a_draft_and_the_view_follows(
     assert b"urn:new" in await _read(jobs.store, f"{uat}/{ds}/g_{ds}/{job['job_id']}/source.ndjson")
     again = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})
     assert again.json() == started and len(jobs.imports) == 1, "asking again answers with the same job"
+    other = await _data_source(db_session, uat, graph_name="elsewhere")
+    versioning.track(uat, other)
+    elsewhere = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": other})
+    assert elsewhere.status_code == 409 and "Import: Finance lineage" in elsewhere.json()["detail"], \
+        "the data already went with the first job: somewhere else needs the file again"
+    assert len(jobs.imports) == 1 and len(versioning.drafts) == 1
 
     # The view is checked against the draft, then staged into it: a new view claims the draft.
     view = body["views"][0]

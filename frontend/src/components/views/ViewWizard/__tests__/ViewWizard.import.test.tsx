@@ -13,20 +13,28 @@
  *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
  *     rest and is retried under the same request id; a view switched to a copy is checked again;
  *   - on a version-controlled data source, an import waits in a draft by default (or goes live,
- *     if chosen), and the view then opens on that draft.
+ *     if chosen), and the view then opens on that draft;
+ *   - a view with its data (a package): its data goes into a new draft of a version-controlled
+ *     target, the view is checked against that draft and goes into it too, and opens there; a
+ *     target that can't take the data is refused (the view alone still can be imported); and data
+ *     that already went into a draft elsewhere asks for the file again.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
-  ImportViewResult, InspectResult, ReconcileResult,
+  ImportViewResult, InspectResult, PackageInspectResult, ReconcileResult,
 } from '@/services/viewTransferApiService'
 
 const inspectMock = vi.fn()
 const reconcileMock = vi.fn()
 const importMock = vi.fn()
 const getViewMock = vi.fn()
+const inspectPackageMock = vi.fn()
+const packageDataMock = vi.fn()
+const getImportMock = vi.fn()
+const importPreviewMock = vi.fn()
 let requestIds = 0
 const NOT_VERSIONED = { versioned: false, allowed: false, checking: false }
 let staging = NOT_VERSIONED
@@ -36,6 +44,8 @@ vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
   return {
     ...actual,
     inspectViewFile: (...args: unknown[]) => inspectMock(...args),
+    inspectViewPackage: (...args: unknown[]) => inspectPackageMock(...args),
+    importPackageData: (...args: unknown[]) => packageDataMock(...args),
     reconcileViews: (...args: unknown[]) => reconcileMock(...args),
     importView: (...args: unknown[]) => importMock(...args),
     newRequestId: () => `req-test-${String(++requestIds).padStart(4, '0')}`,
@@ -44,6 +54,14 @@ vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
 vi.mock('@/services/viewApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewApiService')>()
   return { ...actual, getView: (...args: unknown[]) => getViewMock(...args), listViews: vi.fn().mockResolvedValue({ items: [] }) }
+})
+vi.mock('@/services/importExportApiService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/importExportApiService')>()
+  return {
+    ...actual,
+    getImport: (...args: unknown[]) => getImportMock(...args),
+    getImportPreview: (...args: unknown[]) => importPreviewMock(...args),
+  }
 })
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 vi.mock('../import/useDraftStaging', () => ({
@@ -490,5 +508,139 @@ describe('ViewWizard — importing into a draft', () => {
     await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
     expect(importMock.mock.calls.map(([r]) => r.stage)).toEqual([true, true])
     expect(await screen.findAllByRole('button', { name: 'Open in draft' })).toHaveLength(2)
+  })
+})
+
+// ── A view with its data ────────────────────────────────────────────────────
+
+const VERSIONED = { versioned: true, allowed: true, checking: false }
+
+/** A package of "Finance lineage" with the data of its entities, suggested for UAT's Lineage (and,
+ *  next best, UAT's Archive). */
+function inspectedPackage(): PackageInspectResult {
+  const base = inspected()
+  const suggestion = base.targetSuggestions.s1[0]
+  return {
+    ...base,
+    uploadId: 'up_1',
+    package: {
+      scope: 'view', data: { version: 'published', nodes: 120, edges: 80 }, createdAt: '2026-09-20T10:00:00Z',
+      parts: {
+        'view-bundle.json': { sha256: 'sha256:b', bytes: 2048, verified: true },
+        'data/graph.ndjson': { sha256: 'sha256:d', bytes: 40960, verified: true },
+      },
+      integrity: 'verified',
+    },
+    targetSuggestions: {
+      s1: [
+        { ...suggestion, versioned: true },
+        { ...suggestion, dataSourceId: 'ds2', label: 'Archive', score: 40, sampleHitRate: 0.1, versioned: true },
+      ],
+    },
+  }
+}
+
+const DATA_STARTED = {
+  jobId: 'imp_1', branchId: 'br_data', graphId: 'g1', workspaceId: 'ws1', dataSourceId: 'ds1', viewId: null,
+  draftName: 'Import: Finance lineage',
+}
+
+function renderPackage() {
+  const file = new File(['PK'], 'finance.v7.view-package.zip', { type: 'application/zip' })
+  return renderImport({ importFile: file })
+}
+
+describe('ViewWizard — a view with its data', () => {
+  beforeEach(() => {
+    staging = VERSIONED
+    inspectPackageMock.mockResolvedValue(inspectedPackage())
+    reconcileMock.mockResolvedValue(reconciled())
+    packageDataMock.mockResolvedValue(DATA_STARTED)
+    getImportMock.mockResolvedValue({ jobId: 'imp_1', jobType: 'ingest', status: 'completed', graphId: 'g1', branchId: 'br_data' })
+    importPreviewMock.mockResolvedValue({
+      job: { jobId: 'imp_1', jobType: 'ingest', status: 'completed', graphId: 'g1' },
+      summary: { new: 118, updated: 2, unchanged: 0, deleted: 0, invalid: 0 },
+      sample: [{ rowIndex: 0, kind: 'node', status: 'new', label: 'revenue' }],
+    })
+  })
+
+  it('brings the data into a draft, checks the view against it, and puts the view there too', async () => {
+    importMock.mockResolvedValue({ ...imported('view_new'), version: null, staged: { branchId: 'br_data' } })
+    renderPackage()
+
+    expect(await screen.findByText('Import a view with its data')).toBeInTheDocument()
+    expect(screen.getByText(/120 entities and 80 relationships/)).toBeInTheDocument()
+    expect(inspectMock).not.toHaveBeenCalled()
+    await next()                                          // → Target
+    expect(await screen.findAllByText('Version control')).toHaveLength(2)
+    await next()                                          // → Data
+    expect(await screen.findByText('Bring in the data')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /Bring the data into a draft/ }))
+
+    expect(await screen.findByText('The data is in the draft')).toBeInTheDocument()
+    expect(packageDataMock).toHaveBeenCalledWith('up_1', {
+      workspaceId: 'ws1', dataSourceId: 'ds1', viewId: null, draftName: 'Import: Finance lineage',
+    })
+    expect(screen.getByText('118')).toBeInTheDocument()
+    await next()                                          // → Match, against the draft
+    expect(await screen.findByText('How it fits here')).toBeInTheDocument()
+    expect(reconcileMock).toHaveBeenCalledWith([expect.objectContaining({
+      action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds1', branchId: 'br_data' },
+    })])
+
+    for (const step of ['basics-step', 'layout-step', 'assignment-step', 'entities-step', 'preview-step']) {
+      await next()
+      await screen.findByTestId(step)
+    }
+    expect(screen.getByText('It joins its data in “Import: Finance lineage”')).toBeInTheDocument()
+    expect(screen.queryByText('When it goes live')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0]).toMatchObject({
+      action: 'create', stage: true, target: { workspaceId: 'ws1', dataSourceId: 'ds1', branchId: 'br_data' },
+    })
+    expect(await screen.findByText('Waiting with its data in “Import: Finance lineage”')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Open view now/ }))
+    expect(screen.getByTestId('location')).toHaveTextContent('/views/view_new?branch=br_data')
+  })
+
+  it('goes only where the data can, and imports the view alone when asked', async () => {
+    staging = NOT_VERSIONED
+    importMock.mockResolvedValue(imported('view_new'))
+    renderPackage()
+
+    await screen.findByText('Import a view with its data')
+    await next()                                          // → Target
+    expect(await screen.findByText(/isn’t under version control, so the package’s data can’t go into it/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.click(await screen.findByRole('radio', { name: 'View only' }))
+    expect(screen.getByRole('heading', { name: 'Import a view' })).toBeInTheDocument()
+    await next()                                          // → Target
+    await next()                                          // → Match: no Data step, against what's published
+    expect(await screen.findByText('How it fits here')).toBeInTheDocument()
+    expect(reconcileMock).toHaveBeenCalledWith([expect.objectContaining({ target: { workspaceId: 'ws1', dataSourceId: 'ds1' } })])
+    expect(packageDataMock).not.toHaveBeenCalled()
+  })
+
+  it('asks for the file again once the data went into a draft elsewhere', async () => {
+    renderPackage()
+    await screen.findByText('Import a view with its data')
+    await next()
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: /Bring the data into a draft/ }))
+    await screen.findByText('The data is in the draft')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))                 // → Target
+    fireEvent.click(await screen.findByRole('button', { name: /Archive/ }))
+    await next()                                                                    // → Data, for Archive
+    expect(await screen.findByText('The data already went into another draft')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /Choose the file again/ }))
+    expect(await screen.findByText('Drop a view file here')).toBeInTheDocument()
+    expect(packageDataMock).toHaveBeenCalledTimes(1)
   })
 })

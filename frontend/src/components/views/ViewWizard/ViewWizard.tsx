@@ -22,7 +22,9 @@
  * The Import journey (a view from a file exported elsewhere) runs through the same
  * three layers: its File and Target steps belong to the scope phase, and its Match
  * step leads the body, whose Basics → Preview steps edit the imported design. The
- * submit writes it through the import endpoint instead of create/update.
+ * submit writes it through the import endpoint instead of create/update. A view with
+ * its data (a package) has a Data step before Match: the data goes into a draft of
+ * the target, and the view is checked against that draft and goes into it too.
  */
 
 import React, { useState, useCallback, useMemo, useEffect, useRef, startTransition } from 'react'
@@ -42,6 +44,8 @@ import {
     History,
     FileUp,
     ListChecks,
+    DatabaseZap,
+    GitPullRequestDraft,
 } from 'lucide-react'
 import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -98,11 +102,12 @@ import { PreviewStep } from './steps/PreviewStep'
 import { AssignmentStep } from './steps/AssignmentStep'
 import { ScopeStep, ScopeModeToggle } from './steps/ScopeStep'
 import { viewTypeLabel } from '@/lib/domainLabels'
-import { ImportSessionProvider, useImportSession, useImportSessionState } from './import/importSession'
+import { ImportSessionProvider, sameDataTarget, useImportSession, useImportSessionState } from './import/importSession'
 import { BatchImport } from './import/BatchImport'
 import { StageChoice } from './import/StageChoice'
 import { useDraftStaging } from './import/useDraftStaging'
 import { ImportStep } from './import/ImportStep'
+import { PackageDataStep } from './import/PackageDataStep'
 import { ReconcileStep } from './import/ReconcileStep'
 import { TargetSuggestions } from './import/TargetSuggestions'
 import { ImportMetadataPanel } from './import/ImportMetadataPanel'
@@ -208,7 +213,7 @@ export interface WizardFormData {
 }
 
 export type WizardStep =
-    | 'file' | 'target' | 'scope' | 'reconcile'
+    | 'file' | 'target' | 'data' | 'scope' | 'reconcile'
     | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
 
 interface StepDef {
@@ -262,11 +267,18 @@ const LAYOUT_TYPES = [
 // ============================================
 
 /** The Import journey's steps. The target step only exists for a new view (an update's target
- *  view fixes the scope); the design steps only for layouts the wizard can build. */
-function importStepDefs(opts: { needsTarget: boolean; buildable: boolean; withAssignments: boolean }): StepDef[] {
+ *  view fixes the scope); the data step only for a view with its data; the design steps only for
+ *  layouts the wizard can build. */
+function importStepDefs(opts: {
+    needsTarget: boolean
+    withData: boolean
+    buildable: boolean
+    withAssignments: boolean
+}): StepDef[] {
     return [
         { id: 'file', label: 'File', icon: <FileUp className="w-4 h-4" /> },
         ...(opts.needsTarget ? [{ id: 'target' as const, label: 'Target', icon: <Database className="w-4 h-4" /> }] : []),
+        ...(opts.withData ? [{ id: 'data' as const, label: 'Data', icon: <DatabaseZap className="w-4 h-4" /> }] : []),
         { id: 'reconcile', label: 'Match', icon: <ListChecks className="w-4 h-4" /> },
         { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
         ...(opts.buildable ? [
@@ -488,6 +500,16 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     const importAction = importSession.action
     const importNeedsTarget = importAction === 'create' || importAction === 'copy'
     const importViewType = importSession.view?.metadata.viewType ?? null
+    // A view with its data can only go where its data can: a data source under version control, in
+    // a draft the person may open.
+    const packageTarget = useDraftStaging(
+        isImport && importSession.withData ? selectedWsId : null,
+        isImport && importSession.withData ? selectedDsId : null,
+    )
+    const packageTargetReady = !importSession.withData
+        || (!packageTarget.checking && packageTarget.versioned && packageTarget.allowed)
+    // The data source a reconcile was last made against: another one is checked afresh.
+    const reconciledScope = useRef<string | null>(null)
 
     // Fetch stats + probe schema while scope step is visible (existing mode)
     const probeScope = selectedWsId && selectedDsId
@@ -550,16 +572,22 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     // Which file and view the target was last suggested for (see confirmImportFile).
     const suggestedFor = useRef<string | null>(null)
 
+    const { invalidateReconcile } = importSession
     const handleScopeConfirm = useCallback(() => {
         if (scopeMode === 'existing' || scopeMode === 'import') {
             if (selectedWsId && selectedDsId) {
                 if (scopeMode === 'existing') saveLastScope(selectedWsId, selectedDsId)
+                if (scopeMode === 'import') {
+                    const scope = `${selectedWsId}/${selectedDsId}`
+                    if (reconciledScope.current !== scope) invalidateReconcile()
+                    reconciledScope.current = scope
+                }
                 setScopeConfirmed(true)
             }
         } else if (selectedWsId && selectedProviderId && selectedOntologyId) {
             setScopeConfirmed(true)
         }
-    }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId])
+    }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId, invalidateReconcile])
 
     /** Import: past the File step. Every view of a file goes to the batch flow; a new view picks
      *  its target next; an update's target view already fixes the scope. */
@@ -621,6 +649,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             if (importSession.batch) return BATCH_IMPORT_STEPS
             return importStepDefs({
                 needsTarget: importNeedsTarget,
+                withData: importSession.withData,
                 buildable: isBuildable(importViewType),
                 withAssignments: importViewType === 'reference',
             })
@@ -636,7 +665,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [scopeMode, importSession.batch, importNeedsTarget, importViewType])
+    }, [scopeMode, importSession.batch, importSession.withData, importNeedsTarget, importViewType])
 
     // ── Phase A (import): the file, then where a new view goes ──
     if (isImport && !scopeConfirmed) {
@@ -685,7 +714,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                         onBack={() => setImportStep('file')}
                         onNext={handleScopeConfirm}
                         onClose={props.onClose}
-                        canProceed={!!(selectedWsId && selectedDsId)}
+                        canProceed={!!(selectedWsId && selectedDsId) && packageTargetReady}
                         isLastStep={false}
                         isSubmitting={false}
                         onSubmit={() => {}}
@@ -696,13 +725,26 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                             onScopeModeChange={() => {}}
                             showModeToggle={false}
                             title="Where should this view be imported?"
-                            subtitle="Choose the data source here that holds the same graph the view was built on"
+                            subtitle={importSession.withData
+                                ? 'Choose the data source here, under version control, that holds the same graph: its data goes into a draft of it'
+                                : 'Choose the data source here that holds the same graph the view was built on'}
                             aboveSlot={(
-                                <TargetSuggestions
-                                    suggestions={importSession.suggestions}
-                                    selectedDataSourceId={selectedDsId}
-                                    onSelect={selectScope}
-                                />
+                                <>
+                                    <TargetSuggestions
+                                        suggestions={importSession.suggestions}
+                                        selectedDataSourceId={selectedDsId}
+                                        onSelect={selectScope}
+                                        requireVersioned={importSession.withData}
+                                    />
+                                    {importSession.withData && selectedDsId && !packageTarget.checking && !packageTargetReady && (
+                                        <p role="status" className="mt-3 flex items-start gap-2 rounded-xl bg-amber-500/[0.07] border border-amber-500/20 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-200">
+                                            <AlertCircle className="w-3.5 h-3.5 mt-px shrink-0" />
+                                            {packageTarget.versioned
+                                                ? 'Bringing data into a draft of this data source needs permission to manage it. Choose another.'
+                                                : 'This data source isn’t under version control, so the package’s data can’t go into it. Choose another, or import just the view from the File step.'}
+                                        </p>
+                                    )}
+                                </>
                             )}
                             availableWorkspaces={scopeData.workspaces}
                             schemaAvailability={scopeData.schemaAvailability}
@@ -851,6 +893,19 @@ function ViewWizardBody({
     const importViewType = importSession?.view?.metadata.viewType ?? null
     const importBuildable = isBuildable(importViewType)
     const reconciled = isImport ? importSession.reconcile : null
+    // A view with its data: the data goes into a draft of the target first (the Data step, which
+    // then leads the body), and the view is checked against that draft and goes into it.
+    const importWithData = isImport && importSession.withData
+    const importFirstStep: WizardStep = importWithData ? 'data' : 'reconcile'
+    const importDataTarget = useMemo(() => ({
+        workspaceId: resolvedWorkspaceId,
+        dataSourceId: resolvedDataSourceId ?? '',
+        viewId: importTargetViewId,
+    }), [resolvedWorkspaceId, resolvedDataSourceId, importTargetViewId])
+    const importData = importSession?.data
+    const importDataBranch = importWithData && importData?.preview && sameDataTarget(importData.target, importDataTarget)
+        ? importData.started?.branchId ?? null
+        : null
     // An update keeps the view's current name and details unless the person picks the file's.
     const targetViewQuery = useQuery({
         queryKey: [...VIEW_QUERY_KEY, importTargetViewId],
@@ -868,10 +923,13 @@ function ViewWizardBody({
     const importRequestRef = useRef<{ fingerprint: string; id: string } | null>(null)
     /** The draft an import was staged in: the view opens there. */
     const createdBranchRef = useRef<string | null>(null)
-    const importTarget = useMemo(() => (importTargetViewId
-        ? { viewId: importTargetViewId }
-        : { workspaceId: resolvedWorkspaceId, dataSourceId: resolvedDataSourceId }),
-    [importTargetViewId, resolvedWorkspaceId, resolvedDataSourceId])
+    const importTarget = useMemo(() => ({
+        ...(importTargetViewId
+            ? { viewId: importTargetViewId }
+            : { workspaceId: resolvedWorkspaceId, dataSourceId: resolvedDataSourceId }),
+        // Checked against the draft the data went into, so what it brought counts as found.
+        ...(importDataBranch ? { branchId: importDataBranch } : {}),
+    }), [importTargetViewId, resolvedWorkspaceId, resolvedDataSourceId, importDataBranch])
     const importTargetLabel = isImportUpdate
         ? `“${importSession?.targetView?.name ?? 'the view'}”`
         : `${scopeContext.workspaceName} · ${scopeContext.dataSourceLabel}`
@@ -1013,7 +1071,7 @@ function ViewWizardBody({
     // Reset on open / close.
     useEffect(() => {
         if (isOpen) {
-            setCurrentStep(isImport ? 'reconcile' : 'basics')
+            setCurrentStep(isImport ? importFirstStep : 'basics')
             setPreviousSteps([])
             setDriftDismissed(false)
             setPhase('steps')
@@ -1065,6 +1123,7 @@ function ViewWizardBody({
         if (isImport) {
             return importStepDefs({
                 needsTarget: !isImportUpdate,
+                withData: importWithData,
                 buildable: importBuildable,
                 withAssignments: formData.layoutType === 'reference',
             })
@@ -1088,7 +1147,7 @@ function ViewWizardBody({
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importBuildable])
+    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importWithData, importBuildable])
 
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
@@ -1114,6 +1173,8 @@ function ViewWizardBody({
                 }
                 return formData.layoutType !== undefined
             }
+            // Past the Data step once the data is in the draft.
+            case 'data': return !!importDataBranch
             case 'reconcile': {
                 // Past the Match step only with a verdict that allows it, and with every choice
                 // made there re-checked, so the design edited next is the one the server scored.
@@ -1127,7 +1188,7 @@ function ViewWizardBody({
             case 'preview': return true
             default: return false
         }
-    }, [currentStep, formData, isImport, reconciled, importHydrated, importSession])
+    }, [currentStep, formData, isImport, reconciled, importHydrated, importSession, importDataBranch])
 
     const handleNext = useCallback(() => {
         const idx = activeSteps.findIndex(s => s.id === currentStep)
@@ -1143,8 +1204,8 @@ function ViewWizardBody({
     }, [currentStep, activeSteps])
 
     const handleBack = useCallback(() => {
-        // The Match step leads an import's body: back is its target (or its file).
-        if (isImport && currentStep === 'reconcile') {
+        // The Match (or Data) step leads an import's body: back is its target (or its file).
+        if (isImport && currentStep === importFirstStep) {
             onBackToScope?.()
             return
         }
@@ -1160,7 +1221,7 @@ function ViewWizardBody({
                 setCurrentStep(prev)
             })
         }
-    }, [previousSteps, currentStep, mode, onBackToScope, isImport])
+    }, [previousSteps, currentStep, mode, onBackToScope, isImport, importFirstStep])
 
     const handleStepClick = useCallback((stepId: WizardStep) => {
         // Clicking the scope step in create mode goes back to scope
@@ -1186,7 +1247,9 @@ function ViewWizardBody({
     // offered there, and the default.
     const importStaging = useDraftStaging(isImport ? resolvedWorkspaceId : null, isImport ? resolvedDataSourceId : null)
     const [stageChoice, setStageChoice] = useState<boolean | null>(null)
-    const importStaged = isImport && importStaging.versioned && importStaging.allowed && (stageChoice ?? true)
+    // A view with its data always joins its data's draft: they go live together.
+    const importStaged = importWithData
+        || (isImport && importStaging.versioned && importStaging.allowed && (stageChoice ?? true))
     const importWantsPublication = isImport && !isImportUpdate && !importStaged
         && formData.visibility === 'enterprise' && !canPublishHere
 
@@ -1619,9 +1682,11 @@ function ViewWizardBody({
     const creationStages: CreationStage[] = useMemo(() => isImport ? [
         {
             id: 'import' as const,
-            label: importStaged
-                ? (isImportUpdate ? `Proposing the update of ${importTargetLabel} in your draft` : 'Importing the view into its own draft')
-                : isImportUpdate ? `Updating ${importTargetLabel}` : 'Importing the view',
+            label: importWithData
+                ? (isImportUpdate ? `Proposing the update of ${importTargetLabel} beside its data` : 'Importing the view into the draft with its data')
+                : importStaged
+                    ? (isImportUpdate ? `Proposing the update of ${importTargetLabel} in your draft` : 'Importing the view into its own draft')
+                    : isImportUpdate ? `Updating ${importTargetLabel}` : 'Importing the view',
             detail: importStaged
                 ? 'Writing its design into the draft and checking every entity once more; it goes live with the draft'
                 : 'Writing its design, checking every entity once more, and saving it as a version',
@@ -1652,7 +1717,7 @@ function ViewWizardBody({
             detail: 'Writing the layout this view opens with',
             state: stageStates.layout,
         },
-    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication, importStaged])
+    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication, importStaged, importWithData])
 
     /** What the user just built — shown on the success step. */
     const successStats: CreationSummaryStat[] = useMemo(() => {
@@ -1762,7 +1827,9 @@ function ViewWizardBody({
                             isBlank={isBlank}
                             stats={successStats}
                         />
-                        {isImport && importResult && <ImportResultNote result={importResult} />}
+                        {isImport && importResult && (
+                            <ImportResultNote result={importResult} withData={importWithData ? importData?.started?.draftName : undefined} />
+                        )}
                     </>
                 )
             ) : (
@@ -1825,6 +1892,16 @@ function ViewWizardBody({
                 </div>
             )}
 
+            {currentStep === 'data' && importWithData && (
+                <PackageDataStep
+                    target={importDataTarget}
+                    targetLabel={importTargetLabel}
+                    onChooseFileAgain={() => {
+                        importSession?.clearFile()
+                        onBackToFile?.()
+                    }}
+                />
+            )}
             {currentStep === 'reconcile' && isImport && (
                 <ReconcileStep
                     target={importTarget}
@@ -1898,7 +1975,20 @@ function ViewWizardBody({
                             importFilled.base,
                         )}
                     />
-                    {importStaging.versioned && (
+                    {importWithData ? (
+                        <div className="mb-6 flex items-start gap-3 rounded-2xl border border-glass-border p-4">
+                            <GitPullRequestDraft className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+                            <div className="min-w-0 text-xs">
+                                <p className="text-sm font-bold text-ink">It joins its data in “{importData?.started?.draftName}”</p>
+                                <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">
+                                    The view and the data it came with go live together, when the draft is published or its review request merges.
+                                    {!isImportUpdate && formData.visibility === 'enterprise'
+                                        ? ' Publishing to everyone waits until then: it goes live shared with its workspace, and you can ask to publish it from Share.'
+                                        : ''}
+                                </p>
+                            </div>
+                        </div>
+                    ) : importStaging.versioned && (
                         <div className="mb-6">
                             <StageChoice staging={importStaging} stage={importStaged} onChange={setStageChoice}
                                 kind={isImportUpdate ? 'update' : 'new'}

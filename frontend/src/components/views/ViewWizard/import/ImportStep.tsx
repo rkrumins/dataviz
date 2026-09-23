@@ -6,12 +6,15 @@
  * from, and whether it's exactly what was exported), and offers the actions that make sense for
  * it: updating the view here that it already is, a separate copy, a new view, or overwriting a
  * view of your choosing.
+ *
+ * A view with its data (a `.view-package.zip`) is taken in the same place: it then says what data
+ * comes with the view, and that it comes through a draft.
  */
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  ArrowRightLeft, Check, CopyPlus, FileSearch, GitMerge, Info, Layers, ListChecks, Loader2, PlusCircle,
-  Replace, Search, ShieldCheck,
+  ArrowRightLeft, Check, CopyPlus, DatabaseZap, FileSearch, GitMerge, GitPullRequestDraft, Info, Layers,
+  ListChecks, Loader2, PlusCircle, Replace, Search, ShieldAlert, ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
@@ -19,44 +22,46 @@ import { listViews } from '@/services/viewApiService'
 import type { IdentityMatch } from '@/services/viewTransferApiService'
 import { BundleDropzone } from '@/features/view-transfer/BundleDropzone'
 import { BundleSummaryCard } from '@/features/view-transfer/BundleSummaryCard'
-import { TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
+import { pluralize, TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
 import { useImportSession, type ImportTargetView } from './importSession'
 
 export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
   const session = useImportSession()
   if (!session) return null
-  const { inspect, view } = session
+  const { inspect, view, pkg, withData } = session
   const environment = inspect?.bundle.generator.environment ?? null
-  const packageFile = session.inspectError?.code === 'package'
+  // A package vouches for itself too: every part it carries must check out.
+  const integrity = inspect ? (pkg?.info.integrity === 'modified' ? 'modified' : inspect.integrity) : null
 
   return (
     <div className="space-y-6">
       <div className="text-center">
         <h3 className="text-xl font-bold text-ink">
-          {session.intoViewId ? 'Update this view from a file' : 'Import a view'}
+          {session.intoViewId ? 'Update this view from a file' : withData ? 'Import a view with its data' : 'Import a view'}
         </h3>
         <p className="text-ink-muted text-sm mt-1">
-          Bring in a view exported from another environment where the same data source is onboarded
+          {withData
+            ? 'Bring in a view and the graph data it was exported with, through a draft of the data source you choose'
+            : 'Bring in a view exported from another environment where the same data source is onboarded'}
         </p>
       </div>
       {modeToggle && <div className="flex justify-center">{modeToggle}</div>}
 
       <div className="grid md:grid-cols-[minmax(0,4fr)_minmax(0,7fr)] gap-6">
-        <HowItWorks />
+        <HowItWorks withData={withData} />
         <div className="space-y-4 min-w-0">
           <BundleDropzone
             fileName={session.fileName}
             size={session.fileSize}
             busy={session.inspecting}
-            error={session.inspectError
-              ? (packageFile
-                ? 'This is a view with its data. Views with their data are imported through their own journey, which stages the data in a draft first.'
-                : session.inspectError.message)
-              : null}
-            integrity={inspect?.integrity ?? null}
+            error={session.inspectError?.message ?? null}
+            integrity={integrity}
             environment={environment}
+            packaged={!!pkg}
             onFile={(file) => { void session.loadFile(file) }}
           />
+
+          {pkg && inspect && <PackageSummary />}
 
           {inspect && inspect.notices.length > 0 && (
             <div className="space-y-1.5">
@@ -68,7 +73,7 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
             </div>
           )}
 
-          {inspect && inspect.views.length > 1 && !session.intoViewId && (
+          {inspect && inspect.views.length > 1 && !session.intoViewId && !withData && (
             <div className="inline-flex rounded-xl border border-glass-border p-1 bg-black/[0.02] dark:bg-white/[0.02]" role="group" aria-label="How many views to import">
               {([true, false] as const).map(all => (
                 <button key={String(all)} type="button" aria-pressed={session.batch === all} onClick={() => session.setBatch(all)}
@@ -85,9 +90,11 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
           {inspect && inspect.views.length > 1 && !session.batch && (
             <div>
               <p className="text-xs font-medium text-ink-secondary mb-2">
-                This file holds {inspect.views.length} views. Choose the one to import:
+                {withData
+                  ? `This package holds ${inspect.views.length} views. Its data goes into one draft with one of them: choose it. Import the others afterwards from this file, without the data.`
+                  : `This file holds ${inspect.views.length} views. Choose the one to import:`}
               </p>
-              <div className="rounded-xl border border-glass-border divide-y divide-glass-border/60 max-h-48 overflow-y-auto">
+              <div className="rounded-xl border border-glass-border divide-y divide-glass-border max-h-48 overflow-y-auto">
                 {inspect.views.map((v, i) => (
                   <button key={v.portableId + i} type="button" onClick={() => session.setViewIndex(i)}
                     className={cn('w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors',
@@ -112,15 +119,21 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
   )
 }
 
-function HowItWorks() {
-  const steps: Array<[ReactNode, string, string]> = [
+function HowItWorks({ withData }: { withData: boolean }) {
+  const steps: Array<[ReactNode, string, string]> = withData ? [
+    [<FileSearch key="f" className="w-4 h-4" />, 'Choose the package', 'A view with its data, exported from another environment. Every part is checked; nothing is saved yet.'],
+    [<ArrowRightLeft key="t" className="w-4 h-4" />, 'Pick where it goes', 'A data source here under version control: the data can only arrive through a draft.'],
+    [<DatabaseZap key="d" className="w-4 h-4" />, 'Bring in the data', 'Into a new draft of that data source. It only adds and updates; nothing here is deleted.'],
+    [<ListChecks key="m" className="w-4 h-4" />, 'See what matched', 'Checked against the draft, so the entities the data just brought count as found.'],
+    [<GitPullRequestDraft key="r" className="w-4 h-4" />, 'Review, then publish', 'The view joins its data in the draft. Publish the draft, or send it for review, and both go live together.'],
+  ] : [
     [<FileSearch key="f" className="w-4 h-4" />, 'Choose the file', 'Any view file exported from another environment. It is read here; nothing is saved yet.'],
     [<ArrowRightLeft key="t" className="w-4 h-4" />, 'Pick where it goes', 'We suggest the data source here that holds the same graph, measured on the view’s own entities.'],
     [<ListChecks key="m" className="w-4 h-4" />, 'See what matched', 'Every entity the view places is looked up here. Anything not found is kept, marked, never lost.'],
     [<ShieldCheck key="r" className="w-4 h-4" />, 'Review and import', 'Rename it or change anything. The import is saved as a version you can go back to.'],
   ]
   return (
-    <div className="rounded-2xl bg-gradient-to-br from-indigo-50/60 to-transparent dark:from-indigo-950/20 border border-glass-border/60 p-5 space-y-4 h-fit">
+    <div className="rounded-2xl bg-gradient-to-br from-indigo-50/60 to-transparent dark:from-indigo-950/20 border border-glass-border p-5 space-y-4 h-fit">
       <p className="text-xs font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">How importing works</p>
       <ol className="space-y-3.5">
         {steps.map(([icon, title, body], i) => (
@@ -138,8 +151,64 @@ function HowItWorks() {
       </ol>
       <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.04] px-3 py-2.5 text-[11px] text-ink-muted leading-relaxed">
         <span className="font-semibold text-ink-secondary">Comes across:</span> layers, placements, rules, display rules,
-        settings, name and history. <span className="font-semibold text-ink-secondary">Doesn’t:</span> the graph data,
-        sharing, favourites and drafts.
+        settings, name and history{withData ? ', and the entities and relationships the package holds' : ''}.{' '}
+        <span className="font-semibold text-ink-secondary">Doesn’t:</span> {withData ? '' : 'the graph data, '}sharing, favourites and drafts.
+      </div>
+    </div>
+  )
+}
+
+// ── A view with its data ────────────────────────────────────────────────────
+
+function PackageSummary() {
+  const session = useImportSession()!
+  const info = session.pkg!.info
+  const nodes = info.data?.nodes ?? null
+  const edges = info.data?.edges ?? null
+  const unchecked = Object.entries(info.parts).filter(([, part]) => !part.verified).map(([name]) => name)
+  const scope = info.scope === 'source' ? 'the whole data source' : 'the entities of the view'
+  const version = info.data?.version === 'draft' ? 'as it was in a draft' : 'as published'
+  return (
+    <div className="rounded-2xl border border-violet-200/70 dark:border-violet-900/60 bg-gradient-to-br from-violet-50/60 to-transparent dark:from-violet-950/20 overflow-hidden">
+      <div className="flex items-start gap-3 px-4 py-3">
+        <span className="w-9 h-9 rounded-xl bg-violet-500/10 text-violet-500 flex items-center justify-center shrink-0">
+          <DatabaseZap className="w-4.5 h-4.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold text-ink">With its data</p>
+          <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">
+            {nodes !== null && edges !== null
+              ? <>{pluralize(nodes, 'entity', 'entities')} and {pluralize(edges, 'relationship')}: {scope}, {version}.</>
+              : <>The data of {scope}, {version}.</>}
+          </p>
+          {unchecked.length > 0 ? (
+            <p className="flex items-start gap-1.5 mt-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+              <ShieldAlert className="w-3.5 h-3.5 mt-px shrink-0" />
+              Changed after it was exported: {unchecked.join(', ')}. It imports as it is now.
+            </p>
+          ) : (
+            <p className="flex items-center gap-1.5 mt-1.5 text-[11px] text-emerald-700 dark:text-emerald-300">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" /> Every part checks out against the package’s fingerprints
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-3 border-t border-violet-200/60 dark:border-violet-900/40 px-4 py-2.5">
+        <div className="inline-flex rounded-xl border border-glass-border p-1 bg-canvas-elevated" role="radiogroup" aria-label="What to import">
+          {([true, false] as const).map(on => (
+            <button key={String(on)} type="button" role="radio" aria-checked={session.withData === on}
+              onClick={() => session.setWithData(on)}
+              className={cn('px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors',
+                session.withData === on ? 'bg-violet-500 text-white shadow-sm' : 'text-ink-muted hover:text-ink')}>
+              {on ? 'View and data' : 'View only'}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-ink-muted leading-relaxed">
+          {session.withData
+            ? 'The data goes into a draft first, and the view follows it there.'
+            : 'Just the view, as from a view file: for where the data is already here.'}
+        </p>
       </div>
     </div>
   )
@@ -154,14 +223,14 @@ function CollectionSummary() {
   const exists = inspect.views.filter(v => (inspect.identityMatches[v.portableId] ?? []).some(m => m.canEdit)).length
   return (
     <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
-      <div className="px-4 py-3 border-b border-glass-border/60">
+      <div className="px-4 py-3 border-b border-glass-border">
         <p className="text-sm font-bold text-ink">{inspect.views.length} views{environment ? ` from ${environment}` : ''}</p>
         <p className="text-[11px] text-ink-muted mt-0.5">
           {exists ? `${exists} already here and will be updated; ` : ''}
           {inspect.views.length - exists} new. You choose where each source goes, check them all at once, then review each one.
         </p>
       </div>
-      <ul className="max-h-60 overflow-y-auto divide-y divide-glass-border/50">
+      <ul className="max-h-60 overflow-y-auto divide-y divide-glass-border">
         {inspect.views.map(v => {
           const match = (inspect.identityMatches[v.portableId] ?? []).find(m => m.canEdit)
           const status = match ? UPDATE_STATUS_META[match.status] : null
@@ -298,14 +367,14 @@ function OverwritePicker({ exclude, onPick }: { exclude: string[]; onPick: (targ
   const items = (data?.items ?? []).filter(v => !exclude.includes(v.id))
   return (
     <div className="rounded-xl border border-glass-border overflow-hidden">
-      <div className="relative border-b border-glass-border/60">
+      <div className="relative border-b border-glass-border">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
         <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search views you can edit…"
           aria-label="Search views to overwrite"
           className="w-full pl-9 pr-3 py-2 text-xs bg-transparent text-ink placeholder:text-ink-muted outline-none" />
         {isFetching && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-ink-muted" />}
       </div>
-      <ul className="max-h-52 overflow-y-auto divide-y divide-glass-border/50">
+      <ul className="max-h-52 overflow-y-auto divide-y divide-glass-border">
         {items.map(v => (
           <li key={v.id}>
             <button type="button" onClick={() => onPick({

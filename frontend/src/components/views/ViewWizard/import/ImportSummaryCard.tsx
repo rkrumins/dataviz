@@ -82,7 +82,11 @@ export function ImportSummaryCard({ targetLabel, editedSinceCheck, staged = fals
 }
 
 /** After the import: what was stored, proven — or what this environment changed, and why. */
-export function ImportResultNote({ result }: { result: ImportViewResult }) {
+export function ImportResultNote({ result, withData }: {
+  result: ImportViewResult
+  /** The draft the view went into with its data (a package), by name. */
+  withData?: string | null
+}) {
   const { integrity, notices } = result
   return (
     <div className="max-w-xl mx-auto mt-6 space-y-2">
@@ -90,11 +94,13 @@ export function ImportResultNote({ result }: { result: ImportViewResult }) {
         <div className="flex items-start gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50/50 dark:bg-indigo-950/20 px-4 py-3">
           <GitPullRequestDraft className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
           <div className="min-w-0 text-xs">
-            <p className="font-semibold text-ink">Waiting in a draft</p>
+            <p className="font-semibold text-ink">{withData ? `Waiting with its data in “${withData}”` : 'Waiting in a draft'}</p>
             <p className="text-ink-secondary mt-0.5">
-              {result.version
-                ? 'It’s private and in no list until the draft is published or its review request merges.'
-                : 'The view here is unchanged until the draft is published or its review request merges.'}
+              {withData
+                ? 'The view and its data go live together when the draft is published or its review request merges.'
+                : result.version
+                  ? 'It’s private and in no list until the draft is published or its review request merges.'
+                  : 'The view here is unchanged until the draft is published or its review request merges.'}
               {' '}Open the draft to look it over, then publish it or send it for review.
             </p>
           </div>

@@ -556,11 +556,14 @@ export interface PackageDataStarted {
   graphId: string
   workspaceId: string
   dataSourceId: string
+  /** The view the draft was opened for (an update), if any. */
+  viewId?: string | null
   draftName: string
 }
 
 /** Bring an inspected package's data into a new draft of the target data source. The view then
- *  follows into the same draft. Asking again answers with the job already started. */
+ *  follows into the same draft. Asking again for the same target answers with the job already
+ *  started; another target is refused (409): the data went with that job. */
 export function importPackageData(
   uploadId: string,
   body: { workspaceId: string; dataSourceId: string; viewId?: string | null; draftName?: string | null },

@@ -3,18 +3,23 @@
  * on, ranked by what the file says about its source (same kind of database, same graph, same
  * semantic layer) and then MEASURED: a sample of the view's own entities is looked up in each,
  * so "found 49 of 50 here" is evidence, not a guess.
+ *
+ * For a view with its data, only a data source under version control can take it: the others
+ * are shown, but can't be chosen.
  */
 import { createElement } from 'react'
-import { Check, Sparkles } from 'lucide-react'
+import { Check, GitBranch, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import type { TargetSuggestion } from '@/services/viewTransferApiService'
 import { percent } from '@/features/view-transfer/format'
 
-export function TargetSuggestions({ suggestions, selectedDataSourceId, onSelect }: {
+export function TargetSuggestions({ suggestions, selectedDataSourceId, onSelect, requireVersioned = false }: {
   suggestions: TargetSuggestion[]
   selectedDataSourceId: string | null
   onSelect: (workspaceId: string, dataSourceId: string) => void
+  /** Only data sources under version control can be chosen (a view with its data). */
+  requireVersioned?: boolean
 }) {
   const top = suggestions.slice(0, 3)
   if (top.length === 0) return null
@@ -30,10 +35,12 @@ export function TargetSuggestions({ suggestions, selectedDataSourceId, onSelect 
           const active = s.dataSourceId === selectedDataSourceId
           const hit = s.sampleHitRate
           const found = hit !== null ? Math.round(hit * s.sampleSize) : null
+          const unavailable = requireVersioned && s.versioned === false
           return (
             <button key={s.dataSourceId} type="button" onClick={() => onSelect(s.workspaceId, s.dataSourceId)}
-              aria-pressed={active}
-              className={cn('text-left rounded-xl border-2 bg-canvas-elevated px-3 py-2.5 transition-colors',
+              aria-pressed={active} disabled={unavailable}
+              title={unavailable ? 'Not under version control, so it can’t take the data' : undefined}
+              className={cn('text-left rounded-xl border-2 bg-canvas-elevated px-3 py-2.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
                 active ? 'border-indigo-500 shadow-sm shadow-indigo-500/15' : 'border-transparent hover:border-indigo-200 dark:hover:border-indigo-800')}>
               <div className="flex items-center gap-2 min-w-0">
                 {s.providerType ? createElement(getProviderLogo(s.providerType), { className: 'w-4 h-4 shrink-0' }) : null}
@@ -58,8 +65,14 @@ export function TargetSuggestions({ suggestions, selectedDataSourceId, onSelect 
               ) : (
                 <p className="text-[10px] text-ink-muted mt-2">Not sampled</p>
               )}
-              {s.reasons.length > 0 && (
+              {(s.reasons.length > 0 || requireVersioned) && (
                 <div className="flex flex-wrap gap-1 mt-2">
+                  {requireVersioned && (
+                    <span className={cn('inline-flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded',
+                      s.versioned ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted')}>
+                      <GitBranch className="w-2.5 h-2.5" /> {s.versioned ? 'Version control' : 'No version control'}
+                    </span>
+                  )}
                   {s.reasons.map(r => (
                     <span key={r} className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary">{r}</span>
                   ))}
