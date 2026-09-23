@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict
 
 from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.canonical import HASH_PREFIX

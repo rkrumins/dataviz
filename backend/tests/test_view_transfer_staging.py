@@ -22,7 +22,7 @@ from backend.app.db.repositories import view_repo
 from backend.app.services import draft_views
 from backend.app.services.permission_service import PermissionClaims
 from backend.tests.test_view_transfer_import import (  # noqa: F401 — graph is a fixture
-    _as, _assignments, _edit, _file, _import, _layout, _user, _view, _workspace, graph,
+    _as, _edit, _file, _import, _user, _view, _workspace, graph,
 )
 
 pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off

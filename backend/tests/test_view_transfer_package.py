@@ -48,7 +48,8 @@ async def test_a_package_reads_back_verified(store, tmp_path):
     try:
         assert parsed.verified
         assert parsed.bundle == BUNDLE
-        assert open(parsed.data_path, "rb").read() == NDJSON
+        with open(parsed.data_path, "rb") as data:
+            assert data.read() == NDJSON
         assert parsed.parts["data/graph.ndjson"]["bytes"] == len(NDJSON)
         assert parsed.manifest["scope"] == "view"
     finally:

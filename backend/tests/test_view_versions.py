@@ -6,7 +6,6 @@ import contextlib
 import json
 
 import pytest
-from fastapi import HTTPException, status
 from httpx import AsyncClient
 from sqlalchemy import select
 
