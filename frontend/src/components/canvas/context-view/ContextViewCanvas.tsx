@@ -31,6 +31,9 @@ import {
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
+import { useSaveProblemsStore } from '@/store/saveProblemsStore'
+import { OntologyViolationError } from '@/services/versioningApiService'
+import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
@@ -5623,8 +5626,26 @@ export function ContextViewCanvas({
               } else {
                 notify('success', 'Saved to draft.')
               }
+              useSaveProblemsStore.getState().clear()
             } catch (e) {
-              notify('error', (e as Error).message)
+              if (e instanceof OntologyViolationError) {
+                // Refused as a whole — nothing was written. Say exactly what and why, on the changes
+                // that caused it, and keep Review & Save open on them.
+                const problems = mapSaveProblems(e.violations, stagedChangeList)
+                useSaveProblemsStore.getState().report(problems)
+                const failing = new Map(problems.flatMap(p => p.changeIds.map(id => [id, p.reason] as const)))
+                useStagedChangesStore.setState(st => ({
+                  changes: st.changes.map(c => (failing.has(c.id) || c.error
+                    ? { ...c, error: failing.get(c.id) } : c)),
+                }))
+                useStagedChangesStore.getState().openReviewPanel()
+                notify('error', problems.length === 1
+                  ? `Nothing was saved. ${problems[0].reason}`
+                  : `Nothing was saved. ${problems.length} changes need attention.`,
+                  { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else {
+                notify('error', (e as Error).message)
+              }
             }
             return
           }

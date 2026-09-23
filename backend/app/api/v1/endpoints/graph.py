@@ -2978,7 +2978,13 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             assigned.setdefault(eid, eid)
 
     def _ref(x):                               # temp ref → real id; pass real ids / non-strings through
-        return assigned.get(x, x) if isinstance(x, str) else x
+        if not isinstance(x, str):
+            return x
+        x = assigned.get(x, x)
+        # A reader shows an entity with no urn under the stand-in id "gv:<entity id>"; an edit the
+        # client addresses to that id means the entity itself (it used to read as an edit of nothing
+        # — a creation from a partial payload — and fail as "a node needs an entity type").
+        return x[3:] if x.startswith("gv:") else x
 
     ops: List[dict] = []
     for i, o in enumerate(request_ops):

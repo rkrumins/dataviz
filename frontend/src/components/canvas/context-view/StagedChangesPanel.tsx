@@ -13,6 +13,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
+import { liveProblems, useSaveProblemsStore } from '@/store/saveProblemsStore'
+import type { SaveProblem } from '@/features/versioning/model/saveProblems'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
   useStagedChangesStore,
@@ -176,6 +178,12 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
 
   const total = changes.length
   const failedCount = changes.filter(c => c.error).length
+  // Why the last save was refused (nothing was written) — the problems still tied to staged changes.
+  const allProblems = useSaveProblemsStore(s => s.problems)
+  const problems = useMemo(
+    () => liveProblems(allProblems, new Set(changes.map(c => c.id))),
+    [allProblems, changes],
+  )
 
   const summaryStats = useMemo(() => ({
     creates: changes.filter(c => SUMMARY_KIND[c.type] === 'create').length,
@@ -254,7 +262,7 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
                     {total === 0
                       ? 'Nothing pending. Make some edits and they\'ll show up here for review.'
                       : <>Confirm <span className="font-semibold text-white/80 tabular-nums">{total}</span> edit{total === 1 ? '' : 's'} before they hit the backend.</>}
-                    {failedCount > 0 && (
+                    {failedCount > 0 && problems.length === 0 && (
                       <span className="ml-1.5 inline-flex items-center gap-1 text-rose-300 font-semibold">
                         <LucideIcons.AlertTriangle className="w-3 h-3" />
                         {failedCount} previously failed
@@ -263,6 +271,13 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
                   </p>
                 </div>
               </div>
+
+              {problems.length > 0 && (
+                <SaveProblemsBanner
+                  problems={problems}
+                  onDiscard={(ids) => ids.forEach(id => discard(id))}
+                />
+              )}
 
               {/* Summary chips + Undo/Redo cluster */}
               {total > 0 && (
@@ -616,10 +631,16 @@ function ChangeRow({
             {change.error && (
               <>
                 <span className="text-white/15">·</span>
-                <span className="text-rose-300 font-semibold" title={change.error}>failed</span>
+                <span className="text-rose-300 font-semibold">not saved</span>
               </>
             )}
           </p>
+          {change.error && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-snug text-rose-200/90">
+              <LucideIcons.CircleAlert className="w-3.5 h-3.5 mt-px flex-shrink-0 text-rose-300" aria-hidden />
+              <span>{change.error}</span>
+            </p>
+          )}
 
           <AnimatePresence initial={false}>
             {isExpanded && (
@@ -692,6 +713,55 @@ function MoveDetail({ change }: { change: StagedChange }) {
     <div className="mt-2.5 grid grid-cols-2 gap-2">
       {cell('From', from || 'Its current parent', from ? undefined : 'Replaced on save, wherever it is')}
       {cell('To', label(after.parentId) ?? 'Top level', after.edgeType ? `as ${after.edgeType}` : undefined)}
+    </div>
+  )
+}
+
+/**
+ * The last save was refused as a whole, so NOTHING was written. Say so first, then each problem —
+ * what it is about and why — with the fix that is always available: discard the change that caused
+ * it (the rest stay staged, ready to save again).
+ */
+function SaveProblemsBanner({ problems, onDiscard }: {
+  problems: SaveProblem[]
+  onDiscard: (changeIds: string[]) => void
+}) {
+  const n = problems.length
+  return (
+    <div
+      role="alert"
+      className="relative mt-5 rounded-2xl border border-rose-400/35 bg-gradient-to-br from-rose-500/[0.14] via-rose-500/[0.08] to-transparent px-4 py-3.5 shadow-[inset_0_0_0_1px_rgba(244,63,94,0.10)]"
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="w-7 h-7 rounded-xl bg-rose-500/20 border border-rose-400/30 flex items-center justify-center flex-shrink-0">
+          <LucideIcons.OctagonAlert className="w-4 h-4 text-rose-300" aria-hidden />
+        </span>
+        <div className="min-w-0">
+          <p className="text-[13.5px] font-semibold text-white leading-tight">Nothing was saved</p>
+          <p className="text-[11.5px] text-white/60 leading-tight mt-0.5">
+            {n === 1 ? '1 change needs attention' : `${n} changes need attention`} — fix or discard {n === 1 ? 'it' : 'them'}, then save again.
+          </p>
+        </div>
+      </div>
+      <ul className="mt-3 space-y-2">
+        {problems.map((p, i) => (
+          <li key={i} className="flex items-start gap-3 rounded-xl bg-black/25 border border-white/[0.06] px-3 py-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-[12.5px] font-semibold text-white/95 truncate" title={p.name}>{p.name}</p>
+              <p className="text-[11.5px] text-rose-100/80 leading-snug mt-0.5">{p.reason}</p>
+            </div>
+            {p.changeIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onDiscard(p.changeIds)}
+                className="flex-shrink-0 mt-0.5 px-2.5 py-1 rounded-lg text-[11.5px] font-semibold text-rose-100 bg-rose-500/20 border border-rose-400/30 hover:bg-rose-500/30 focus-visible:outline focus-visible:outline-1 focus-visible:outline-rose-300 transition-colors"
+              >
+                Discard this change
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
