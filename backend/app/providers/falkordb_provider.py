@@ -13915,7 +13915,29 @@ class FalkorDBProvider(GraphDataProvider):
         return out
 
     #: URNs per label-qualified seek in ``resolve_identities``.
-    _RESOLVE_IDENTITIES_CHUNK = 2000
+    _RESOLVE_IDENTITIES_CHUNK = 5000
+    #: Seeks in flight at once. A view from another environment can name tens of thousands of
+    #: entities that aren't here, each sought under every label: one at a time, 30,000 of them
+    #: across 30 labels took 2.4 s; four at a time with the larger chunk, 0.54 s.
+    _RESOLVE_IDENTITIES_CONCURRENCY = 4
+
+    async def _cached_urn_labels(self, urns: List[str]) -> Dict[str, str]:
+        """The urn→label cache's entries for ``urns`` (sanitized labels), and nothing else: no
+        bootstrap on a miss. Empty when the cache can't be read."""
+        if self._redis is None:
+            return {}
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for urn in urns:
+                pipe.hget(self._urn_label_key(), urn)
+            raws = await pipe.execute()
+        except Exception as exc:  # noqa: BLE001 — every URN then goes through the full seek
+            logger.debug("resolve_identities: urn→label cache unreadable: %s", exc)
+            return {}
+        return {
+            urn: _sanitize_label(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+            for urn, raw in zip(urns, raws) if raw is not None
+        }
 
     async def _identity_seek(self, label: str, urns: List[str]) -> Dict[str, Dict[str, Any]]:
         """One label-qualified index seek: the found subset of ``urns`` with its identity.
@@ -13952,6 +13974,10 @@ class FalkorDBProvider(GraphDataProvider):
            proof of absence: its entries can be stale (a re-typed node lives under a new label)
            or missing. A URN is reported absent only when every label's seek succeeded and
            none held it; a URN whose seek failed and wasn't found elsewhere stays unknown.
+
+        Pass 1 reads the cache alone, not ``_label_buckets``: on a miss that one bootstraps by
+        seeking every label itself, so a URN that isn't here was sought under every label twice.
+        Seeks run a few at a time (``_RESOLVE_IDENTITIES_CONCURRENCY``).
         """
         wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
         out: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -13959,27 +13985,32 @@ class FalkorDBProvider(GraphDataProvider):
             return out
         await self._ensure_connected()
         size = self._RESOLVE_IDENTITIES_CHUNK
+        slots = asyncio.Semaphore(self._RESOLVE_IDENTITIES_CONCURRENCY)
 
+        async def seek(label: str, chunk: List[str]) -> Dict[str, Dict[str, Any]]:
+            async with slots:
+                return await self._identity_seek(label, chunk)
+
+        cached = await self._cached_urn_labels(wanted)
+        buckets: Dict[str, List[str]] = {}
         pending: List[str] = []
-        try:
-            buckets = await self._label_buckets(wanted)
-        except Exception:
-            buckets = [("", wanted)]
-        for label, bucket in buckets:
-            if not label:
-                pending.extend(bucket)
+        for urn in wanted:
+            if cached.get(urn):
+                buckets.setdefault(cached[urn], []).append(urn)
+            else:
+                pending.append(urn)
+        chunks = [(label, bucket[start:start + size]) for label, bucket in sorted(buckets.items())
+                  for start in range(0, len(bucket), size)]
+        results = await asyncio.gather(*(seek(label, chunk) for label, chunk in chunks),
+                                       return_exceptions=True)
+        for (label, chunk), found in zip(chunks, results):
+            if isinstance(found, BaseException):
+                logger.warning("resolve_identities seek failed (%d urns, label=%r): %s",
+                               len(chunk), label, found)
+                pending.extend(chunk)
                 continue
-            for start in range(0, len(bucket), size):
-                chunk = bucket[start:start + size]
-                try:
-                    found = await self._identity_seek(label, chunk)
-                except Exception as exc:
-                    logger.warning("resolve_identities seek failed (%d urns, label=%r): %s",
-                                   len(chunk), label, exc)
-                    pending.extend(chunk)
-                    continue
-                out.update(found)
-                pending.extend(u for u in chunk if u not in found)
+            out.update(found)
+            pending.extend(u for u in chunk if u not in found)
 
         if not pending:
             return out
@@ -13993,17 +14024,23 @@ class FalkorDBProvider(GraphDataProvider):
             return out  # every pending URN stays unknown
         failed: set = set()
         remaining = pending
-        for label in labels:
+        # Labels in waves as wide as the seeks allowed at once: what one wave finds isn't sought
+        # again under the labels after it.
+        wave_size = self._RESOLVE_IDENTITIES_CONCURRENCY
+        for first in range(0, len(labels), wave_size):
             if not remaining:
                 break
-            for start in range(0, len(remaining), size):
-                chunk = remaining[start:start + size]
-                try:
-                    out.update(await self._identity_seek(label, chunk))
-                except Exception as exc:
+            chunks = [(label, remaining[start:start + size]) for label in labels[first:first + wave_size]
+                      for start in range(0, len(remaining), size)]
+            results = await asyncio.gather(*(seek(label, chunk) for label, chunk in chunks),
+                                           return_exceptions=True)
+            for (label, chunk), found in zip(chunks, results):
+                if isinstance(found, BaseException):
                     logger.warning("resolve_identities confirm seek failed (%d urns, label=%r): %s",
-                                   len(chunk), label, exc)
+                                   len(chunk), label, found)
                     failed.update(chunk)
+                    continue
+                out.update(found)
             remaining = [u for u in remaining if u not in out]
         for urn in remaining:
             if urn not in failed:
