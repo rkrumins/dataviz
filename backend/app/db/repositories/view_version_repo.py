@@ -22,6 +22,7 @@ no-op that returns that version, so repeated saves never pile up identical rows.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -66,11 +67,6 @@ def _load_json(raw: Optional[str], default: Any) -> Any:
         return default
 
 
-def _config_of(row: ViewORM) -> dict:
-    config = _load_json(row.config, {})
-    return config if isinstance(config, dict) else {}
-
-
 def _tags_of(raw: Optional[str]) -> List[str]:
     tags = _load_json(raw, [])
     return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
@@ -84,15 +80,27 @@ class WorkingState:
     label: Dict[str, Any]
 
 
-def _label_of(row: ViewORM, config: dict) -> Dict[str, Any]:
+def _inputs(row: ViewORM) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """What a view's working state is computed from, read off the row. Read here, on the event
+    loop: the computation may run in a worker thread, which must never touch an ORM object."""
+    return row.config, row.view_type, row.name, row.description, row.tags
+
+
+def _state_from(config_raw: Optional[str], view_type: Optional[str], name: Optional[str],
+                description: Optional[str], tags_raw: Optional[str]) -> WorkingState:
+    config = _load_json(config_raw, {})
+    if not isinstance(config, dict):
+        config = {}
+    definition = portable_definition(config, view_type)
     icon = config.get("icon")
-    return {
-        "name": row.name,
-        "description": row.description or None,
+    label = {
+        "name": name,
+        "description": description or None,
         "icon": icon if isinstance(icon, str) and icon else None,
-        "tags": _tags_of(row.tags),
-        "viewType": row.view_type or "graph",
+        "tags": _tags_of(tags_raw),
+        "viewType": view_type or "graph",
     }
+    return WorkingState(definition=definition, content_hash=content_hash(definition), label=label)
 
 
 def _label_of_version(v: ViewVersionORM) -> Dict[str, Any]:
@@ -105,11 +113,16 @@ def _label_of_version(v: ViewVersionORM) -> Dict[str, Any]:
     }
 
 
-def working_state(row: ViewORM) -> WorkingState:
-    config = _config_of(row)
-    definition = portable_definition(config, row.view_type)
-    return WorkingState(definition=definition, content_hash=content_hash(definition),
-                        label=_label_of(row, config))
+async def working_state_async(row: ViewORM) -> WorkingState:
+    """The view as it is right now, worked out in a worker thread. Canonicalising and hashing a
+    large view takes seconds (about 1.8 s at 250,000 placements), and on the event loop every
+    other request this worker is serving would wait for it."""
+    return await asyncio.to_thread(_state_from, *_inputs(row))
+
+
+def _stored_form(definition: dict) -> Tuple[str, dict]:
+    """A version's stored definition and its stats: both walk the whole design."""
+    return canonical_json(definition), definition_stats(definition)
 
 
 async def head(session: AsyncSession, view_id: str) -> Optional[ViewVersionORM]:
@@ -173,20 +186,20 @@ async def checkpoint(
     if source not in SOURCES:
         raise ValueError(f"unknown version source {source!r}")
 
-    state = working_state(row)
+    state = await working_state_async(row)
     latest = await head(session, row.id)
     if (not force and latest is not None and latest.content_hash == state.content_hash
             and _label_of_version(latest) == state.label):
         return latest, False
 
-    stats = definition_stats(state.definition)
+    stored_definition, stats = await asyncio.to_thread(_stored_form, state.definition)
     for attempt in (1, 2):
         number = await _next_version(session, row.id)
         version = ViewVersionORM(
             view_id=row.id,
             version=number,
             content_hash=state.content_hash,
-            definition=canonical_json(state.definition),
+            definition=stored_definition,
             origin_hash=origin_hash if origin_hash and origin_hash != state.content_hash else None,
             name=state.label["name"],
             description=state.label["description"],
@@ -226,7 +239,7 @@ async def snapshot_if_dirty(session: AsyncSession, row: ViewORM, *, actor: Optio
     """Keep the view's current design as a version before something replaces it, even when it
     only existed as unsaved canvas edits: nothing is lost to an import."""
     latest = await ensure_baseline(session, row)
-    if status(row, latest)["dirty"]:
+    if (await status(row, latest))["dirty"]:
         await checkpoint(session, row, source="snapshot", actor=actor, message=message)
 
 
@@ -313,33 +326,40 @@ async def latest_of_source(
     return result.scalar_one_or_none()
 
 
-def definition_of(version: ViewVersionORM) -> dict:
-    definition = _load_json(version.definition, {})
+def parse_definition(raw: Optional[str]) -> dict:
+    """A stored definition, decoded. Pure, so it can run in a worker thread: a large view's is
+    tens of megabytes."""
+    definition = _load_json(raw, {})
     return definition if isinstance(definition, dict) else {}
 
 
-def base_definition(version: ViewVersionORM, base_hash: Optional[str]) -> dict:
-    """The design a merge starts from when ``version`` is the merge base found by ``base_hash``.
+def base_definition(definition_raw: Optional[str], origin_hash: Optional[str],
+                    provenance_raw: Optional[str], base_hash: Optional[str]) -> dict:
+    """The design a merge starts from, when the version with these stored columns (its
+    ``definition``, ``origin_hash`` and ``provenance``) is the merge base found by ``base_hash``.
 
     Usually the version's own design. When the base was found through the version's
     ``origin_hash`` (an import that stored something other than its file), it is the FILE's
     design: what the file's side last agreed with, so the choices made on import count as
-    changes made here and a merge keeps them.
+    changes made here and a merge keeps them. Pure, so it can run in a worker thread.
     """
-    if base_hash and version.origin_hash and base_hash == version.origin_hash:
-        origin = (_load_json(version.provenance, {}) or {}).get("originDefinition")
+    if base_hash and origin_hash and base_hash == origin_hash:
+        origin = (_load_json(provenance_raw, {}) or {}).get("originDefinition")
         if isinstance(origin, dict):
             return origin
-    return definition_of(version)
+    return parse_definition(definition_raw)
 
 
 def label_of(version: ViewVersionORM) -> Dict[str, Any]:
     return _label_of_version(version)
 
 
-def status(row: ViewORM, latest: Optional[ViewVersionORM]) -> Dict[str, Any]:
-    """Whether the view has changed since its latest version, and how."""
-    state = working_state(row)
+async def status(row: ViewORM, latest: Optional[ViewVersionORM],
+                 state: Optional[WorkingState] = None) -> Dict[str, Any]:
+    """Whether the view has changed since its latest version, and how. Pass ``state`` when the
+    caller already has it: working it out again costs as much as the first time."""
+    if state is None:
+        state = await working_state_async(row)
     design_changed = latest is None or latest.content_hash != state.content_hash
     label_changed = latest is None or _label_of_version(latest) != state.label
     return {
@@ -380,18 +400,19 @@ async def restore(
     await session.refresh(row, with_for_update=True)
     latest = await ensure_baseline(session, row)
     snapshot: Optional[ViewVersionORM] = None
-    if status(row, latest)["dirty"]:
+    if (await status(row, latest))["dirty"]:
         snapshot, _ = await checkpoint(
             session, row, source="snapshot", actor=actor,
             message=f"Saved automatically before restoring v{version_number}",
         )
 
-    definition = definition_of(target)
+    definition = await asyncio.to_thread(parse_definition, target.definition)
     layout = definition.get("layout")
     if gate_layout is not None and isinstance(layout, dict) and isinstance(layout.get("referenceLayout"), dict):
         layout["referenceLayout"] = await gate_layout(session, layout["referenceLayout"])
     label = label_of(target)
-    row.config = json.dumps(config_from_definition(definition, icon=label["icon"]))
+    row.config = await asyncio.to_thread(
+        lambda: json.dumps(config_from_definition(definition, icon=label["icon"])))
     row.name = label["name"]
     row.description = label["description"]
     row.tags = json.dumps(label["tags"]) if label["tags"] else None
@@ -409,6 +430,19 @@ async def restore(
     return {"version": restored, "created": created, "snapshot": snapshot}
 
 
+#: Provenance kept for the server's own use, not sent to clients: an import's copy of its file's
+#: design (``base_definition`` merges from it) and the history it carried (the next export
+#: carries it on). Each can be megabytes, and a history page lists up to 200 versions.
+_SERVER_ONLY_PROVENANCE = ("originDefinition", "ancestry")
+
+
+def _client_provenance(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    provenance = _load_json(raw, None)
+    if isinstance(provenance, dict):
+        return {k: v for k, v in provenance.items() if k not in _SERVER_ONLY_PROVENANCE}
+    return provenance
+
+
 def to_summary(v: ViewVersionORM) -> Dict[str, Any]:
     """A version as the history list shows it: no definition, stats and provenance decoded."""
     return {
@@ -423,7 +457,7 @@ def to_summary(v: ViewVersionORM) -> Dict[str, Any]:
         "message": v.message,
         "parentVersion": v.parent_version,
         "stats": _load_json(v.stats, {}) or {},
-        "provenance": _load_json(v.provenance, None),
+        "provenance": _client_provenance(v.provenance),
         "ontologyDigest": v.ontology_digest,
         "createdBy": v.created_by,
         "createdAt": v.created_at,

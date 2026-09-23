@@ -1,6 +1,7 @@
 """View versions: checkpoints of a view's design, history, compare and restore."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 
@@ -244,6 +245,23 @@ def _as(user: User, claims: PermissionClaims):
                 app.dependency_overrides.pop(dep, None)
             else:
                 app.dependency_overrides[dep] = fn
+
+
+async def test_the_status_check_works_the_design_out_off_the_event_loop(test_client: AsyncClient, monkeypatch):
+    """Canonicalising and hashing a large view takes seconds; on the event loop every other
+    request the worker serves would wait. The header asks for this on every view open."""
+    vid = await _view(test_client, await _workspace(test_client))
+    in_threads = []
+    to_thread = asyncio.to_thread
+
+    async def recording(fn, *args, **kwargs):
+        in_threads.append(getattr(fn, "__name__", repr(fn)))
+        return await to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", recording)
+    resp = await test_client.get(f"/api/v1/views/{vid}/versions/status")
+    assert resp.status_code == 200
+    assert "_state_from" in in_threads
 
 
 async def test_readers_see_history_but_cannot_save_or_restore(test_client: AsyncClient):

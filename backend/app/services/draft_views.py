@@ -15,6 +15,7 @@ that left undone:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
@@ -67,9 +68,10 @@ async def changes_on(session: AsyncSession, branch_id: str) -> List[Dict[str, An
     for view_id, row in rows.items():
         overlay = overlays.get(view_id)
         staged = _loads(overlay.staged_provenance) if overlay is not None else {}
-        published = view_version_repo.working_state(row)
-        proposed = portable_definition(await view_repo.effective_view_config(session, row, branch_id),
-                                       row.view_type)
+        published = await view_version_repo.working_state_async(row)
+        # Canonicalising, diffing and hashing walk whole designs: worker threads, not the loop.
+        proposed = await asyncio.to_thread(
+            portable_definition, await view_repo.effective_view_config(session, row, branch_id), row.view_type)
         label = _loads(overlay.label) if overlay is not None and overlay.label else published.label
         entry: Dict[str, Any] = {
             "viewId": row.id, "workspaceId": row.workspace_id, "name": label.get("name") or row.name,
@@ -79,17 +81,18 @@ async def changes_on(session: AsyncSession, branch_id: str) -> List[Dict[str, An
         if view_id in waiting:
             head = await view_version_repo.head(session, row.id)
             provenance = (view_version_repo.to_summary(head).get("provenance") or {}) if head else {}
-            entry.update(change="create", stats=definition_stats(proposed),
+            entry.update(change="create", stats=await asyncio.to_thread(definition_stats, proposed),
                          goesLiveAs=staged.get("visibility") or "private")
         elif overlay is not None and overlay.definition is not None:
             provenance = staged.get("provenance") or {}
-            entry.update(change="update", diff=diff_definitions(
-                published.definition, proposed, label_a=published.label, label_b=label))
+            entry.update(change="update", diff=await asyncio.to_thread(
+                diff_definitions, published.definition, proposed, label_a=published.label, label_b=label))
         else:
-            if content_hash(proposed) == published.content_hash:
+            if await asyncio.to_thread(content_hash, proposed) == published.content_hash:
                 continue
             provenance = {}
-            entry.update(change="layout", diff=diff_definitions(published.definition, proposed))
+            entry.update(change="layout", diff=await asyncio.to_thread(
+                diff_definitions, published.definition, proposed))
         origin = provenance.get("origin") or {}
         if origin:
             entry["origin"] = {"environment": origin.get("environment"), "version": origin.get("version"),

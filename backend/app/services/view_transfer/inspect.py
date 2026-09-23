@@ -74,7 +74,7 @@ async def identity_matches(
             continue
         view = by_portable[row.portable_id]
         latest = await view_version_repo.head(session, row.id)
-        working = view_version_repo.working_state(row)
+        working = await view_version_repo.working_state_async(row)
         history = [h.get("hash") for h in view.raw.get("history") or [] if isinstance(h, dict)]
         state = update_status(
             incoming_hash=view.actual_hash, incoming_history_hashes=history,

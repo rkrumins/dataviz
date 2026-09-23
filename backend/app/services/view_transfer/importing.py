@@ -11,6 +11,7 @@ matched, record activity, and re-read the result so the response can PROVE what 
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -84,15 +85,30 @@ async def _policy(session: AsyncSession, view_type: str) -> Policy:
     return Policy(view_type_allowed=allowed, node_sorting_enabled=sorting)
 
 
+def _canonical(definition: Any, view_type: str) -> Tuple[dict, str]:
+    canonical = portable_definition(definition, view_type)
+    return canonical, content_hash(canonical)
+
+
+def _merged(base: dict, ours: dict, theirs: dict, view_type: str) -> Tuple[dict, List[str]]:
+    merged = merge_definitions(base, ours, theirs)
+    return portable_definition(merged.definition, view_type), merged.conflicts
+
+
+# Everything below that walks a whole design (canonicalising, hashing, merging, diffing,
+# collecting references, reconciling) runs in a worker thread: at the limits each takes up to
+# seconds, and on the event loop every other request this worker is serving would wait. Only
+# plain data crosses into those threads, never an ORM object.
+
+
 async def _prepare(session: AsyncSession, item: ReconcileItem) -> Prepared:
     """The definition this item would write, and (when updating) how it stands."""
-    incoming = portable_definition(item.definition, item.view_type)
-    incoming_hash = content_hash(incoming)
+    incoming, incoming_hash = await asyncio.to_thread(_canonical, item.definition, item.view_type)
     effective = incoming
     update: Optional[Dict[str, Any]] = None
     conflicts: List[str] = []
     row = item.target.view
-    working = view_version_repo.working_state(row) if row is not None else None
+    working = await view_version_repo.working_state_async(row) if row is not None else None
     if row is not None:
         versions = await target_versions(session, row.id)
         state = update_status(
@@ -102,9 +118,11 @@ async def _prepare(session: AsyncSession, item: ReconcileItem) -> Prepared:
         mergeable = state.status == DIVERGED and item.action == "update"
         if item.strategy == "merge" and mergeable:
             base_row = await view_version_repo.get_version(session, row.id, state.base_version)
-            base = view_version_repo.base_definition(base_row, state.base_hash)
-            merged = merge_definitions(base, working.definition, incoming)
-            effective, conflicts = portable_definition(merged.definition, item.view_type), merged.conflicts
+            base = await asyncio.to_thread(
+                view_version_repo.base_definition, base_row.definition, base_row.origin_hash,
+                base_row.provenance, state.base_hash)
+            effective, conflicts = await asyncio.to_thread(
+                _merged, base, working.definition, incoming, item.view_type)
         latest = await view_version_repo.head(session, row.id)
         update = {
             "status": state.status,
@@ -116,9 +134,11 @@ async def _prepare(session: AsyncSession, item: ReconcileItem) -> Prepared:
             "conflicts": conflicts,
         }
     if not item.rewrite.is_empty():
-        effective = portable_definition(rewrite(effective, item.rewrite), item.view_type)
+        effective = await asyncio.to_thread(
+            lambda: portable_definition(rewrite(effective, item.rewrite), item.view_type))
     if update is not None and working is not None:
-        update["diff"] = diff_definitions(working.definition, effective, sample_limit=50)
+        update["diff"] = await asyncio.to_thread(
+            diff_definitions, working.definition, effective, sample_limit=50)
     return Prepared(item=item, effective=effective, update=update, conflicts=conflicts)
 
 
@@ -168,23 +188,26 @@ async def reconcile_items(session: AsyncSession, items: List[ReconcileItem]) -> 
         groups.setdefault(graph_of(p), []).append(p)
     facts: Dict[Tuple[str, Optional[str], Optional[str]], tuple] = {}
     for key, members in groups.items():
-        urns = sorted({u for m in members for u in collect(m.effective).urns})
+        urns = await asyncio.to_thread(
+            lambda ms=members: sorted({u for m in ms for u in collect(m.effective).urns}))
         facts[key] = await _target_facts(session, members[0].item.target, urns)
 
     results = []
     reports = []
     for p in prepared:
         lookup, types = facts[graph_of(p)]
-        report = reconcile_view(
-            p.effective, exported=p.item.exported, lookup=lookup, types=types,
-            policy=await _policy(session, p.item.view_type),
-            entities_resolved_at_export=p.item.entities_resolved,
-        )
+        policy = await _policy(session, p.item.view_type)
+        report, effective_hash = await asyncio.to_thread(
+            lambda p=p, lookup=lookup, types=types, policy=policy: (
+                reconcile_view(p.effective, exported=p.item.exported, lookup=lookup, types=types,
+                               policy=policy, entities_resolved_at_export=p.item.entities_resolved),
+                content_hash(p.effective),
+            ))
         reports.append(report)
         results.append({
             "key": p.item.key,
             "effectiveDefinition": p.effective,
-            "effectiveHash": content_hash(p.effective),
+            "effectiveHash": effective_hash,
             "report": report,
             "update": p.update,
         })
@@ -236,17 +259,23 @@ async def _prepared(session: AsyncSession, item: ImportItem) -> Tuple[str, dict,
     of what was submitted, the file's own definition (canonical) when sent, and what the rules
     here changed."""
     view_type = item.metadata.get("viewType") or "graph"
-    definition = portable_definition(item.definition, view_type)
-    submitted_hash = content_hash(definition)
-    origin_definition = (portable_definition(item.origin_definition, view_type)
-                         if item.origin_definition is not None else None)
+
+    def canonical() -> Tuple[dict, str, Optional[dict], Optional[dict]]:
+        definition, submitted_hash = _canonical(item.definition, view_type)
+        origin_definition = (portable_definition(item.origin_definition, view_type)
+                             if item.origin_definition is not None else None)
+        rl = reference_layout(definition)
+        if rl is not None:
+            view_repo._validate_layer_refs({"layers": rl.get("layers") or [],
+                                            "assignments": rl.get("assignments") or {}})
+        return definition, submitted_hash, origin_definition, rl
+
+    definition, submitted_hash, origin_definition, rl = await asyncio.to_thread(canonical)
     adjustments: List[str] = []
-    rl = reference_layout(definition)
     if rl is not None:
-        view_repo._validate_layer_refs({"layers": rl.get("layers") or [],
-                                        "assignments": rl.get("assignments") or {}})
-        sanitized = await view_repo._gate_node_ordering(session, sanitize_node_ordering(rl))
-        if sanitized != rl:
+        sanitized = await view_repo._gate_node_ordering(
+            session, await asyncio.to_thread(sanitize_node_ordering, rl))
+        if await asyncio.to_thread(lambda: sanitized != rl):
             adjustments.append("Custom node order was dropped: node sorting is turned off here.")
             definition["layout"]["referenceLayout"] = sanitized
     return view_type, definition, submitted_hash, origin_definition, adjustments
@@ -257,7 +286,8 @@ async def _locked_target(session: AsyncSession, item: ImportItem) -> ViewORM:
     row = item.target.view
     assert row is not None
     await session.refresh(row, with_for_update=True)
-    if item.expected_target_hash and view_version_repo.working_state(row).content_hash != item.expected_target_hash:
+    if item.expected_target_hash and (
+            await view_version_repo.working_state_async(row)).content_hash != item.expected_target_hash:
         raise HTTPException(status_code=409, detail={
             "type": "target_changed",
             "message": f"'{row.name}' changed after you reviewed it. Check it again before importing.",
@@ -265,16 +295,32 @@ async def _locked_target(session: AsyncSession, item: ImportItem) -> ViewORM:
     return row
 
 
-async def _report_on(session: AsyncSession, item: ImportItem, definition: dict, workspace_id: str,
-                     view_type: str) -> Dict[str, Any]:
+@dataclass
+class _Facts:
+    """What the target graph said about a design's entities and types, and the rules here."""
+    lookup: Dict[str, Optional[dict]]
+    types: TargetTypes
+    policy: Policy
+
+
+async def _facts_for(session: AsyncSession, item: ImportItem, definition: dict, view_type: str) -> _Facts:
+    """Ask the target graph about ``definition``'s entities. Done BEFORE an update takes the view's
+    row: the row stays locked until the import commits, and a large view's lookup takes seconds,
+    during which a canvas save to that view would wait. Writing never changes which entities a
+    design names, so the answer holds for what is then written."""
+    urns = await asyncio.to_thread(lambda: sorted(collect(definition).urns))
+    lookup, types = await _target_facts(
+        session, Target(item.target.workspace_id, item.target.data_source_id, branch_id=item.target.branch_id),
+        urns)
+    return _Facts(lookup=lookup, types=types, policy=await _policy(session, view_type))
+
+
+async def _report_on(item: ImportItem, definition: dict, facts: _Facts) -> Dict[str, Any]:
     """How ``definition`` matches the target graph: the authoritative record, taken on what is
     actually written."""
-    lookup, types = await _target_facts(
-        session, Target(workspace_id, item.target.data_source_id, branch_id=item.target.branch_id),
-        sorted(collect(definition).urns))
-    return reconcile_view(definition, exported=item.exported, lookup=lookup, types=types,
-                          policy=await _policy(session, view_type),
-                          entities_resolved_at_export=item.entities_resolved)
+    return await asyncio.to_thread(
+        lambda: reconcile_view(definition, exported=item.exported, lookup=facts.lookup, types=facts.types,
+                               policy=facts.policy, entities_resolved_at_export=item.entities_resolved))
 
 
 def _provenance(item: ImportItem, report: Dict[str, Any], adjustments: List[str],
@@ -345,6 +391,7 @@ async def import_item(
     :class:`AlreadyImported` when a concurrent attempt of the same request got there first.
     """
     view_type, definition, submitted_hash, origin_definition, adjustments = await _prepared(session, item)
+    facts = await _facts_for(session, item, definition, view_type)
 
     notices: List[str] = []
     incoming_portable = item.provenance.get("portableId")
@@ -366,7 +413,7 @@ async def import_item(
                 workspaceId=item.target.workspace_id,
                 dataSourceId=item.target.data_source_id,
                 viewType=view_type,
-                config=config_from_definition(definition, icon=item.metadata.get("icon")),
+                config=await asyncio.to_thread(config_from_definition, definition, icon=item.metadata.get("icon")),
                 visibility=item.metadata.get("visibility") or "private",
                 tags=item.metadata.get("tags") or None,
             ),
@@ -380,7 +427,8 @@ async def import_item(
         row = await _locked_target(session, item)
         await view_version_repo.snapshot_if_dirty(session, row, actor=actor,
                                                   message="Saved automatically before importing")
-        row.config = json.dumps(config_from_definition(definition, icon=item.metadata.get("icon")))
+        row.config = await asyncio.to_thread(
+            lambda: json.dumps(config_from_definition(definition, icon=item.metadata.get("icon"))))
         row.name = item.metadata["name"]
         row.description = item.metadata.get("description")
         row.tags = json.dumps(item.metadata["tags"]) if item.metadata.get("tags") else None
@@ -394,8 +442,8 @@ async def import_item(
             row.updated_by = actor
     await session.flush()
 
-    stored = view_version_repo.working_state(row)
-    report = await _report_on(session, item, stored.definition, row.workspace_id, view_type)
+    stored = await view_version_repo.working_state_async(row)
+    report = await _report_on(item, stored.definition, facts)
     provenance, origin, origin_hash = _provenance(item, report, adjustments, origin_definition,
                                                   stored.content_hash)
     # What a retry of this request must answer with (see ``replay``).
@@ -471,8 +519,11 @@ async def stage_update(
     request finds the same draft (a person has one per view) and answers with what it staged.
     """
     view_type, definition, submitted_hash, origin_definition, adjustments = await _prepared(session, item)
+    facts = await _facts_for(session, item, definition, view_type)
+    # Opened before the view is locked, as the lookup is: it talks to the version store. It is the
+    # importer's own draft of this view, found again (not made again) on a retry.
+    branch_id = await open_draft(item.target.view)
     row = await _locked_target(session, item)
-    branch_id = await open_draft(row)
     overlay = await view_repo.ensure_overlay(session, row.id, branch_id)
     staged_before = json.loads(overlay.staged_provenance) if overlay.staged_provenance else {}
     if item.request_id and staged_before.get("requestId") == item.request_id:
@@ -482,16 +533,18 @@ async def stage_update(
             })
         return _staged_result(row, branch_id, staged_before, replayed=True)
 
-    published = view_version_repo.working_state(row)
-    base_rest, base_layout, base_scope = split_definition(published.definition)
-    rest, layout, scope = split_definition(definition)
-    overlay.fork_base_definition = json.dumps(base_rest)
-    overlay.fork_base_layout = json.dumps(base_layout)
-    overlay.fork_base_entity_scope = base_scope
+    published = await view_version_repo.working_state_async(row)
+
+    def encoded() -> Tuple[str, str, Any, str, str, Any, str]:
+        base_rest, base_layout, base_scope = split_definition(published.definition)
+        rest, layout, scope = split_definition(definition)
+        return (json.dumps(base_rest), json.dumps(base_layout), base_scope,
+                json.dumps(rest), json.dumps(layout), scope, content_hash(definition))
+
+    (overlay.fork_base_definition, overlay.fork_base_layout, overlay.fork_base_entity_scope,
+     overlay.definition, overlay.reference_layout, overlay.entity_scope,
+     written_hash) = await asyncio.to_thread(encoded)
     overlay.fork_base_label = json.dumps(published.label)
-    overlay.definition = json.dumps(rest)
-    overlay.reference_layout = json.dumps(layout)
-    overlay.entity_scope = scope
     overlay.label = json.dumps({
         "name": item.metadata["name"],
         "description": item.metadata.get("description") or None,
@@ -500,8 +553,7 @@ async def stage_update(
         "viewType": view_type,
     })
 
-    written_hash = content_hash(definition)
-    report = await _report_on(session, item, definition, row.workspace_id, view_type)
+    report = await _report_on(item, definition, facts)
     provenance, origin, _ = _provenance(item, report, adjustments, origin_definition, written_hash)
     # Whether the view ends up holding something other than the file is only known once the
     # draft goes live and merges (view_repo.promote_overlay); the file's design waits here.
@@ -515,13 +567,13 @@ async def stage_update(
         # An overwrite makes the view track the file's view once it goes live.
         "portableId": item.provenance.get("portableId") if item.action == "overwrite" else None,
         "fileDefinition": (origin_definition if origin_definition is not None
-                           else portable_definition(item.definition, view_type)),
+                           else await asyncio.to_thread(portable_definition, item.definition, view_type)),
         "message": _import_message(origin),
         "summary": _import_summary(origin, item.provenance.get("name") or row.name, report["summary"]["matchRate"]),
         "provenance": provenance,
         "integrity": _integrity(submitted_hash, written_hash, adjustments),
     }
-    overlay.staged_provenance = json.dumps(staged)
+    overlay.staged_provenance = await asyncio.to_thread(json.dumps, staged)
     await session.flush()
     return {**_staged_result(row, branch_id, staged), "report": report}
 

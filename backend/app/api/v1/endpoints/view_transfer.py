@@ -28,16 +28,18 @@ import re
 import tempfile
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Type, TypeVar
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
     _domain_errors, get_import_export_service, get_versioning_service,
 )
+from backend.app.api.v1.endpoints.large_json import json_response
 from backend.app.api.v1.endpoints.view_guards import editable_view, readable_view
 from backend.app.api.v1.endpoints.views import (
     _compute_ontology_digest,
@@ -131,7 +133,7 @@ async def export_view_file(
     if len(sealed) == 1:
         headers["X-Definition-Hash"] = sealed[0].version.content_hash
         headers["X-View-Version"] = str(sealed[0].version.version)
-    body = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
+    body = await asyncio.to_thread(lambda: json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8"))
     return Response(content=body, media_type="application/json", headers=headers)
 
 
@@ -314,7 +316,7 @@ async def inspect_view_package(
         os.unlink(path)
     try:
         try:
-            parsed = parse_bundle(parsed_package.bundle)
+            parsed = await asyncio.to_thread(parse_bundle, parsed_package.bundle)
         except BundleError as exc:
             raise _bundle_error(exc)
         upload_id = f"up_{uuid.uuid4().hex}"
@@ -338,7 +340,7 @@ async def inspect_view_package(
                 graph = await svc.get_graph_by_data_source(ds) if ds else None
                 versioned[ds] = graph is not None and graph.get("workspace_id") == item.get("workspaceId")
             item["versioned"] = versioned[ds]
-    return {
+    return await json_response({
         "uploadId": upload_id,
         "package": {
             "scope": manifest.get("scope"), "data": manifest.get("data"), "createdAt": manifest.get("createdAt"),
@@ -348,10 +350,10 @@ async def inspect_view_package(
         "bundle": parsed.bundle.model_dump(mode="json", exclude={"views"}),
         "integrity": parsed.integrity,
         "notices": parsed.notices,
-        "views": view_payload(parsed),
+        "views": await asyncio.to_thread(view_payload, parsed),
         "identityMatches": await identity_matches(session, parsed, ctx),
         "targetSuggestions": suggestions,
-    }
+    })
 
 
 class PackageDataRequest(BaseModel):
@@ -452,12 +454,12 @@ def _bundle_error(exc: BundleError) -> HTTPException:
     })
 
 
-async def _read_capped(request: Request, cap: int) -> bytes:
+async def _read_capped(request: Request, cap: int, message: Optional[str] = None) -> bytes:
     """The request body, refused (413) as soon as it passes ``cap`` rather than after buffering
     all of it."""
     too_big = HTTPException(status_code=413, detail={
         "type": "invalid_bundle", "code": "too_large",
-        "message": f"This file is larger than {cap // (1024 * 1024)} MB, the most a view file can be.",
+        "message": message or f"This file is larger than {cap // (1024 * 1024)} MB, the most a view file can be.",
     })
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > cap:
@@ -493,18 +495,18 @@ async def inspect_view_file(
                        "\"Import a view with its data\".",
         })
     try:
-        parsed = parse_bundle(raw)
+        parsed = await asyncio.to_thread(parse_bundle, raw)
     except BundleError as exc:
         raise _bundle_error(exc)
     ctx = await _viewer_context(session, user, claims) if rbac_flag("RBAC_ENFORCE_VIEWS") else None
-    return {
+    return await json_response({
         "bundle": parsed.bundle.model_dump(mode="json", exclude={"views"}),
         "integrity": parsed.integrity,
         "notices": parsed.notices,
-        "views": view_payload(parsed),
+        "views": await asyncio.to_thread(view_payload, parsed),
         "identityMatches": await identity_matches(session, parsed, ctx),
         "targetSuggestions": await target_suggestions(session, parsed, claims),
-    }
+    })
 
 
 class Resolutions(BaseModel):
@@ -615,6 +617,32 @@ async def _resolve_scope(
     return importing.Target(target.workspaceId, target.dataSourceId)
 
 
+#: A /reconcile or /import body: a file's designs, each possibly with the file's own copy too.
+_MAX_REQUEST_BYTES = 2 * limits.MAX_BUNDLE_BYTES
+
+_Body = TypeVar("_Body", bound=BaseModel)
+
+
+async def _body(request: Request, model: Type[_Body]) -> _Body:
+    """The request body as ``model``, parsed and validated in a worker thread.
+
+    FastAPI would do it on the event loop, and a view's design with its manifest runs to tens of
+    megabytes: about a second (46 MB) that every other request this worker serves would wait out.
+    A body that doesn't validate is refused as FastAPI refuses one, with a 422 listing the errors.
+    """
+    raw = await _read_capped(request, _MAX_REQUEST_BYTES,
+                             f"This request is larger than {_MAX_REQUEST_BYTES // (1024 * 1024)} MB.")
+    try:
+        return await asyncio.to_thread(model.model_validate_json, raw)
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)])
+
+
+def _exported(manifest: Manifest) -> Dict[str, Dict[str, Any]]:
+    return {urn: info.model_dump() for urn, info in manifest.entities.items()}
+
+
 def _checked_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     try:
         check_depth(definition)
@@ -630,7 +658,7 @@ def _assignment_count(definition: Dict[str, Any]) -> int:
 
 @router.post("/reconcile", dependencies=[Depends(require_feature("viewImportEnabled"))])
 async def reconcile_view_file(
-    req: ReconcileRequest = Body(...),
+    request: Request,
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -643,28 +671,38 @@ async def reconcile_view_file(
     or the caller's draft of it when the target names one. Views sharing a target graph share
     one identity lookup.
     """
-    seen = set()
-    total = 0
+    req = await _body(request, ReconcileRequest)
+
+    def checked() -> List[tuple]:
+        """Each view's definition checked, and its manifest as the reconciler reads it. Both walk
+        whole designs, so this runs in a worker thread."""
+        seen = set()
+        total = 0
+        out = []
+        for view in req.views:
+            if view.key in seen:
+                raise HTTPException(status_code=422, detail=f"Key '{view.key}' is used twice")
+            seen.add(view.key)
+            definition = _checked_definition(view.definition)
+            total += _assignment_count(definition)
+            if total > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
+                raise HTTPException(status_code=422, detail=(
+                    f"These views hold more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments. "
+                    "Check them in smaller groups."))
+            out.append((view, definition, _exported(view.manifest)))
+        return out
+
     items = []
-    for view in req.views:
-        if view.key in seen:
-            raise HTTPException(status_code=422, detail=f"Key '{view.key}' is used twice")
-        seen.add(view.key)
-        definition = _checked_definition(view.definition)
-        total += _assignment_count(definition)
-        if total > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
-            raise HTTPException(status_code=422, detail=(
-                f"These views hold more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments. "
-                "Check them in smaller groups."))
+    for view, definition, exported in await asyncio.to_thread(checked):
         items.append(importing.ReconcileItem(
             key=view.key, definition=definition, view_type=view.viewType,
-            exported={urn: info.model_dump() for urn, info in view.manifest.entities.items()},
+            exported=exported,
             entities_resolved=view.manifest.entitiesResolved,
             history_hashes=view.history, action=view.action, strategy=view.strategy,
             rewrite=view.resolutions.to_rewrite(),
             target=await _resolve_target(session, view.target, view.action, view.portableId, user, claims, svc),
         ))
-    return await importing.reconcile_items(session, items)
+    return await json_response(await importing.reconcile_items(session, items))
 
 
 class ImportMetadata(BaseModel):
@@ -746,7 +784,7 @@ async def _answer(session: AsyncSession, result: Dict[str, Any], actor: Optional
 
 @router.post("/import", dependencies=[Depends(require_feature("viewImportEnabled"))])
 async def import_view_file(
-    req: ImportRequest = Body(...),
+    request: Request,
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -762,6 +800,7 @@ async def import_view_file(
     With ``stage``, the import goes into a draft of the data source instead (see
     ``importing.stage_update`` and ``importing.stage_new``) and the response names it.
     """
+    req = await _body(request, ImportRequest)
     actor = _actor(user)
     if req.stage:
         await require_versioning_enabled()
@@ -777,14 +816,20 @@ async def import_view_file(
     if req.requestId:
         previous = await importing.replay(session, req.requestId, actor)
         if previous is not None:
-            return await _answer(session, previous, actor)
+            return await json_response(await _answer(session, previous, actor))
 
-    definition = _checked_definition(req.definition)
-    if req.originDefinition is not None:
-        _checked_definition(req.originDefinition)
-    if _assignment_count(definition) > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
-        raise HTTPException(status_code=422, detail=(
-            f"This view holds more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments."))
+    def checked() -> Dict[str, Dict[str, Any]]:
+        """The definitions checked and the manifest read, in a worker thread: both walk whole designs."""
+        _checked_definition(req.definition)
+        if req.originDefinition is not None:
+            _checked_definition(req.originDefinition)
+        if _assignment_count(req.definition) > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
+            raise HTTPException(status_code=422, detail=(
+                f"This view holds more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments."))
+        return _exported(req.manifest)
+
+    exported = await asyncio.to_thread(checked)
+    definition = req.definition
     target = await _resolve_target(session, req.target, req.action, req.origin.portableId, user, claims, svc)
     view_type = req.metadata.viewType
     if req.action in ("create", "copy"):
@@ -802,7 +847,7 @@ async def import_view_file(
         definition=definition,
         provenance=req.origin.model_dump(),
         history=[h.model_dump() for h in req.history][-limits.MAX_HISTORY_ENTRIES:],
-        exported={urn: info.model_dump() for urn, info in req.manifest.entities.items()},
+        exported=exported,
         entities_resolved=req.manifest.entitiesResolved,
         resolutions_summary=req.resolutions.summary(),
         expected_target_hash=req.expectedTargetHash,
@@ -851,4 +896,4 @@ async def import_view_file(
         result = await importing.replay(session, req.requestId, actor)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    return await _answer(session, result, actor)
+    return await json_response(await _answer(session, result, actor))

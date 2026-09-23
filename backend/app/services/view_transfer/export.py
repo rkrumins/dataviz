@@ -14,6 +14,7 @@ The file also carries, per view:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -81,7 +82,7 @@ async def seal(
         )
         version = await view_version_repo.get_version(session, row.id, head.version)
     return SealedView(row=row, version=version,
-                      definition=view_version_repo.definition_of(version),
+                      definition=await asyncio.to_thread(view_version_repo.parse_definition, version.definition),
                       label=view_version_repo.label_of(version))
 
 
@@ -145,15 +146,18 @@ async def export_views(
             sources[key] = await describe_source(session, item.row.workspace_id, ds, ontology_digest=digest)
         view_source.append(source_keys[key_tuple])
 
+    # Walking the designs (their references, stats and manifests) runs in worker threads: seconds
+    # for a large view, which on the event loop every other request would wait out.
+    refs_of = await asyncio.to_thread(lambda: [collect(item.definition) for item in sealed])
     entities_by_source: Dict[str, Dict[str, Optional[dict]]] = {}
     resolved_ok: Dict[str, bool] = {}
     for key in sources:
-        urns = sorted({
+        urns = await asyncio.to_thread(lambda key=key: sorted({
             urn
-            for item, item_key in zip(sealed, view_source) if item_key == key
-            for urn in urns_of_kind(collect(item.definition), URN_KIND_ASSIGNMENT, URN_KIND_ANCHOR,
+            for refs, item_key in zip(refs_of, view_source) if item_key == key
+            for urn in urns_of_kind(refs, URN_KIND_ASSIGNMENT, URN_KIND_ANCHOR,
                                     URN_KIND_RULE, URN_KIND_ROOT, URN_KIND_PREDICATE)
-        })
+        }))
         engine = source_engines.get(key)
         found: Dict[str, Optional[dict]] = {}
         ok = engine is not None
@@ -174,14 +178,16 @@ async def export_views(
     names = await view_repo.resolve_user_ids(
         session, {v.created_by for rows in history_rows.values() for v in rows} | {actor})
     entries: List[Dict[str, Any]] = []
-    for item, key in zip(sealed, view_source):
-        refs = collect(item.definition)
+    for item, key, refs in zip(sealed, view_source, refs_of):
         found = entities_by_source.get(key, {})
-        manifest_entities = {
-            urn: {"name": info.get("name"), "type": info.get("type"), "qualifiedName": info.get("qualifiedName")}
-            for urn in sorted(refs.urns)
-            if isinstance(info := found.get(urn), dict)
-        }
+        manifest_entities, counts = await asyncio.to_thread(lambda refs=refs, found=found, item=item: (
+            {
+                urn: {"name": info.get("name"), "type": info.get("type"), "qualifiedName": info.get("qualifiedName")}
+                for urn in sorted(refs.urns)
+                if isinstance(info := found.get(urn), dict)
+            },
+            definition_stats(item.definition),
+        ))
         history, truncated = await _history(session, item, history_rows[item.row.id], names)
         entries.append({
             "source": key,
@@ -192,7 +198,7 @@ async def export_views(
             "metadata": item.label,
             "definition": item.definition,
             "manifest": {
-                "counts": definition_stats(item.definition),
+                "counts": counts,
                 "entities": manifest_entities,
                 "entitiesResolved": resolved_ok.get(key, False),
             },

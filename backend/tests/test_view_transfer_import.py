@@ -14,7 +14,7 @@ from backend.app.auth.dependencies import get_current_user, get_optional_user, g
 from backend.app.db.models import ProviderORM, ViewORM, WorkspaceDataSourceORM
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims
-from backend.app.services.view_transfer import limits
+from backend.app.services.view_transfer import importing, limits
 from backend.app.services.view_transfer.canonical import canonical_json
 from backend.auth_service.interface import User
 
@@ -392,6 +392,30 @@ async def test_an_update_reviewed_against_a_view_that_since_changed_is_refused(t
     assert resp.status_code == 409 and resp.json()["detail"]["type"] == "target_changed"
     history = (await test_client.get(f"/api/v1/views/{target_id}/versions")).json()["items"]
     assert [v["version"] for v in history] == [1], "nothing was written"
+
+
+async def test_an_update_asks_the_graph_before_it_locks_the_view(test_client, graph, monkeypatch):
+    """The view's row stays locked until the import commits; a large view's lookup takes seconds,
+    and a canvas save to that view would wait them out if the lookup came after the lock."""
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    inspected = await _file(test_client, await _view(test_client, dev))
+    target_id = (await _import(test_client, inspected, {"workspaceId": uat})).json()["viewId"]
+    order = []
+    facts, locked = importing._target_facts, importing._locked_target
+
+    async def recording_facts(*args, **kwargs):
+        order.append("lookup")
+        return await facts(*args, **kwargs)
+
+    async def recording_lock(*args, **kwargs):
+        order.append("lock")
+        return await locked(*args, **kwargs)
+
+    monkeypatch.setattr(importing, "_target_facts", recording_facts)
+    monkeypatch.setattr(importing, "_locked_target", recording_lock)
+    resp = await _import(test_client, inspected, {"viewId": target_id}, action="update")
+    assert resp.status_code == 200, resp.text
+    assert order == ["lookup", "lock"]
 
 
 async def test_update_only_applies_to_the_same_view(test_client, graph):

@@ -15,6 +15,7 @@ Reading needs read access to the view; saving and restoring need edit access.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Union
 
@@ -22,6 +23,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.endpoints.large_json import json_response
 from backend.app.api.v1.endpoints.view_guards import editable_view, readable_view
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims
@@ -72,15 +74,12 @@ async def list_versions(
     latest = await view_version_repo.ensure_baseline(session, view)
     rows, has_more = await view_version_repo.list_versions(session, view_id, limit=limit, before=before)
     items = await _with_names(session, [view_version_repo.to_summary(v) for v in rows])
-    working = view_version_repo.status(view, latest)
+    state = await view_version_repo.working_state_async(view)
+    working = await view_version_repo.status(view, latest, state)
     if working["dirty"]:
-        state = view_version_repo.working_state(view)
         latest_full = await view_version_repo.get_version(session, view_id, latest.version)
-        working["summary"] = diff_definitions(
-            view_version_repo.definition_of(latest_full), state.definition,
-            label_a=view_version_repo.label_of(latest_full), label_b=state.label,
-            sample_limit=0,
-        )
+        working["summary"] = await _diff(latest_full.definition, view_version_repo.label_of(latest_full),
+                                         state.definition, state.label, sample_limit=0)
     return {
         "items": items,
         "hasMore": has_more,
@@ -104,7 +103,7 @@ async def version_status(
     """
     view = await readable_view(session, view_id, user, claims)
     latest = await view_version_repo.head(session, view_id)
-    result = view_version_repo.status(view, latest)
+    result = await view_version_repo.status(view, latest)
     result["portableId"] = view.portable_id
     result["origin"] = await _origin(session, view_id)
     return result
@@ -166,7 +165,7 @@ async def compare_versions(
     if before is None:
         raise HTTPException(status_code=404, detail=f"Version {from_version} not found")
     if to_version == "working":
-        state = view_version_repo.working_state(view)
+        state = await view_version_repo.working_state_async(view)
         after_definition, after_label = state.definition, state.label
     else:
         try:
@@ -176,15 +175,20 @@ async def compare_versions(
         after = await view_version_repo.get_version(session, view_id, number)
         if after is None:
             raise HTTPException(status_code=404, detail=f"Version {number} not found")
-        after_definition, after_label = view_version_repo.definition_of(after), view_version_repo.label_of(after)
-    return {
-        "from": from_version,
-        "to": to_version,
-        "diff": diff_definitions(
-            view_version_repo.definition_of(before), after_definition,
-            label_a=view_version_repo.label_of(before), label_b=after_label,
-        ),
-    }
+        after_definition = await asyncio.to_thread(view_version_repo.parse_definition, after.definition)
+        after_label = view_version_repo.label_of(after)
+    diff = await _diff(before.definition, view_version_repo.label_of(before), after_definition, after_label)
+    return {"from": from_version, "to": to_version, "diff": diff}
+
+
+async def _diff(before_raw: Optional[str], before_label: Dict[str, Any], after: dict,
+                after_label: Dict[str, Any], **options: Any) -> Dict[str, Any]:
+    """``diff_definitions`` against a stored version, in a worker thread: decoding and walking two
+    large designs takes seconds, and the event loop serves every other request meanwhile."""
+    def run() -> Dict[str, Any]:
+        before = view_version_repo.parse_definition(before_raw)
+        return diff_definitions(before, after, label_a=before_label, label_b=after_label, **options)
+    return await asyncio.to_thread(run)
 
 
 @router.get("/{version}")
@@ -200,8 +204,8 @@ async def get_version(
     if row is None:
         raise HTTPException(status_code=404, detail=f"Version {version} not found")
     summary = (await _with_names(session, [view_version_repo.to_summary(row)]))[0]
-    summary["definition"] = view_version_repo.definition_of(row)
-    return summary
+    summary["definition"] = await asyncio.to_thread(view_version_repo.parse_definition, row.definition)
+    return await json_response(summary)
 
 
 @router.post("/{version}/restore")

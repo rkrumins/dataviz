@@ -3,6 +3,7 @@ Repository for views table.
 Views define how to visually render context models (or ad-hoc graphs).
 Supports CRUD, filtering, favourites, and enterprise discovery.
 """
+import asyncio
 import json
 import logging
 import os
@@ -1072,16 +1073,22 @@ async def _promote_staged_import(
     staged = _json_or_none(overlay.staged_provenance) or {}
     await view_version_repo.snapshot_if_dirty(
         session, row, actor=actor, message="Saved automatically before a draft's import went live")
-    published = view_version_repo.working_state(row)
-    base = join_definition(json.loads(overlay.fork_base_definition or "{}"),
-                           json.loads(overlay.fork_base_layout or "{}"), overlay.fork_base_entity_scope)
-    proposed = join_definition(json.loads(overlay.definition),
-                               json.loads(overlay.reference_layout or "{}"), overlay.entity_scope)
-    merged = merge_definitions(base, published.definition, proposed)
+    published = await view_version_repo.working_state_async(row)
     label = merge_labels(_json_or_none(overlay.fork_base_label) or {}, published.label,
                          _json_or_none(overlay.label) or {})
+    # The overlay's columns are read here, on the event loop; decoding and merging the designs
+    # (seconds for a large view) runs in a worker thread.
+    parts = (overlay.fork_base_definition, overlay.fork_base_layout, overlay.fork_base_entity_scope,
+             overlay.definition, overlay.reference_layout, overlay.entity_scope)
 
-    row.config = json.dumps(config_from_definition(merged.definition, icon=label.get("icon")))
+    def merge() -> tuple:
+        base_rest, base_layout, base_scope, rest, layout, scope = parts
+        base = join_definition(json.loads(base_rest or "{}"), json.loads(base_layout or "{}"), base_scope)
+        proposed = join_definition(json.loads(rest), json.loads(layout or "{}"), scope)
+        merged = merge_definitions(base, published.definition, proposed)
+        return merged, json.dumps(config_from_definition(merged.definition, icon=label.get("icon")))
+
+    merged, row.config = await asyncio.to_thread(merge)
     row.name = label.get("name") or row.name
     row.description = label.get("description") or None
     row.tags = json.dumps(label["tags"]) if label.get("tags") else None
@@ -1094,7 +1101,7 @@ async def _promote_staged_import(
     await session.delete(overlay)
     await session.flush()
 
-    stored = view_version_repo.working_state(row)
+    stored = await view_version_repo.working_state_async(row)
     provenance = {**(staged.get("provenance") or {}), "branchId": branch_id,
                   "stagedBy": staged.get("actor"), "stagedAt": staged.get("stagedAt"), "publishedBy": actor}
     if merged.conflicts:
@@ -1103,9 +1110,10 @@ async def _promote_staged_import(
     # from the same lineage still finds it (view_version_repo.base_definition).
     origin_hash = None
     file_definition = staged.get("fileDefinition")
-    if isinstance(file_definition, dict) and content_hash(file_definition) != stored.content_hash:
+    file_hash = await asyncio.to_thread(content_hash, file_definition) if isinstance(file_definition, dict) else None
+    if file_hash is not None and file_hash != stored.content_hash:
         provenance["originDefinition"] = file_definition
-        origin_hash = content_hash(file_definition)
+        origin_hash = file_hash
     version, _ = await view_version_repo.checkpoint(
         session, row, source="import", actor=staged.get("actor") or actor, force=True,
         origin_hash=origin_hash, message=f"{staged.get('message') or 'Imported'}, published from a draft",
