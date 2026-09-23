@@ -1,7 +1,7 @@
 /**
  * The Match step's pieces, pinned:
  *   - choices are pure edits of `Resolutions` (the shape the server applies), and taking one back
- *     leaves no trace;
+ *     leaves no trace; many at once is one pass, fast enough for the 20,000 entities a report lists;
  *   - the score projects dropped entities immediately and counts what it can't score (remaps,
  *     withdrawn choices) as pending, never as found;
  *   - the panel turns a click into exactly that edit: drop one, drop all not found, map a type;
@@ -9,10 +9,10 @@
  */
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import type { ReconciledView, ReconcileReport } from '@/services/viewTransferApiService'
+import type { ReconciledView, ReconcileReport, Resolutions } from '@/services/viewTransferApiService'
 import { ReconciliationPanel } from '../ReconciliationPanel'
 import {
-  decisionOf, projectedRate, resolutionCount, sameResolutions, withDecision, withTypeDecision,
+  decisionOf, projectedRate, resolutionCount, sameResolutions, withDecision, withDecisions, withTypeDecision,
 } from '../resolutions'
 
 function report(): ReconcileReport {
@@ -55,6 +55,27 @@ describe('resolutions', () => {
     expect(remapped.drop).toEqual([])
     expect(decisionOf(remapped, 'urn:a')).toEqual({ kind: 'remap', urn: 'urn:b' })
     expect(sameResolutions(withDecision(remapped, 'urn:a', { kind: 'keep' }), {})).toBe(true)
+  })
+
+  it('records one decision for many at once, as one at a time would', () => {
+    const start: Resolutions = { drop: ['urn:kept-drop', 'urn:a'], remap: { 'urn:b': 'urn:x', 'urn:c': 'urn:y' } }
+    const urns = ['urn:a', 'urn:b', 'urn:d']
+    const oneByOne = urns.reduce<Resolutions>((r, urn) => withDecision(r, urn, { kind: 'drop' }), start)
+    const atOnce = withDecisions(start, urns, { kind: 'drop' })
+    expect(sameResolutions(atOnce, oneByOne)).toBe(true)
+    expect(atOnce.remap).toEqual({ 'urn:c': 'urn:y' })
+    expect(sameResolutions(withDecisions(atOnce, urns, { kind: 'keep' }), { drop: ['urn:kept-drop'], remap: { 'urn:c': 'urn:y' } })).toBe(true)
+  })
+
+  it('drops and scores 20,000 entities without stalling the page', () => {
+    const r = report()
+    r.entities = Array.from({ length: 20_000 }, (_, i) => ({ ...r.entities[0], urn: `urn:gone:${i}` }))
+    r.summary.entities = { ...r.summary.entities, checked: 20_100, found: 100 }
+    const started = performance.now()
+    const draft = withDecisions({}, r.entities.map(e => e.urn), { kind: 'drop' })
+    expect(projectedRate(r, {}, draft)).toEqual({ rate: 1, pending: 0 })
+    // One entity at a time took seconds here: each searched every choice already made.
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   it('records type decisions: map, drop, and leave', () => {

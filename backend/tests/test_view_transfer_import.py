@@ -452,6 +452,18 @@ async def test_target_policy_that_strips_data_is_reported(test_client, graph):
     assert body["version"]["provenance"]["adjustments"] == integrity["adjustments"]
 
 
+async def test_a_retried_import_answers_as_the_first_attempt_did(test_client, graph):
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    inspected = await _file(test_client, await _view(test_client, dev))
+    feature_flags._cache = {**(feature_flags._cache or {}), "nodeSortingEnabled": False}
+    feature_flags._cache_ts = time.monotonic()
+
+    first = (await _import(test_client, inspected, {"workspaceId": uat}, request_id="req-0002-abcd")).json()
+    again = (await _import(test_client, inspected, {"workspaceId": uat}, request_id="req-0002-abcd")).json()
+    assert again["viewId"] == first["viewId"] and again["integrity"] == {**first["integrity"], "replayed": True}
+    assert (again["integrity"]["verified"], again["integrity"]["adjusted"]) == (False, True)
+    assert again["report"] == first["version"]["provenance"]["report"]
+
 
 def _user(uid: str) -> User:
     return User(id=uid, email=f"{uid}@example.com", first_name="T", last_name="U", role="user",

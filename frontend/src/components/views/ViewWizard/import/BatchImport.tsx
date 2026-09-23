@@ -24,7 +24,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { getView, listViews, type View } from '@/services/viewApiService'
 import {
-  importView, newRequestId, reconcileViews,
+  ViewTransferError, importView, newRequestId, reconcileViews,
   type ImportAction, type InspectedView, type InspectResult, type ReconciledView, type ReconcileVerdict,
   type Resolutions, type TransferTarget, type UpdateStrategy,
 } from '@/services/viewTransferApiService'
@@ -69,6 +69,8 @@ interface Entry {
   }
 }
 
+/** How many exceptions a report lists at most (the server's `MAX_EXCEPTIONS`). */
+const MAX_LISTED = 20_000
 const VERDICT_LABEL: Record<ReconcileVerdict, string> = { ready: 'Ready', attention: 'Worth a look', blocked: 'Can’t import' }
 const VERDICT_TONE: Record<ReconcileVerdict, string> = { ready: TONE_CHIP.emerald, attention: TONE_CHIP.amber, blocked: TONE_CHIP.rose }
 
@@ -221,6 +223,10 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   }
 
   const dirty = active.some(e => !sameResolutions(e.resolutions, e.draft))
+  /** Views with entities whose lookup failed: neither found nor missing, and worth another try. */
+  const unchecked = active.some(e => (e.reconciled?.report.summary.entities.unknown ?? 0) > 0)
+  const recheck = () => void check(entries.map(e => (
+    (e.reconciled?.report.summary.entities.unknown ?? 0) > 0 ? { ...e, reconciled: null } : e)))
   const checked = active.every(e => e.reconciled)
   const blocked = active.filter(e => e.reconciled?.report.summary.verdict === 'blocked')
   const aggregate = useMemo(() => {
@@ -260,6 +266,8 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   })
   const current: Record<string, View | undefined> = Object.fromEntries(updating.map((e, i) => [e.here!.viewId, currentViews[i]?.data]))
   const currentLoaded = updating.every(e => current[e.here!.viewId])
+  /** Views being updated that couldn't be read here (deleted, or access lost since the check). */
+  const unreadable = updating.filter((_, i) => currentViews[i]?.isError)
 
   /** How many new views go to each workspace under each (lower-cased) name. */
   const namesInBatch = useMemo(() => {
@@ -333,7 +341,13 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
           branchId: result.staged?.branchId ?? null,
         } })
       } catch (err) {
-        setEntry(e.view.index, { run: { state: 'failed', error: err instanceof Error ? err.message : 'Import failed' } })
+        // The view here changed after it was checked: its check is stale, and a retry with the old
+        // one would only be refused again. It is checked again before the next attempt.
+        const changed = err instanceof ViewTransferError && err.type === 'target_changed'
+        setEntry(e.view.index, {
+          run: { state: 'failed', error: err instanceof Error ? err.message : 'Import failed' },
+          ...(changed ? { reconciled: null, epoch: e.epoch + 1 } : {}),
+        })
       }
     }
     void queryClient.invalidateQueries({ queryKey: ['views'] })
@@ -354,6 +368,8 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
       : active.every(e => e.name.trim().length > 0) && currentLoaded
   const done = active.filter(e => e.run.state === 'done')
   const failed = active.filter(e => e.run.state === 'failed')
+  const toImport = active.length - done.length
+  const checkAgain = failed.some(e => !e.reconciled)
 
   const footer = phase === 'importing' ? (
     <div className="flex items-center gap-2 text-sm text-ink-muted">
@@ -363,9 +379,15 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   ) : phase === 'done' ? (
     <div className="flex items-center justify-end gap-2 w-full">
       {failed.length > 0 && (
-        <button type="button" onClick={() => void importAll()}
+        <button type="button"
+          onClick={() => {
+            if (!checkAgain) return void importAll()
+            setPhase('steps')
+            goTo('reconcile')
+          }}
           className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5">
-          <RefreshCw className="w-4 h-4" /> Retry {pluralize(failed.length, 'failed import')}
+          <RefreshCw className="w-4 h-4" />
+          {checkAgain ? 'Check the changed views again' : `Retry ${pluralize(failed.length, 'failed import')}`}
         </button>
       )}
       <button type="button" onClick={onClose}
@@ -378,7 +400,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   return (
     <WizardShell
       title="Import Views"
-      submitLabel={`Import ${pluralize(active.length, 'view')}`}
+      submitLabel={`Import ${pluralize(toImport, 'view')}`}
       currentStep={step}
       activeSteps={steps}
       currentStepIndex={steps.findIndex(s => s.id === step)}
@@ -482,14 +504,24 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold text-rose-600 hover:bg-rose-500/10 disabled:opacity-40">
                   Drop everything not found
                 </button>
-                {(dirty || reconcileError) && (
-                  <button type="button" onClick={() => void check(entries)} disabled={reconciling}
+                {(dirty || reconcileError || unchecked) && (
+                  <button type="button" onClick={recheck} disabled={reconciling}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-60">
                     {reconciling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    {reconcileError ? 'Try again' : 'Re-check with these choices'}
+                    {reconcileError ? 'Try again' : dirty ? 'Re-check with these choices' : 'Check again'}
                   </button>
                 )}
               </div>
+              {unchecked && !dirty && !reconciling && (
+                <p className="text-[11px] text-ink-muted">
+                  Some entities couldn’t be checked because the lookup failed. Check again to look them up.
+                </p>
+              )}
+              {active.some(e => e.reconciled?.report.entitiesTruncated) && (
+                <p className="text-[11px] text-ink-muted">
+                  A view lists only its first {MAX_LISTED.toLocaleString()} entities not found, so this drops those. Re-check, then drop the rest.
+                </p>
+              )}
               {reconcileError && <p className="text-xs text-rose-500">{reconcileError}</p>}
             </div>
           </div>
@@ -585,6 +617,19 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
                   now either way: {active.length - stageable.length === 1 ? 'its data source isn’t' : 'their data sources aren’t'} under version control.
                 </p>
               )}
+            </div>
+          )}
+          {unreadable.length > 0 && (
+            <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-300 dark:border-rose-800 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span className="flex-1">
+                {unreadable.map(e => `“${e.here!.name}”`).join(', ')} can’t be read here any more, so {unreadable.length === 1 ? 'it' : 'they'} can’t
+                be updated. Go back to Match and skip {unreadable.length === 1 ? 'it' : 'them'}, or import {unreadable.length === 1 ? 'it as a separate copy' : 'them as separate copies'}.
+              </span>
+              <button type="button" onClick={() => currentViews.forEach(q => { if (q.isError) void q.refetch() })}
+                className="font-semibold underline underline-offset-2 hover:no-underline shrink-0">
+                Try again
+              </button>
             </div>
           )}
           <div className="rounded-2xl border border-glass-border divide-y divide-glass-border">

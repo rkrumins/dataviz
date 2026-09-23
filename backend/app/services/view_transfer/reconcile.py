@@ -17,6 +17,7 @@ Every URN the view names ends in exactly one state:
 from __future__ import annotations
 
 import difflib
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
@@ -202,13 +203,17 @@ def reconcile_view(
     missing_entity_types = sum(1 for t in entity_types if t["status"] == MISSING)
     missing_relationship_types = sum(1 for t in relationship_types if t["status"] == MISSING)
 
+    # One pass over the assignments, not one per layer: 30 layers × 250,000 placements took seconds.
+    by_layer: Dict[Any, _Counts] = {}
+    for urn, entry in assignments.items():
+        layer_id = entry.get("layerId") if isinstance(entry, dict) else None
+        if isinstance(entry, dict) and isinstance(layer_id, Hashable):
+            by_layer.setdefault(layer_id, _Counts()).add(statuses.get(urn, UNKNOWN))
     layer_rows = []
     healthy = 0
     for layer in layers:
-        counts = _Counts()
-        for urn, entry in assignments.items():
-            if isinstance(entry, dict) and entry.get("layerId") == layer.get("id"):
-                counts.add(statuses.get(urn, UNKNOWN))
+        layer_id = layer.get("id")
+        counts = (by_layer.get(layer_id) if isinstance(layer_id, Hashable) else None) or _Counts()
         anchor_urn = layer.get("anchorUrn") if isinstance(layer.get("anchorUrn"), str) else None
         anchor = {"urn": anchor_urn, "status": statuses.get(anchor_urn, UNKNOWN)} if anchor_urn else None
         ok = counts.missing == 0 and counts.unknown == 0 and (anchor is None or anchor["status"] != MISSING)

@@ -93,7 +93,7 @@ import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
-import { useViewVersionStatus } from '@/hooks/useViewVersions'
+import { invalidateViewVersions, useViewVersionStatus } from '@/hooks/useViewVersions'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { timeAgo } from '@/lib/timeAgo'
@@ -349,6 +349,8 @@ export function ViewPageHeader({ viewId, workspaceName }: {
         closeDetails()
         queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, viewId] })
         queryClient.invalidateQueries({ queryKey: ['views'] })
+        // A new name, description or tags is a change since the latest version: the chip's dot.
+        invalidateViewVersions(queryClient, viewId)
         // The canvas reads its view from the schema store, not React Query — without
         // this a rename would update the header and leave the canvas (and the tab
         // title, which is derived from it) showing the old name until a reload.

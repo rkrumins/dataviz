@@ -27,7 +27,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -649,5 +649,23 @@ describe('Versions and Export, a preview behind one admin switch', () => {
     renderHeader(viewResponse({ access: OWNER_ACCESS }))
     expect(await screen.findByRole('button', { name: 'Versions, at v8 with unsaved changes' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Export' })).toBeInTheDocument()
+  })
+
+  it('asks again after a rename, which is a change since the latest version', async () => {
+    preview(true)
+    mockVersionStatus.mockResolvedValue({
+      headVersion: 8, headHash: 'sha256:a', workingHash: 'sha256:a',
+      designChanged: false, labelChanged: false, dirty: false,
+    })
+    mockUpdateView.mockResolvedValue(viewResponse({ access: OWNER_ACCESS, name: 'Renamed' }))
+    renderHeader(viewResponse({ access: OWNER_ACCESS }))
+    await screen.findByRole('button', { name: 'Versions, at v8' })
+    expect(mockVersionStatus).toHaveBeenCalledTimes(1)
+
+    fireEvent.doubleClick(await screen.findByText('Test View'))
+    const input = screen.getByRole('textbox', { name: 'View name' })
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(mockVersionStatus).toHaveBeenCalledTimes(2))
   })
 })

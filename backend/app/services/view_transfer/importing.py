@@ -398,6 +398,8 @@ async def import_item(
     report = await _report_on(session, item, stored.definition, row.workspace_id, view_type)
     provenance, origin, origin_hash = _provenance(item, report, adjustments, origin_definition,
                                                   stored.content_hash)
+    # What a retry of this request must answer with (see ``replay``).
+    provenance.update(submittedHash=submitted_hash, notices=notices)
     version, created = await view_version_repo.checkpoint(
         session, row, source="import", actor=actor, force=True, origin_hash=origin_hash,
         message=_import_message(origin), provenance=provenance, request_id=item.request_id,
@@ -571,10 +573,13 @@ async def replay(session: AsyncSession, request_id: str, actor: Optional[str]) -
             "type": "request_id_taken", "message": "This request id was already used. Try again.",
         })
     summary = view_version_repo.to_summary(version)
-    report = ((summary.get("provenance") or {}).get("report")) or {}
-    return {"viewId": version.view_id, "version": summary, "report": report, "notices": [],
-            "integrity": {"submittedHash": version.content_hash, "storedHash": version.content_hash,
-                          "verified": True, "adjusted": False, "adjustments": [], "replayed": True}}
+    provenance = summary.get("provenance") or {}
+    # The first attempt's own answer: a retry of an import that had to adjust the design must not
+    # come back "verified".
+    integrity = _integrity(provenance.get("submittedHash") or version.content_hash,
+                           version.content_hash, provenance.get("adjustments") or [])
+    return {"viewId": version.view_id, "version": summary, "report": provenance.get("report") or {},
+            "notices": provenance.get("notices") or [], "integrity": {**integrity, "replayed": True}}
 
 
 __all__ = ["AlreadyImported", "Target", "ReconcileItem", "ImportItem", "reconcile_items",

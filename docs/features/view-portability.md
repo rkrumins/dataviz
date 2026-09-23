@@ -235,7 +235,8 @@ The import also:
   `workspace:view:create`, the enterprise publish policy, restricted data sources), and checks the
   data source belongs to the workspace and the view type is allowed here;
 - refuses with 409 when an update's target changed since it was reviewed (`expectedTargetHash`);
-- returns the first result again for a repeated `requestId`, so retries are safe;
+- returns the first result again for a repeated `requestId`, integrity report included, so
+  retries are safe;
 - ties a multi-view import together with `batchId`, in each version's provenance and the activity log.
 
 ### Several views in one file
@@ -243,7 +244,8 @@ The import also:
 The wizard's batch flow maps each source in the file to a data source here, reconciles every view
 in one request, and reviews them as a table (action, name, visibility, draft). It then imports one
 view per request under one `batchId`; a failure doesn't stop the rest, and "Retry failed" reuses
-each view's `requestId`.
+each view's `requestId`. A view that changed here during the import (`409 target_changed`) goes
+back to be checked again first, since retrying against the old check would only be refused again.
 
 ---
 

@@ -73,6 +73,7 @@ export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
   }
 
   const verdict = reconcile.report.summary.verdict
+  const unchecked = reconcile.report.summary.entities.unknown
   return (
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-4">
@@ -102,6 +103,19 @@ export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
         availableTypes={availableTypes}
         exportedNames={view?.manifest.entities ?? {}}
       />
+
+      {/* A lookup that failed is worth another try: those entities are neither found nor missing. */}
+      {unchecked > 0 && !dirty && !reconciling && (
+        <div className="flex items-center gap-3 rounded-xl border border-glass-border px-4 py-3">
+          <p className="text-xs text-ink flex-1">
+            {pluralize(unchecked, 'entity', 'entities')} couldn’t be checked because the lookup failed, so {unchecked === 1 ? 'it counts' : 'they count'} as neither found nor missing.
+          </p>
+          <button type="button" onClick={() => void session.runReconcile(target)}
+            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500 text-white hover:bg-indigo-600">
+            <RefreshCw className="w-3.5 h-3.5" /> Check again
+          </button>
+        </div>
+      )}
 
       {(dirty || reconciling) && (
         <div className="sticky bottom-0 flex items-center gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-canvas-elevated px-4 py-3 shadow-lg">

@@ -9,9 +9,12 @@
  *   - a view that already exists here: the Target step is skipped, the update is reconciled
  *     against that view, and the import names the design it was reviewed against;
  *   - a view that changed since it was reviewed is sent back to the Match step to check again;
+ *   - overwriting another view is offered only for a view you can edit, asked when it is picked;
+ *   - entities whose lookup failed can be looked up again, one view or many;
  *   - a file of several views: every view checked in one request, then imported one request per
  *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
- *     rest and is retried under the same request id; a view switched to a copy is checked again;
+ *     rest and is retried under the same request id; a view switched to a copy is checked again, as
+ *     is one that changed here during the import; a view to update that can't be read says so;
  *   - on a version-controlled data source, an import waits in a draft by default (or goes live,
  *     if chosen), and the view then opens on that draft;
  *   - a view with its data (a package): its data goes into a new draft of a version-controlled
@@ -31,6 +34,7 @@ const inspectMock = vi.fn()
 const reconcileMock = vi.fn()
 const importMock = vi.fn()
 const getViewMock = vi.fn()
+const listViewsMock = vi.fn()
 const inspectPackageMock = vi.fn()
 const packageDataMock = vi.fn()
 const getImportMock = vi.fn()
@@ -53,7 +57,11 @@ vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
 })
 vi.mock('@/services/viewApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewApiService')>()
-  return { ...actual, getView: (...args: unknown[]) => getViewMock(...args), listViews: vi.fn().mockResolvedValue({ items: [] }) }
+  return {
+    ...actual,
+    getView: (...args: unknown[]) => getViewMock(...args),
+    listViews: (...args: unknown[]) => listViewsMock(...args),
+  }
 })
 vi.mock('@/services/importExportApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/importExportApiService')>()
@@ -212,6 +220,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   requestIds = 0
   staging = NOT_VERSIONED
+  listViewsMock.mockResolvedValue({ items: [] })
 })
 
 describe('ViewWizard — Import journey', () => {
@@ -302,6 +311,38 @@ describe('ViewWizard — Import journey', () => {
     fireEvent.click(screen.getByRole('button', { name: /^retry$/i }))
     expect(await screen.findByText('How it fits here')).toBeInTheDocument()
     await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+  })
+  it('overwrites only a view you can edit, and says so of one you can’t', async () => {
+    inspectMock.mockResolvedValue(inspected())
+    listViewsMock.mockResolvedValue({ items: [
+      { id: 'view_ro', name: 'Read-only view', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1' },
+      { id: 'view_rw', name: 'Editable view', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1' },
+    ] })
+    getViewMock.mockImplementation(async (id: string) => ({ id, access: { canEdit: id === 'view_rw' } }))
+    renderImport()
+
+    fireEvent.click(await screen.findByText('Overwrite an existing view…'))
+    fireEvent.click(await screen.findByText('Read-only view'))
+    expect(await screen.findByText(/You can’t edit this view, so it can’t be overwritten/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Editable view'))
+    expect(await screen.findByText(/Overwriting/)).toHaveTextContent('Overwriting Editable view in UAT')
+    expect(getViewMock.mock.calls.map(([id]) => id)).toEqual(['view_ro', 'view_rw'])
+  })
+  it('looks again at entities whose lookup failed', async () => {
+    inspectMock.mockResolvedValue(inspected())
+    const failed = reconciled()
+    const summary = failed.views[0].report.summary
+    summary.entities = { ...summary.entities, unknown: 1, checked: 1 }
+    reconcileMock.mockResolvedValueOnce(failed).mockResolvedValue(reconciled())
+    renderImport()
+    await screen.findByText('Create a new view')
+    await next()                                          // → Target
+    await next()                                          // → Match
+
+    expect(await screen.findByText(/1 entity couldn’t be checked because the lookup failed/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Check again/ }))
+    await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Check again/ })).not.toBeInTheDocument())
   })
 })
 
@@ -426,6 +467,60 @@ describe('ViewWizard — importing every view of a file', () => {
       action: 'copy', target: { workspaceId: 'ws1', dataSourceId: 'ds1' },
       metadata: { name: 'Sales pipeline', visibility: 'private' }, expectedTargetHash: null,
     })
+  })
+  it('checks again a view that changed here during the import, before importing it again', async () => {
+    importMock
+      .mockImplementationOnce(async () => imported('view_new'))
+      .mockRejectedValueOnce(new ViewTransferError('“Sales (UAT)” changed after you reviewed it.', 409, 'target_changed'))
+      .mockImplementation(async () => imported('view_uat'))
+    renderImport()
+    await throughToReview()
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+
+    // Retrying with the old check would only be refused again.
+    expect(screen.queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument()
+    reconcileMock.mockImplementation(async (views: Array<{ key: string }>) => ({
+      views: views.map(v => ({ ...reconciled().views[0], key: v.key, update: { ...FAST_FORWARD, targetWorkingHash: 'sha256:new' } })),
+      aggregate: reconciled().aggregate,
+    }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Check the changed views again' }))
+    expect(await screen.findByText('How they fit here')).toBeInTheDocument()
+    await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+    expect(reconcileMock.mock.calls[1][0]).toEqual([expect.objectContaining({ key: '1', action: 'update' })])
+    await next()                                          // → Review
+    fireEvent.click(await screen.findByRole('button', { name: /Import 1 view/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(3))
+    expect(importMock.mock.calls[2][0]).toMatchObject({
+      target: { viewId: 'view_uat' }, expectedTargetHash: 'sha256:new', requestId: importMock.mock.calls[1][0].requestId,
+    })
+  })
+
+  it('says which view to update can’t be read here, rather than leaving Import dead', async () => {
+    getViewMock.mockRejectedValue(new Error('View not found'))
+    renderImport()
+    await throughToReview()
+    await next()                                          // → Review
+
+    expect(await screen.findByText(/“Sales \(UAT\)” can’t be read here any more/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Import 2 views/ })).toBeDisabled()
+  })
+  it('looks again at the views with entities whose lookup failed', async () => {
+    reconcileMock.mockImplementationOnce(async (views: Array<{ key: string; action: string }>) => ({
+      views: views.map(v => {
+        const r = { ...reconciled().views[0], key: v.key, update: v.action === 'update' ? FAST_FORWARD : null }
+        if (v.key === '1') r.report.summary.entities = { ...r.report.summary.entities, unknown: 1 }
+        return r
+      }),
+      aggregate: reconciled().aggregate,
+    }))
+    renderImport()
+    await throughToReview()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Check again' }))
+    await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+    expect(reconcileMock.mock.calls[1][0]).toEqual([expect.objectContaining({ key: '1', action: 'update' })])
   })
 })
 

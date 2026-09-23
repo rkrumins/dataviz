@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
-import { listViews } from '@/services/viewApiService'
+import { getView, listViews, type View } from '@/services/viewApiService'
 import type { IdentityMatch } from '@/services/viewTransferApiService'
 import { BundleDropzone } from '@/features/view-transfer/BundleDropzone'
 import { BundleSummaryCard } from '@/features/view-transfer/BundleSummaryCard'
@@ -365,11 +365,33 @@ function OverwritePicker({ exclude, onPick }: { exclude: string[]; onPick: (targ
     staleTime: 30_000,
   })
   const items = (data?.items ?? []).filter(v => !exclude.includes(v.id))
+  // Lists don't say who may edit what, so that is asked of the view picked: the alternative is a
+  // refusal one step later, on a view that could never have been overwritten.
+  const [checking, setChecking] = useState<string | null>(null)
+  const [refused, setRefused] = useState<string | null>(null)
+  const pick = async (v: View) => {
+    setChecking(v.id)
+    setRefused(null)
+    try {
+      if (!(await getView(v.id)).access?.canEdit) {
+        setRefused(v.id)
+        return
+      }
+      onPick({
+        viewId: v.id, name: v.name, workspaceId: v.workspaceId, workspaceName: v.workspaceName,
+        dataSourceId: v.dataSourceId ?? null, dataSourceName: v.dataSourceName, canEdit: true,
+      })
+    } catch {
+      setRefused(v.id)
+    } finally {
+      setChecking(null)
+    }
+  }
   return (
     <div className="rounded-xl border border-glass-border overflow-hidden">
       <div className="relative border-b border-glass-border">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
-        <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search views you can edit…"
+        <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search views…"
           aria-label="Search views to overwrite"
           className="w-full pl-9 pr-3 py-2 text-xs bg-transparent text-ink placeholder:text-ink-muted outline-none" />
         {isFetching && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-ink-muted" />}
@@ -377,13 +399,17 @@ function OverwritePicker({ exclude, onPick }: { exclude: string[]; onPick: (targ
       <ul className="max-h-52 overflow-y-auto divide-y divide-glass-border">
         {items.map(v => (
           <li key={v.id}>
-            <button type="button" onClick={() => onPick({
-              viewId: v.id, name: v.name, workspaceId: v.workspaceId, workspaceName: v.workspaceName,
-              dataSourceId: v.dataSourceId ?? null, dataSourceName: v.dataSourceName,
-            })} className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
+            <button type="button" onClick={() => void pick(v)} disabled={checking !== null}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03]">
               <span className="text-xs font-medium text-ink truncate flex-1">{v.name}</span>
+              {checking === v.id && <Loader2 className="w-3 h-3 animate-spin text-ink-muted shrink-0" />}
               <span className="text-[10px] text-ink-muted truncate max-w-[45%]">{v.workspaceName}{v.dataSourceName ? ` · ${v.dataSourceName}` : ''}</span>
             </button>
+            {refused === v.id && (
+              <p role="alert" className="px-3 pb-2 text-[11px] text-rose-600 dark:text-rose-400">
+                You can’t edit this view, so it can’t be overwritten. Ask its owner for edit access, or pick another.
+              </p>
+            )}
           </li>
         ))}
         {!isFetching && items.length === 0 && <li className="px-3 py-3 text-[11px] text-ink-muted">No views match.</li>}

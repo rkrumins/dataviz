@@ -22,8 +22,17 @@ export function withDecision(r: Resolutions, urn: string, decision: EntityDecisi
   return { ...r, drop, remap }
 }
 
+/** `withDecision` for many at once, in one pass: "Drop all" can cover 20,000 entities. */
 export function withDecisions(r: Resolutions, urns: string[], decision: EntityDecision): Resolutions {
-  return urns.reduce((acc, urn) => withDecision(acc, urn, decision), r)
+  const chosen = new Set(urns)
+  const drop = (r.drop ?? []).filter(u => !chosen.has(u))
+  const remap = { ...(r.remap ?? {}) }
+  for (const urn of chosen) {
+    delete remap[urn]
+    if (decision.kind === 'drop') drop.push(urn)
+    if (decision.kind === 'remap') remap[urn] = decision.urn
+  }
+  return { ...r, drop, remap }
 }
 
 export type TypeKind = 'entity' | 'relationship'
@@ -86,15 +95,20 @@ export function projectedRate(report: ReconcileReport, applied: Resolutions, dra
   let checked = entities.checked
   let found = entities.found
   let pending = 0
+  // Sets, not `decisionOf` per row: that searches the drop list each time, and a report can list
+  // 20,000 entities with as many dropped.
+  const drops = new Set(draft.drop ?? [])
   for (const row of report.entities) {
-    const decision = decisionOf(draft, row.urn)
-    if (decision.kind === 'drop' && row.status !== 'unknown') {
-      checked -= 1
-      if (row.status !== 'missing') found -= 1
+    if (drops.has(row.urn)) {
+      if (row.status !== 'unknown') {
+        checked -= 1
+        if (row.status !== 'missing') found -= 1
+      }
+    } else if (draft.remap?.[row.urn] !== undefined) {
+      pending += 1
     }
-    if (decision.kind === 'remap') pending += 1
   }
-  pending += (applied.drop ?? []).filter(urn => !draft.drop?.includes(urn)).length
+  pending += (applied.drop ?? []).filter(urn => !drops.has(urn)).length
   pending += Object.entries(applied.remap ?? {}).filter(([urn, to]) => draft.remap?.[urn] !== to).length
   return { rate: checked > 0 ? found / checked : null, pending }
 }

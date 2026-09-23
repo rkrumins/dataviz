@@ -395,10 +395,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /views/transfer/inspect — read an uploaded view file",
             "POST /views/transfer/reconcile — check it against a data source",
             "POST /views/transfer/import — create or update a view from it",
+            "POST /views/transfer/packages/inspect and /packages/{id}/data — read a view + data "
+            "package, and bring its data into a draft",
         ),
         ui_surfaces=(
             "The 'Import a view' journey in the View wizard",
-            "'Import view' buttons in the Explorer and the workspace Views manager",
+            "'Import view' buttons in the Explorer and the workspace Views manager, and a view "
+            "file dropped on the Explorer",
+            "'Update from file' on the view card menu and in the canvas Import / Export menu",
         ),
         still_allowed=("Building views in the wizard", "Exporting views"),
         depends_on=("viewPortabilityEnabled",),

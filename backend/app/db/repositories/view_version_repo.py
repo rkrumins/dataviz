@@ -375,6 +375,9 @@ async def restore(
     if target is None:
         raise LookupError(f"view {row.id} has no version {version_number}")
 
+    # Held until the caller commits, as a canvas save holds it: a save that landed between the
+    # snapshot below and the write would be overwritten without ever being kept as a version.
+    await session.refresh(row, with_for_update=True)
     latest = await ensure_baseline(session, row)
     snapshot: Optional[ViewVersionORM] = None
     if status(row, latest)["dirty"]:
