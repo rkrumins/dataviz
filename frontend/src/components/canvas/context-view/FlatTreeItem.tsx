@@ -32,6 +32,8 @@ export interface RowSelectModifiers {
 }
 
 interface FlatTreeItemProps {
+  /** Set when this row is drawn apart from its parent (another column): where it belongs. */
+  placedApartNote?: string
   node: HierarchyNode
   depth: number
   isLast: boolean
@@ -104,6 +106,7 @@ const FLAT_ROW_STYLE: Record<string, string> = {
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
+  placedApartNote,
   depth,
   isLast,
   parentIsLast,
@@ -748,6 +751,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
               style={{ backgroundColor: nodeColor }}
             />
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
+          </span>
+        )}
+        {placedApartNote && (
+          <span className="text-[10.5px] text-ink-muted truncate mt-0.5 flex items-center gap-1" title={placedApartNote}>
+            <LucideIcons.CornerLeftUp className="w-3 h-3 flex-shrink-0" aria-hidden />
+            {placedApartNote}
           </span>
         )}
         {/* Display-rule tags — shared chip cluster (premium chips +

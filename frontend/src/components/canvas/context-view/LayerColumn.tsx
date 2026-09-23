@@ -110,6 +110,12 @@ interface LayerColumnProps {
    *  was said against: no load-more row while the parent still has that count,
    *  even when some of its children render in other columns. */
   exhaustedParents?: Map<string, number>
+  /** Every loaded child of each parent, whichever column it is drawn in (the canvas's containment
+   *  map). A child placed in another column is loaded — counting only this column's rows offered a
+   *  "Load 1 more" for it that could never arrive. */
+  loadedChildren?: Map<string, string[]>
+  /** Entity id → "Part of <parent> · <layer>" for entities drawn apart from their parent. */
+  placedApart?: Map<string, string>
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
@@ -284,6 +290,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   loadingNodes,
   failedNodes,
   exhaustedParents,
+  loadedChildren,
+  placedApart,
   feedMore,
   onFeedMore,
   onScroll,
@@ -664,7 +672,8 @@ export const LayerColumn = React.memo(function LayerColumn({
         // In trace mode the trace API already returns the complete set of
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
-        const hasMore = !isTracing && node.children.length < childCount && !activeQuery
+        const loaded = Math.max(node.children.length, loadedChildren?.get(node.id)?.length ?? 0)
+        const hasMore = !isTracing && loaded < childCount && !activeQuery
           && exhaustedParents?.get(node.id) !== childCount
 
         // What the session found INSIDE this container, at any depth — the
@@ -694,7 +703,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         const hasInline = inline !== null && (inline.rows.length > 0 || inline.overflow > 0)
 
         if (hasMore) {
-          stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - node.children.length })
+          stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - loaded })
         }
 
         if (inline && hasInline) {
@@ -717,7 +726,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents, feedMore, layer.id, layer.name])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents, loadedChildren, feedMore, layer.id, layer.name])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -2622,6 +2631,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <div style={animStyle}>
                       <FlatTreeItem
                         node={node}
+                        placedApartNote={depth === 0 ? placedApart?.get(node.id) : undefined}
                         depth={depth}
                         isLast={isLast}
                         parentIsLast={parentIsLast}

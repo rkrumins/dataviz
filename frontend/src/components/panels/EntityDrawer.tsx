@@ -1204,7 +1204,10 @@ function RelationshipEditor({ nodeId }: { nodeId: string }) {
   const { reparent, retypeContainment } = useReparentNode()
   const { node, parentNode, parentName, currentEdgeType, relTypeOptions, moveTargets } = useContainmentPlacement(nodeId)
   const inDraft = useBranchStore((s) => !!s.currentBranchId)
+  const openReview = useStagedChangesStore((s) => s.openReviewPanel)
   if (!node) return null
+  // A new entity's parent is part of its unsaved create, so it can be moved once it is saved.
+  const unsaved = node.data?.isPending === 'create'
 
   return (
     <div className="pt-5 border-t border-glass-border/30">
@@ -1213,7 +1216,25 @@ function RelationshipEditor({ nodeId }: { nodeId: string }) {
         Relationship
       </h4>
 
-      {!inDraft ? (
+      {inDraft && unsaved ? (
+        <div className="px-3 py-2.5 rounded-xl bg-accent-lineage/10 border border-accent-lineage/20 text-xs text-ink flex items-start gap-2">
+          <LucideIcons.Save className="w-3.5 h-3.5 mt-0.5 shrink-0 text-accent-lineage" />
+          <div className="space-y-2">
+            <p>
+              <span className="font-semibold">Save this new entity before moving it.</span>{' '}
+              {parentNode ? `It will be created inside ${parentName}.` : 'It will be created at the top level.'}{' '}
+              Once saved, you can move it anywhere or change how it relates to its parent.
+            </p>
+            <button
+              type="button"
+              onClick={openReview}
+              className="px-2.5 py-1 rounded-lg bg-accent-lineage/20 hover:bg-accent-lineage/30 text-accent-lineage font-semibold transition-colors"
+            >
+              Review &amp; Save
+            </button>
+          </div>
+        </div>
+      ) : !inDraft ? (
         <div className="px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
           <LucideIcons.Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
           <span>Switch to a draft to change where this entity sits or how it relates to its parent.</span>

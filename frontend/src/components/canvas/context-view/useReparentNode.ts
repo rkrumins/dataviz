@@ -80,6 +80,9 @@ export function useReparentNode() {
         layout: writer?.current() ?? null,
       }
 
+      const label = (id: string) =>
+        (canvas.nodes.find((n) => n.id === id)?.data?.label as string | undefined) ?? id
+      const fromLabels = [...new Set(before.removedLinks.map((e) => label(e.source)))]
       const edgeId = generateId('staged-edge')
       const newLink: LineageEdge = {
         id: edgeId, source: parentKey, target: childKey, type: 'containment',
@@ -106,7 +109,9 @@ export function useReparentNode() {
           targetUrn: (canvas.nodes.find((n) => n.id === childKey)?.data?.urn as string) ?? childKey,
           before,
           after,
-          summary: `Move under ${parentLabel}`,
+          summary: fromLabels.length > 0
+            ? `Move '${label(childKey)}' from '${fromLabels.join("', '")}' to '${parentLabel}'`
+            : `Move '${label(childKey)}' to '${parentLabel}'`,
           discard: () => {
             const cs = useCanvasStore.getState()
             cs.removeEdge(edgeId)
@@ -132,7 +137,8 @@ export function useReparentNode() {
     if (childKey === parentKey) return
 
     if (dragged.data?.isPending === 'create') {
-      notify('info', 'Save this new entity before moving it to a different parent.')
+      notify('info', `'${(dragged.data?.label as string) || 'This entity'}' is new — save it first, then you can move it to a different parent.`,
+        { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
       return
     }
 
@@ -205,7 +211,8 @@ export function useReparentNode() {
     const childKey = child.id
 
     if (child.data?.isPending === 'create') {
-      notify('info', 'Save this new entity before changing how it relates to its parent.')
+      notify('info', `'${(child.data?.label as string) || 'This entity'}' is new — save it first, then you can change how it relates to its parent.`,
+        { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
       return
     }
 

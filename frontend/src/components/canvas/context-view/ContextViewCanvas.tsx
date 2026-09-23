@@ -1877,6 +1877,21 @@ export function ContextViewCanvas({
     sortOverrides,
   })
 
+  // An entity drawn as a root of one column while its parent sits in another (it has its own
+  // layer placement): say where it belongs, so it never reads as a stray duplicate.
+  const placedApart = useMemo(() => {
+    const out = new Map<string, string>()
+    const layerName = new Map(sortedLayers.map(l => [l.id, l.name]))
+    for (const [child, parent] of parentMap) {
+      const own = nodeLayerMap.get(child)
+      const theirs = nodeLayerMap.get(parent)
+      if (!own || !theirs || own === theirs) continue
+      const parentName = (nodeMap.get(parent)?.data as Record<string, unknown> | undefined)?.label as string | undefined
+      out.set(child, `Part of ${parentName ?? 'another entity'} · ${layerName.get(theirs) ?? 'another layer'}`)
+    }
+    return out
+  }, [parentMap, nodeLayerMap, nodeMap, sortedLayers])
+
   // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
   // sort handlers keep a stable identity and LayerColumn's memo holds).
   const nodesByLayerRef = useRef(nodesByLayer)
@@ -6037,6 +6052,8 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 exhaustedParents={exhaustedParents}
+                loadedChildren={childMap}
+                placedApart={placedApart}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
                 onScroll={handleLayerScroll}
