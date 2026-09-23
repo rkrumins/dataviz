@@ -20,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 from backend.app.db.models import (
+    IdpProviderORM,
+    UserIdentityORM,
     UserORM,
     UserRoleORM,
     UserApprovalORM,
@@ -35,6 +37,7 @@ from backend.common.identity_provenance import (
 from backend.common.roles import (
     DEFAULT_PLATFORM_TIER,
     GLOBAL_ASSIGNABLE_ROLES,
+    PLATFORM_ADMIN_ROLES,
 )
 
 
@@ -338,26 +341,132 @@ async def search_users(
     return list(result.scalars().all())
 
 
+# The admin user list searches, sorts and counts in SQL, so all three must
+# agree with what a row SHOWS (see ``_admin_response``): the role is the
+# ``user_roles`` row, or the default tier when there is none, and the name is
+# ``resolve_display_name`` — a non-blank override, else "first last".
+_ROLE_SHOWN = func.coalesce(
+    select(func.min(UserRoleORM.role_name))
+    .where(UserRoleORM.user_id == UserORM.id)
+    .scalar_subquery(),
+    DEFAULT_PLATFORM_TIER,
+)
+_NAME_SHOWN = func.lower(func.coalesce(
+    func.nullif(func.trim(UserORM.display_name), ""),
+    UserORM.first_name + " " + UserORM.last_name,
+))
+_USER_SORTS = {
+    "name": _NAME_SHOWN,
+    "email": UserORM.email,
+    "status": UserORM.status,
+    "role": _ROLE_SHOWN,
+    "createdAt": UserORM.created_at,
+}
+
+
+def _user_list_filters(status: Optional[str], search: Optional[str]) -> list:
+    """WHERE clauses shared by :func:`list_users` and :func:`count_users`, so
+    a page and the total it is counted against can never disagree."""
+    filters = [UserORM.deleted_at.is_(None)]
+    if status:
+        filters.append(UserORM.status == status)
+    term = (search or "").strip()
+    if term:
+        like = f"%{term}%"
+        filters.append(or_(
+            UserORM.id.ilike(like),
+            UserORM.email.ilike(like),
+            UserORM.display_name.ilike(like),
+            (UserORM.first_name + " " + UserORM.last_name).ilike(like),
+            _ROLE_SHOWN.ilike(like),
+            # The providers an account signs in with — "Entra", "okta".
+            select(UserIdentityORM.id)
+            .join(IdpProviderORM, IdpProviderORM.id == UserIdentityORM.provider_id)
+            .where(
+                UserIdentityORM.user_id == UserORM.id,
+                or_(
+                    IdpProviderORM.display_name.ilike(like),
+                    IdpProviderORM.slug.ilike(like),
+                ),
+            )
+            .exists(),
+        ))
+    return filters
+
+
 async def list_users(
     session: AsyncSession,
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    *,
+    search: Optional[str] = None,
+    sort: str = "createdAt",
+    order: str = "desc",
 ) -> list[UserORM]:
-    stmt = select(UserORM).where(UserORM.deleted_at.is_(None))
-    if status:
-        stmt = stmt.where(UserORM.status == status)
-    stmt = stmt.order_by(UserORM.created_at.desc()).limit(limit).offset(offset)
+    key = _USER_SORTS[sort]
+    stmt = (
+        select(UserORM)
+        .where(*_user_list_filters(status, search))
+        # ``id`` breaks ties, so rows that sort equal (a bulk import shares
+        # one ``created_at``) can't straddle a page boundary differently on
+        # every request and appear twice or not at all.
+        .order_by(key.desc() if order == "desc" else key.asc(), UserORM.id)
+        .limit(limit)
+        .offset(offset)
+    )
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
 
-async def count_users(session: AsyncSession, status: Optional[str] = None) -> int:
-    stmt = select(func.count()).select_from(UserORM).where(UserORM.deleted_at.is_(None))
-    if status:
-        stmt = stmt.where(UserORM.status == status)
+async def count_users(
+    session: AsyncSession,
+    status: Optional[str] = None,
+    *,
+    search: Optional[str] = None,
+) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(UserORM)
+        .where(*_user_list_filters(status, search))
+    )
     result = await session.execute(stmt)
     return result.scalar_one()
+
+
+async def user_stats(session: AsyncSession) -> dict[str, int]:
+    """Counts across every account, for the admin list's KPI cards and tabs.
+
+    The list is paged, so the page in hand can only count itself. Soft-deleted
+    accounts are left out throughout, exactly as the list leaves them out.
+    """
+    live = UserORM.deleted_at.is_(None)
+    by_status = dict((await session.execute(
+        select(UserORM.status, func.count())
+        .where(live)
+        .group_by(UserORM.status)
+    )).all())
+    admins = (await session.execute(
+        select(func.count(UserRoleORM.user_id.distinct()))
+        .select_from(UserRoleORM)
+        .join(UserORM, UserORM.id == UserRoleORM.user_id)
+        .where(live, UserRoleORM.role_name.in_(sorted(PLATFORM_ADMIN_ROLES)))
+    )).scalar_one()
+    resets = (await session.execute(
+        select(UserORM.reset_token_hash, UserORM.reset_token_expires_at)
+        .where(live, UserORM.reset_token_hash.is_not(None))
+    )).all()
+    return {
+        "total": sum(by_status.values()),
+        "pending": by_status.get("pending", 0),
+        "active": by_status.get("active", 0),
+        "suspended": by_status.get("suspended", 0),
+        "admins": admins,
+        "reset_requested": sum(
+            1 for token_hash, expires_at in resets
+            if _reset_is_pending(token_hash, expires_at)
+        ),
+    }
 
 
 async def update_user_status(session: AsyncSession, user_id: str, status: str) -> Optional[UserORM]:
@@ -849,18 +958,26 @@ async def flag_reset_requested(session: AsyncSession, user_id: str) -> None:
         await session.flush()
 
 
+def _reset_is_pending(token_hash: Optional[str], expires_at: Optional[str]) -> bool:
+    """The rule behind :func:`has_pending_reset`, on the raw columns, so the
+    admin list's reset-request count uses the same rule as each row's badge."""
+    if not token_hash:
+        return False
+    # Sentinel means user requested a reset but admin hasn't generated a token yet
+    if token_hash == "__requested__":
+        return True
+    if expires_at:
+        expires = datetime.fromisoformat(expires_at)
+        return datetime.now(timezone.utc) <= expires
+    return False
+
+
 async def has_pending_reset(session: AsyncSession, user_id: str) -> bool:
     """Check if a user has a pending reset request or a non-expired reset token."""
     user = await get_user_by_id(session, user_id)
-    if user is None or not user.reset_token_hash:
+    if user is None:
         return False
-    # Sentinel means user requested a reset but admin hasn't generated a token yet
-    if user.reset_token_hash == "__requested__":
-        return True
-    if user.reset_token_expires_at:
-        expires = datetime.fromisoformat(user.reset_token_expires_at)
-        return datetime.now(timezone.utc) <= expires
-    return False
+    return _reset_is_pending(user.reset_token_hash, user.reset_token_expires_at)
 
 
 # ── Role management ───────────────────────────────────────────────────

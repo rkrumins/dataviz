@@ -85,3 +85,49 @@ describe('WorkspaceAccessList', () => {
         await waitFor(() => expect(listEffective).toHaveBeenCalledWith('ws_target'))
     })
 })
+
+describe('WorkspaceAccessList — thousands of people', () => {
+    // 30 people, direct, named Person 1..30 (zero-padded so they sort as listed).
+    const MANY: WorkspaceAccessResponse = {
+        totalUsers: 30, directUsers: 30, viaGroupUsers: 0,
+        users: Array.from({ length: 30 }, (_, i) => {
+            const n = String(i + 1).padStart(2, '0')
+            return {
+                userId: `usr_${n}`, displayName: `Person ${n}`, email: `p${n}@example.com`,
+                avatarId: null, status: 'active', deleted: false,
+                roles: ['workspace_member'], effectiveRole: 'workspace_member',
+                grants: [{ role: 'workspace_member', via: 'direct' as const, bindingId: `b${n}`, groupId: null, groupName: null, expiresAt: null }],
+            }
+        }),
+    }
+
+    it('mounts one page of rows at a time, and pages through the rest', async () => {
+        listEffective.mockResolvedValue(MANY)
+        const u = userEvent.setup()
+        render(<WorkspaceAccessList workspaceId="ws_1" />)
+
+        expect(await screen.findByText('Person 01')).toBeInTheDocument()
+        expect(screen.getByText('Person 25')).toBeInTheDocument()
+        expect(screen.queryByText('Person 26')).not.toBeInTheDocument()
+        expect(screen.getByText('Page 1 / 2')).toBeInTheDocument()
+
+        await u.click(screen.getByRole('button', { name: 'Next page' }))
+        expect(screen.getByText('Person 26')).toBeInTheDocument()
+        expect(screen.getByText('Person 30')).toBeInTheDocument()
+        expect(screen.queryByText('Person 01')).not.toBeInTheDocument()
+    })
+
+    it('searches everyone, not just the page, and starts results at page one', async () => {
+        listEffective.mockResolvedValue(MANY)
+        const u = userEvent.setup()
+        render(<WorkspaceAccessList workspaceId="ws_1" />)
+        await screen.findByText('Person 01')
+        await u.click(screen.getByRole('button', { name: 'Next page' }))
+
+        // Person 03 lives on page 1; the search finds them from page 2.
+        await u.type(screen.getByPlaceholderText(/search people/i), 'p03@')
+        expect(screen.getByText('Person 03')).toBeInTheDocument()
+        expect(screen.queryByText('Person 26')).not.toBeInTheDocument()
+        expect(screen.queryByText(/Page \d \/ \d/)).not.toBeInTheDocument()
+    })
+})

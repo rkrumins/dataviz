@@ -14,10 +14,15 @@ override; we don't need to mint real JWTs.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import datetime, timezone
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import event
 
 from backend.app.db.models import (
+    GroupORM,
     UserORM,
     WorkspaceORM,
     ViewORM,
@@ -231,6 +236,129 @@ async def test_workspace_member_404_for_unknown_workspace(
         "/api/v1/admin/workspaces/ws_ghost/members"
     )
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_members_list_names_every_subject_in_binding_order(
+    test_client: AsyncClient, db_session,
+):
+    """Subjects are resolved in a few batched queries now; what the list
+    says about each one — and the order it lists them in — is unchanged."""
+    from backend.app.db.repositories import binding_repo
+
+    ws_id = await _seed_workspace(db_session)
+    await _seed_user(db_session, user_id="usr_named", email="named@example.com")
+    gone = await _seed_user(db_session, user_id="usr_gone", email="gone@example.com")
+    group_id = (
+        await test_client.post("/api/v1/admin/groups", json={"name": "Crew"})
+    ).json()["id"]
+    for uid in ("usr_named", gone):
+        await test_client.post(
+            f"/api/v1/admin/groups/{group_id}/members", json={"userId": uid},
+        )
+    # Seeded directly: the POST route refuses a subject with no row.
+    for subject_type, subject_id, role in [
+        ("user", "usr_named", "workspace_admin"),
+        ("group", group_id, "workspace_viewer"),
+        ("user", gone, "workspace_member"),
+        ("user", "usr_never_existed", "workspace_viewer"),
+    ]:
+        await binding_repo.create_binding(
+            db_session, subject_type=subject_type, subject_id=subject_id,
+            role_name=role, scope_type="workspace", scope_id=ws_id,
+        )
+    (await db_session.get(UserORM, gone)).deleted_at = (
+        datetime.now(timezone.utc).isoformat()
+    )
+    await db_session.commit()
+
+    r = await test_client.get(f"/api/v1/admin/workspaces/{ws_id}/members")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+
+    in_scope = await binding_repo.list_for_scope(
+        db_session, scope_type="workspace", scope_id=ws_id,
+    )
+    assert [m["bindingId"] for m in rows] == [b.id for b in in_scope]
+
+    subjects = {m["subject"]["id"]: m["subject"] for m in rows}
+    assert subjects["usr_named"] == {
+        "type": "user", "id": "usr_named",
+        "displayName": "Bob Bobson", "secondary": "named@example.com",
+    }
+    # Soft-deleted but still bound: named, so an admin can find and revoke it.
+    assert subjects[gone]["displayName"] == "Bob Bobson"
+    assert subjects[group_id] == {
+        "type": "group", "id": group_id,
+        "displayName": "Crew", "secondary": "2 members",
+    }
+    assert subjects["usr_never_existed"] == {
+        "type": "user", "id": "usr_never_existed",
+        "displayName": None, "secondary": None,
+    }
+
+
+@contextmanager
+def _count_queries(session):
+    """Count statements run on the session's engine (transaction control
+    excluded). Same helper as ``test_view_repo.py``."""
+    counter = {"n": 0}
+    engine = session.bind.sync_engine
+
+    def _on_exec(conn, cursor, statement, params, context, executemany):
+        stmt = statement.strip().upper()
+        if stmt.startswith(("SAVEPOINT", "RELEASE SAVEPOINT", "ROLLBACK", "BEGIN", "COMMIT")):
+            return
+        counter["n"] += 1
+
+    event.listen(engine, "before_cursor_execute", _on_exec)
+    try:
+        yield counter
+    finally:
+        event.remove(engine, "before_cursor_execute", _on_exec)
+
+
+@pytest.mark.asyncio
+async def test_members_list_query_count_does_not_grow_with_members(
+    test_client: AsyncClient, db_session,
+):
+    """Resolving subjects one binding at a time was a query or two per
+    member — thousands for a big workspace. It is now a fixed handful."""
+    from backend.app.db.repositories import binding_repo
+
+    async def seed(ws_id: str, users: int, groups: int) -> None:
+        await _seed_workspace(db_session, ws_id=ws_id, name=ws_id)
+        for i in range(users):
+            uid = f"usr_{ws_id}_{i}"
+            db_session.add(UserORM(
+                id=uid, email=f"{uid}@example.com", password_hash="x",
+                first_name="U", last_name=str(i), status="active",
+            ))
+            await binding_repo.create_binding(
+                db_session, subject_type="user", subject_id=uid,
+                role_name="workspace_member", scope_type="workspace", scope_id=ws_id,
+            )
+        for i in range(groups):
+            gid = f"grp_{ws_id}_{i}"
+            db_session.add(GroupORM(id=gid, name=gid))
+            await binding_repo.create_binding(
+                db_session, subject_type="group", subject_id=gid,
+                role_name="workspace_viewer", scope_type="workspace", scope_id=ws_id,
+            )
+        await db_session.commit()
+
+    await seed("ws_small", users=3, groups=1)
+    await seed("ws_big", users=30, groups=5)
+    # Warm anything a first request loads once (caches, lazy config).
+    await test_client.get("/api/v1/admin/workspaces/ws_small/members")
+
+    with _count_queries(db_session) as small:
+        r = await test_client.get("/api/v1/admin/workspaces/ws_small/members")
+        assert len(r.json()) == 4
+    with _count_queries(db_session) as big:
+        r = await test_client.get("/api/v1/admin/workspaces/ws_big/members")
+        assert len(r.json()) == 35
+    assert big["n"] == small["n"]
 
 
 # ── /admin/workspaces/{ws}/members/effective ────────────────────────
