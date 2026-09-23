@@ -20,6 +20,11 @@ export function viewFileName(name: string | null | undefined, version: number | 
   return `${viewFileSlug(name)}${version ? `.v${version}` : ''}.view.json`
 }
 
+/** The name of a package of the view with its data (the server names the download the same). */
+export function viewPackageName(name: string | null | undefined, version: number | null): string {
+  return `${viewFileSlug(name)}${version ? `.v${version}` : ''}.view-package.zip`
+}
+
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`

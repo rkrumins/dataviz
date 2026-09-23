@@ -11,7 +11,9 @@
 import { TIMEOUTS } from '@/config/timeouts'
 import { useHealthStore } from '@/store/health'
 import { fetchWithTimeout } from './fetchWithTimeout'
-import { triggerBrowserDownload } from './importExportApiService'
+import {
+  downloadExportUrl, getExport, pollJob, triggerBrowserDownload, type Job,
+} from './importExportApiService'
 import type { View } from './viewApiService'
 import type { ViewDefinitionDiff, ViewVersionSummary } from './viewVersionsApiService'
 
@@ -125,6 +127,8 @@ export interface TargetSuggestion {
   sampleSize: number
   /** Share of the sample found in this data source; null when it couldn't be probed. */
   sampleHitRate: number | null
+  /** Packages only: whether the data source is under version control (so can take the data). */
+  versioned?: boolean
 }
 
 export interface InspectResult {
@@ -152,6 +156,9 @@ export interface TransferTarget {
   workspaceId?: string | null
   dataSourceId?: string | null
   viewId?: string | null
+  /** One of the caller's drafts of that data source: checked against as the draft reads (a
+   *  package's data counts as there), and, when staging, the draft the view goes into. */
+  branchId?: string | null
 }
 
 export interface ReconcileCounts {
@@ -458,4 +465,116 @@ export function importView(request: ImportViewRequest): Promise<ImportViewResult
 export function newRequestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+// ── A view with its data: the View Package ────────────────────────────────────
+
+export type PackageScope = 'view' | 'source'
+export type PackageDataVersion = 'published' | 'draft'
+
+export interface PackageStarted {
+  jobId: string
+  graphId: string
+  workspaceId: string
+  fileName: string
+  bundleHash: string
+  views: Array<{ viewId: string; version: number }>
+}
+
+export interface ExportedPackage extends PackageStarted {
+  bytes: number | null
+  nodes: number | null
+  edges: number | null
+}
+
+/**
+ * Package views with their graph data and download it. An export job builds the package on the
+ * server (the data can be large); this starts it, follows it, and downloads the result.
+ */
+export async function exportViewPackage(
+  views: Array<{ viewId: string; version?: number | null }>,
+  options: { scope: PackageScope; dataVersion: PackageDataVersion; message?: string },
+  onJob?: (job: Job) => void,
+  signal?: AbortSignal,
+): Promise<ExportedPackage> {
+  const started = await postJson<PackageStarted>('/packages', {
+    views: views.map((v) => (v.version ? { viewId: v.viewId, version: v.version } : { viewId: v.viewId })),
+    scope: options.scope,
+    dataVersion: options.dataVersion,
+    message: options.message || null,
+  })
+  const job = await pollJob(() => getExport(started.workspaceId, started.graphId, started.jobId), {
+    intervalMs: 1000, onTick: onJob, signal,
+  })
+  if (job.status !== 'completed') {
+    throw new ViewTransferError(job.errorMessage || 'The package could not be built.', 500)
+  }
+  triggerBrowserDownload(downloadExportUrl(started.workspaceId, started.graphId, started.jobId), started.fileName)
+  const summary = (job.summary ?? {}) as { nodes?: number; edges?: number; package?: { bytes?: number } }
+  return {
+    ...started,
+    bytes: summary.package?.bytes ?? null,
+    nodes: summary.nodes ?? null,
+    edges: summary.edges ?? null,
+  }
+}
+
+export interface PackagePart {
+  sha256: string
+  bytes: number
+  verified: boolean
+  views?: number
+  bundleHash?: string
+}
+
+export interface PackageInspectResult extends InspectResult {
+  /** Keeps the package's data on the server (for a day) until it is imported. */
+  uploadId: string
+  package: {
+    scope: PackageScope | null
+    data: { version?: PackageDataVersion; nodes?: number | null; edges?: number | null } | null
+    createdAt?: string | null
+    parts: Record<string, PackagePart>
+    integrity: 'verified' | 'modified'
+  }
+}
+
+/** Read a view package: every part checked, the data kept for the import that follows, and the
+ *  views described as for a view file. */
+export async function inspectViewPackage(file: Blob): Promise<PackageInspectResult> {
+  const res = await send('/packages/inspect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/zip' },
+    body: file,
+  })
+  return res.json() as Promise<PackageInspectResult>
+}
+
+export interface PackageDataStarted {
+  jobId: string
+  branchId: string
+  graphId: string
+  workspaceId: string
+  dataSourceId: string
+  draftName: string
+}
+
+/** Bring an inspected package's data into a new draft of the target data source. The view then
+ *  follows into the same draft. Asking again answers with the job already started. */
+export function importPackageData(
+  uploadId: string,
+  body: { workspaceId: string; dataSourceId: string; viewId?: string | null; draftName?: string | null },
+): Promise<PackageDataStarted> {
+  return postJson<PackageDataStarted>(`/packages/${uploadId}/data`, body)
+}
+
+/** A view package, by its name or its first bytes (a zip). */
+export async function isViewPackage(file: File): Promise<boolean> {
+  if (/\.view-package\.zip$/i.test(file.name)) return true
+  try {
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer())
+    return head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04
+  } catch {
+    return false
+  }
 }

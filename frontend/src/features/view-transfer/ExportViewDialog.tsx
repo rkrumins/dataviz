@@ -6,6 +6,10 @@
  * current design, which is saved as a new version first when it has unsaved changes, so the file
  * always names a version this view can be compared and updated against later.
  *
+ * "View + data" packages the views WITH their graph data (a .view-package.zip), for a data
+ * source under version control: the view's own entities or the whole source, as published or as
+ * in the person's draft. An export job builds it on the server; the dialog follows it.
+ *
  * Two columns, like the graph ExportDialog: what travels (and what doesn't) on the left, the
  * version choice and a preview of the file on the right.
  */
@@ -13,8 +17,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, Check, CheckCircle2, Copy, Download, EyeOff, FileJson2, Fingerprint, History,
-  Layers, Loader2, RefreshCw, Tag, X,
+  AlertTriangle, Check, CheckCircle2, Copy, Database, Download, EyeOff, FileJson2, Fingerprint,
+  GitPullRequestDraft, History, Layers, Loader2, Package, RefreshCw, Tag, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -23,10 +27,19 @@ import { useModalA11y } from '@/hooks/useModalA11y'
 import {
   VIEW_VERSION_STATUS_QUERY_KEY, invalidateViewVersions, useViewVersions,
 } from '@/hooks/useViewVersions'
-import { exportViews, type ExportedFile } from '@/services/viewTransferApiService'
+import {
+  exportViewPackage, exportViews, type ExportedFile, type ExportedPackage, type PackageDataVersion,
+  type PackageScope,
+} from '@/services/viewTransferApiService'
 import { getViewVersionStatus, type ViewVersionSummary } from '@/services/viewVersionsApiService'
+import { getView } from '@/services/viewApiService'
+import type { Job } from '@/services/importExportApiService'
 import { recordEvent } from '@/services/telemetryService'
-import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName } from './format'
+import { useFeature } from '@/store/features'
+import { usePermission } from '@/store/auth'
+import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
+import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
+import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName, viewPackageName } from './format'
 
 export interface ExportViewDialogProps {
   /** One view, or several (the Explorer's bulk bar). */
@@ -41,6 +54,36 @@ type Phase = 'choose' | 'running' | 'done' | 'failed'
 /** The server's cap on views in one file (`view_transfer.limits.MAX_VIEWS_PER_BUNDLE`). */
 export const MAX_VIEWS_PER_FILE = 200
 
+/** Whether these views can be packaged with their data, and if not, why not. */
+function usePackageOption(views: Array<{ id: string }>) {
+  const details = useQueries({
+    queries: views.map((v) => ({ queryKey: [...VIEW_QUERY_KEY, v.id], queryFn: () => getView(v.id), staleTime: 60_000 })),
+  })
+  const loaded = details.every((d) => d.data)
+  const scopes = new Set(details.map((d) => `${d.data?.workspaceId}|${d.data?.dataSourceId ?? ''}`))
+  const first = details[0]?.data
+  const oneSource = loaded && scopes.size === 1 && !!first?.dataSourceId
+  const graphExport = useFeature('graphExportEnabled')
+  const canRead = usePermission('workspace:datasource:read', first?.workspaceId)
+  const resolved = useResolveGraph(
+    oneSource && graphExport ? first?.workspaceId : undefined,
+    oneSource && graphExport ? first?.dataSourceId : null,
+    views.length === 1 ? views[0].id : null,
+  )
+  const reason = !loaded ? null
+    : !oneSource ? 'A package holds views from one data source.'
+      : !graphExport ? 'Exporting graph data is turned off here.'
+        : !canRead ? 'Packaging data needs permission to read this data source.'
+          : resolved.isLoading ? null
+            : !resolved.data?.graphId ? 'Only a data source under version control can be packaged with its data.'
+              : null
+  return {
+    available: loaded && !reason && !!resolved.data?.graphId,
+    reason,
+    hasDraft: !!resolved.data?.myDraft?.branchId,
+  }
+}
+
 export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewDialogProps) {
   const single = views.length === 1
   const [phase, setPhase] = useState<Phase>('choose')
@@ -48,6 +91,13 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
   const [note, setNote] = useState('')
   const [result, setResult] = useState<ExportedFile | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [content, setContent] = useState<'view' | 'data'>('view')
+  const [scope, setScope] = useState<PackageScope>(single ? 'view' : 'source')
+  const [dataVersion, setDataVersion] = useState<PackageDataVersion>('published')
+  const [packaged, setPackaged] = useState<ExportedPackage | null>(null)
+  const [job, setJob] = useState<Job | null>(null)
+  const packageOption = usePackageOption(views)
+  const withData = content === 'data' && packageOption.available
   const queryClient = useQueryClient()
   // Stable for the dialog's whole life: the a11y hook re-focuses the panel whenever its callback
   // changes, which would pull the cursor out of the note field on any parent re-render.
@@ -63,7 +113,20 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
   async function run() {
     setPhase('running')
     setError(null)
+    setJob(null)
     try {
+      if (withData) {
+        const done = await exportViewPackage(
+          views.map((v) => ({ viewId: v.id, version: single && pick !== 'current' ? pick : null })),
+          { scope: single ? scope : 'source', dataVersion: single ? dataVersion : 'published', message: note.trim() || undefined },
+          setJob,
+        )
+        setPackaged(done)
+        setPhase('done')
+        views.forEach((v) => invalidateViewVersions(queryClient, v.id))
+        recordEvent('view.export', { views: views.length, withData: true, scope, dataVersion })
+        return
+      }
       const file = await exportViews(
         views.map((v) => ({ viewId: v.id, version: single && pick !== 'current' ? pick : null })),
         note.trim() || undefined,
@@ -79,7 +142,9 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
     }
   }
 
-  const title = single ? 'Export view' : `Export ${views.length} views`
+  const title = withData
+    ? (single ? 'Export view with its data' : `Export ${views.length} views with their data`)
+    : single ? 'Export view' : `Export ${views.length} views`
   const tooMany = views.length > MAX_VIEWS_PER_FILE
 
   // Portaled, and clicks stop here: hosts include clickable cards and menus, which must not
@@ -99,7 +164,7 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
           <div className="border-b border-glass-border/50 px-8 py-5 flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-4 min-w-0">
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 flex-shrink-0">
-                <FileJson2 className="w-6 h-6" />
+                {withData ? <Package className="w-6 h-6" /> : <FileJson2 className="w-6 h-6" />}
               </div>
               <div className="min-w-0">
                 <h3 id="export-view-title" className="text-xl font-bold text-ink">{title}</h3>
@@ -119,11 +184,16 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
           <div className="flex-1 overflow-y-auto">
             {phase === 'choose' && (
               <div className="grid md:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
-                <WhatTravels />
+                <WhatTravels withData={withData} />
                 <div className="px-8 py-6 space-y-5">
+                  <ContentChoice content={withData ? 'data' : 'view'} onChange={setContent} reason={packageOption.reason} />
+                  {withData && (
+                    <DataChoice single={single} scope={scope} setScope={setScope} dataVersion={dataVersion}
+                      setDataVersion={setDataVersion} hasDraft={packageOption.hasDraft} />
+                  )}
                   {single
-                    ? <SingleViewChoice view={views[0]} pick={pick} setPick={setPick} note={note} setNote={setNote} />
-                    : <ManyViewsChoice views={views} note={note} setNote={setNote} />}
+                    ? <SingleViewChoice view={views[0]} pick={pick} setPick={setPick} note={note} setNote={setNote} withData={withData} />
+                    : <ManyViewsChoice views={views} note={note} setNote={setNote} withData={withData} />}
                 </div>
               </div>
             )}
@@ -135,11 +205,17 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
                     <Loader2 className="w-7 h-7 text-indigo-500 animate-spin" />
                   </div>
                 </div>
-                <p className="text-sm font-semibold text-ink">Preparing the file…</p>
-                <p className="text-[11px] text-ink-muted">Recording the version and naming every entity it places. The download starts by itself.</p>
+                <p className="text-sm font-semibold text-ink">{withData ? 'Packaging the view with its data…' : 'Preparing the file…'}</p>
+                <p className="text-[11px] text-ink-muted">
+                  {withData
+                    ? (job?.status === 'running' ? 'Writing the graph data and packing it with the view. Large sources take a while.'
+                      : 'Recording the version and starting the export.')
+                    : 'Recording the version and naming every entity it places.'} The download starts by itself.
+                </p>
               </div>
             )}
-            {phase === 'done' && result && <Done result={result} count={views.length} />}
+            {phase === 'done' && packaged && <PackageDone result={packaged} />}
+            {phase === 'done' && result && !packaged && <Done result={result} count={views.length} />}
             {phase === 'failed' && (
               <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
                 <div className="w-11 h-11 rounded-xl bg-rose-50 dark:bg-rose-950/30 text-rose-500 flex items-center justify-center flex-shrink-0">
@@ -182,14 +258,25 @@ export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewD
 
 // ── Left column ──────────────────────────────────────────────────────────────
 
-function WhatTravels() {
+function WhatTravels({ withData = false }: { withData?: boolean }) {
   return (
     <div className="px-8 py-6 border-b md:border-b-0 md:border-r border-glass-border/50 bg-gradient-to-br from-indigo-50/40 to-transparent dark:from-indigo-950/15 space-y-5">
       <div>
-        <h4 className="text-sm font-bold text-ink">What's in the file</h4>
-        <p className="text-[11px] text-ink-muted mt-0.5">Everything needed to rebuild the view where the same data source is onboarded.</p>
+        <h4 className="text-sm font-bold text-ink">{withData ? 'What’s in the package' : 'What’s in the file'}</h4>
+        <p className="text-[11px] text-ink-muted mt-0.5">
+          {withData ? 'The view file, and the graph data it shows: everything to bring both to another environment.'
+            : 'Everything needed to rebuild the view where the same data source is onboarded.'}
+        </p>
       </div>
       <ul className="space-y-3">
+        {withData && (
+          <>
+            <Feature icon={<Database className="w-4 h-4" />} title="Its graph data"
+              body="Entities and relationships with all their properties, in the data source's own export format, which also imports on its own." />
+            <Feature icon={<GitPullRequestDraft className="w-4 h-4" />} title="Imported through a draft"
+              body="There, data and view land in a draft together, for review. It only adds and updates: a package never deletes anything." />
+          </>
+        )}
         <Feature icon={<Layers className="w-4 h-4" />} title="Its design, exactly"
           body="Layers, placements, rules, display rules and settings — including any this environment doesn't know about yet." />
         <Feature icon={<Tag className="w-4 h-4" />} title="Name, description, icon and tags"
@@ -202,9 +289,9 @@ function WhatTravels() {
       <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.04] px-3.5 py-3 flex items-start gap-2.5">
         <EyeOff className="w-4 h-4 text-ink-muted flex-shrink-0 mt-0.5" />
         <p className="text-[11px] text-ink-muted leading-relaxed">
-          <span className="font-semibold text-ink-secondary">Not included:</span> the graph data itself, who the view is
-          shared with, favourites, draft changes, and anyone's email address. Entities are named so the import can show
-          what it didn't find.
+          <span className="font-semibold text-ink-secondary">Not included:</span>{' '}
+          {withData ? '' : 'the graph data itself, '}who the view is shared with, favourites, draft changes to the view,
+          and anyone's email address.{withData ? '' : ' Entities are named so the import can show what it didn\'t find.'}
         </p>
       </div>
     </div>
@@ -225,12 +312,13 @@ function Feature({ icon, title, body }: { icon: React.ReactNode; title: string; 
 
 // ── Right column: one view ───────────────────────────────────────────────────
 
-function SingleViewChoice({ view, pick, setPick, note, setNote }: {
+function SingleViewChoice({ view, pick, setPick, note, setNote, withData = false }: {
   view: { id: string; name: string }
   pick: 'current' | number
   setPick: (p: 'current' | number) => void
   note: string
   setNote: (n: string) => void
+  withData?: boolean
 }) {
   const { data, isLoading, error } = useViewVersions(view.id)
   const versions = data?.items ?? []
@@ -278,7 +366,8 @@ function SingleViewChoice({ view, pick, setPick, note, setNote }: {
           )}
         </div>
       </div>
-      <FilePreview filename={viewFileName(view.name, exportsAs)} stats={chosen?.stats}
+      <FilePreview filename={withData ? viewPackageName(view.name, exportsAs) : viewFileName(view.name, exportsAs)}
+        stats={chosen?.stats} withData={withData}
         extra={pick === 'current' && dirty ? '+ unsaved changes' : undefined} />
     </>
   )
@@ -296,7 +385,12 @@ function Choice({ active, onClick, title, desc }: { active: boolean; onClick: ()
   )
 }
 
-function FilePreview({ filename, stats, extra }: { filename: string; stats?: Record<string, number>; extra?: string }) {
+function FilePreview({ filename, stats, extra, withData = false }: {
+  filename: string
+  stats?: Record<string, number>
+  extra?: string
+  withData?: boolean
+}) {
   const rows: Array<[string, number | undefined]> = [
     ['layers', stats?.layers], ['placements', stats?.assignments], ['rules', stats?.rules],
     ['display rules', stats?.displayRules],
@@ -304,8 +398,9 @@ function FilePreview({ filename, stats, extra }: { filename: string; stats?: Rec
   return (
     <div className="rounded-xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] p-4">
       <div className="flex items-center gap-2.5">
-        <FileJson2 className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+        {withData ? <Package className="w-4 h-4 text-indigo-500 flex-shrink-0" /> : <FileJson2 className="w-4 h-4 text-indigo-500 flex-shrink-0" />}
         <span className="text-xs font-mono text-ink truncate" title={filename}>{filename}</span>
+        {withData && <span className="ml-auto text-[10px] font-semibold text-ink-muted shrink-0">+ graph data</span>}
       </div>
       {stats && (
         <div className="grid grid-cols-4 gap-2 mt-3">
@@ -324,10 +419,11 @@ function FilePreview({ filename, stats, extra }: { filename: string; stats?: Rec
 
 // ── Right column: several views ──────────────────────────────────────────────
 
-function ManyViewsChoice({ views, note, setNote }: {
+function ManyViewsChoice({ views, note, setNote, withData = false }: {
   views: Array<{ id: string; name: string }>
   note: string
   setNote: (n: string) => void
+  withData?: boolean
 }) {
   const statuses = useQueries({
     queries: views.map((v) => ({
@@ -375,12 +471,110 @@ function ManyViewsChoice({ views, note, setNote }: {
             className="w-full px-3 py-2 rounded-xl border border-glass-border bg-transparent text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500 transition-colors" />
         </div>
       )}
-      <FilePreview filename={`${views.length}-views.view.json`} />
+      <FilePreview filename={withData ? `${views.length}-views.view-package.zip` : `${views.length}-views.view.json`} withData={withData} />
     </>
   )
 }
 
+// ── Right column: view only, or view + data ─────────────────────────────────
+
+function ContentChoice({ content, onChange, reason }: {
+  content: 'view' | 'data'
+  onChange: (c: 'view' | 'data') => void
+  /** Why the data can't come too, when it can't. */
+  reason: string | null
+}) {
+  const options = [
+    { id: 'view' as const, icon: FileJson2, title: 'View only', desc: 'Its design and history, as a .view.json file.' },
+    { id: 'data' as const, icon: Package, title: 'View + data', desc: 'With the graph data it shows, as a package.' },
+  ]
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="What to export">
+        {options.map((o) => {
+          const disabled = o.id === 'data' && !!reason
+          const Icon = o.icon
+          return (
+            <button key={o.id} type="button" role="radio" aria-checked={content === o.id} disabled={disabled}
+              onClick={() => onChange(o.id)}
+              className={cn('text-left px-3.5 py-2.5 rounded-xl border-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                content === o.id ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20' : 'border-glass-border hover:border-glass-border-hover')}>
+              <span className="flex items-center gap-2 text-xs font-semibold text-ink">
+                <Icon className={cn('w-3.5 h-3.5', content === o.id ? 'text-indigo-500' : 'text-ink-muted')} /> {o.title}
+              </span>
+              <span className="block text-[11px] text-ink-muted mt-0.5">{o.desc}</span>
+            </button>
+          )
+        })}
+      </div>
+      {reason && <p className="text-[11px] text-ink-muted mt-1.5">{reason}</p>}
+    </div>
+  )
+}
+
+function DataChoice({ single, scope, setScope, dataVersion, setDataVersion, hasDraft }: {
+  single: boolean
+  scope: PackageScope
+  setScope: (s: PackageScope) => void
+  dataVersion: PackageDataVersion
+  setDataVersion: (v: PackageDataVersion) => void
+  hasDraft: boolean
+}) {
+  if (!single) {
+    return (
+      <p className="rounded-xl bg-black/[0.03] dark:bg-white/[0.04] px-3.5 py-2.5 text-[11px] text-ink-muted">
+        Several views share one package of the <span className="font-semibold text-ink-secondary">whole data source</span>, as published.
+      </p>
+    )
+  }
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <div>
+        <label className="block text-xs font-medium text-ink-secondary mb-2">Which data</label>
+        <div className="space-y-2">
+          <Choice active={scope === 'view'} onClick={() => setScope('view')} title="This view's entities" desc="What the view shows, and how it connects." />
+          <Choice active={scope === 'source'} onClick={() => setScope('source')} title="The whole data source" desc="Every entity and relationship in it." />
+        </div>
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-ink-secondary mb-2">As it is</label>
+        <div className="space-y-2">
+          <Choice active={dataVersion === 'published'} onClick={() => setDataVersion('published')} title="Published" desc="The version everyone sees." />
+          {hasDraft && (
+            <Choice active={dataVersion === 'draft'} onClick={() => setDataVersion('draft')} title="In your draft" desc="With the changes you haven't published yet." />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Done ─────────────────────────────────────────────────────────────────────
+
+function PackageDone({ result }: { result: ExportedPackage }) {
+  return (
+    <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
+      <div className="w-11 h-11 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500 flex items-center justify-center flex-shrink-0">
+        <CheckCircle2 className="w-6 h-6" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <h3 className="text-lg font-bold text-ink">Packaged</h3>
+        <p className="text-sm text-ink-muted mt-1">
+          Downloading <span className="font-medium text-ink break-all">{result.fileName}</span>
+          {result.bytes ? <> ({fileSize(result.bytes)})</> : null}
+          {result.nodes !== null ? <>, with {result.nodes.toLocaleString()} entities and {(result.edges ?? 0).toLocaleString()} relationships</> : null}.
+          To bring it into another environment, open the View wizard there and choose <span className="font-medium text-ink">Import a view</span>:
+          it goes into a draft there, data and view together.
+        </p>
+        <div className="mt-4 flex items-center gap-2 rounded-xl border border-glass-border px-3 py-2">
+          <Fingerprint className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+          <span className="text-[11px] text-ink-muted">Views fingerprint</span>
+          <span className="text-xs font-mono text-ink truncate" title={result.bundleHash}>{shortHash(result.bundleHash, 16)}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function Done({ result, count }: { result: ExportedFile; count: number }) {
   const [copied, setCopied] = useState(false)
