@@ -690,11 +690,16 @@ class GraphVersioningService:
             # Cascade containment deletes (ontology-driven): expand a deleted node to its
             # subtree + all incident edges so a checkpoint can't orphan descendants or dangle
             # edges — parity with apply_ops, via the same shared helper.
-            del_nodes = {c.entity_id for c in changes
-                         if c.op == "delete" and c.entity_kind == "node"}
+            # Nodes this checkpoint leaves deleted (a delete later undone by a re-create is not one).
+            del_nodes = {eid for eid, k in kind_by_entity.items()
+                         if k == "node" and head_state.get(eid) is None}
             if del_nodes:
                 subtree, inc_edges = await self._cascade_deletes(
-                    s, graph_id, branch_id, del_nodes, containment_edge_types)
+                    s, graph_id, branch_id, del_nodes, containment_edge_types, overlay=head_state)
+                for e in subtree | set(inc_edges):             # touched in this checkpoint: prior known
+                    if e in base_state:
+                        head_state[e] = None
+                        kind_by_entity[e] = "edge" if e in inc_edges else "node"
                 extra = [e for e in (subtree | set(inc_edges)) if e not in base_state]
                 extra_cur = await self._current_values(s, graph_id, branch_id, extra) if extra else {}
                 for e in extra:
@@ -712,30 +717,19 @@ class GraphVersioningService:
                     canonicalize_payload_types(v, ontology_rules)
             deltas = net_delta(base_state, head_state)
 
-            # Rich ontology gate — the authoritative check for staged edits (stage_changes
-            # can't type endpoints that exist only as uncommitted working changes; here the
-            # composed head state can). Strictness is decided by the graph row.
-            if ontology_rules is not None and deltas:
+            # The gate every write path shares, on what this checkpoint WRITES: no untyped
+            # creation, hierarchy integrity for new / re-pointed edges, and — strict graphs — the
+            # ontology (the authoritative check for staged edits: stage_changes can't type endpoints
+            # that exist only as uncommitted working changes; the composed head state can).
+            if deltas:
                 graph = await s.get(GraphORM, graph_id)
-                if graph is not None and graph.ontology_enforcement == "strict":
-                    rich = [(d.entity_id, kind_by_entity.get(d.entity_id, "node"),
-                             d.payload, d.op) for d in deltas]
-                    endpoint_types: Dict[str, str] = {}
-                    eps = {ep for _e, k, p, o in rich if k == "edge" and o == "create" and p
-                           for ep in _edge_src_tgt(p) if ep}
-                    for ep in eps:
-                        v = head_state.get(ep) or base_state.get(ep) or composed.get(ep)
-                        if v and v.get("entityType"):
-                            endpoint_types[ep] = v["entityType"]
-                    unknown = [ep for ep in eps if ep not in endpoint_types]
-                    if unknown:
-                        cur = await self._current_values(s, graph_id, branch_id, unknown)
-                        for ep, v in cur.items():
-                            if v and v.get("entityType"):
-                                endpoint_types[ep] = v["entityType"]
-                    rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
-                    if rich_viol:
-                        raise OntologyViolation(rich_viol)   # rolls back — nothing committed
+                await self._enforce_written(
+                    s, graph_id, branch_id, {d.entity_id: d.payload for d in deltas},
+                    base_state, kind_by_entity,
+                    containment_edge_types=containment_edge_types or [],
+                    ontology_rules=ontology_rules,
+                    strict=graph is not None and graph.ontology_enforcement == "strict",
+                    known=head_state)
 
             commit_seq = await self._next_seq(s, graph_id, branch_id)
             commit = CommitORM(
@@ -936,34 +930,17 @@ class GraphVersioningService:
                  for d in deltas if d.op != "delete"], ontology)
             if viol:
                 raise OntologyViolation(viol)
-        # Rich re-gate at merge time: rules are resolved from the CURRENT published
-        # ontology by the caller, so a draft opened before an ontology tightening
-        # cannot merge violating creates onto main (violations 422 back with
-        # per-entity reasons). Endpoint types come from merged_state — already
-        # hydrated with added edges' endpoints by _hydrate_merge_neighborhood.
-        if ontology_rules is not None and graph.ontology_enforcement == "strict":
-            rich = [(d.entity_id, kind_by_entity.get(d.entity_id, "node"),
-                     d.payload, d.op) for d in deltas]
-            endpoint_types = {
-                eid: v["entityType"] for eid, v in merged_state.items()
-                if v and v.get("entityType")
-            }
-            rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
-            if rich_viol:
-                raise OntologyViolation(rich_viol)
-        # Same authoritative duplicate/single-parent/cycle integrity the write path enforces,
-        # re-checked against CURRENT main at merge time — two drafts that are each clean in
-        # isolation must not compose into a two-parent or cyclic hierarchy on main.
-        merge_edge_creates = [(d.entity_id, d.payload) for d in deltas
-                              if d.op == "create" and d.payload is not None
-                              and kind_by_entity.get(d.entity_id) == "edge"]
-        if merge_edge_creates:
-            viol = await self._validate_edge_integrity(
-                s, graph.id, main_id, merge_edge_creates,
-                {d.entity_id for d in deltas if d.op == "delete"},
-                containment_edge_types or [])
-            if viol:
-                raise OntologyViolation(viol)
+        # Re-gated at merge time against CURRENT main, with rules resolved from the CURRENT
+        # published ontology by the caller — the same gate as every other write path, on what the
+        # publish writes: a draft opened before an ontology tightening cannot merge violating
+        # entities onto main, and two drafts that are each clean in isolation cannot compose into
+        # a two-parent or cyclic hierarchy. Edge ends are typed from ``merged_state`` (already
+        # hydrated with added edges' endpoints by _hydrate_merge_neighborhood).
+        await self._enforce_written(
+            s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, theirs,
+            kind_by_entity, containment_edge_types=containment_edge_types or [],
+            ontology_rules=ontology_rules, strict=graph.ontology_enforcement == "strict",
+            known=merged_state)
         await self._write_deltas(s, graph.id, main_id, squash, deltas, kind_by_entity, actor)
 
         main.head_commit_id = squash.id
@@ -1705,6 +1682,8 @@ class GraphVersioningService:
         actor: str,
         message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> str:
         """Squash-merge a fork PR into the parent's ``main`` — the same 3-way
         semantics as draft publish, across graphs (plan §8, §12.5).
@@ -1756,6 +1735,12 @@ class GraphVersioningService:
                 pr.checks_status = checks
                 if not checks["ontology"]["ok"]:
                     raise OntologyViolation(checks["ontology"]["violations"])
+                # The gate every write path shares, against the PARENT's main and ontology.
+                await self._enforce_written(
+                    s, parent.id, parent_main, {d.entity_id: d.payload for d in deltas}, theirs,
+                    kind_by_entity, containment_edge_types=containment_edge_types or [],
+                    ontology_rules=ontology_rules,
+                    strict=parent.ontology_enforcement == "strict", known=merged)
                 reviewers = set(pr.reviewers or [])
                 if reviewers and pr.approval_status != "approved":
                     raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
@@ -2819,6 +2804,81 @@ class GraphVersioningService:
                     nxt.add(b)
             frontier = nxt
         return seen
+
+    async def _enforce_written(
+        self, s, graph_id: str, branch_id: str,
+        written: Mapping[str, Optional[dict]], prior: Mapping[str, Optional[dict]],
+        kind_by_entity: Mapping[str, str], *,
+        containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
+        strict: bool, known: Optional[Mapping[str, Optional[dict]]] = None,
+    ) -> None:
+        """The ONE gate every write path shares (canvas save, checkpoint, publish): it judges the
+        state being WRITTEN (``written``: entity → new value, ``None`` = delete) against what it
+        replaces (``prior``), never the ops that expressed it. Raises :class:`OntologyViolation`.
+
+        * Nothing is created untyped — every enforcement mode.
+        * Hierarchy integrity for every NEW or RE-POINTED edge (no duplicate, no second
+          containment parent, no loop) — every enforcement mode.
+        * Under strict enforcement with the graph's ontology: a node's type must be declared, an
+          edge's type declared and its ends of the allowed types, a containment allowed by the
+          parent's ``can_contain``. Judged as a create for anything new AND for anything whose
+          type-defining fields change (a retype, a re-pointed or re-typed edge) — only an edit
+          that leaves them alone is exempt, so legacy data stays editable. Retyping a node
+          re-judges its existing edges against its NEW type, so a retype cannot leave the graph
+          holding relationships the ontology forbids.
+        ``known`` adds values the caller already holds (e.g. a merge's composed state) for typing
+        edge ends; anything else is read from the branch."""
+        live = {eid: v for eid, v in written.items() if v is not None}
+
+        untyped = _untyped_creations(
+            {eid: v for eid, v in live.items() if prior.get(eid) is None}, kind_by_entity)
+        if untyped:
+            raise OntologyViolation(untyped)
+
+        judged: Dict[str, str] = {
+            eid: ("create" if _redefines(prior.get(eid), v, kind_by_entity.get(eid, "node"))
+                  else "update")
+            for eid, v in live.items()}
+        edge_writes = [(eid, v) for eid, v in live.items()
+                       if kind_by_entity.get(eid) == "edge" and judged[eid] == "create"]
+        deleted_edges = {eid for eid, v in written.items()
+                         if v is None and kind_by_entity.get(eid) == "edge"}
+        if edge_writes:
+            viol = await self._validate_edge_integrity(
+                s, graph_id, branch_id, edge_writes, deleted_edges, containment_edge_types or [])
+            if viol:
+                raise OntologyViolation(viol)
+
+        if ontology_rules is None or not strict:
+            return
+        rich = [(eid, kind_by_entity.get(eid, "node"), v, judged[eid]) for eid, v in live.items()]
+        retyped = [eid for eid, v in live.items()
+                   if kind_by_entity.get(eid, "node") == "node" and judged[eid] == "create"
+                   and prior.get(eid) is not None]
+        if retyped:
+            for eid, v in (await self._incident_live_edges(s, graph_id, branch_id, retyped)).items():
+                if eid not in written:                  # edges written in this batch are judged already
+                    rich.append((eid, "edge", v, "create"))
+        endpoint_types: Dict[str, str] = {}
+        unknown: set = set()
+        for _eid, kind, v, op in rich:
+            if kind != "edge" or op != "create":
+                continue
+            for ep in _edge_src_tgt(v):
+                if not ep or ep in endpoint_types:
+                    continue
+                ev = written.get(ep) if ep in written else (known or {}).get(ep) or prior.get(ep)
+                if ev and ev.get("entityType"):
+                    endpoint_types[ep] = ev["entityType"]
+                elif ep not in written:
+                    unknown.add(ep)
+        if unknown:
+            for ep, ev in (await self._current_values(s, graph_id, branch_id, list(unknown))).items():
+                if ev and ev.get("entityType"):
+                    endpoint_types[ep] = ev["entityType"]
+        viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
+        if viol:
+            raise OntologyViolation(viol)
 
     async def _validate_edge_integrity(
         self, s, graph_id: str, branch_id: str,
@@ -4982,13 +5042,24 @@ class GraphVersioningService:
                 payload = op.get("payload") or {}
                 kind_by_entity[eid] = (op.get("entity_kind")
                                        or ("edge" if _is_edge_payload(payload) else "node"))
-                new_vals[eid] = None if op["op"] == "delete" else dict(payload)
+                earlier = new_vals.get(eid)
+                if op["op"] == "update" and earlier is not None:
+                    # Several ops on ONE entity in one batch COMPOSE, in order: an update after a
+                    # create (a node renamed before its first save) patches the create's payload,
+                    # and two updates become one patch. Replacing instead stored a renamed new
+                    # node as {displayName} alone — no type, no urn — which then failed every
+                    # read of the draft.
+                    new_vals[eid] = self._patch_payload(earlier, payload)
+                else:
+                    new_vals[eid] = None if op["op"] == "delete" else dict(payload)
+                    if op["op"] == "update":
+                        update_ids.add(eid)
+                        if op.get("base_version"):
+                            base_versions[eid] = op["base_version"]
+                    else:
+                        update_ids.discard(eid)          # a create / delete restarts the entity
                 if new_vals[eid] is not None and kind_by_entity[eid] == "node":
                     new_vals[eid] = _sanitize_node_properties(new_vals[eid])
-                if op["op"] == "update":
-                    update_ids.add(eid)
-                    if op.get("base_version"):
-                        base_versions[eid] = op["base_version"]
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
@@ -5029,7 +5100,7 @@ class GraphVersioningService:
                              if v is None and kind_by_entity.get(eid) == "node"}
             if deleted_nodes:
                 subtree, inc_edges = await self._cascade_deletes(
-                    s, graph_id, bid, deleted_nodes, containment_edge_types)
+                    s, graph_id, bid, deleted_nodes, containment_edge_types, overlay=new_vals)
                 new_desc = [d for d in subtree if d not in new_vals]
                 if new_desc:
                     desc_vals = await self._current_values(s, graph_id, bid, new_desc)
@@ -5038,11 +5109,12 @@ class GraphVersioningService:
                             new_vals[d] = None
                             cur_vals[d] = desc_vals[d]
                             kind_by_entity[d] = "node"
+                for d in subtree:                                # a descendant edited in this save
+                    new_vals[d] = None                           # goes too (its prior is known)
                 for eid, payload in inc_edges.items():           # all incident edges, any type
-                    if eid in new_vals:
-                        continue
-                    new_vals[eid] = None
-                    cur_vals.setdefault(eid, payload)
+                    if eid not in new_vals:                      # stored, untouched: prior = stored
+                        cur_vals.setdefault(eid, payload)
+                    new_vals[eid] = None                         # incl. ones drawn in this save
                     kind_by_entity[eid] = "edge"
 
             # Referential integrity (bounded): every edge written here must have live
@@ -5073,22 +5145,13 @@ class GraphVersioningService:
                 if not _live(src) or not _live(tgt):
                     raise ConcurrencyError(f"edge {eid} would dangle: {src}->{tgt}")
 
-            # ── Containment/edge integrity (authoritative, always on) ────────────────────────────
-            # Duplicate-edge / second-containment-parent / containment-cycle guards, shared with
-            # the merge path via _validate_edge_integrity. Creates only — an update can't add an
-            # edge, and legacy-dirty data must not block property edits. Same-batch deletes are
-            # subtracted (a reparent stages delete(old parent)+create(new)).
-            edge_creates = [(eid, v) for eid, v in new_vals.items()
-                            if v is not None and kind_by_entity.get(eid) == "edge"
-                            and eid not in update_ids]
-            if edge_creates:
-                deleted_edge_ids = {eid for eid, v in new_vals.items()
-                                    if v is None and kind_by_entity.get(eid) == "edge"}
-                viol = await self._validate_edge_integrity(
-                    s, graph_id, bid, edge_creates, deleted_edge_ids,
-                    containment_edge_types or [])
-                if viol:
-                    raise OntologyViolation(viol)
+            # Untyped creations, hierarchy integrity and the ontology — judged on what is WRITTEN
+            # (a patch of nothing is a creation; a retype or a re-pointed edge is judged in full).
+            await self._enforce_written(
+                s, graph_id, bid, new_vals, cur_vals, kind_by_entity,
+                containment_edge_types=containment_edge_types or [],
+                ontology_rules=ontology_rules,
+                strict=graph.ontology_enforcement == "strict")
 
             ontology = Ontology.from_spec(graph.ontology_spec)   # write-through ontology gate
             if ontology is not None and graph.ontology_enforcement == "strict":
@@ -5097,26 +5160,6 @@ class GraphVersioningService:
                      for eid, v in new_vals.items() if v is not None], ontology)
                 if viol:
                     raise OntologyViolation(viol)
-
-            # Rich ontology gate (injected rules; creates only). Endpoint types are free:
-            # new_vals holds the batch, cur_vals was hydrated with unknown endpoints by the
-            # referential-integrity block above. Only GENUINE creates are gated — a `create`
-            # op on an already-live entity (the write-through provider re-records edge
-            # endpoints as idempotent upserts) nets to an update and must not re-litigate a
-            # legacy entity's type.
-            if ontology_rules is not None and graph.ontology_enforcement == "strict":
-                rich = [(eid, kind_by_entity.get(eid, "node"), v,
-                         "update" if (eid in update_ids or cur_vals.get(eid) is not None)
-                         else "create")
-                        for eid, v in new_vals.items() if v is not None]
-                endpoint_types = {}
-                for eid in set(new_vals) | set(cur_vals):
-                    v = new_vals.get(eid) if new_vals.get(eid) is not None else cur_vals.get(eid)
-                    if v and v.get("entityType"):
-                        endpoint_types[eid] = v["entityType"]
-                rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
-                if rich_viol:
-                    raise OntologyViolation(rich_viol)
 
             # Canonicalize entity/edge-type casing to the ontology's declared spelling before
             # the delta is content-hashed and written, so a write-through (or the repair script)
@@ -5504,9 +5547,32 @@ class GraphVersioningService:
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
 
+    async def _effective_incident_edges(
+        self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int],
+        overlay: Optional[Mapping[str, Optional[dict]]],
+    ) -> Dict[str, dict]:
+        """Live edges incident to *node_ids*: the branch's stored ones with *overlay* (the write
+        in progress — entity → new value, ``None`` = deleted) laid over them, plus the overlay's
+        own edges touching *node_ids*. Without the overlay this is :meth:`_incident_live_edges`."""
+        inc = await self._incident_live_edges(s, graph_id, branch_id, node_ids, as_of_seq)
+        if not overlay:
+            return inc
+        ids = set(node_ids)
+        out: Dict[str, dict] = {}
+        for eid, p in inc.items():
+            v = overlay[eid] if eid in overlay else p
+            if v is not None and (set(_edge_src_tgt(v)) & ids):
+                out[eid] = v
+        for eid, v in overlay.items():
+            if eid not in out and v is not None and _is_edge_payload(v) \
+                    and (set(_edge_src_tgt(v)) & ids):
+                out[eid] = v
+        return out
+
     async def _cascade_subtree(
         self, s, graph_id: str, branch_id: str, root_ids: set,
         cset: set, as_of_seq: Optional[int], cap: int, max_depth: int = 64,
+        overlay: Optional[Mapping[str, Optional[dict]]] = None,
     ) -> set:
         """Containment subtree to delete when *root_ids* are deleted, respecting SHARED
         children: a descendant is included only when ALL of its containment parents are in
@@ -5519,7 +5585,8 @@ class GraphVersioningService:
             if not frontier or len(deleted) >= cap:
                 break
             # Children reachable via containment OUT-edges from the newly-deleted frontier.
-            inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+            inc = await self._effective_incident_edges(
+                s, graph_id, branch_id, frontier, as_of_seq, overlay)
             candidates: set = set()
             for p in inc.values():
                 if (p.get("edgeType") or "").upper() not in cset:
@@ -5531,7 +5598,8 @@ class GraphVersioningService:
                 break
             # Gather EVERY containment parent of each candidate; delete it only when they're
             # all already in the delete set (otherwise a surviving parent keeps it alive).
-            cand_inc = await self._incident_live_edges(s, graph_id, branch_id, candidates, as_of_seq)
+            cand_inc = await self._effective_incident_edges(
+                s, graph_id, branch_id, candidates, as_of_seq, overlay)
             parents_of: Dict[str, set] = {}
             for p in cand_inc.values():
                 if (p.get("edgeType") or "").upper() not in cset:
@@ -5551,6 +5619,7 @@ class GraphVersioningService:
     async def _cascade_deletes(
         self, s, graph_id: str, branch_id: str, root_node_ids,
         containment_edge_types, as_of_seq: Optional[int] = None,
+        overlay: Optional[Mapping[str, Optional[dict]]] = None,
     ) -> Tuple[set, Dict[str, dict]]:
         """The full tombstone set for deleting *root_node_ids* on a branch:
 
@@ -5562,16 +5631,21 @@ class GraphVersioningService:
 
         Lineage-connected nodes are NOT added to the node set; only their edges are cleaned.
         Returns ``(subtree_node_ids, {edge_entity_id: payload})``. The same helper backs the
-        read-only delete-impact preview AND the commit-time cascade, so they always agree."""
+        read-only delete-impact preview AND the commit-time cascade, so they always agree.
+
+        A write passes itself as *overlay* so the cascade follows the hierarchy AS WRITTEN: a
+        child linked under the node in the same save goes with it, a relationship drawn to it in
+        the same save goes too, and a child moved away from it in the same save stays."""
         roots = {r for r in root_node_ids if r}
         if not roots:
             return set(), {}
         cset = {t.upper() for t in (containment_edge_types or [])}
         subtree = await self._cascade_subtree(
-            s, graph_id, branch_id, set(roots), cset, as_of_seq, _CASCADE_MAX_NODES,
+            s, graph_id, branch_id, set(roots), cset, as_of_seq, _CASCADE_MAX_NODES, overlay=overlay,
         ) if cset else set(roots)
         subtree |= roots
-        edges = await self._incident_live_edges(s, graph_id, branch_id, subtree, as_of_seq)
+        edges = await self._effective_incident_edges(
+            s, graph_id, branch_id, subtree, as_of_seq, overlay)
         return subtree, edges
 
     async def delete_impact(
@@ -5722,6 +5796,40 @@ class GraphVersioningService:
                 )
 
 
+def _redefines(before: Optional[dict], after: Mapping, kind: str) -> bool:
+    """Whether writing *after* over *before* defines a (partly) NEW entity for the ontology: it
+    did not exist, or a type-defining field changed — a node's type; an edge's type or either
+    end. Such a write faces the full ontology gate; any other edit is exempt."""
+    if not before:
+        return True
+    if kind == "node":
+        return (before.get("entityType") or "") != (after.get("entityType") or "")
+    return (str(before.get("edgeType") or before.get("edge_type") or "").upper()
+            != str(after.get("edgeType") or after.get("edge_type") or "").upper()
+            or _edge_src_tgt(before) != _edge_src_tgt(after))
+
+
+def _untyped_creations(
+    created: Mapping[str, Optional[dict]], kind_by_entity: Mapping[str, str],
+) -> List[dict]:
+    """Violations for entities about to be CREATED without a type (a node's ``entityType``, an
+    edge's ``edgeType``). Every reader needs one, so this holds in every enforcement mode — one
+    untyped node made every read of its draft fail. Callers pass only entities that do not exist
+    yet: ones already stored untyped (legacy data) stay editable, so they can be fixed."""
+    out: List[dict] = []
+    for eid, v in created.items():
+        if v is None:
+            continue
+        kind = kind_by_entity.get(eid, "node")
+        if kind == "node" and not v.get("entityType"):
+            out.append({"entity_id": eid, "kind": kind, "rule": "missing_entity_type",
+                        "reason": "A node needs an entity type from the ontology."})
+        elif kind == "edge" and not (v.get("edgeType") or v.get("edge_type")):
+            out.append({"entity_id": eid, "kind": kind, "rule": "missing_edge_type",
+                        "reason": "A relationship needs a relationship type from the ontology."})
+    return out
+
+
 def _fold_shared(
     base_state: Mapping[str, Optional[dict]],
     changes: Sequence["WorkingChangeORM"],
@@ -5758,11 +5866,17 @@ def _fold_shared(
         order: List[str] = []                            # actors, first-seen order
         net: Dict[str, Optional[dict]] = {}
         for c in chs:
+            # Each collaborator's ops COMPOSE onto the staged ancestor exactly as ``materialize``
+            # folds a private draft: an update is a PATCH. Taking the last payload as the whole
+            # value dropped every field a partial update did not mention — a new node renamed
+            # before checkpoint lost its type, and the 3-way merge read the missing fields as
+            # deletions.
             if c.actor not in net:
                 order.append(c.actor)
-            net[c.actor] = None if c.op == "delete" else (
-                dict(c.payload) if c.payload is not None else None
-            )
+                net[c.actor] = ancestor
+            net[c.actor] = materialize(
+                {eid: net[c.actor]},
+                [{"entity_id": eid, "op": c.op, "payload": c.payload}])[eid]
         merged = net[order[0]]
         for a in order[1:]:                              # iterative 3-way over the staged ancestor
             out = three_way_merge(ancestor, merged, net[a], set_fields)
@@ -5876,7 +5990,10 @@ def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
     return {
         "urn": urn,
         "entityId": entity_id,
-        "entityType": payload.get("entityType"),
+        # "unknown" like main's reader (``_node_from_props``): writes refuse an untyped creation,
+        # but one stored before that rule must still read — shown so it can be retyped, never a
+        # 500 that takes the whole draft down with it.
+        "entityType": payload.get("entityType") or "unknown",
         "displayName": payload.get("displayName") or "",
         "qualifiedName": payload.get("qualifiedName"),
         "description": payload.get("description"),
@@ -5905,7 +6022,7 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
         "id": entity_id,
         "sourceUrn": urn_of.get(src, f"gv:{src}"),
         "targetUrn": urn_of.get(tgt, f"gv:{tgt}"),
-        "edgeType": payload.get("edgeType"),
+        "edgeType": payload.get("edgeType") or payload.get("edge_type") or "unknown",   # never a 500 (see above)
         "confidence": payload.get("confidence"),
         "properties": payload.get("properties") or {},
         "version": content_hash(payload),       # OCC token (see _graphnode_dict)
