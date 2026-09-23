@@ -24,6 +24,7 @@ import { BundleDropzone } from '@/features/view-transfer/BundleDropzone'
 import { BundleSummaryCard } from '@/features/view-transfer/BundleSummaryCard'
 import { pluralize, TONE_CHIP, UPDATE_STATUS_META } from '@/features/view-transfer/format'
 import { useImportSession, type ImportTargetView } from './importSession'
+import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 
 export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
   const session = useImportSession()
@@ -194,10 +195,11 @@ function PackageSummary() {
         </div>
       </div>
       <div className="flex items-center gap-3 border-t border-violet-200/60 dark:border-violet-900/40 px-4 py-2.5">
-        <div className="inline-flex rounded-xl border border-glass-border p-1 bg-canvas-elevated" role="radiogroup" aria-label="What to import">
+        <div className="inline-flex rounded-xl border border-glass-border p-1 bg-canvas-elevated" role="radiogroup" aria-label="What to import"
+          onKeyDown={onRadioGroupKeyDown}>
           {([true, false] as const).map(on => (
             <button key={String(on)} type="button" role="radio" aria-checked={session.withData === on}
-              onClick={() => session.setWithData(on)}
+              tabIndex={session.withData === on ? 0 : -1} onClick={() => session.setWithData(on)}
               className={cn('px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors',
                 session.withData === on ? 'bg-violet-500 text-white shadow-sm' : 'text-ink-muted hover:text-ink')}>
               {on ? 'View and data' : 'View only'}

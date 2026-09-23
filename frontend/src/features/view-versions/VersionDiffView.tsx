@@ -22,15 +22,12 @@ function lastSegment(urn: string): string {
   return urn.split(/[,:/]/).filter(Boolean).pop() ?? urn
 }
 
-export function VersionDiffView({ diff, layerNames = {} }: {
-  diff: ViewDefinitionDiff
-  layerNames?: Record<string, string>
-}) {
+export function VersionDiffView({ diff }: { diff: ViewDefinitionDiff }) {
   if (diff.identical) {
     return <p className="rounded-xl border border-glass-border px-4 py-6 text-center text-xs text-ink-muted">These two are the same design.</p>
   }
   const a = diff.assignments
-  const nameOf = (id: string | null) => (id ? layerNames[id] ?? id : 'none')
+  const nameOf = (id: string | null) => (id ? diff.layers.names?.[id] ?? id : 'none')
   return (
     <div className="space-y-4">
       {diff.metadata.length > 0 && (

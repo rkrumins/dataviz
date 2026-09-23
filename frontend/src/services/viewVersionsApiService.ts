@@ -51,6 +51,8 @@ export interface ViewDefinitionDiff {
     removed: Array<{ id: string; name?: string }>
     changed: Array<{ id: string; name?: string; fields: string[] }>
     reordered: boolean
+    /** Every layer on either side, id → name. */
+    names?: Record<string, string>
   }
   assignments: {
     added: number

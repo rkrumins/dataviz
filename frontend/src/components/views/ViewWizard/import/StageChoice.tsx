@@ -7,6 +7,7 @@ import { GitPullRequestDraft, Info, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { BRANCH_VOCAB } from '@/features/versioning/model/branchVocab'
 import type { DraftStaging } from './useDraftStaging'
+import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 
 export function StageChoice({ staging, stage, onChange, kind, count = 1, wantsEveryone = false }: {
   staging: DraftStaging
@@ -46,13 +47,13 @@ export function StageChoice({ staging, stage, onChange, kind, count = 1, wantsEv
         <p className="text-sm font-bold text-ink">When {several ? 'they go' : 'it goes'} live</p>
         <p className="text-[11px] text-ink-muted mt-0.5">This data source is under version control, so {several ? 'these views' : 'this view'} can go through review like any other change to it.</p>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="When it goes live">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="When it goes live" onKeyDown={onRadioGroupKeyDown}>
         {options.map(o => {
           const selected = stage === o.value
           const Icon = o.icon
           return (
             <button key={o.title} type="button" role="radio" aria-checked={selected} disabled={o.disabled}
-              onClick={() => onChange(o.value)}
+              tabIndex={selected ? 0 : -1} onClick={() => onChange(o.value)}
               className={cn('text-left rounded-xl border px-3 py-2.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
                 selected ? 'border-indigo-500 bg-indigo-500/[0.06] ring-1 ring-indigo-500/30'
                   : 'border-glass-border hover:border-indigo-300 dark:hover:border-indigo-700')}>

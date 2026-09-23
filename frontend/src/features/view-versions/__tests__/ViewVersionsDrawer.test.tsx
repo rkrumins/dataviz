@@ -117,6 +117,17 @@ describe('ViewVersionsDrawer', () => {
     expect(compareMock).toHaveBeenCalledWith('view_1', 1, 2)
   })
 
+  it('says which layer a moved placement left and joined, by name', async () => {
+    compareMock.mockResolvedValue({ from: 1, to: 2, diff: {
+      ...EMPTY_DIFF,
+      layers: { ...EMPTY_DIFF.layers, names: { l1: 'Sources', l2: 'Marts' } },
+      assignments: { ...EMPTY_DIFF.assignments, moved: 1, samples: { ...EMPTY_DIFF.assignments.samples, moved: [{ urn: 'urn:li:orders', from: 'l1', to: 'l2' }] } },
+    } })
+    renderDrawer()
+    fireEvent.click(await screen.findByRole('button', { name: 'with v1' }))
+    expect(await screen.findByText('Sources → Marts')).toBeInTheDocument()
+  })
+
   it('restores as a new version, and says the graph data is untouched', async () => {
     restoreMock.mockResolvedValue({ view: { id: 'view_1' }, version: version(5, { source: 'restore' }), snapshot: version(4, { source: 'snapshot' }) })
     renderDrawer()

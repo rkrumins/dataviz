@@ -117,6 +117,9 @@ def diff_definitions(
             "removed": removed_layers,
             "changed": changed_layers,
             "reordered": common_order_a != common_order_b,
+            # Every layer on either side by name (the later name where both have it), so a
+            # placement that moved can say from which layer to which.
+            "names": {i: layer.get("name") or i for i, layer in {**layers_a, **layers_b}.items()},
         },
         "assignments": {
             "added": len(added),

@@ -1,8 +1,8 @@
 /**
  * The name, description, icon and tags of an imported view, against what the file says.
  *
- * A new view (create or copy) starts from the file's values, with a way back to them and a
- * warning when the workspace already has a view by that name. An update or overwrite starts
+ * A new view (create or copy) starts from the file's values, with a way back to each once it's
+ * changed, and a warning when the workspace already has a view by that name. An update or overwrite starts
  * from the view's CURRENT values (renaming a view because a file arrived would surprise people),
  * with a per-field switch to take the file's instead.
  */
@@ -28,6 +28,10 @@ function currentValue(view: View, field: Field): string | string[] {
   if (field === 'tags') return view.tags ?? []
   if (field === 'icon') return view.config?.icon ?? 'Layout'
   return (field === 'name' ? view.name : view.description) ?? ''
+}
+
+function formValue(formData: WizardFormData, field: Field): string | string[] {
+  return field === 'tags' ? formData.tags : formData[field]
 }
 
 function same(a: string | string[], b: string | string[]): boolean {
@@ -79,7 +83,7 @@ function PerFieldChoice({ formData, updateFormData, file, current, environment }
         {fields.map(field => {
           const fromFile = fileValue(file, field)
           const now = currentValue(current, field)
-          const value = field === 'tags' ? formData.tags : formData[field]
+          const value = formValue(formData, field)
           const choice = same(value, fromFile) ? 'file' : same(value, now) ? 'current' : 'custom'
           const set = (v: string | string[]) => updateFormData({ [field]: v } as Partial<WizardFormData>)
           return (
@@ -127,6 +131,7 @@ function NewViewNaming({ formData, updateFormData, file, environment, workspaceI
       .filter((s): s is string => !!s && !taken.has(s.toLowerCase()))
     : []
   const renamed = formData.name !== file.name
+  const changed = (['description', 'icon', 'tags'] as Field[]).filter(f => !same(formValue(formData, f), fileValue(file, f)))
 
   return (
     <div className="space-y-2">
@@ -143,6 +148,17 @@ function NewViewNaming({ formData, updateFormData, file, environment, workspaceI
           </button>
         )}
       </div>
+      {changed.length > 0 && (
+        <p className="flex items-center gap-x-3 gap-y-1 flex-wrap px-1 text-[11px] text-ink-muted">
+          <span>Changed from the file. Use the file’s:</span>
+          {changed.map(f => (
+            <button key={f} type="button" onClick={() => updateFormData({ [f]: fileValue(file, f) } as Partial<WizardFormData>)}
+              className="inline-flex items-center gap-1 font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+              <RotateCcw className="w-3 h-3" /> {FIELD_LABEL[f].toLowerCase()}
+            </button>
+          ))}
+        </p>
+      )}
       {duplicate && (
         <div className="flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-2.5">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />

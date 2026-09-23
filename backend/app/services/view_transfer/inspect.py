@@ -174,15 +174,21 @@ async def target_suggestions(
             urn for view in parsed.views if view.source_key == key
             for urn in urns_of_kind(collect(view.definition), URN_KIND_ASSIGNMENT)
         })[:SAMPLE_SIZE]
+        digest = (described.get("ontology") or {}).get("digest")
         rows = []
         for rank, (score, reasons, ds) in enumerate(scored[:10]):
             hit_rate = None
-            if sample and rank < PROBED_CANDIDATES:
+            if rank < PROBED_CANDIDATES and (sample or digest):
                 try:
                     engine = await engine_for(session, ds.workspace_id, ds.id)
-                    found = await engine.provider.resolve_identities(sample)
-                    checked = len(found)
-                    hit_rate = (sum(1 for v in found.values() if v) / checked) if checked else None
+                    # The same ontology, to the byte (both sides digest it alike): every type the
+                    # file names means here what it meant there.
+                    if digest and await engine.get_ontology_digest() == digest:
+                        score, reasons = score + 10, [*reasons, "Identical semantic layer"]
+                    if sample:
+                        found = await engine.provider.resolve_identities(sample)
+                        checked = len(found)
+                        hit_rate = (sum(1 for v in found.values() if v) / checked) if checked else None
                 except Exception as exc:  # noqa: BLE001 — a probe that can't run is just unknown
                     logger.info("inspect: probe of %s failed: %s", ds.id, exc)
             workspace = cache.get(f"ws:{ds.workspace_id}") or await session.get(WorkspaceORM, ds.workspace_id)

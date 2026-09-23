@@ -12,14 +12,18 @@
  *   childrenOf / loadChildren  →  provider-backed lazy children (cached)
  *
  * Edit mode: a view's persisted assignments reference URNs the browser hasn't
- * paged in yet. Those are batch-resolved via `provider.getNode(urn)` at small
- * concurrency; a null/failed lookup writes a TOMBSTONE (fetched exactly once)
- * whose identity falls back to a prettified URN fragment with `missing: true`
- * so the UI can hint "not found in graph" without ever re-fetching.
+ * paged in yet. Those are resolved in batches (`provider.getNodes`, a hundred
+ * URNs a request, a few requests at a time: an imported view can place tens of
+ * thousands). A URN asked for and not returned writes a TOMBSTONE (fetched
+ * exactly once) whose identity falls back to a prettified URN fragment with
+ * `missing: true`, so the UI can hint "not found in graph" without ever
+ * re-fetching. A batch that FAILED proves nothing: its URNs are named from
+ * their fragments, never marked missing, and not asked again this session.
  */
 
 import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import { mapWithConcurrency } from '@/lib/concurrency'
 import type { LayerAssignmentEntry } from '@/types/schema'
 import type { BrowserSnapshot } from './WizardAssignmentTree'
 
@@ -60,7 +64,8 @@ export function fallbackNameFromUrn(urn: string): string {
  */
 export const WizardEntitySeedContext = createContext<ReadonlyMap<string, EntityIdentity> | null>(null)
 
-const RESOLVE_CONCURRENCY = 5
+const RESOLVE_BATCH = 100
+const RESOLVE_CONCURRENCY = 4
 const CHILDREN_PAGE_SIZE = 50
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
@@ -113,28 +118,31 @@ export function useWizardEntityIndex(opts: {
         if (missing.length === 0) return
 
         let cancelled = false
-        const run = async () => {
-            for (let i = 0; i < missing.length; i += RESOLVE_CONCURRENCY) {
-                if (cancelled) return
-                const chunk = missing.slice(i, i + RESOLVE_CONCURRENCY)
-                chunk.forEach(urn => inFlightRef.current.add(urn))
-                await Promise.all(chunk.map(async urn => {
-                    try {
-                        const node = await provider.getNode(urn)
-                        resolvedRef.current.set(urn, node
-                            ? { name: node.displayName, type: node.entityType, childCount: node.childCount ?? 0 }
-                            : null)
-                    } catch {
-                        // Tombstone — resolved once, never re-fetched.
-                        resolvedRef.current.set(urn, null)
-                    } finally {
-                        inFlightRef.current.delete(urn)
-                    }
-                }))
-                if (!cancelled) setTick(t => t + 1)
+        const batches: string[][] = []
+        for (let i = 0; i < missing.length; i += RESOLVE_BATCH) batches.push(missing.slice(i, i + RESOLVE_BATCH))
+        void mapWithConcurrency(batches, RESOLVE_CONCURRENCY, async batch => {
+            // A newer run owns whatever this one hasn't started.
+            if (cancelled) return
+            batch.forEach(urn => inFlightRef.current.add(urn))
+            try {
+                const nodes = await provider.getNodes({ urns: batch, limit: batch.length })
+                const found = new Map(nodes.map(n => [n.urn, n]))
+                for (const urn of batch) {
+                    const node = found.get(urn)
+                    // Not returned: not in the graph. Tombstone — resolved once, never re-fetched.
+                    resolvedRef.current.set(urn, node
+                        ? { name: node.displayName, type: node.entityType, childCount: node.childCount ?? 0 }
+                        : null)
+                }
+            } catch {
+                for (const urn of batch) {
+                    resolvedRef.current.set(urn, { name: fallbackNameFromUrn(urn), type: 'unknown', childCount: 0 })
+                }
+            } finally {
+                batch.forEach(urn => inFlightRef.current.delete(urn))
             }
-        }
-        void run()
+            if (!cancelled) setTick(t => t + 1)
+        })
         return () => { cancelled = true }
     }, [assignments, snapshot, provider, seed])
 

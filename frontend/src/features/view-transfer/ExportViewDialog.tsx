@@ -38,6 +38,7 @@ import type { Job } from '@/services/importExportApiService'
 import { recordEvent } from '@/services/telemetryService'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
+import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName, viewPackageName } from './format'
 
@@ -523,13 +524,13 @@ function ContentChoice({ content, onChange, reason }: {
   ]
   return (
     <div>
-      <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="What to export">
+      <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="What to export" onKeyDown={onRadioGroupKeyDown}>
         {options.map((o) => {
           const disabled = o.id === 'data' && !!reason
           const Icon = o.icon
           return (
             <button key={o.id} type="button" role="radio" aria-checked={content === o.id} disabled={disabled}
-              onClick={() => onChange(o.id)}
+              tabIndex={content === o.id ? 0 : -1} onClick={() => onChange(o.id)}
               className={cn('text-left px-3.5 py-2.5 rounded-xl border-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
                 content === o.id ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20' : 'border-glass-border hover:border-glass-border-hover')}>
               <span className="flex items-center gap-2 text-xs font-semibold text-ink">

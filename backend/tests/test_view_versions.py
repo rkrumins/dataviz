@@ -122,6 +122,7 @@ async def test_compare_two_versions_and_a_version_with_now(test_client: AsyncCli
     assert diff["assignments"]["moved"] == 1
     assert diff["assignments"]["samples"]["moved"] == [{"urn": "urn:a", "from": "l1", "to": "l2"}]
     assert diff["identical"] is False
+    assert diff["layers"]["names"] == {"l1": "Sources", "l2": "Marts"}, "a move can say which layers, by name"
     now = (await test_client.get(f"/api/v1/views/{vid}/versions/compare", params={"from": 2})).json()["diff"]
     assert now["identical"] is True
 

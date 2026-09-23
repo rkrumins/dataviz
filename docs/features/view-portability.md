@@ -172,7 +172,8 @@ bundle, each view's integrity, and:
 - **target suggestions** per source in the file: the data sources here the caller can read, ranked
   by what the file says about its source (provider, graph name or catalog identifier, ontology),
   then measured: a sample of 50 of the view's own entities is looked up in the top candidates
-  ("49 of 50 found here").
+  ("49 of 50 found here"), and a top candidate whose ontology digest is the file's ranks higher
+  ("Identical semantic layer").
 
 ### 2. Reconcile
 

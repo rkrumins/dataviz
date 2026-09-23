@@ -572,4 +572,5 @@ async def test_inspect_finds_where_the_file_belongs(test_client, db_session, gra
     assert other not in by_workspace, "a different kind of graph with a different name isn't suggested"
     twin = by_workspace[uat]
     assert twin["score"] >= 70 and "Same graph" in twin["reasons"]
+    assert "Identical semantic layer" in twin["reasons"], "the ontology digests match"
     assert twin["sampleSize"] == 3 and twin["sampleHitRate"] == pytest.approx(2 / 3)

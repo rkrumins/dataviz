@@ -35,7 +35,7 @@ getChildrenWithEdges.mockResolvedValue({
 // a factory returning a fresh object each render throws the loaded children away
 // on every render and childrenOf never returns anything.
 vi.mock('@/providers/GraphProviderContext', () => {
-  const provider = { getNode: vi.fn().mockResolvedValue(null), getChildrenWithEdges }
+  const provider = { getNodes: vi.fn().mockResolvedValue([]), getChildrenWithEdges }
   return { useGraphProvider: () => provider }
 })
 vi.mock('@/hooks/useDataSourceSchema', () => ({

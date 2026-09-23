@@ -27,7 +27,7 @@ beforeAll(() => {
 vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
 
 vi.mock('@/providers/GraphProviderContext', () => ({
-  useGraphProvider: () => ({ getNode: vi.fn().mockResolvedValue(null) }),
+  useGraphProvider: () => ({ getNodes: vi.fn().mockResolvedValue([]) }),
 }))
 
 // LayerStudio reads the data source's ontology to offer Auto-layer's candidate
