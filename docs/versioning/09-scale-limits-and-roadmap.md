@@ -128,9 +128,9 @@ frontend-only gap.)*
 
 See [08](08-import-export.md) for detail; the load-bearing ones:
 
-- **In-process `BackgroundTasks` dispatch, not a real async dispatcher.** A `uvicorn --reload` (or a
-  crash) mid-import/export kills the job and leaves its summary null. A Redis/Postgres dispatcher is a
-  designed slot-in behind the same call.
+- **In-process dispatch, not a real async dispatcher.** A `uvicorn --reload` (or a crash)
+  mid-import/export kills the job; it is reported `failed` once silent for `JOB_STALE_AFTER_SECS`.
+  A Redis/Postgres dispatcher is a designed slot-in behind the same call.
 - **Export doesn't stream the read.** It `materialize_state`s the whole state then streams the write —
   fine for human-scale exports, not 5M+ (swap `materialize_state` → keyset streaming).
 - **No cloud object store yet**: artifacts live in the management database (`DatabaseObjectStore`,

@@ -12,6 +12,7 @@ importing it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,17 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# What a job reads when it stopped mid-run: its task was cancelled, or its server went away.
+_INTERRUPTED = ("The job stopped before it finished (the server restarted or it was interrupted). "
+                "Start it again.")
+
+
+def _silent_secs(row: JobORM) -> float:
+    """Seconds since the job last showed life: its heartbeat, else its start, else its creation."""
+    last = datetime.fromisoformat(row.updated_at or row.started_at or row.created_at)
+    return (datetime.now(timezone.utc) - last).total_seconds()
 
 
 class ImportExportService:
@@ -117,14 +129,25 @@ class ImportExportService:
     async def _run_safe(self, job_id: str, runner) -> None:
         try:
             await runner(job_id)
+        except asyncio.CancelledError:
+            # A shutdown or a cancelled task: record it, or the job reads "running" forever.
+            logger.warning("job %s was cancelled", job_id)
+            try:
+                await self._mark_failed(job_id, _INTERRUPTED)
+            except Exception:  # noqa: BLE001 — the cancellation must still propagate
+                logger.exception("recording the cancellation of job %s failed", job_id)
+            raise
         except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
             logger.exception("job %s failed", job_id)
-            async with db.graphver_session() as s:
-                row = await s.get(JobORM, job_id)
-                if row is not None:
-                    row.status = "failed"
-                    row.error_message = str(exc)[:2000]
-                    row.completed_at = _now()
+            await self._mark_failed(job_id, str(exc))
+
+    async def _mark_failed(self, job_id: str, message: str) -> None:
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            if row is not None and row.status in ("pending", "running"):
+                row.status = "failed"
+                row.error_message = message[:2000]
+                row.completed_at = _now()
 
     async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Job summary + a bounded sample of resolved rows (the inline preview; the full diff is
@@ -324,11 +347,19 @@ class ImportExportService:
         return b"".join(chunks)
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Job as a camelCase dict (frontend wire shape)."""
+        """Job as a camelCase dict (frontend wire shape). A pending or running import/export silent
+        for ``JOB_STALE_AFTER_SECS`` is reported failed: the process running it went away (a
+        restart, a killed pod) and nothing will finish it, while a live import beats every few
+        seconds (``ImportWorker``)."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is None:
                 return None
+            if row.job_type in ("ingest", "export") and row.status in ("pending", "running") \
+                    and _silent_secs(row) > config.JOB_STALE_AFTER_SECS:
+                row.status = "failed"
+                row.error_message = _INTERRUPTED
+                row.completed_at = _now()
             return {
                 "jobId": row.id, "jobType": row.job_type, "status": row.status,
                 "graphId": row.graph_id, "branchId": row.branch_id,

@@ -78,15 +78,19 @@ is (`service.py:86-88`). It inserts the `JobORM` row and mints a self-describing
 (`{ws}/{ds}/{graph}/{job}/source.<fmt>`) for the caller to stream the upload into
 (`service.py:102-105`).
 
-**Dispatch.** The endpoint streams the uploaded file into the object store, then schedules the
-worker via FastAPI `BackgroundTasks` (`versioning.py:2012-2013`). `run_import_safe` / `_run_safe`
-(`service.py:108-122`) wrap the run so any exception marks the job `failed` with an
-`error_message` — the failure is durable on the job row.
+**Dispatch.** The endpoint streams the uploaded file into the object store, then runs the worker as
+a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI `BackgroundTasks`:
+those run inside the request's ASGI call, so the route's 120 s timeout tier cancelled any import
+that outlasted it. `run_import_safe` / `_run_safe` wrap the run so any exception, or a
+cancellation, marks the job `failed` with an `error_message` — the failure is durable on the job
+row.
 
-> **Limitation — in-process dispatch.** v1 runs imports/exports on **FastAPI `BackgroundTasks`**
-> inside the web process, not a real async dispatcher (`service.py:9-11`). Two consequences to know:
-> a `uvicorn --reload` (or any process restart) **mid-import kills the job** — it never reaches
-> `completed` and its `summary` stays null; and a very large import competes with request handling.
+> **Limitation — in-process dispatch.** v1 runs imports (detached tasks) and exports (**FastAPI
+> `BackgroundTasks`**) inside the web process, not a real async dispatcher (`service.py:9-11`). Two
+> consequences to know: a `uvicorn --reload` (or any process restart) **mid-import kills the job** —
+> it never reaches `completed`, and since a running import touches its `updated_at` every 15 s,
+> `get_job` reports a job silent for `JOB_STALE_AFTER_SECS` (default 900) as `failed` so the UI
+> stops waiting; and a very large import competes with request handling.
 > A Redis/Postgres dispatcher (mirroring the aggregation worker) slots in behind the same
 > `run_import_safe` call without touching the pipeline. Tracked in
 > [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
@@ -371,8 +375,9 @@ rejects keys that resolve outside the root (`:85-91`), and the same sweep delete
 
 ## 11. Limitations & open items (candid)
 
-- **In-process `BackgroundTasks` dispatch**, not a durable async dispatcher — a process restart
-  mid-import kills the job (`service.py:9-11`). Highest-priority hardening item.
+- **In-process dispatch**, not a durable async dispatcher — a process restart mid-import kills the
+  job, which is then reported `failed` once stale (`service.py:9-11`). Highest-priority hardening
+  item.
 - **Export buffers the read** (`materialize_state` before streaming the write) — keyset streaming is
   the 5M+ follow-up (`export_worker.py:9-10`); **JSON and xlsx are buffered** on both parse and write
   (`formats.py:120-122`, `xlsx_adapter.py:26-32`), so they're human-scale formats — use ndjson/csv

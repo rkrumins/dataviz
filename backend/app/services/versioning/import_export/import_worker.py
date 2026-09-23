@@ -14,6 +14,7 @@ Invalid rows are quarantined (partial acceptance), not fatal; the tally lands on
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -30,6 +31,9 @@ from .rowmodel import normalize
 logger = logging.getLogger(__name__)
 
 _PARSE_BATCH = 2000
+# How often a running import touches its job's ``updated_at``. ``get_job`` reports a job silent
+# for JOB_STALE_AFTER_SECS as failed, and a long parse or apply window says nothing on its own.
+_HEARTBEAT_SECS = 15
 
 
 def _now() -> str:
@@ -193,12 +197,16 @@ class ImportWorker:
 
     async def run(self, job_id: str) -> Dict[str, int]:
         job = await self._load_running(job_id)
-        graph_id, branch_id = job["graph_id"], job["branch_id"]
-        actor = await self._branch_owner(graph_id, branch_id)
+        beat = asyncio.create_task(self._heartbeat(job_id))
+        try:
+            graph_id, branch_id = job["graph_id"], job["branch_id"]
+            actor = await self._branch_owner(graph_id, branch_id)
 
-        await self._parse(job_id, job["source_uri"], job["import_format"])
-        summary = await self._resolve_and_build(
-            job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+            await self._parse(job_id, job["source_uri"], job["import_format"])
+            summary = await self._resolve_and_build(
+                job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        finally:
+            beat.cancel()
 
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
@@ -210,6 +218,17 @@ class ImportWorker:
         return summary
 
     # ------------------------------------------------------------------ #
+    async def _heartbeat(self, job_id: str) -> None:
+        """Say "still running" on a timer rather than per batch: resolving or applying one window
+        can take minutes without a batch boundary."""
+        while True:
+            await asyncio.sleep(_HEARTBEAT_SECS)
+            try:
+                async with db.graphver_session() as s:
+                    await s.execute(update(JobORM).where(JobORM.id == job_id).values(updated_at=_now()))
+            except Exception:  # noqa: BLE001 — the next beat tries again
+                logger.debug("import %s: heartbeat skipped", job_id, exc_info=True)
+
     async def _load_running(self, job_id: str) -> Dict[str, Any]:
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)

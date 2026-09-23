@@ -266,6 +266,9 @@ STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
 # The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
 # written more than this many hours ago.
 OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
+# A pending/running import or export job silent this long (no ``updated_at`` heartbeat) is
+# reported failed: the process running it went away, and nothing else will ever finish it.
+JOB_STALE_AFTER_SECS: int = int(os.getenv("JOB_STALE_AFTER_SECS", "900"))
 
 
 # --------------------------------------------------------------------------- #

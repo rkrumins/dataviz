@@ -52,6 +52,7 @@ from backend.app.auth.dependencies import get_optional_user, get_permission_clai
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.db.repositories import data_source_repo, view_activity_repo, view_repo
+from backend.app.services.background import spawn_detached
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.storage.object_store import storage_key
 from backend.app.services.view_transfer import importing, limits, package
@@ -392,7 +393,6 @@ class PackageDataRequest(BaseModel):
 @router.post("/packages/{upload_id}/data", dependencies=[Depends(require_feature("viewImportEnabled"))])
 async def import_package_data(
     upload_id: str,
-    background: BackgroundTasks,
     body: PackageDataRequest = Body(...),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -442,7 +442,8 @@ async def import_package_data(
         data = {**done, "jobId": created["job_id"], "attempt": attempt}
         await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
                                   _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
-        background.add_task(ie.run_import_safe, created["job_id"])
+        # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
+        spawn_detached(ie.run_import_safe(created["job_id"]), name=f"import {created['job_id']}")
         return data
 
     workspace = await session.get(WorkspaceORM, body.workspaceId)
@@ -479,7 +480,7 @@ async def import_package_data(
     await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
                               _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
     await ie.store.delete(_upload_key(upload_id, package.UPLOAD_DATA))     # the job has its own copy
-    background.add_task(ie.run_import_safe, created["job_id"])
+    spawn_detached(ie.run_import_safe(created["job_id"]), name=f"import {created['job_id']}")
     return data
 
 
