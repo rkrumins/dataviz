@@ -35,13 +35,22 @@ async def readable_view(
     return view
 
 
+async def may_edit_view(
+    session: AsyncSession, view: ViewORM, user: Optional[User], claims: PermissionClaims,
+) -> bool:
+    """Whether the caller may edit ``view``, one they can read: ``editable_view``'s rule, as a
+    yes or no for callers that act differently rather than refuse."""
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return True
+    ctx = await _viewer_context(session, user, claims)
+    return await view_access.can_edit_view(session, ctx, view)
+
+
 async def editable_view(
     session: AsyncSession, view_id: str, user: Optional[User], claims: PermissionClaims,
 ) -> ViewORM:
     """The view, or 404 when unreadable and 403 when readable but not editable."""
     view = await readable_view(session, view_id, user, claims)
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        ctx = await _viewer_context(session, user, claims)
-        if not await view_access.can_edit_view(session, ctx, view):
-            raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+    if not await may_edit_view(session, view, user, claims):
+        raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
     return view

@@ -11,15 +11,19 @@ import type { ViewVersionPage } from '@/services/viewVersionsApiService'
 
 const resolveGraphMock = vi.fn()
 
-vi.mock('@/services/viewTransferApiService', () => ({ exportViews: vi.fn(), exportViewPackage: vi.fn() }))
+vi.mock('@/services/viewTransferApiService', () => ({
+  exportViews: vi.fn(),
+  exportViewPackage: vi.fn(),
+  previewExport: vi.fn(async (ids: string[]) => ({
+    views: ids.map((viewId) => ({
+      viewId, name: 'Finance lineage', workspaceId: 'ws1', dataSourceId: 'ds1', headVersion: 3, dirty: false,
+      maySeal: true, exportsAs: 3, includesUnsaved: false, stats: { layers: 3, assignments: 120 }, estimatedBytes: 1000,
+    })),
+  })),
+}))
 vi.mock('@/services/viewVersionsApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/viewVersionsApiService')>(),
   listViewVersions: vi.fn(),
-  getViewVersionStatus: vi.fn(),
-}))
-vi.mock('@/services/viewApiService', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@/services/viewApiService')>(),
-  getView: vi.fn(async (id: string) => ({ id, name: 'Finance lineage', workspaceId: 'ws1', dataSourceId: 'ds1' })),
 }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/versioningApiService')>(),

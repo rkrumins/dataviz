@@ -40,7 +40,7 @@ from backend.app.api.v1.endpoints.versioning import (
     _domain_errors, get_import_export_service, get_versioning_service,
 )
 from backend.app.api.v1.endpoints.large_json import json_response
-from backend.app.api.v1.endpoints.view_guards import editable_view, readable_view
+from backend.app.api.v1.endpoints.view_guards import editable_view, may_edit_view, readable_view
 from backend.app.api.v1.endpoints.views import (
     _compute_ontology_digest,
     _viewer_context,
@@ -56,7 +56,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.storage.object_store import storage_key
 from backend.app.services.view_transfer import importing, limits, package
 from backend.app.services.view_transfer.bundle import BundleError, check_depth, parse_bundle
-from backend.app.services.view_transfer.export import export_views
+from backend.app.services.view_transfer.export import export_views, preview as export_preview
 from backend.app.services.view_transfer.inspect import identity_matches, target_suggestions, view_payload
 from backend.app.services.view_transfer.references import Rewrite, reference_layout
 from backend.app.services.view_transfer.sources import effective_data_source
@@ -98,8 +98,9 @@ async def export_view_file(
     """Download views as a View Bundle file.
 
     Each view exports as a real version: the one asked for, or its current design, sealed as a
-    new version first if it has unsaved changes. Every view needs read access; one the caller
-    can't read fails the whole export with the same 404 a direct read would give.
+    new version first if it has unsaved changes and the caller may edit it (anyone else gets its
+    latest version). Every view needs read access; one the caller can't read fails the whole
+    export with the same 404 a direct read would give.
     """
     seen = set()
     requests = []
@@ -107,7 +108,8 @@ async def export_view_file(
         if ref.viewId in seen:
             raise HTTPException(status_code=422, detail=f"View '{ref.viewId}' is listed twice")
         seen.add(ref.viewId)
-        requests.append((await readable_view(session, ref.viewId, user, claims), ref.version))
+        view = await readable_view(session, ref.viewId, user, claims)
+        requests.append((view, ref.version, await may_edit_view(session, view, user, claims)))
 
     try:
         bundle, sealed = await export_views(session, requests, actor=_actor(user), message=req.message)
@@ -153,6 +155,28 @@ async def _package_bytes(data: bytes):
     yield data
 
 
+class ExportPreviewRequest(BaseModel):
+    viewIds: List[str] = Field(..., min_length=1, max_length=limits.MAX_VIEWS_PER_BUNDLE)
+
+
+@router.post("/export/preview", dependencies=[Depends(require_feature("viewExportEnabled"))])
+async def preview_view_export(
+    req: ExportPreviewRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What exporting these views as they stand would write, in one request however many are
+    selected: per view, the version it goes out as, whether that includes unsaved changes (only
+    for someone who may edit it), its counts and an estimated size. Writes nothing. A view the
+    caller can't read is a 404, as it would be for the export itself."""
+    views = []
+    for view_id in dict.fromkeys(req.viewIds):
+        view = await readable_view(session, view_id, user, claims)
+        views.append(await export_preview(session, view, may_seal=await may_edit_view(session, view, user, claims)))
+    return await json_response({"views": views})
+
+
 @router.post("/packages", dependencies=[Depends(require_feature("viewExportEnabled")),
                                         Depends(require_feature("graphExportEnabled"))])
 async def export_view_package(
@@ -181,11 +205,12 @@ async def export_view_package(
         if ref.viewId in seen:
             raise HTTPException(status_code=422, detail=f"View '{ref.viewId}' is listed twice")
         seen.add(ref.viewId)
-        requests.append((await readable_view(session, ref.viewId, user, claims), ref.version))
+        view = await readable_view(session, ref.viewId, user, claims)
+        requests.append((view, ref.version, await may_edit_view(session, view, user, claims)))
     first = requests[0][0]
-    sources = {(ds.id if ds else None) for ds in [await effective_data_source(session, row) for row, _ in requests]}
+    sources = {(ds.id if ds else None) for ds in [await effective_data_source(session, row) for row, _, _ in requests]}
     ds_id = next(iter(sources))
-    if len(sources) != 1 or ds_id is None or any(row.workspace_id != first.workspace_id for row, _ in requests):
+    if len(sources) != 1 or ds_id is None or any(row.workspace_id != first.workspace_id for row, _, _ in requests):
         raise HTTPException(status_code=422, detail="A package holds views from one data source.")
     if not has_permission(claims, "workspace:datasource:read", workspace_id=first.workspace_id):
         raise HTTPException(status_code=403, detail="Missing permission: workspace:datasource:read")

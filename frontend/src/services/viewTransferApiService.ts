@@ -327,6 +327,29 @@ export interface ImportViewResult {
   staged?: { branchId: string } | null
 }
 
+/** What exporting a view as it stands would write (`POST /export/preview`); nothing is written. */
+export interface ExportPreview {
+  viewId: string
+  name: string
+  workspaceId: string
+  dataSourceId: string | null
+  headVersion: number | null
+  /** The design has changed since `headVersion`. */
+  dirty: boolean
+  /** The caller may edit the view, so its export saves unsaved changes as a new version first.
+   *  Anyone else exports the latest version as it stands. */
+  maySeal: boolean
+  /** The version the file names. */
+  exportsAs: number
+  includesUnsaved: boolean
+  stats: Record<string, number>
+  estimatedBytes: number
+}
+
+export function previewExport(viewIds: string[]): Promise<{ views: ExportPreview[] }> {
+  return postJson('/export/preview', { viewIds })
+}
+
 export interface ExportedFile {
   filename: string
   bytes: number

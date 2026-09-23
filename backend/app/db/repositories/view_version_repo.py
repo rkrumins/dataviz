@@ -148,6 +148,15 @@ async def _next_version(session: AsyncSession, view_id: str) -> int:
     return int(result.scalar() or 0) + 1
 
 
+async def stored_size(session: AsyncSession, view_id: str, version: int) -> int:
+    """How long a version's stored definition is, without reading it: it can be megabytes."""
+    result = await session.execute(
+        select(func.length(ViewVersionORM.definition))
+        .where(ViewVersionORM.view_id == view_id, ViewVersionORM.version == version)
+    )
+    return int(result.scalar() or 0)
+
+
 async def find_by_request_id(session: AsyncSession, request_id: str) -> Optional[ViewVersionORM]:
     if not request_id:
         return None

@@ -376,6 +376,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         posture="capability",
         server_gates=(
             "POST /views/transfer/export — build a view file",
+            "POST /views/transfer/export/preview — say what an export would write",
             "POST /views/transfer/packages — build a view + data package",
         ),
         ui_surfaces=(

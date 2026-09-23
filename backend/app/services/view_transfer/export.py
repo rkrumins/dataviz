@@ -27,6 +27,7 @@ from backend.app.db.models import ViewORM, ViewVersionORM
 from backend.app.db.repositories import view_repo, view_version_repo
 from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.bundle import assemble_bundle
+from backend.app.services.view_transfer.canonical import canonical_json
 from backend.app.services.view_transfer.references import (
     URN_KIND_ANCHOR, URN_KIND_ASSIGNMENT, URN_KIND_PREDICATE, URN_KIND_ROOT, URN_KIND_RULE,
     collect, definition_stats, urns_of_kind,
@@ -63,9 +64,14 @@ class SealedView:
 
 async def seal(
     session: AsyncSession, row: ViewORM, version_number: Optional[int], *,
-    actor: Optional[str], message: Optional[str],
+    actor: Optional[str], message: Optional[str], may_seal: bool = True,
 ) -> SealedView:
-    """The version this view exports as: the one asked for, or its current design sealed."""
+    """The version this view exports as: the one asked for, or its current design sealed.
+
+    Sealing unsaved changes writes a version, which only someone who may edit the view does
+    (``may_seal``). Anyone else exports its latest version as it stands: reading a view never
+    writes to it. (A view with no versions at all gets its first, as reading its history does.)
+    """
     if not row.portable_id:
         # A row that predates the column and escaped its backfill: give it an identity now,
         # before it leaves, so its copies can find it again.
@@ -76,14 +82,57 @@ async def seal(
         if version is None:
             raise LookupError(f"'{row.name}' has no version {version_number}")
     else:
-        await view_version_repo.ensure_baseline(session, row)
-        head, _ = await view_version_repo.checkpoint(
-            session, row, source="export", actor=actor, message=message or "Sealed for export",
-        )
+        head = await view_version_repo.ensure_baseline(session, row)
+        if may_seal:
+            head, _ = await view_version_repo.checkpoint(
+                session, row, source="export", actor=actor, message=message or "Sealed for export",
+            )
         version = await view_version_repo.get_version(session, row.id, head.version)
     return SealedView(row=row, version=version,
                       definition=await asyncio.to_thread(view_version_repo.parse_definition, version.definition),
                       label=view_version_repo.label_of(version))
+
+
+#: How a view's size in a file relates to its canonical design: the file is indented, and its
+#: manifest names every entity the view places. Fitted to exported views of 200 to 20,000
+#: placements (within a few percent there); an estimate, not a promise.
+_FILE_BYTES_PER_DESIGN_BYTE = 2.2
+_FILE_BYTES_PER_PLACEMENT = 150
+
+
+def _measured(definition: dict) -> Tuple[int, Dict[str, int]]:
+    return len(canonical_json(definition)), definition_stats(definition)
+
+
+async def preview(session: AsyncSession, row: ViewORM, *, may_seal: bool) -> Dict[str, Any]:
+    """What exporting ``row`` as it stands would write (see ``seal``), without writing anything:
+    the version it goes out as, whether that includes unsaved changes, its counts and roughly
+    how big it makes the file."""
+    latest = await view_version_repo.head(session, row.id)
+    state = await view_version_repo.working_state_async(row)
+    dirty = (await view_version_repo.status(row, latest, state))["dirty"]
+    if latest is None or (dirty and may_seal):
+        design_bytes, stats = await asyncio.to_thread(_measured, state.definition)
+        exports_as = latest.version + 1 if latest is not None else 1
+    else:
+        design_bytes = await view_version_repo.stored_size(session, row.id, latest.version)
+        stats = view_version_repo.to_summary(latest)["stats"]
+        exports_as = latest.version
+    ds = await effective_data_source(session, row)
+    return {
+        "viewId": row.id,
+        "name": row.name,
+        "workspaceId": row.workspace_id,
+        "dataSourceId": ds.id if ds else None,
+        "headVersion": latest.version if latest is not None else None,
+        "dirty": dirty,
+        "maySeal": may_seal,
+        "exportsAs": exports_as,
+        "includesUnsaved": dirty and may_seal,
+        "stats": stats,
+        "estimatedBytes": round(design_bytes * _FILE_BYTES_PER_DESIGN_BYTE
+                                + int(stats.get("assignments") or 0) * _FILE_BYTES_PER_PLACEMENT),
+    }
 
 
 async def _history(
@@ -113,17 +162,18 @@ async def _history(
 
 async def export_views(
     session: AsyncSession,
-    requests: List[Tuple[ViewORM, Optional[int]]],
+    requests: List[Tuple[ViewORM, Optional[int], bool]],
     *,
     actor: Optional[str],
     message: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[SealedView]]:
-    """Build the bundle for ``requests`` (each a view and an optional version number).
+    """Build the bundle for ``requests``: each a view, an optional version number, and whether
+    the caller may seal the view's unsaved changes (see ``seal``).
 
     Returns ``(bundle, sealed)``. Raises ``LookupError`` for a version that doesn't exist.
     """
-    sealed = [await seal(session, row, number, actor=actor, message=message)
-              for row, number in requests]
+    sealed = [await seal(session, row, number, actor=actor, message=message, may_seal=may_seal)
+              for row, number, may_seal in requests]
 
     # One source entry per distinct (workspace, data source); one identity lookup per source.
     source_keys: Dict[Tuple[str, Optional[str]], str] = {}

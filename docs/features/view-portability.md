@@ -340,7 +340,8 @@ description, icon and tags, never visibility, and says the graph data isn't affe
 
 | Route | Does | Gate |
 |---|---|---|
-| `POST /api/v1/views/transfer/export` | `{views: [{viewId, version?}], message?}` → the file (`X-Bundle-Hash`, and for one view `X-Definition-Hash`, `X-View-Version`) | `viewExportEnabled`; read access to every view |
+| `POST /api/v1/views/transfer/export` | `{views: [{viewId, version?}], message?}` → the file (`X-Bundle-Hash`, and for one view `X-Definition-Hash`, `X-View-Version`) | `viewExportEnabled`; read access to every view. Sealing unsaved changes needs edit access: anyone else exports the latest version |
+| `POST /api/v1/views/transfer/export/preview` | `{viewIds}` → per view: the version it would export as, whether that includes unsaved changes, counts and an estimated size. Writes nothing | `viewExportEnabled`; read access to every view |
 | `POST /api/v1/views/transfer/inspect` | raw file → bundle, integrity, identity matches, target suggestions | `viewImportEnabled` |
 | `POST /api/v1/views/transfer/reconcile` | views + targets + resolutions → effective definition, report, update preview | `viewImportEnabled`; create permission in the target workspace, or edit access to the target view |
 | `POST /api/v1/views/transfer/import` | one view → view, version, report, integrity (and `staged` when it went into a draft) | `viewImportEnabled`; the view-create gates, or edit access; staging needs sign-in and `workspace:datasource:manage` |

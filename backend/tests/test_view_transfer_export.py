@@ -13,6 +13,9 @@ from backend.app.services.feature_flags import feature_flags
 from backend.app.services.view_transfer import bundle as bundle_mod
 from backend.app.services.view_transfer.canonical import content_hash, portable_definition
 
+from backend.app.services.permission_service import PermissionClaims
+from backend.tests.test_view_transfer_import import _as, _user
+
 pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
 
 
@@ -54,9 +57,10 @@ async def _workspace(client: AsyncClient, name="Export WS") -> str:
     return resp.json()["id"]
 
 
-async def _view(client: AsyncClient, ws_id: str, name="Finance lineage") -> str:
+async def _view(client: AsyncClient, ws_id: str, name="Finance lineage", visibility="private") -> str:
     resp = await client.post("/api/v1/views/", json={
         "name": name, "workspaceId": ws_id, "viewType": "reference", "tags": ["finance"],
+        "visibility": visibility,
         "description": "What feeds revenue",
         "config": {"icon": "Layout", "content": {"visibleEntityTypes": ["domain"]},
                    "layout": {"type": "reference"}, "entityOverrides": {"domain": {"color": "#111"}}},
@@ -124,6 +128,50 @@ async def test_unsaved_changes_are_sealed_as_a_version_before_they_leave(test_cl
     assert bundle["views"][0]["version"] == 2
     history = (await test_client.get(f"/api/v1/views/{vid}/versions")).json()["items"]
     assert (history[0]["version"], history[0]["source"], history[0]["message"]) == (2, "export", "For prod")
+
+
+async def _unsaved_change(client: AsyncClient, vid: str):
+    """A canvas save: a layout write that takes no version."""
+    await client.put(f"/api/v1/views/{vid}/layout", json={"referenceLayout": {
+        "layers": [{"id": "l1", "name": "Sources", "entityTypes": [], "order": 0}],
+        "assignments": {"urn:b": {"layerId": "l1", "inheritsChildren": True}}}})
+
+
+async def _preview(client: AsyncClient, *view_ids):
+    resp = await client.post("/api/v1/views/transfer/export/preview", json={"viewIds": list(view_ids)})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["views"]
+
+
+async def test_the_preview_says_what_an_export_would_write_and_writes_nothing(test_client, fake_graph):
+    ws = await _workspace(test_client)
+    vid = await _view(test_client, ws)
+    await _unsaved_change(test_client, vid)
+    [view] = await _preview(test_client, vid, vid)                 # listed twice, described once
+    assert (view["headVersion"], view["dirty"], view["maySeal"]) == (1, True, True)
+    assert (view["exportsAs"], view["includesUnsaved"]) == (2, True)
+    assert view["stats"]["assignments"] == 1 and view["estimatedBytes"] > 0
+    assert (view["workspaceId"], view["name"]) == (ws, "Finance lineage")
+    history = (await test_client.get(f"/api/v1/views/{vid}/versions")).json()["items"]
+    assert [v["version"] for v in history] == [1], "a preview writes nothing"
+
+
+async def test_a_reader_exports_the_latest_version_and_saves_nothing(test_client, fake_graph):
+    """Sealing unsaved changes writes a version: only someone who may edit the view does that."""
+    ws = await _workspace(test_client)
+    vid = await _view(test_client, ws, visibility="workspace")
+    await _unsaved_change(test_client, vid)
+    reader = _user("usr_reader")
+    with _as(reader, PermissionClaims(sid="s_reader", ws_perms={ws: ("workspace:view:read",)})):
+        [view] = await _preview(test_client, vid)
+        assert (view["dirty"], view["maySeal"], view["includesUnsaved"], view["exportsAs"]) == (True, False, False, 1)
+        resp = await _export(test_client, {"viewId": vid})
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["x-view-version"] == "1" and resp.json()["views"][0]["version"] == 1
+    history = (await test_client.get(f"/api/v1/views/{vid}/versions")).json()["items"]
+    assert [v["version"] for v in history] == [1], "the reader's export saved nothing"
+    # Someone who may edit it seals the change on the way out.
+    assert (await _export(test_client, {"viewId": vid})).headers["x-view-version"] == "2"
 
 
 async def test_exporting_an_older_version_exports_exactly_that_version(test_client, fake_graph):

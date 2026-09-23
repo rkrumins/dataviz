@@ -4,7 +4,11 @@
  * A view file carries the view's DESIGN (layers, placements, rules, settings, name) and its
  * version history, never the graph data. Every export is a real version: the one picked, or the
  * current design, which is saved as a new version first when it has unsaved changes, so the file
- * always names a version this view can be compared and updated against later.
+ * always names a version this view can be compared and updated against later. Only someone who
+ * may edit the view saves that version; anyone else exports its latest version as it stands.
+ *
+ * What each view would go out as comes from one request (`previewExport`) however many views
+ * are selected.
  *
  * "View + data" packages the views WITH their graph data (a .view-package.zip), for a data
  * source under version control: the view's own entities or the whole source, as published or as
@@ -15,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useQueries, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, Check, CheckCircle2, Copy, Database, Download, EyeOff, FileJson2, Fingerprint,
   GitPullRequestDraft, History, Layers, Loader2, Package, RefreshCw, Tag, X,
@@ -24,20 +28,16 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
+import { invalidateViewVersions, useViewVersions } from '@/hooks/useViewVersions'
 import {
-  VIEW_VERSION_STATUS_QUERY_KEY, invalidateViewVersions, useViewVersions,
-} from '@/hooks/useViewVersions'
-import {
-  exportViewPackage, exportViews, type ExportedFile, type ExportedPackage, type PackageDataVersion,
-  type PackageScope,
+  exportViewPackage, exportViews, previewExport, type ExportedFile, type ExportedPackage, type ExportPreview,
+  type PackageDataVersion, type PackageScope,
 } from '@/services/viewTransferApiService'
-import { getViewVersionStatus, type ViewVersionSummary } from '@/services/viewVersionsApiService'
-import { getView } from '@/services/viewApiService'
+import type { ViewVersionSummary } from '@/services/viewVersionsApiService'
 import type { Job } from '@/services/importExportApiService'
 import { recordEvent } from '@/services/telemetryService'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
-import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName, viewPackageName } from './format'
 
@@ -57,14 +57,24 @@ type Phase = 'choose' | 'running' | 'done' | 'failed'
 /** The server's cap on views in one file (`view_transfer.limits.MAX_VIEWS_PER_BUNDLE`). */
 export const MAX_VIEWS_PER_FILE = 200
 
-/** Whether these views can be packaged with their data, and if not, why not. */
-function usePackageOption(views: Array<{ id: string }>) {
-  const details = useQueries({
-    queries: views.map((v) => ({ queryKey: [...VIEW_QUERY_KEY, v.id], queryFn: () => getView(v.id), staleTime: 60_000 })),
+export const EXPORT_PREVIEW_QUERY_KEY = 'view-export-preview'
+
+/** What each view would go out as: one request however many views are selected. */
+function useExportPreview(views: Array<{ id: string }>, enabled: boolean) {
+  const ids = views.map((v) => v.id)
+  return useQuery({
+    queryKey: [EXPORT_PREVIEW_QUERY_KEY, ids],
+    queryFn: () => previewExport(ids),
+    enabled,
+    staleTime: 15_000,
   })
-  const loaded = details.every((d) => d.data)
-  const scopes = new Set(details.map((d) => `${d.data?.workspaceId}|${d.data?.dataSourceId ?? ''}`))
-  const first = details[0]?.data
+}
+
+/** Whether these views can be packaged with their data, and if not, why not. */
+function usePackageOption(views: Array<{ id: string }>, preview: ExportPreview[] | undefined) {
+  const loaded = !!preview
+  const scopes = new Set((preview ?? []).map((p) => `${p.workspaceId}|${p.dataSourceId ?? ''}`))
+  const first = preview?.[0]
   const oneSource = loaded && scopes.size === 1 && !!first?.dataSourceId
   const graphExport = useFeature('graphExportEnabled')
   const canRead = usePermission('workspace:datasource:read', first?.workspaceId)
@@ -99,7 +109,9 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
   const [dataVersion, setDataVersion] = useState<PackageDataVersion>('published')
   const [packaged, setPackaged] = useState<ExportedPackage | null>(null)
   const [job, setJob] = useState<Job | null>(null)
-  const packageOption = usePackageOption(views)
+  const tooMany = views.length > MAX_VIEWS_PER_FILE
+  const preview = useExportPreview(views, !tooMany && phase === 'choose')
+  const packageOption = usePackageOption(views, preview.data?.views)
   const withData = content === 'data' && packageOption.available
   const queryClient = useQueryClient()
   // Stable for the dialog's whole life: the a11y hook re-focuses the panel whenever its callback
@@ -127,6 +139,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
         setPackaged(done)
         setPhase('done')
         views.forEach((v) => invalidateViewVersions(queryClient, v.id))
+        void queryClient.invalidateQueries({ queryKey: [EXPORT_PREVIEW_QUERY_KEY] })
         recordEvent('view.export', { views: views.length, withData: true, scope, dataVersion })
         return
       }
@@ -138,6 +151,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
       setPhase('done')
       // Exporting unsaved changes saved them as a version: the history and header chip moved.
       views.forEach((v) => invalidateViewVersions(queryClient, v.id))
+      void queryClient.invalidateQueries({ queryKey: [EXPORT_PREVIEW_QUERY_KEY] })
       recordEvent('view.export', { views: views.length, version: single && pick !== 'current' ? 'earlier' : 'current' })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The export could not be completed.')
@@ -148,7 +162,6 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
   const title = withData
     ? (single ? 'Export view with its data' : `Export ${views.length} views with their data`)
     : single ? 'Export view' : `Export ${views.length} views`
-  const tooMany = views.length > MAX_VIEWS_PER_FILE
 
   // Portaled, and clicks stop here: hosts include clickable cards and menus, which must not
   // react to a click that was meant for the dialog.
@@ -195,8 +208,9 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
                       setDataVersion={setDataVersion} hasDraft={packageOption.hasDraft} />
                   )}
                   {single
-                    ? <SingleViewChoice view={views[0]} pick={pick} setPick={setPick} note={note} setNote={setNote} withData={withData} />
-                    : <ManyViewsChoice views={views} note={note} setNote={setNote} withData={withData} />}
+                    ? <SingleViewChoice view={views[0]} preview={preview.data?.views[0]} pick={pick} setPick={setPick}
+                      note={note} setNote={setNote} withData={withData} />
+                    : <ManyViewsChoice views={views} preview={preview} note={note} setNote={setNote} withData={withData} />}
                 </div>
               </div>
             )}
@@ -315,8 +329,10 @@ function Feature({ icon, title, body }: { icon: React.ReactNode; title: string; 
 
 // ── Right column: one view ───────────────────────────────────────────────────
 
-function SingleViewChoice({ view, pick, setPick, note, setNote, withData = false }: {
+function SingleViewChoice({ view, preview, pick, setPick, note, setNote, withData = false }: {
   view: { id: string; name: string }
+  /** What exporting the current design would write; `maySeal` is false for someone who can't edit. */
+  preview?: ExportPreview
   pick: 'current' | number
   setPick: (p: 'current' | number) => void
   note: string
@@ -328,7 +344,9 @@ function SingleViewChoice({ view, pick, setPick, note, setNote, withData = false
   const working = data?.workingCopy
   const head = versions[0]
   const dirty = !!working?.dirty
-  const exportsAs = pick === 'current' ? (dirty ? (head?.version ?? 0) + 1 : head?.version ?? null) : pick
+  // Unsaved changes are sealed into the file only by someone who may edit the view.
+  const seals = dirty && (preview?.maySeal ?? true)
+  const exportsAs = pick === 'current' ? (seals ? (head?.version ?? 0) + 1 : head?.version ?? null) : pick
   const chosen: ViewVersionSummary | undefined = pick === 'current' ? head : versions.find((v) => v.version === pick)
   const earlier = versions.slice(dirty ? 0 : 1)
 
@@ -345,10 +363,13 @@ function SingleViewChoice({ view, pick, setPick, note, setNote, withData = false
         <label className="block text-xs font-medium text-ink-secondary mb-2">Which version</label>
         <div className="space-y-2">
           <Choice active={pick === 'current'} onClick={() => setPick('current')}
-            title={dirty ? `The current design, as v${exportsAs}` : `The current design${head ? ` · v${head.version}` : ''}`}
-            desc={dirty ? 'It has unsaved changes. They are saved as a new version first, so the file names a version this view has.'
-              : head ? `${VERSION_SOURCE_LABEL[head.source]} ${timeAgo(head.createdAt)}${head.createdByName ? ` by ${head.createdByName}` : ''}` : ''} />
-          {pick === 'current' && dirty && (
+            title={seals ? `The current design, as v${exportsAs}`
+              : dirty ? `The latest version${head ? ` · v${head.version}` : ''}`
+                : `The current design${head ? ` · v${head.version}` : ''}`}
+            desc={seals ? 'It has unsaved changes. They are saved as a new version first, so the file names a version this view has.'
+              : dirty ? `Changes made since v${head?.version} aren’t saved as a version yet, so they aren’t in the file. Only someone who can edit this view can save them.`
+                : head ? `${VERSION_SOURCE_LABEL[head.source]} ${timeAgo(head.createdAt)}${head.createdByName ? ` by ${head.createdByName}` : ''}` : ''} />
+          {pick === 'current' && seals && (
             <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500}
               placeholder={`Note for v${exportsAs} (optional) — e.g. "For the UAT release"`}
               className="w-full px-3 py-2 rounded-xl border border-glass-border bg-transparent text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500 transition-colors" />
@@ -370,8 +391,8 @@ function SingleViewChoice({ view, pick, setPick, note, setNote, withData = false
         </div>
       </div>
       <FilePreview filename={withData ? viewPackageName(view.name, exportsAs) : viewFileName(view.name, exportsAs)}
-        stats={chosen?.stats} withData={withData}
-        extra={pick === 'current' && dirty ? '+ unsaved changes' : undefined} />
+        stats={pick === 'current' && preview ? preview.stats : chosen?.stats} withData={withData}
+        bytes={pick === 'current' && !withData ? preview?.estimatedBytes : undefined} />
     </>
   )
 }
@@ -388,10 +409,11 @@ function Choice({ active, onClick, title, desc }: { active: boolean; onClick: ()
   )
 }
 
-function FilePreview({ filename, stats, extra, withData = false }: {
+function FilePreview({ filename, stats, bytes, withData = false }: {
   filename: string
   stats?: Record<string, number>
-  extra?: string
+  /** Roughly how big the file is, when known. */
+  bytes?: number
   withData?: boolean
 }) {
   const rows: Array<[string, number | undefined]> = [
@@ -404,6 +426,9 @@ function FilePreview({ filename, stats, extra, withData = false }: {
         {withData ? <Package className="w-4 h-4 text-indigo-500 flex-shrink-0" /> : <FileJson2 className="w-4 h-4 text-indigo-500 flex-shrink-0" />}
         <span className="text-xs font-mono text-ink truncate" title={filename}>{filename}</span>
         {withData && <span className="ml-auto text-[10px] font-semibold text-ink-muted shrink-0">+ graph data</span>}
+        {!withData && bytes !== undefined && (
+          <span className="ml-auto text-[10px] font-semibold text-ink-muted shrink-0">about {fileSize(bytes)}</span>
+        )}
       </div>
       {stats && (
         <div className="grid grid-cols-4 gap-2 mt-3">
@@ -415,66 +440,71 @@ function FilePreview({ filename, stats, extra, withData = false }: {
           ))}
         </div>
       )}
-      {extra && <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-2">Counts are of the latest version, {extra}.</p>}
     </div>
   )
 }
 
 // ── Right column: several views ──────────────────────────────────────────────
 
-function ManyViewsChoice({ views, note, setNote, withData = false }: {
+function ManyViewsChoice({ views, preview, note, setNote, withData = false }: {
   views: Array<{ id: string; name: string }>
+  preview: ReturnType<typeof useExportPreview>
   note: string
   setNote: (n: string) => void
   withData?: boolean
 }) {
-  const statuses = useQueries({
-    queries: views.map((v) => ({
-      queryKey: [VIEW_VERSION_STATUS_QUERY_KEY, v.id],
-      queryFn: () => getViewVersionStatus(v.id),
-      staleTime: 15_000,
-    })),
-  })
-  const dirtyCount = statuses.filter((s) => s.data?.dirty).length
-  const rows = useMemo(() => views.map((v, i) => ({ view: v, status: statuses[i] })), [views, statuses])
+  const byId = useMemo(() => new Map((preview.data?.views ?? []).map((p) => [p.viewId, p])), [preview.data])
+  const sealing = (preview.data?.views ?? []).filter((p) => p.includesUnsaved).length
+  const totals = useMemo(() => {
+    const all = preview.data?.views
+    if (!all) return undefined
+    const stats: Record<string, number> = {}
+    for (const p of all) for (const [k, v] of Object.entries(p.stats ?? {})) stats[k] = (stats[k] ?? 0) + (v ?? 0)
+    return { stats, bytes: all.reduce((n, p) => n + p.estimatedBytes, 0) }
+  }, [preview.data])
 
   return (
     <>
       <div>
         <label className="block text-xs font-medium text-ink-secondary mb-2">{pluralize(views.length, 'view')}, each at its current design</label>
         <ul className="rounded-xl border border-glass-border divide-y divide-glass-border max-h-72 overflow-y-auto">
-          {rows.map(({ view, status }) => {
-            const head = status.data?.headVersion ?? null
-            const dirty = !!status.data?.dirty
+          {views.map((view) => {
+            const p = byId.get(view.id)
             return (
               <li key={view.id} className="flex items-center gap-3 px-3.5 py-2.5">
                 <span className="text-xs font-medium text-ink truncate flex-1" title={view.name}>{view.name}</span>
-                {status.isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted" />
-                  : dirty ? (
+                {!p ? (preview.isError ? <span className="text-[10px] text-rose-500">couldn’t be read</span>
+                  : <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted" />)
+                  : p.includesUnsaved ? (
                     <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
                       title="Unsaved changes are saved as a new version first">
-                      {head ? `v${head} + changes → v${head + 1}` : 'saved as v1'}
+                      {p.headVersion ? `v${p.headVersion} + changes → v${p.exportsAs}` : 'saved as v1'}
                     </span>
                   ) : (
-                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
-                      {head ? `v${head}` : 'v1'}
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"
+                      title={p.dirty ? `Changes since v${p.exportsAs} aren’t saved as a version yet, so they aren’t in the file. Only someone who can edit this view can save them.` : undefined}>
+                      v{p.exportsAs}{p.dirty ? ' · changes not included' : ''}
                     </span>
                   )}
               </li>
             )
           })}
         </ul>
+        {preview.isError && (
+          <p className="text-[11px] text-rose-500 mt-2">These views couldn’t be read: {preview.error.message}</p>
+        )}
       </div>
-      {dirtyCount > 0 && (
+      {sealing > 0 && (
         <div>
           <label className="block text-xs font-medium text-ink-secondary mb-1.5">
-            Note for the {pluralize(dirtyCount, 'new version')} <span className="text-ink-muted font-normal">(optional)</span>
+            Note for the {pluralize(sealing, 'new version')} <span className="text-ink-muted font-normal">(optional)</span>
           </label>
           <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} placeholder='e.g. "For the UAT release"'
             className="w-full px-3 py-2 rounded-xl border border-glass-border bg-transparent text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500 transition-colors" />
         </div>
       )}
-      <FilePreview filename={withData ? `${views.length}-views.view-package.zip` : `${views.length}-views.view.json`} withData={withData} />
+      <FilePreview filename={withData ? `${views.length}-views.view-package.zip` : `${views.length}-views.view.json`} withData={withData}
+        stats={totals?.stats} bytes={withData ? undefined : totals?.bytes} />
     </>
   )
 }

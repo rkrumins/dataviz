@@ -317,6 +317,7 @@
       "posture": "capability",
       "serverGates": [
         "POST /views/transfer/export \u2014 build a view file",
+        "POST /views/transfer/export/preview \u2014 say what an export would write",
         "POST /views/transfer/packages \u2014 build a view + data package"
       ],
       "uiSurfaces": [
