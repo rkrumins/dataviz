@@ -56,17 +56,25 @@ def _decode_no_bom(raw: bytes) -> str:
 
 
 async def _lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
-    """Yield complete decoded lines from a byte-chunk stream (reassembling across boundaries)."""
-    buf = b""
+    """Yield complete decoded lines from a byte-chunk stream (reassembling across boundaries).
+    Linear: each chunk is scanned once with ``find`` and only the unfinished line's pieces carry
+    over (re-splitting the whole remaining buffer per line was quadratic)."""
+    tail: List[bytes] = []
     seen = False
     async for chunk in chunks:
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            yield _decode_line(line, first=not seen)
+        start = 0
+        end = chunk.find(b"\n")
+        while end != -1:
+            tail.append(chunk[start:end])
+            yield _decode_line(b"".join(tail), first=not seen)
+            tail = []
             seen = True
-    if buf.strip():
-        yield _decode_line(buf, first=not seen)
+            start = end + 1
+            end = chunk.find(b"\n", start)
+        tail.append(chunk[start:])
+    rest = b"".join(tail)
+    if rest.strip():
+        yield _decode_line(rest, first=not seen)
 
 
 class NdjsonAdapter:
@@ -124,7 +132,7 @@ class JsonAdapter:
     fmt = "json"
 
     async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
-        buf = b""
+        buf = bytearray()   # amortized appends; `bytes +=` re-copied the whole buffer per chunk
         async for chunk in chunks:
             buf += chunk
         text = decode_bytes(buf).strip()

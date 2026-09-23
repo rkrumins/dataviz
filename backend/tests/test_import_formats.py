@@ -3,12 +3,13 @@
 Adapters feed the ONE normalized row model: ``parse`` streams a byte iterator into raw column
 dicts (reassembling records split across chunk boundaries — a 5M-row file is never buffered
 whole); ``write`` serializes records back. The registry resolves a format name to its adapter.
-Pure — runs under the per-file runner.
+Parsing stays linear in the file size. Pure — runs under the per-file runner.
 """
 import asyncio
 import json
+import time
 
-from backend.app.services.versioning.import_export.formats import get_adapter
+from backend.app.services.versioning.import_export.formats import _lines, get_adapter
 
 
 async def _achunks(*parts: bytes):
@@ -77,10 +78,52 @@ async def _run() -> None:
         pass
 
 
+async def _run_scale() -> None:
+    # ---- _lines: a large multi-chunk file with a BOM + CRLF endings yields exactly the written
+    #      lines (an empty one included) — whatever the chunk boundaries split (the BOM, a CRLF
+    #      pair, a multi-byte UTF-8 char) — plus the per-line cp1252 fallback and an unterminated
+    #      last line ----
+    lines = [f'{{"i": {i}, "city": "São Paulo", "pad": "{"x" * (i % 97)}"}}' for i in range(40_000)]
+    lines[7] = ""
+    data = b"\xef\xbb\xbf" + b"".join(line.encode() + b"\r\n" for line in lines) + b"last,S\xe3o"
+    cuts = sorted({0, 1, data.index(b"\r\n", 1000) + 1, data.index("ã".encode(), 5000) + 1,
+                   *range(0, len(data), 7919)})
+    chunks = [data[a:b] for a, b in zip(cuts, cuts[1:] + [len(data)])]
+    assert await _collect(_lines(_achunks(*chunks))) == lines + ["last,São"]
+
+    # ---- ...and linear: ~20 MiB of ndjson in the object store's 1 MiB reads parses well under 2 s
+    #      (re-splitting the whole remaining buffer per line was quadratic: seconds at 20 MiB) ----
+    line = json.dumps({"kind": "node", "urn": "urn:x", "displayName": "d", "pad": "p" * 20}).encode()
+    blob = (line + b"\n") * ((20 << 20) // (len(line) + 1))
+    mib = 1 << 20
+    started = time.perf_counter()
+    count = 0
+    async for _ in get_adapter("ndjson").parse(
+            _achunks(*(blob[i:i + mib] for i in range(0, len(blob), mib)))):
+        count += 1
+    elapsed = time.perf_counter() - started
+    assert count == blob.count(b"\n") and elapsed < 2.0, (count, elapsed)
+
+    # ---- json: a large array fed in many small chunks is reassembled whole, in linear time
+    #      (`bytes +=` per chunk re-copied everything so far: seconds for this input) ----
+    records = [{"kind": "node", "urn": f"urn:{i}"} for i in range(200_000)]
+    blob = json.dumps(records).encode()
+    started = time.perf_counter()
+    got = await _collect(get_adapter("json").parse(
+        _achunks(*(blob[i:i + 256] for i in range(0, len(blob), 256)))))
+    elapsed = time.perf_counter() - started
+    assert got == records and elapsed < 2.0, (len(got), elapsed)
+
+
 def test_import_formats():
     asyncio.run(_run())
 
 
+def test_import_formats_scale():
+    asyncio.run(_run_scale())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
+    asyncio.run(_run_scale())
     print("import formats: OK")
