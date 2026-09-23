@@ -7,8 +7,8 @@ boundaries so an arbitrarily large file is never buffered whole.
 
 v1 ships ndjson, json-lines' sibling csv/tsv here; xlsx and the zip bundle plug in as further
 adapters (they need heavier libs, so they live in their own modules and register the same way).
-A quoted CSV cell may span lines (a record is read until its quotes balance); nested/complex
-property values belong in the single-line ``properties_json`` column.
+A quoted CSV cell may span lines (a record is read until no quoted cell is left open);
+nested/complex property values belong in the single-line ``properties_json`` column.
 """
 from __future__ import annotations
 
@@ -79,21 +79,32 @@ async def _lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
         yield _decode_line(rest, first=not seen)
 
 
-async def _csv_records(lines: AsyncIterator[str]) -> AsyncIterator[str]:
+async def _csv_records(lines: AsyncIterator[str], delim: str) -> AsyncIterator[str]:
     """Group physical lines into logical CSV records: a quoted cell may contain newlines, so lines
-    are joined until the record's quotes balance (the csv dialect doubles embedded quotes)."""
+    are joined while one is left open. Same rule as the csv reader: a quote opens a quoted cell
+    only at the start of a cell (anywhere else it is literal, e.g. ``5" screen``), and inside one
+    ``""`` is an escaped quote. A line with no quote costs one ``find``."""
     record: List[str] = []
-    quotes = 0
+    quoted = False
     async for line in lines:
         if line == "" and not record:
             continue
         record.append(line)
-        quotes += line.count('"')
-        if quotes % 2 == 0:
+        i = line.find('"')
+        while i != -1:
+            if quoted:
+                if line.startswith('"', i + 1):   # "" — an escaped quote; the cell goes on
+                    i = line.find('"', i + 2)
+                    continue
+                quoted = False                    # the closing quote
+            elif i == 0 or line[i - 1] == delim:
+                quoted = True                     # a quote opening a cell
+            i = line.find('"', i + 1)
+        if not quoted:
             yield "\n".join(record)
-            record, quotes = [], 0
+            record = []
     if record:
-        yield "\n".join(record)   # unbalanced to EOF: the csv reader closes the open cell
+        yield "\n".join(record)   # a quoted cell still open at EOF: the csv reader closes it
 
 
 class NdjsonAdapter:
@@ -121,7 +132,7 @@ class DelimitedAdapter:
 
     async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
         header: List[str] | None = None
-        async for record in _csv_records(_lines(chunks)):
+        async for record in _csv_records(_lines(chunks), self._delim):
             row = next(csv.reader([record], delimiter=self._delim))
             if header is None:
                 header = row

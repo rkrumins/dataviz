@@ -95,6 +95,21 @@ async def _run() -> None:
     assert recs == [{"entity_id": "ent_1", "prop.note": 'He said "hi"\n\nand left'},
                     {"entity_id": "ent_2", "prop.note": "plain"}], recs
 
+    # ---- csv: a quote INSIDE an unquoted cell is literal (only one at the start of a cell opens a
+    #      quoted cell), so an odd number of them (5" screen) keeps the record to its line; an
+    #      escaped quote ("") in a quoted cell, even right before a line break, doesn't close it;
+    #      in tsv a quoted cell opens after a tab ----
+    recs = await _collect(get_adapter("csv").parse(_achunks(
+        b'entity_id,prop.size,prop.note\n'
+        b'ent_1,5" screen,plain\n'
+        b'ent_2,7,"a ""b"" c\nd ""e""\nf"\n'
+        b'ent_3,x"y"z,last\n')))
+    assert recs == [{"entity_id": "ent_1", "prop.size": '5" screen', "prop.note": "plain"},
+                    {"entity_id": "ent_2", "prop.size": "7", "prop.note": 'a "b" c\nd "e"\nf'},
+                    {"entity_id": "ent_3", "prop.size": 'x"y"z', "prop.note": "last"}], recs
+    recs = await _collect(get_adapter("tsv").parse(_achunks(b'a\tb\n1\t"x\ny"\n2\t3"\n')))
+    assert recs == [{"a": "1", "b": "x\ny"}, {"a": "2", "b": '3"'}], recs
+
     # ---- list properties round-trip through csv/tsv: cell_text renders a flat list as JSON (the
     #      writers' job) and the parse reads it back as the SAME list, so re-importing an unchanged
     #      export changes nothing (str() gave "['a', 'b']", re-imported as a string "update").
