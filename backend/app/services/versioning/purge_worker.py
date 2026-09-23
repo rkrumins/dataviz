@@ -343,6 +343,10 @@ class PurgeRunner:
                 await client.delete()
                 verdict = f"dropped '{name}'"
                 logger.warning("purge %s DROPPED FalkorDB graph %s (we created it)", job_id, name)
+                # A graph later written under the same name gets a new id catalogue;
+                # every long-lived reader must drop its old one (graph_generation).
+                from backend.app.providers.graph_generation import bump_graph_generation
+                await bump_graph_generation(name, reason=f"purge {job_id}")
             except Exception as exc:                            # pragma: no cover - infra
                 # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
                 # purge over it — and stranding millions of SQL rows — is not an improvement.

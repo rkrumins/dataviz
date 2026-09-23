@@ -35,7 +35,8 @@ getChildrenWithEdges.mockResolvedValue({
 // a factory returning a fresh object each render throws the loaded children away
 // on every render and childrenOf never returns anything.
 vi.mock('@/providers/GraphProviderContext', () => {
-  const provider = { getNode: vi.fn().mockResolvedValue(null), getChildrenWithEdges }
+  // Lookups are batched through getNodes; an empty answer = "not in the graph".
+  const provider = { getNodes: vi.fn().mockResolvedValue([]), getChildrenWithEdges }
   return { useGraphProvider: () => provider }
 })
 vi.mock('@/hooks/useDataSourceSchema', () => ({
@@ -51,7 +52,7 @@ const fakeBrowser = {
   topLevelIds: ['urn:finance'],
   nodes: new Map([['urn:finance', {
     node: { urn: 'urn:finance', entityType: 'domain', displayName: 'Financial Services', properties: {} },
-    childIds: [], totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
+    childIds: [], totalChildren: 2, hasMore: false, nextOffset: 0, loaded: true,
   }]]),
   parentMap: new Map<string, string>(),
   isLoading: false,
@@ -61,6 +62,7 @@ const fakeBrowser = {
   peekNode: (urn: string) => fakeBrowser.nodes.get(urn),
   topLevelHasMore: false, topLevelTotalCount: 1,
   topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
+  failedIds: new Set<string>(),
   loadingNodes: new Set<string>(),
 }
 vi.mock('@/hooks/useEntityBrowser', () => ({ useEntityBrowser: () => fakeBrowser }))
@@ -124,8 +126,9 @@ describe('LayerStudio — an anchor holding more than one page', () => {
     await withChildCount(5000, async () => {
       render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
       await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
-      // Never a silent 2-of-5000: the remainder is stated and reachable.
-      expect(rows().getByRole('button', { name: /Show 100 more/ })).toBeInTheDocument()
+      // Never a silent 2-of-5000: the remainder is stated and reachable. The
+      // number is the WIZARD's page (50) — what the click actually fetches.
+      expect(rows().getByRole('button', { name: /Show 50 more/ })).toBeInTheDocument()
       expect(rows().getByText(/4,998 left/)).toBeInTheDocument()
     })
   })
@@ -135,10 +138,11 @@ describe('LayerStudio — an anchor holding more than one page', () => {
       render(<LayerStudio formData={formData(anchored)} updateFormData={vi.fn()} />)
       await waitFor(() => expect(rows().getByText('Payments')).toBeInTheDocument())
       getChildrenWithEdges.mockClear()
-      fireEvent.click(rows().getByRole('button', { name: /Show 100 more/ }))
+      fireEvent.click(rows().getByRole('button', { name: /Show 50 more/ }))
       await waitFor(() => expect(getChildrenWithEdges).toHaveBeenCalled())
-      // Paged, not refetched from the top.
+      // Paged, not refetched from the top — and exactly the page the label named.
       expect(getChildrenWithEdges.mock.calls[0][1].offset).toBe(2)
+      expect(getChildrenWithEdges.mock.calls[0][1].limit).toBe(50)
     })
   })
 

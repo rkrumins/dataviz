@@ -62,7 +62,7 @@ async def _run() -> None:
     async with db.graphver_session() as s:
         graph = await s.get(GraphORM, gid)
         await proj._merkle_augment_upserts(
-            s, graph, main_id, seq_a, seq_b, last={}, urn_of=urn_of,
+            s, graph, main_id, seq_a, seq_b, last={}, urn_of=urn_of, label_of={},
             node_upserts=node_upserts, edge_upserts=edge_upserts)
     recovered = {eid: p for eid, _urn, p in node_upserts}
     assert "ent_A" in recovered, node_upserts
@@ -74,7 +74,7 @@ async def _run() -> None:
         graph = await s.get(GraphORM, gid)
         await proj._merkle_augment_upserts(
             s, graph, main_id, seq_a, seq_b, last={("node", "ent_A"): ("node", "update", None)},
-            urn_of={}, node_upserts=node_upserts2, edge_upserts=[])
+            urn_of={}, label_of={}, node_upserts=node_upserts2, edge_upserts=[])
     assert node_upserts2 == [], node_upserts2
 
     await db.dispose_engine()

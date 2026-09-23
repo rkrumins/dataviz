@@ -68,6 +68,8 @@ def _provider(*, fail_on=None):
 
     class _Graph:
         async def query(self, cypher, **kw):
+            if cypher.startswith("CALL db.indexes()"):
+                return None                      # a read of the catalogue, not DDL
             issued.append(cypher)
             if fail_on and fail_on in cypher:
                 raise RuntimeError("server said no")
@@ -142,6 +144,8 @@ def test_already_indexed_is_success_not_failure():
 
     class _Graph:
         async def query(self, cypher, **kw):
+            if cypher.startswith("CALL db.indexes()"):
+                return None                      # a read of the catalogue, not DDL
             issued.append(cypher)
             raise RuntimeError("Attribute 'urn' is already indexed")
 
@@ -199,6 +203,8 @@ class _Refusing:
         self.issued = []
 
     async def query(self, cypher, **kw):
+        if cypher.startswith("CALL db.indexes()"):
+            return None                      # a read of the catalogue, not DDL
         self.issued.append(cypher)
         raise self.error
 
@@ -409,3 +415,24 @@ def test_the_retired_set_is_disjoint_from_the_declared_one():
     declared = {(ix.rel, ix.props) for ix in declared_edge_indexes()}
     retired = {(ix.rel, ix.props) for ix in RETIRED_EDGE_INDEXES}
     assert not (declared & retired)
+
+
+def test_a_marker_over_a_graph_with_no_indexes_is_not_trusted():
+    """GRAPH.DELETE takes every index with it, and the marker lives in Redis, outside
+    the graph: after the 2026-09-22 heal the graph had 0 indexes while the marker still
+    claimed the set was applied, so every read was a full scan. The graph itself is
+    the authority — a definite "no indexes" re-applies the set."""
+    p = _provider()
+    _run(p.ensure_indices(TYPES))
+    first = len(p.issued)
+
+    class _Wiped:
+        async def query(self, cypher, **kw):
+            p.issued.append(cypher)
+            if cypher.startswith("CALL db.indexes()"):
+                return type("R", (), {"result_set": [[0]]})()
+            return None
+    p._graph = _Wiped()
+    _run(p.ensure_indices(TYPES))
+    ddl = [c for c in p.issued[first:] if not c.startswith("CALL db.indexes()")]
+    assert len(ddl) == _expected_count(TYPES), "a wiped graph must get its indexes back"

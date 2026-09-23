@@ -64,6 +64,20 @@ describe('a lean node is completed, not dropped', () => {
     expect(s().nodes).toHaveLength(2)
   })
 
+  it('does the same when the node arrives in a landing PAGE', () => {
+    // Child and type pages land through their own actions, not addGraph. A
+    // lean ancestor that a later page brings in full is completed there too.
+    s().addNodes([node('c1', { childCount: null })])
+    s().addChildPage('p', { offset: 100, hasMore: true, direction: 'asc', lastUrn: 'c2', childCount: 2 },
+      [node('c1', { childCount: 7 }), node('c2', {})], [])
+    expect(get('c1')!.data.childCount).toBe(7)
+    expect(s().nodes).toHaveLength(2)
+
+    s().addFeedPage('f', { entityTypes: ['t'], offset: 200, hasMore: false }, [node('c2', { childCount: 3 })], [])
+    expect(get('c2')!.data.childCount).toBe(3)
+    expect(s().nodes).toHaveLength(2)
+  })
+
   it('leaves position alone — layout owns it', () => {
     s().addNodes([{ id: 'c1', position: { x: 10, y: 20 }, data: { urn: 'c1' } } as LineageNode])
     s().addNodes([{ id: 'c1', position: { x: 0, y: 0 }, data: { urn: 'c1', childCount: 3 } } as LineageNode])

@@ -38,6 +38,7 @@ import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
 // Editor components (shared across canvases)
 import { EditorToolbar } from './EditorToolbar'
+import { FeedMoreChip } from './FeedMoreChip'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 import { BuilderEmptyState } from './create/BuilderEmptyState'
@@ -90,7 +91,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
-  const { loadChildren, cancelChildLoad, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, loadMoreFeeds, isLoading: isLoadingChildren } = useGraphHydration()
   useLoadingNotification('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
   // Legacy inline quick-filter (substring over visible nodes) — left
@@ -376,6 +377,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
+      {/* Roots/orphans beyond the first page — reachable, and said so. */}
+      <FeedMoreChip loadingNodes={loadingNodes} failedNodes={failedNodes} onLoadMore={keys => void loadMoreFeeds(keys)} />
       {/* Editor Toolbar - Unified with LineageCanvas */}
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar

@@ -22,6 +22,7 @@ import type {
     EntityType,
     URN,
     NodeQuery,
+    NodePage,
     EdgeQuery,
     LineageResult,
     ContainmentResult,
@@ -478,6 +479,27 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    async getNodesPage(query: NodeQuery): Promise<NodePage> {
+        try {
+            return await this.fetch<NodePage>('/nodes/page', {
+                method: 'POST',
+                body: JSON.stringify({ query }),
+                timeoutMs: TIMEOUTS.NODES_QUERY_MS,
+            })
+        } catch (error) {
+            // A server from before /nodes/page (a deploy in progress): its POST lands
+            // on GET /nodes/{urn} — 405 — or nowhere — 404. Page by counting, as
+            // clients did before; a full page is taken to mean there may be more.
+            const status = (error as { status?: number } | null)?.status
+            if (status === 404 || status === 405) {
+                const nodes = await this.getNodes(query)
+                const limit = query.limit ?? 100
+                return { nodes, hasMore: nodes.length >= limit, nextOffset: (query.offset ?? 0) + nodes.length }
+            }
+            throw error
+        }
+    }
+
     async getNodeDegrees(urns: string[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>> {
         // Total lineage degree per URN over the FULL graph. A URN absent
         // from the response is UNKNOWN (its provider bucket failed) —
@@ -657,6 +679,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             sortProperty?: string | null
             cursor?: string | null
             sortDirection?: 'asc' | 'desc'
+            lineageScope?: 'page' | 'siblings'
         }
     ): Promise<{
         children: GraphNode[]
@@ -665,8 +688,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
         totalChildren: number
         hasMore: boolean
         nextCursor?: string | null
+        nextOffset?: number | null
     }> {
         const params = new URLSearchParams()
+        if (options?.lineageScope === 'siblings') params.append('lineageScope', 'siblings')
         if (options?.offset) params.append('offset', String(options.offset))
         if (options?.limit) params.append('limit', String(options.limit))
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)

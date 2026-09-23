@@ -86,4 +86,17 @@ describe('SelectionBar', () => {
     await user.click(screen.getByRole('button', { name: /clear/i }))
     expect(onClear).toHaveBeenCalled()
   })
+
+  it('offers Link… only where a link can be written — a draft being edited', () => {
+    renderBar(['a', 'b'])
+    expect(screen.queryByRole('button', { name: /link/i })).not.toBeInTheDocument()
+  })
+
+  it('opens the bulk link panel from Link…', async () => {
+    const user = userEvent.setup()
+    const onLink = vi.fn()
+    renderBar(['a', 'b'], { onLink })
+    await user.click(screen.getByRole('button', { name: /link/i }))
+    expect(onLink).toHaveBeenCalledTimes(1)
+  })
 })

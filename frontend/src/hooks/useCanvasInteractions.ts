@@ -9,11 +9,20 @@ import { useState, useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
 import { validateDrawnEdge } from '@/services/ontologyPreflightService'
+import { judgePairs, type LinkPair, type PairVerdict } from '@/lib/bulkLinks'
+import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
+
+/** The ontology a batch of links is judged by. */
+export interface LinkOntology {
+    relationshipTypes: RelationshipTypeSchema[]
+    containmentEdgeTypes: string[]
+    entityTypes: EntityTypeSchema[]
+}
 import { generateId } from '@/lib/utils'
 import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
@@ -107,6 +116,10 @@ export interface UseCanvasInteractionsResult {
     /** Stage a new RAW edge between two nodes (optimistic + create_edge change). Returns the temp
      *  edge id, or `null` when the ontology gate rejects it (invalid type/endpoints or duplicate). */
     stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
+    /** Stage many RAW edges of one type at once — each pair through the same gate as
+     *  `stageEdgeCreate`, then one canvas update and one staged batch. Pairs the gate
+     *  rejects come back with their reasons; nothing is notified. */
+    stageEdgeCreateMany: (pairs: readonly LinkPair[], edgeType: string, ontology?: LinkOntology) => { staged: number; rejected: PairVerdict[] }
     
     // Canvas Actions
     selectAll: () => void
@@ -132,6 +145,41 @@ export interface UseCanvasInteractionsResult {
 // ============================================
 // Hook Implementation
 // ============================================
+
+/** A RAW lineage edge as staged: the optimistic canvas edge, and its
+ *  `create_edge` change (without the id and timestamp the store assigns).
+ *  Shared by the single and the bulk staging paths so both stage exactly the
+ *  same thing. */
+function edgeCreateChange(sourceUrn: string, targetUrn: string, edgeType: string) {
+    const tempId = generateId('staged-edge')
+    const optimistic = {
+        id: tempId,
+        source: sourceUrn,
+        target: targetUrn,
+        type: 'lineage' as const,
+        data: { edgeType, relationship: edgeType.toLowerCase() },
+    }
+    const change: Omit<StagedChange, 'id' | 'timestamp'> = {
+        type: 'create_edge',
+        targetId: tempId,
+        // `source`/`target` are canvas node ids (== urns == backend entity_ids).
+        after: { edgeType, source: sourceUrn, target: targetUrn },
+        summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
+        // Main-mode parity: applyAll runs this to persist the edge via the
+        // provider. In DRAFT mode this hook is never called — saveStagedChangesToDraft
+        // routes create_edge through /graph/changes (stagedChangesToOps). Either way
+        // a temp endpoint (edge between two new nodes) resolves to its real id.
+        apply: async ({ provider, resolveTempId }) => {
+            if (!provider) return // local-only (no backend) — accept optimistically
+            const src = resolveTempId(sourceUrn) ?? sourceUrn
+            const tgt = resolveTempId(targetUrn) ?? targetUrn
+            const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType })
+            if (!res.success) throw new Error(res.error || 'Failed to create edge')
+        },
+        discard: () => useCanvasStore.getState().removeEdge(tempId),
+    }
+    return { optimistic, change }
+}
 
 export function useCanvasInteractions(
     options: UseCanvasInteractionsOptions = {}
@@ -472,36 +520,48 @@ export function useCanvasInteractions(
             return null
         }
 
-        const tempId = generateId('staged-edge')
-        const optimistic = {
-            id: tempId,
-            source: sourceUrn,
-            target: targetUrn,
-            type: 'lineage' as const,
-            data: { edgeType, relationship: edgeType.toLowerCase() },
-        }
+        const { optimistic, change } = edgeCreateChange(sourceUrn, targetUrn, edgeType)
         useCanvasStore.getState().addEdges([optimistic])
-        useStagedChangesStore.getState().stage({
-            type: 'create_edge',
-            targetId: tempId,
-            // `source`/`target` are canvas node ids (== urns == backend entity_ids).
-            after: { edgeType, source: sourceUrn, target: targetUrn },
-            summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
-            // Main-mode parity: applyAll runs this to persist the edge via the
-            // provider. In DRAFT mode this hook is never called — saveStagedChangesToDraft
-            // routes create_edge through /graph/changes (stagedChangesToOps). Either way
-            // a temp endpoint (edge between two new nodes) resolves to its real id.
-            apply: async ({ provider, resolveTempId }) => {
-                if (!provider) return // local-only (no backend) — accept optimistically
-                const src = resolveTempId(sourceUrn) ?? sourceUrn
-                const tgt = resolveTempId(targetUrn) ?? targetUrn
-                const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType })
-                if (!res.success) throw new Error(res.error || 'Failed to create edge')
-            },
-            discard: () => useCanvasStore.getState().removeEdge(tempId),
-        })
-        return tempId
+        useStagedChangesStore.getState().stage(change)
+        return optimistic.id
     }, [notify])
+
+    const stageEdgeCreateMany = useCallback((pairs: readonly LinkPair[], edgeType: string, ontology?: LinkOntology) => {
+        // The same gate as one drawn link, pair by pair (bulkLinks.judgePairs
+        // runs validateDrawnEdge with the canvas's links indexed by pair) —
+        // then ONE canvas update and ONE staged batch, however many links:
+        // the canvas re-renders on every store update, and 500 of them would
+        // freeze it.
+        const canvas = useCanvasStore.getState()
+        const schema = useSchemaStore.getState().schema
+        const typeById = new Map<string, string>()
+        for (const n of canvas.nodes) {
+            const type = n.data?.type as string | undefined
+            if (!type) continue
+            typeById.set(n.id, type)
+            const urn = n.data?.urn as string | undefined
+            if (urn) typeById.set(urn, type)
+        }
+        // The ontology the caller previewed the batch with (a view's own data
+        // source), so what the preview promised is exactly what is staged;
+        // the workspace schema when none is given.
+        const verdicts = judgePairs(pairs, edgeType, {
+            typeOf: (urn) => typeById.get(urn) ?? null,
+            relationshipTypes: ontology?.relationshipTypes ?? schema?.relationshipTypes ?? [],
+            containmentEdgeTypes: ontology?.containmentEdgeTypes ?? schema?.containmentEdgeTypes ?? [],
+            entityTypes: ontology?.entityTypes ?? schema?.entityTypes ?? [],
+            existingEdges: canvas.edges,
+        })
+        const built = verdicts.filter(v => v.ok).map(v => edgeCreateChange(v.source, v.target, edgeType))
+        if (built.length > 0) {
+            useCanvasStore.getState().addEdges(built.map(b => b.optimistic))
+            const now = Date.now()
+            useStagedChangesStore.getState().stageMany(
+                built.map(b => ({ ...b.change, id: generateId('staged'), timestamp: now })),
+            )
+        }
+        return { staged: built.length, rejected: verdicts.filter(v => !v.ok) }
+    }, [])
 
     // ===================
     // Canvas Actions
@@ -614,6 +674,7 @@ export function useCanvasInteractions(
         // Edge CRUD
         editEdge,
         stageEdgeCreate,
+        stageEdgeCreateMany,
         deleteEdge,
         reverseEdge,
         

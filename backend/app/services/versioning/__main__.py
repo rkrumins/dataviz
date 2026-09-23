@@ -68,7 +68,7 @@ async def _amain() -> None:
     # aggregated/collapsed canvas edges empty until a manual rebuild.
     from backend.app.services.projection_target import (
         make_rollup_rebuild_hook,
-        nudge_stats_after_projection,
+        after_projection,
         resolve_aggregation_edge_types,
     )
     # Provider-aware routing: each graph projects into its pinned provider instance
@@ -83,7 +83,7 @@ async def _amain() -> None:
     projector = FalkorProjector(graph_factory, target_resolver=repair_projection_target,
                                 edge_types_resolver=resolve_aggregation_edge_types,
                                 on_rollups_stale=make_rollup_rebuild_hook(_get_agg_service),
-                                on_projected=nudge_stats_after_projection)
+                                on_projected=after_projection)
     worker = ProjectionWorker(
         projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
         versioning=GraphVersioningService(),

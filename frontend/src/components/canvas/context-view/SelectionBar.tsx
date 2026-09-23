@@ -42,6 +42,9 @@ export interface SelectionBarProps {
   onTrace: () => void
   /** Open the Focus Lens on the selection as a whole. */
   onOpenLens: () => void
+  /** Link the selection to other entities in one go. Only in a draft being
+   *  edited — absent, the action is not offered. */
+  onLink?: () => void
 }
 
 export function SelectionBar({
@@ -51,6 +54,7 @@ export function SelectionBar({
   onClear,
   onTrace,
   onOpenLens,
+  onLink,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
@@ -142,6 +146,23 @@ export function SelectionBar({
 
           {/* What will happen. */}
           <div className="flex items-center gap-2 ml-auto shrink-0">
+            {onLink && (
+              <button
+                type="button"
+                onClick={onLink}
+                title="Or drag the + on any selected card onto another card"
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.Link2 className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Link…
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenLens}

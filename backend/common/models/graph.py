@@ -422,6 +422,25 @@ class ChildrenWithEdgesResult(BaseModel):
     total_children: int = Field(alias="totalChildren")
     has_more: bool = Field(alias="hasMore")
     next_cursor: Optional[str] = Field(None, alias="nextCursor")
+    # Where the NEXT page starts, as an offset into the provider's own order.
+    # Only the provider knows: a draft overlay drops and adds rows around the
+    # page it read, so "offset + rows returned" would skip or repeat rows.
+    next_offset: Optional[int] = Field(None, alias="nextOffset")
+    # Set when part of the answer could not be read (a lineage query failed or
+    # timed out): the children are right, their lineage may not be complete. The
+    # response cache keeps such an answer for seconds, never as the fallback.
+    degraded_detail: Optional[str] = Field(None, alias="degradedDetail")
+
+    class Config:
+        populate_by_name = True
+
+
+class NodePage(BaseModel):
+    """One page of a node query, with where the next page starts (see
+    ChildrenWithEdgesResult.next_offset) and whether there is one."""
+    nodes: List[GraphNode]
+    has_more: bool = Field(alias="hasMore")
+    next_offset: int = Field(alias="nextOffset")
 
     class Config:
         populate_by_name = True

@@ -174,6 +174,9 @@ export interface DriftReport {
   checkedAt: string
   durationMs: number
   skippedReason?: string | null
+  /** Health of the derived lineage summaries (`:AGGREGATED`) — "missing"/"untrusted" means
+   *  "Rebuild fast read layer" hands them to the aggregation job to re-derive. */
+  rollups?: { status: 'ok' | 'missing' | 'untrusted'; aggregated: number; stubs: number } | null
 }
 
 export interface StateResponse {

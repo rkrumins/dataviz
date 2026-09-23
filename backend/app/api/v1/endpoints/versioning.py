@@ -149,7 +149,7 @@ def _get_projector():
             return None
         from backend.app.services.versioning.projection import FalkorProjector
         from backend.app.services.projection_target import (
-            make_rollup_rebuild_hook, nudge_stats_after_projection,
+            make_rollup_rebuild_hook, after_projection,
             resolve_aggregation_edge_types,
         )
 
@@ -169,7 +169,7 @@ def _get_projector():
         _projector = FalkorProjector(
             factory, edge_types_resolver=resolve_aggregation_edge_types,
             on_rollups_stale=make_rollup_rebuild_hook(_agg_service),
-            on_projected=nudge_stats_after_projection)
+            on_projected=after_projection)
     return _projector
 
 
@@ -817,6 +817,9 @@ class DriftReportModel(_ApiModel):
     checked_at: str = Field(alias="checkedAt")
     duration_ms: int = Field(alias="durationMs")
     skipped_reason: Optional[str] = Field(default=None, alias="skippedReason")
+    # Rollup health: {"status": "ok" | "missing" | "untrusted", "aggregated", "stubs"}.
+    # "missing"/"untrusted" → "Rebuild fast read layer" hands them to the aggregation job.
+    rollups: Optional[Dict[str, Any]] = None
 
 
 class StateResponse(_ApiModel):
@@ -2754,10 +2757,15 @@ async def merge_pull_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # only manage may merge into base
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    target = await svc.get_graph(str(_pr["target_graph_id"]))     # judged by the TARGET's ontology
+    cset = await _live_containment_types(session, ws_id, (target or {}).get("data_source_id"))
+    rules = await _rules_for_meta(session, ws_id, target)
     with _domain_errors():
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
+            containment_edge_types=cset, ontology_rules=rules,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
