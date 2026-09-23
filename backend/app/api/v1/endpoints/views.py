@@ -949,6 +949,22 @@ async def restore_view(
     return view
 
 
+_WAITING_IN_DRAFT = ("This view is waiting in a draft. It goes live, with the visibility chosen when "
+                     "it was imported, when the draft is published.")
+
+
+async def _refuse_while_in_draft(session: AsyncSession, view_id: str) -> None:
+    """A view staged in a draft stays private until the draft goes live, and then takes the
+    visibility chosen at import; its sharing tier can't be changed or requested meanwhile
+    (explicit grants still can, to show it to the draft's reviewers)."""
+    from sqlalchemy import select
+    staged = (await session.execute(
+        select(ViewORM.draft_branch_id).where(ViewORM.id == view_id)
+    )).scalar_one_or_none()
+    if staged:
+        raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
+
+
 @router.put("/{view_id}/visibility", response_model=ViewResponse)
 async def update_view_visibility(
     view_id: str = Path(...),
@@ -966,6 +982,7 @@ async def update_view_visibility(
     """
     if visibility not in ("private", "workspace", "enterprise"):
         raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
+    await _refuse_while_in_draft(session, view_id)
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
@@ -1081,6 +1098,8 @@ async def request_publication(
         )
     if view_orm.visibility == "enterprise":
         raise HTTPException(status_code=409, detail="This view is already published")
+    if view_orm.draft_branch_id:
+        raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
 
     view_orm.publish_requested_by = user.id
     view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()

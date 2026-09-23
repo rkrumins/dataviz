@@ -33,6 +33,7 @@ from backend.app.db.models import (
     OntologyORM,
     UserORM,
     ViewORM,
+    view_is_live,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class ImpactFact:
 
 async def _live_views(session: AsyncSession) -> int:
     r = await session.execute(
-        select(func.count()).select_from(ViewORM).where(ViewORM.deleted_at.is_(None))
+        select(func.count()).select_from(ViewORM).where(view_is_live())
     )
     return int(r.scalar() or 0)
 
@@ -93,7 +94,7 @@ async def _view_modes_probe(session: AsyncSession) -> list[ImpactFact]:
     """
     r = await session.execute(
         select(ViewORM.view_type, func.count())
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .group_by(ViewORM.view_type)
         .order_by(func.count().desc())
     )

@@ -26,6 +26,7 @@ from backend.app.db.models import (
     ViewVersionORM,
     WorkspaceDataSourceORM,
     WorkspaceORM,
+    view_is_live,
 )
 from backend.app.db.repositories import view_version_repo
 from backend.app.services import view_access
@@ -64,7 +65,7 @@ async def identity_matches(
     if not by_portable:
         return {}
     rows = (await session.execute(
-        select(ViewORM).where(ViewORM.portable_id.in_(list(by_portable)), ViewORM.deleted_at.is_(None))
+        select(ViewORM).where(ViewORM.portable_id.in_(list(by_portable)), view_is_live())
     )).scalars().all()
     enforce = rbac_flag("RBAC_ENFORCE_VIEWS") and ctx is not None
     out: Dict[str, List[Dict[str, Any]]] = {}

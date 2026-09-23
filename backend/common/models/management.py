@@ -1316,6 +1316,8 @@ class ViewResponse(BaseModel):
     audience: Optional[ViewAudience] = None
     # The identity this view carries between environments (see ViewORM.portable_id).
     portable_id: Optional[str] = Field(None, alias="portableId")
+    # Set while the view exists only in a draft, waiting to go live (see ViewORM.draft_branch_id).
+    draft_branch_id: Optional[str] = Field(None, alias="draftBranchId")
 
     class Config:
         populate_by_name = True

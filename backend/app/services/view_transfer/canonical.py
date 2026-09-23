@@ -21,7 +21,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
 
@@ -125,6 +125,34 @@ def content_hash(definition: Any) -> str:
     """``sha256:<hex>`` of the canonical JSON of ``definition``."""
     digest = hashlib.sha256(canonical_json(definition).encode("utf-8")).hexdigest()
     return f"{HASH_PREFIX}{digest}"
+
+
+def split_definition(definition: dict) -> Tuple[dict, dict, Optional[str]]:
+    """A definition the way a draft overlay holds it: everything but the layout and the scope,
+    the bare ``referenceLayout`` (``{}`` when there is none), and the entity scope. Never
+    mutates its input; :func:`join_definition` puts it back together exactly."""
+    rest = copy.deepcopy(definition)
+    layout = rest.get("layout")
+    reference_layout = layout.pop("referenceLayout", None) if isinstance(layout, dict) else None
+    content = rest.get("content")
+    entity_scope = content.pop("entityScope", None) if isinstance(content, dict) else None
+    return rest, reference_layout if isinstance(reference_layout, dict) else {}, entity_scope
+
+
+def join_definition(rest: dict, reference_layout: Optional[dict], entity_scope: Optional[str]) -> dict:
+    """The inverse of :func:`split_definition`."""
+    definition = copy.deepcopy(rest)
+    if reference_layout:
+        layout = definition.get("layout")
+        layout = layout if isinstance(layout, dict) else {}
+        layout["referenceLayout"] = copy.deepcopy(reference_layout)
+        definition["layout"] = layout
+    if entity_scope is not None:
+        content = definition.get("content")
+        content = content if isinstance(content, dict) else {}
+        content["entityScope"] = entity_scope
+        definition["content"] = content
+    return definition
 
 
 def metadata_of(config: Any, *, name: str, description: Optional[str], tags: Optional[list],

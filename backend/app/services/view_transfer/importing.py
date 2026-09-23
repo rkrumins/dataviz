@@ -15,7 +15,8 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -25,7 +26,7 @@ from backend.app.db.models import ViewORM
 from backend.app.db.repositories import view_activity_repo, view_repo, view_version_repo
 from backend.app.services.layout_config import sanitize_node_ordering
 from backend.app.services.view_transfer.canonical import (
-    config_from_definition, content_hash, portable_definition,
+    config_from_definition, content_hash, portable_definition, split_definition,
 )
 from backend.app.services.view_transfer.diff import diff_definitions
 from backend.app.services.view_transfer.inspect import target_versions
@@ -220,6 +221,107 @@ def _pct(rate: Optional[float]) -> str:
     return "n/a" if rate is None else f"{rate * 100:.1f}%"
 
 
+async def _prepared(session: AsyncSession, item: ImportItem) -> Tuple[str, dict, str, Optional[dict], List[str]]:
+    """The definition as it will be written: canonical, its layer references checked, and held
+    to the rules every layout write here obeys. Returns the view type, that definition, the hash
+    of what was submitted, the file's own definition (canonical) when sent, and what the rules
+    here changed."""
+    view_type = item.metadata.get("viewType") or "graph"
+    definition = portable_definition(item.definition, view_type)
+    submitted_hash = content_hash(definition)
+    origin_definition = (portable_definition(item.origin_definition, view_type)
+                         if item.origin_definition is not None else None)
+    adjustments: List[str] = []
+    rl = reference_layout(definition)
+    if rl is not None:
+        view_repo._validate_layer_refs({"layers": rl.get("layers") or [],
+                                        "assignments": rl.get("assignments") or {}})
+        sanitized = await view_repo._gate_node_ordering(session, sanitize_node_ordering(rl))
+        if sanitized != rl:
+            adjustments.append("Custom node order was dropped: node sorting is turned off here.")
+            definition["layout"]["referenceLayout"] = sanitized
+    return view_type, definition, submitted_hash, origin_definition, adjustments
+
+
+async def _locked_target(session: AsyncSession, item: ImportItem) -> ViewORM:
+    """The view an update writes to, locked, and refused (409) if it changed since review."""
+    row = item.target.view
+    assert row is not None
+    await session.refresh(row, with_for_update=True)
+    if item.expected_target_hash and view_version_repo.working_state(row).content_hash != item.expected_target_hash:
+        raise HTTPException(status_code=409, detail={
+            "type": "target_changed",
+            "message": f"'{row.name}' changed after you reviewed it. Check it again before importing.",
+        })
+    return row
+
+
+async def _report_on(session: AsyncSession, item: ImportItem, definition: dict, workspace_id: str,
+                     view_type: str) -> Dict[str, Any]:
+    """How ``definition`` matches the target graph: the authoritative record, taken on what is
+    actually written."""
+    lookup, types = await _target_facts(session, Target(workspace_id, item.target.data_source_id),
+                                        sorted(collect(definition).urns))
+    return reconcile_view(definition, exported=item.exported, lookup=lookup, types=types,
+                          policy=await _policy(session, view_type),
+                          entities_resolved_at_export=item.entities_resolved)
+
+
+def _provenance(item: ImportItem, report: Dict[str, Any], adjustments: List[str],
+                origin_definition: Optional[dict], written_hash: str) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[str]]:
+    """What the import's version records about it, where the file came from, and the file's own
+    hash when what was written differs from it (see ``origin_hash``)."""
+    origin = {
+        "environment": item.provenance.get("environment"),
+        "viewId": item.provenance.get("sourceViewId"),
+        "version": item.provenance.get("version"),
+        "hash": item.provenance.get("definitionHash"),
+        "portableId": item.provenance.get("portableId"),
+        "exportedAt": item.provenance.get("exportedAt"),
+        "exportedBy": item.provenance.get("exportedBy"),
+        "fileName": item.provenance.get("fileName"),
+    }
+    # What was written differs from the file: keep the file's design, so a later file from the
+    # same lineage can still merge from it (``view_version_repo.base_definition``).
+    origin_hash = content_hash(origin_definition) if origin_definition is not None else None
+    diverges = origin_hash is not None and origin_hash != written_hash
+    provenance = {
+        "origin": origin,
+        "ancestry": item.history,
+        "action": item.action,
+        "strategy": item.strategy,
+        "batchId": item.batch_id,
+        "forkedFrom": item.provenance.get("forkedFrom"),
+        "resolutions": item.resolutions_summary,
+        "adjustments": adjustments,
+        "report": {"summary": report["summary"], "layers": report["layers"]},
+    }
+    if diverges:
+        provenance["originDefinition"] = origin_definition
+    return provenance, origin, origin_hash if diverges else None
+
+
+def _import_message(origin: Dict[str, Any]) -> str:
+    return (f"Imported from {origin['environment'] or 'another environment'}"
+            + (f" (v{origin['version']})" if origin.get("version") else ""))
+
+
+def _import_summary(origin: Dict[str, Any], name: str, match_rate: Optional[float]) -> str:
+    return (f"Imported from {origin['environment'] or 'another environment'} · {name}"
+            + (f" v{origin['version']}" if origin.get("version") else "")
+            + f" · {_pct(match_rate)} matched")
+
+
+def _integrity(submitted_hash: str, written_hash: str, adjustments: List[str]) -> Dict[str, Any]:
+    return {
+        "submittedHash": submitted_hash,
+        "storedHash": written_hash,
+        "verified": written_hash == submitted_hash,
+        "adjusted": bool(adjustments),
+        "adjustments": adjustments,
+    }
+
+
 async def import_item(
     session: AsyncSession,
     item: ImportItem,
@@ -232,22 +334,7 @@ async def import_item(
     Raises ``HTTPException`` (409) when an update target changed since it was reviewed, and
     :class:`AlreadyImported` when a concurrent attempt of the same request got there first.
     """
-    view_type = item.metadata.get("viewType") or "graph"
-    definition = portable_definition(item.definition, view_type)
-    submitted_hash = content_hash(definition)
-    origin_definition = (portable_definition(item.origin_definition, view_type)
-                         if item.origin_definition is not None else None)
-
-    # The same write-side rules every layout write obeys.
-    adjustments: List[str] = []
-    rl = reference_layout(definition)
-    if rl is not None:
-        view_repo._validate_layer_refs({"layers": rl.get("layers") or [],
-                                        "assignments": rl.get("assignments") or {}})
-        sanitized = await view_repo._gate_node_ordering(session, sanitize_node_ordering(rl))
-        if sanitized != rl:
-            adjustments.append("Custom node order was dropped: node sorting is turned off here.")
-            definition["layout"]["referenceLayout"] = sanitized
+    view_type, definition, submitted_hash, origin_definition, adjustments = await _prepared(session, item)
 
     notices: List[str] = []
     incoming_portable = item.provenance.get("portableId")
@@ -280,22 +367,9 @@ async def import_item(
         if forked_from:
             item.provenance = {**item.provenance, "forkedFrom": forked_from}
     else:
-        row = item.target.view
-        assert row is not None
-        await session.refresh(row, with_for_update=True)
-        if item.expected_target_hash and view_version_repo.working_state(row).content_hash != item.expected_target_hash:
-            raise HTTPException(status_code=409, detail={
-                "type": "target_changed",
-                "message": f"'{row.name}' changed after you reviewed it. Check it again before importing.",
-            })
-        # Nothing here is lost to an import: the view's current design is a version before the
-        # file replaces it, even when it only existed as unsaved canvas edits.
-        latest = await view_version_repo.ensure_baseline(session, row)
-        if view_version_repo.status(row, latest)["dirty"]:
-            await view_version_repo.checkpoint(
-                session, row, source="snapshot", actor=actor,
-                message="Saved automatically before importing",
-            )
+        row = await _locked_target(session, item)
+        await view_version_repo.snapshot_if_dirty(session, row, actor=actor,
+                                                  message="Saved automatically before importing")
         row.config = json.dumps(config_from_definition(definition, icon=item.metadata.get("icon")))
         row.name = item.metadata["name"]
         row.description = item.metadata.get("description")
@@ -310,56 +384,19 @@ async def import_item(
             row.updated_by = actor
     await session.flush()
 
-    # The authoritative record of how well it matched, taken on what is actually stored.
     stored = view_version_repo.working_state(row)
-    lookup, types = await _target_facts(session, Target(row.workspace_id, item.target.data_source_id),
-                                        sorted(collect(stored.definition).urns))
-    report = reconcile_view(stored.definition, exported=item.exported, lookup=lookup, types=types,
-                            policy=await _policy(session, view_type),
-                            entities_resolved_at_export=item.entities_resolved)
-    summary = report["summary"]
-    origin = {
-        "environment": item.provenance.get("environment"),
-        "viewId": item.provenance.get("sourceViewId"),
-        "version": item.provenance.get("version"),
-        "hash": item.provenance.get("definitionHash"),
-        "portableId": incoming_portable,
-        "exportedAt": item.provenance.get("exportedAt"),
-        "exportedBy": item.provenance.get("exportedBy"),
-        "fileName": item.provenance.get("fileName"),
-    }
-    # What was stored differs from the file: keep the file's design, so a later file from the
-    # same lineage can still merge from it (``view_version_repo.base_definition``).
-    origin_hash = content_hash(origin_definition) if origin_definition is not None else None
-    diverges = origin_hash is not None and origin_hash != stored.content_hash
-    provenance = {
-        "origin": origin,
-        "ancestry": item.history,
-        "action": item.action,
-        "strategy": item.strategy,
-        "batchId": item.batch_id,
-        "forkedFrom": item.provenance.get("forkedFrom"),
-        "resolutions": item.resolutions_summary,
-        "adjustments": adjustments,
-        "report": {"summary": summary, "layers": report["layers"]},
-    }
-    if diverges:
-        provenance["originDefinition"] = origin_definition
+    report = await _report_on(session, item, stored.definition, row.workspace_id, view_type)
+    provenance, origin, origin_hash = _provenance(item, report, adjustments, origin_definition,
+                                                  stored.content_hash)
     version, created = await view_version_repo.checkpoint(
-        session, row, source="import", actor=actor, force=True,
-        origin_hash=origin_hash if diverges else None,
-        message=f"Imported from {origin['environment'] or 'another environment'}"
-                + (f" (v{origin['version']})" if origin.get("version") else ""),
-        provenance=provenance, request_id=item.request_id,
+        session, row, source="import", actor=actor, force=True, origin_hash=origin_hash,
+        message=_import_message(origin), provenance=provenance, request_id=item.request_id,
     )
     if not created:  # a forced checkpoint only declines when its request id is already taken
         raise AlreadyImported()
     await view_activity_repo.record_view_activity(
         session, view_id=row.id, workspace_id=row.workspace_id, action="imported", actor=actor,
-        summary=(f"Imported from {origin['environment'] or 'another environment'}"
-                 f" · {item.provenance.get('name') or row.name}"
-                 + (f" v{origin['version']}" if origin.get("version") else "")
-                 + f" · {_pct(summary['matchRate'])} matched"),
+        summary=_import_summary(origin, item.provenance.get("name") or row.name, report["summary"]["matchRate"]),
         changes={"action": item.action, "version": version.version, "batchId": item.batch_id},
     )
     return {
@@ -367,14 +404,147 @@ async def import_item(
         "version": view_version_repo.to_summary(version),
         "report": report,
         "notices": notices,
-        "integrity": {
-            "submittedHash": submitted_hash,
-            "storedHash": stored.content_hash,
-            "verified": stored.content_hash == submitted_hash,
-            "adjusted": bool(adjustments),
-            "adjustments": adjustments,
-        },
+        "integrity": _integrity(submitted_hash, stored.content_hash, adjustments),
     }
+
+
+# ── Staged in a draft ────────────────────────────────────────────────────────
+#
+# On a version-controlled data source an import can take the road every other change there
+# takes: into a draft, live only when the draft is published or its review merges.
+#
+#   * An update (or overwrite) is proposed in the importer's own draft for the view (the one
+#     the canvas's layer edits use), beside the published design and label it would replace.
+#     Nothing live changes; publishing merges it 3-way (``view_repo.promote_overlay``). It
+#     supersedes whatever layout that draft proposed for the view before.
+#   * A new view is written as it would be live, but private and marked as living only in its
+#     own new draft (``draft_branch_id``); it is in no list until the draft goes live, and
+#     abandoning the draft discards it.
+
+#: Opens (or finds) the draft a staged import goes into, for the view given.
+OpenDraft = Callable[[ViewORM], Awaitable[str]]
+
+#: The visibilities a staged new view can go live with. Publishing to everyone is a governance
+#: act of its own, done once the view is live.
+STAGED_VISIBILITIES = ("private", "workspace")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _staged_result(row: ViewORM, branch_id: str, staged: Dict[str, Any], *, replayed: bool = False) -> Dict[str, Any]:
+    provenance = staged.get("provenance") or {}
+    return {
+        "viewId": row.id,
+        "version": None,
+        "report": provenance.get("report") or {},
+        "notices": staged.get("notices") or [],
+        "integrity": {**(staged.get("integrity") or {}), **({"replayed": True} if replayed else {})},
+        "staged": {"branchId": branch_id},
+    }
+
+
+async def stage_update(
+    session: AsyncSession,
+    item: ImportItem,
+    *,
+    actor: Optional[str],
+    open_draft: OpenDraft,
+) -> Dict[str, Any]:
+    """Propose an update of a view in the importer's draft for it, in the caller's transaction.
+
+    Checked exactly as a live update is (the same write-side rules, and 409 when the view
+    changed since review), but written to the draft's overlay of the view. A retry of the same
+    request finds the same draft (a person has one per view) and answers with what it staged.
+    """
+    view_type, definition, submitted_hash, origin_definition, adjustments = await _prepared(session, item)
+    row = await _locked_target(session, item)
+    branch_id = await open_draft(row)
+    overlay = await view_repo.ensure_overlay(session, row.id, branch_id)
+    staged_before = json.loads(overlay.staged_provenance) if overlay.staged_provenance else {}
+    if item.request_id and staged_before.get("requestId") == item.request_id:
+        if staged_before.get("actor") != actor:
+            raise HTTPException(status_code=409, detail={
+                "type": "request_id_taken", "message": "This request id was already used. Try again.",
+            })
+        return _staged_result(row, branch_id, staged_before, replayed=True)
+
+    published = view_version_repo.working_state(row)
+    base_rest, base_layout, base_scope = split_definition(published.definition)
+    rest, layout, scope = split_definition(definition)
+    overlay.fork_base_definition = json.dumps(base_rest)
+    overlay.fork_base_layout = json.dumps(base_layout)
+    overlay.fork_base_entity_scope = base_scope
+    overlay.fork_base_label = json.dumps(published.label)
+    overlay.definition = json.dumps(rest)
+    overlay.reference_layout = json.dumps(layout)
+    overlay.entity_scope = scope
+    overlay.label = json.dumps({
+        "name": item.metadata["name"],
+        "description": item.metadata.get("description") or None,
+        "icon": item.metadata.get("icon") or None,
+        "tags": list(item.metadata.get("tags") or []),
+        "viewType": view_type,
+    })
+
+    written_hash = content_hash(definition)
+    report = await _report_on(session, item, definition, row.workspace_id, view_type)
+    provenance, origin, _ = _provenance(item, report, adjustments, origin_definition, written_hash)
+    # Whether the view ends up holding something other than the file is only known once the
+    # draft goes live and merges (view_repo.promote_overlay); the file's design waits here.
+    provenance.pop("originDefinition", None)
+    staged = {
+        "kind": "update",
+        "action": item.action,
+        "requestId": item.request_id,
+        "actor": actor,
+        "stagedAt": _now(),
+        # An overwrite makes the view track the file's view once it goes live.
+        "portableId": item.provenance.get("portableId") if item.action == "overwrite" else None,
+        "fileDefinition": (origin_definition if origin_definition is not None
+                           else portable_definition(item.definition, view_type)),
+        "message": _import_message(origin),
+        "summary": _import_summary(origin, item.provenance.get("name") or row.name, report["summary"]["matchRate"]),
+        "provenance": provenance,
+        "integrity": _integrity(submitted_hash, written_hash, adjustments),
+    }
+    overlay.staged_provenance = json.dumps(staged)
+    await session.flush()
+    return {**_staged_result(row, branch_id, staged), "report": report}
+
+
+async def stage_new(
+    session: AsyncSession,
+    item: ImportItem,
+    *,
+    actor: Optional[str],
+    ontology_digest: Optional[str],
+    open_draft: OpenDraft,
+) -> Dict[str, Any]:
+    """Import a new view into its own new draft, in the caller's transaction.
+
+    Written as a live import would be (its ``import`` version and all, so a retry of the same
+    request replays like one), but private and marked as living only in the draft: it goes
+    live, with the visibility asked for here, when that draft is published.
+    """
+    visibility = item.metadata.get("visibility") or "private"
+    if visibility not in STAGED_VISIBILITIES:
+        raise HTTPException(status_code=422, detail=(
+            "A view imported into a draft goes live as private or shared with its workspace. "
+            "Publish it to everyone once it's live."))
+    item.metadata = {**item.metadata, "visibility": "private"}
+    result = await import_item(session, item, actor=actor, ontology_digest=ontology_digest)
+    row = (await session.execute(select(ViewORM).where(ViewORM.id == result["viewId"]))).scalar_one()
+    branch_id = await open_draft(row)
+    row.draft_branch_id = branch_id
+    overlay = await view_repo.ensure_overlay(session, row.id, branch_id)
+    overlay.staged_provenance = json.dumps({
+        "kind": "create", "action": item.action, "requestId": item.request_id, "actor": actor,
+        "stagedAt": _now(), "visibility": visibility,
+    })
+    await session.flush()
+    return {**result, "staged": {"branchId": branch_id}}
 
 
 async def replay(session: AsyncSession, request_id: str, actor: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -398,4 +568,4 @@ async def replay(session: AsyncSession, request_id: str, actor: Optional[str]) -
 
 
 __all__ = ["AlreadyImported", "Target", "ReconcileItem", "ImportItem", "reconcile_items",
-           "import_item", "replay"]
+           "import_item", "stage_update", "stage_new", "STAGED_VISIBILITIES", "replay"]

@@ -222,6 +222,14 @@ async def checkpoint(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+async def snapshot_if_dirty(session: AsyncSession, row: ViewORM, *, actor: Optional[str], message: str) -> None:
+    """Keep the view's current design as a version before something replaces it, even when it
+    only existed as unsaved canvas edits: nothing is lost to an import."""
+    latest = await ensure_baseline(session, row)
+    if status(row, latest)["dirty"]:
+        await checkpoint(session, row, source="snapshot", actor=actor, message=message)
+
+
 async def ensure_baseline(session: AsyncSession, row: ViewORM) -> ViewVersionORM:
     """The view's latest version, taking a ``baseline`` first if it has none.
 

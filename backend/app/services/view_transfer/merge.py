@@ -126,6 +126,31 @@ def _merge_value(base: Any, ours: Any, theirs: Any, path: str, conflicts: List[s
     return theirs
 
 
+#: The referenceLayout keys the layout merges handle themselves.
+_LAYOUT_MERGED_KEYS = frozenset({"layers", "assignments", "displayRules", "defaultNodeSortMode"})
+
+
+def merge_layout_side_fields(base: dict, ours: dict, theirs: dict,
+                             conflicts: Optional[List[str]] = None) -> Dict[str, Any]:
+    """The referenceLayout keys the layout merges don't know (anything newer than them), merged
+    key by key with the same draft-wins rule, so no merge of a layout drops them."""
+    sink: List[str] = conflicts if conflicts is not None else []
+    merged: Dict[str, Any] = {}
+    for key in sorted((set(base) | set(ours) | set(theirs)) - _LAYOUT_MERGED_KEYS):
+        value = _merge_value(base.get(key, _ABSENT), ours.get(key, _ABSENT), theirs.get(key, _ABSENT),
+                             f"layout.referenceLayout.{key}", sink)
+        if value is not _ABSENT:
+            merged[key] = value
+    return merged
+
+
+def merge_labels(base: dict, ours: dict, theirs: dict) -> dict:
+    """The same file-wins 3-way over a view's label: name, description, icon, tags (a list, so
+    atomic) and view type. Never mutates its inputs."""
+    merged = _merge_value(copy.deepcopy(base), copy.deepcopy(ours), copy.deepcopy(theirs), "label", [])
+    return merged if isinstance(merged, dict) else copy.deepcopy(theirs)
+
+
 def merge_definitions(base: dict, ours: dict, theirs: dict) -> MergeResult:
     """Combine ``theirs`` (the file) into ``ours`` (the view here) against ``base``.
 
@@ -159,14 +184,7 @@ def merge_definitions(base: dict, ours: dict, theirs: dict) -> MergeResult:
         default_sort = merge_default_sort_3way(rl_base, rl_ours, rl_theirs)
         if default_sort is not None:
             merged_rl["defaultNodeSortMode"] = default_sort
-        # Side fields the layout merge doesn't know about still merge, key by key.
-        known = {"layers", "assignments", "displayRules", "defaultNodeSortMode"}
-        extra_keys = (set(rl_base) | set(rl_ours) | set(rl_theirs)) - known
-        for key in sorted(extra_keys):
-            value = _merge_value(rl_base.get(key, _ABSENT), rl_ours.get(key, _ABSENT),
-                                 rl_theirs.get(key, _ABSENT), f"layout.referenceLayout.{key}", conflicts)
-            if value is not _ABSENT:
-                merged_rl[key] = value
+        merged_rl.update(merge_layout_side_fields(rl_base, rl_ours, rl_theirs, conflicts))
         conflicts += _keyed_conflicts(_layers_by_id(rl_base), _layers_by_id(rl_ours),
                                       _layers_by_id(rl_theirs), "layers")
         conflicts += _keyed_conflicts(rl_base.get("assignments") or {}, rl_ours.get("assignments") or {},

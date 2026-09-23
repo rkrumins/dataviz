@@ -7,7 +7,8 @@ a large view's identity check is legitimately longer than the 30s default.
     POST /export      one or more views (optionally at a given version) → a View Bundle file
     POST /inspect     a file (raw body) → is it sound, is it already here, where does it belong
     POST /reconcile   views bound to targets → what matches there, and what would be written
-    POST /import      one view → written, with an ``import`` version that proves what was stored
+    POST /import      one view → written, with an ``import`` version that proves what was stored;
+                      or, on a version-controlled data source, staged in a draft to go live with it
 
 Import is one view per call: every request stays well inside the timeout tier, a multi-view
 import reports honest progress, one failure doesn't block the rest, and ``requestId`` makes a
@@ -25,6 +26,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.endpoints.versioning import _domain_errors, get_versioning_service
 from backend.app.api.v1.endpoints.view_guards import editable_view, readable_view
 from backend.app.api.v1.endpoints.views import (
     _compute_ontology_digest,
@@ -32,9 +34,10 @@ from backend.app.api.v1.endpoints.views import (
     authorize_view_create,
 )
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
+from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import WorkspaceORM
+from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.db.repositories import data_source_repo, view_activity_repo, view_repo
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.view_transfer import importing, limits
@@ -43,6 +46,7 @@ from backend.app.services.view_transfer.export import export_views
 from backend.app.services.view_transfer.inspect import identity_matches, target_suggestions, view_payload
 from backend.app.services.view_transfer.references import Rewrite, reference_layout
 from backend.app.services.view_transfer.sources import effective_data_source
+from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.models.view_transfer import HistoryEntry, Manifest
 
 logger = logging.getLogger(__name__)
@@ -365,6 +369,39 @@ class ImportRequest(BaseModel):
     expectedTargetHash: Optional[str] = Field(None, max_length=128)
     requestId: Optional[str] = Field(None, min_length=8, max_length=128)
     batchId: Optional[str] = Field(None, max_length=128)
+    #: Import into a draft of the (version-controlled) data source rather than live: the view
+    #: changes, or appears, when the draft is published or its review merges.
+    stage: bool = False
+
+
+_DRAFT_PERMISSION = "workspace:datasource:manage"
+
+
+async def _draft_graph(svc: GraphVersioningService, target: importing.Target, claims: PermissionClaims) -> dict:
+    """The versioned graph a staged import's draft is opened on, once the caller may open one."""
+    graph = (await svc.get_graph_by_data_source(target.data_source_id)
+             if target.data_source_id else None)
+    if graph is None or graph.get("workspace_id") != target.workspace_id:
+        raise HTTPException(status_code=422, detail={
+            "type": "not_versioned",
+            "message": "This data source isn't under version control, so there's no draft to import into.",
+        })
+    if not has_permission(claims, _DRAFT_PERMISSION, workspace_id=target.workspace_id):
+        raise HTTPException(status_code=403, detail=f"Missing permission: {_DRAFT_PERMISSION}")
+    return graph
+
+
+async def _answer(session: AsyncSession, result: Dict[str, Any], actor: Optional[str]) -> Dict[str, Any]:
+    """The import's result, with the view as it now reads: on its draft, when it was staged."""
+    staged = result.get("staged")
+    if staged is None:
+        row = await session.get(ViewORM, result["viewId"])
+        if row is not None and row.draft_branch_id:
+            staged = {"branchId": row.draft_branch_id}
+            result = {**result, "staged": staged}
+    view = await view_repo.get_view_enriched(session, result["viewId"], user_id=actor,
+                                             branch_id=(staged or {}).get("branchId"))
+    return {"view": view, **result}
 
 
 @router.post("/import", dependencies=[Depends(require_feature("viewImportEnabled"))])
@@ -373,6 +410,7 @@ async def import_view_file(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Write one view from a file: a new view, a copy, or a new version of a view here.
 
@@ -380,13 +418,23 @@ async def import_view_file(
     from and how well it matched) and the activity entry. The response re-reads what was
     stored and says whether it is exactly what was sent (``integrity.verified``), or how the
     rules here adjusted it. Retrying with the same ``requestId`` returns the first result.
+
+    With ``stage``, the import goes into a draft of the data source instead (see
+    ``importing.stage_update`` and ``importing.stage_new``) and the response names it.
     """
     actor = _actor(user)
+    if req.stage:
+        await require_versioning_enabled()
+        if user is None:
+            raise HTTPException(status_code=401, detail="Sign in to import into a draft.")
+        if req.action in ("create", "copy") and (req.metadata.visibility or "private") not in importing.STAGED_VISIBILITIES:
+            raise HTTPException(status_code=422, detail=(
+                "A view imported into a draft goes live as private or shared with its workspace. "
+                "Publish it to everyone once it's live."))
     if req.requestId:
         previous = await importing.replay(session, req.requestId, actor)
         if previous is not None:
-            return {"view": await view_repo.get_view_enriched(session, previous["viewId"], user_id=actor),
-                    **previous}
+            return await _answer(session, previous, actor)
 
     definition = _checked_definition(req.definition)
     if req.originDefinition is not None:
@@ -418,12 +466,39 @@ async def import_view_file(
         request_id=req.requestId, batch_id=req.batchId, strategy=req.strategy,
         origin_definition=req.originDefinition,
     )
+    graph = await _draft_graph(svc, target, claims) if req.stage else None
+
+    async def own_draft_for(row: ViewORM) -> str:
+        """An update goes into the importer's draft for the view: the one they have open, or a
+        new one (a person has one draft per view)."""
+        with _domain_errors():
+            resolved = await svc.resolve_graph(
+                data_source_id=target.data_source_id, actor=actor, workspace_id=target.workspace_id,
+                open_draft_if_absent=True, originating_view_id=row.id,
+            )
+        draft = (resolved or {}).get("my_draft")
+        if not draft:
+            raise HTTPException(status_code=409, detail="A draft couldn't be opened for this view.")
+        return draft["branch_id"]
+
+    async def new_draft_for(row: ViewORM) -> str:
+        """A new view gets a draft of its own, named for it."""
+        with _domain_errors():
+            return await svc.open_draft(graph_id=graph["graph_id"], owner=actor,
+                                        name=f"Import: {row.name}"[:200], originating_view_id=row.id)
+
     digest = await _compute_ontology_digest(session, target.workspace_id, target.data_source_id)
     try:
         async with session.begin_nested():
-            result = await importing.import_item(session, item, actor=actor, ontology_digest=digest)
+            if not req.stage:
+                result = await importing.import_item(session, item, actor=actor, ontology_digest=digest)
+            elif target.view is not None:
+                result = await importing.stage_update(session, item, actor=actor, open_draft=own_draft_for)
+            else:
+                result = await importing.stage_new(session, item, actor=actor, ontology_digest=digest,
+                                                   open_draft=new_draft_for)
     except importing.AlreadyImported:
         result = await importing.replay(session, req.requestId, actor)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    return {"view": await view_repo.get_view_enriched(session, result["viewId"], user_id=actor), **result}
+    return await _answer(session, result, actor)

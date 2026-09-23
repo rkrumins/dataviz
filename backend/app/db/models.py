@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 from sqlalchemy.orm import relationship
@@ -897,6 +898,12 @@ class ViewORM(Base):
     # workspace may legitimately hold a view and a separate copy of it. NULL only
     # on rows that predate the column and escaped its backfill.
     portable_id = Column(Text, nullable=True, default=lambda: f"pv_{uuid.uuid4().hex}")
+    # Set while the view exists only in a draft: an import staged for review. It goes live,
+    # and this clears, when that draft is published or its review merges; abandoning the draft
+    # discards the view. Until then it is in no list, count or metric (``view_is_live``) and
+    # stays private. A logical ref to a graph-versioning branch, with no cross-schema FK (as
+    # ``view_layout_overlays.branch_id``).
+    draft_branch_id = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -914,6 +921,7 @@ class ViewORM(Base):
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
         Index("idx_view_portable", "portable_id"),
+        Index("idx_view_draft_branch", "draft_branch_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
@@ -922,6 +930,15 @@ class ViewORM(Base):
 
     def __repr__(self) -> str:
         return f"<View id={self.id!r} name={self.name!r} type={self.view_type!r}>"
+
+
+def view_is_live():
+    """The views there are: not deleted, and not waiting in a draft to go live.
+
+    Every query that lists, counts or measures views filters on this rather than on
+    ``deleted_at`` alone, so a view staged in a draft shows up nowhere until the draft is
+    published (tests/test_view_live_filter.py keeps new queries from missing it)."""
+    return and_(ViewORM.deleted_at.is_(None), ViewORM.draft_branch_id.is_(None))
 
 
 # ------------------------------------------------------------------ #
@@ -1036,6 +1053,17 @@ class ViewLayoutOverlayORM(Base):
     # JSON: base bare referenceLayout snapshot captured at draft open.
     fork_base_layout = Column(Text, nullable=False, default="{}")
     fork_base_entity_scope = Column(Text, nullable=True)
+    # A draft that imports a file into the view proposes more than a layout: the rest of its
+    # design (``definition``: the portable definition minus the layout and scope above) and its
+    # label (name, description, icon, tags, view type), each beside the published value it
+    # replaces, so publishing merges them 3-way as it does the layout. NULL when the draft only
+    # edited layers. ``staged_provenance`` is the import's record (where the file came from,
+    # how it matched, its request id), written into the view's history when the draft goes live.
+    definition = Column(Text, nullable=True)
+    fork_base_definition = Column(Text, nullable=True)
+    label = Column(Text, nullable=True)
+    fork_base_label = Column(Text, nullable=True)
+    staged_provenance = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 

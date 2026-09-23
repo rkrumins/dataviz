@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import ViewActivityLogORM, ViewORM
+from backend.app.db.models import ViewActivityLogORM, ViewORM, view_is_live
 from backend.app.db.repositories import outbox_event_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 
@@ -216,7 +216,7 @@ async def get_recent_activity(
     query = (
         select(ViewActivityLogORM, ViewORM)
         .join(ViewORM, ViewORM.id == ViewActivityLogORM.view_id)
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .order_by(ViewActivityLogORM.created_at.desc())
         .limit(limit)
     )
