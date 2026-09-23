@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
     GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult,
@@ -98,6 +99,14 @@ class VersionedBranchProvider:
             containment_edge_types=self._containment_types,
             include_child_count=getattr(query, "include_child_count", True))
         return [GraphNode(**d) for d in rows]
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which ``urns`` exist on this branch, and as what: the three states of
+        ``GraphDataProvider.resolve_identities`` (found / absent / left out when its lookup
+        failed), from bounded ``get_nodes`` reads. This class doesn't inherit that default, and
+        without it every view checked against a version-controlled data source came back
+        "couldn't be checked"."""
+        return await resolve_identities_by_query(self, urns)
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         rows = await self._svc.search_from_state(
