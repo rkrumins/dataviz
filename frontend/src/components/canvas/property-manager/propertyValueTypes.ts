@@ -8,13 +8,30 @@ import { Braces, Hash, ToggleLeft, Type, type LucideIcon } from 'lucide-react'
 
 export type ValueType = 'string' | 'number' | 'boolean' | null
 
-/** Infer a value type from discovered sample values (first non-null). */
-export function inferType(samples: unknown[]): ValueType {
-    const v = samples.find((s) => s !== null && s !== undefined)
+function kindOf(v: unknown): ValueType {
     if (typeof v === 'number') return 'number'
     if (typeof v === 'boolean') return 'boolean'
-    if (typeof v === 'string') return 'string'
+    // An integer too long for a double arrives as its exact digits (see
+    // lib/losslessJson) — it is still a number.
+    if (typeof v === 'string') return /^-?[1-9]\d{15,}$/.test(v) ? 'number' : 'string'
     return null
+}
+
+/** Infer a value type from discovered sample values — the kind MOST of them
+ *  have. The first sample alone decided before, so one stray value typed the
+ *  whole property. */
+export function inferType(samples: unknown[]): ValueType {
+    const counts = new Map<NonNullable<ValueType>, number>()
+    for (const s of samples) {
+        const k = kindOf(s)
+        if (k) counts.set(k, (counts.get(k) ?? 0) + 1)
+    }
+    let best: ValueType = null
+    let most = 0
+    for (const [k, n] of counts) {
+        if (n > most) { best = k; most = n }
+    }
+    return best
 }
 
 export interface TypeMeta { Icon: LucideIcon; tile: string; label: string }

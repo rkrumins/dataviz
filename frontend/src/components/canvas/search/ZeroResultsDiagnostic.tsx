@@ -91,7 +91,12 @@ export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
 
     return (
         <div className="flex flex-col gap-2">
-            <MissLead text={text} onSwitchMatch={onSwitchMatch} />
+            {/* A search that ran out of time found nothing because it stopped,
+                not because nothing matched — reading it as "no matches" is
+                how a slow property search looked like a broken one. */}
+            {result.deadlineExceeded
+                ? <TimedOutLead />
+                : <MissLead text={text} onSwitchMatch={onSwitchMatch} />}
 
             <TechnicalDetails>
                 {causes.map((c, i) => (
@@ -132,6 +137,25 @@ const MATCH_MODES: ReadonlyArray<{ value: QuickMatch; label: string; verb: strin
     { value: 'suffix', label: 'Ends with', verb: 'ends with' },
     { value: 'exact', label: 'Is exactly', verb: 'is exactly' },
 ]
+
+
+function TimedOutLead() {
+    return (
+        <div className={cn(
+            "rounded-xl px-3.5 py-3",
+            "border-l-4 border-l-rose-400 border border-rose-400/45",
+            "bg-rose-500/[0.12] dark:bg-rose-500/[0.10]",
+        )}>
+            <p className="text-[13px] font-display font-semibold leading-snug text-rose-900 dark:text-rose-100">
+                The search timed out before it found anything.
+            </p>
+            <p className="mt-1 text-[11.5px] leading-snug text-rose-900/85 dark:text-rose-100/90">
+                That is not the same as no matches. Narrow it with a type, tag or
+                property filter and run it again.
+            </p>
+        </div>
+    )
+}
 
 
 function MissLead({

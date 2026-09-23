@@ -27,6 +27,9 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
 }) => {
     const overview = useCatalogOverview(viewId)
     const totalEntities = overview.data?.totalEntities
+    // A count that failed is not a count of zero: "0 entities" is what the
+    // header used to say whenever the overview request was refused.
+    const countFailed = !overview.loading && overview.error !== null
 
     return (
         <div className={cn(
@@ -41,6 +44,8 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
                     value={overview.loading ? null : (totalEntities ?? 0)}
                     label="Entities"
                     tone="text-cyan-400"
+                    atLeast={overview.data?.atLeast ?? false}
+                    failure={countFailed ? `Couldn't count the entities in this view: ${overview.error}` : undefined}
                 />
                 <StatTile icon={<Database className="w-3.5 h-3.5" />} value={propertyCount} label="Properties" tone="text-accent-lineage" />
                 <StatTile icon={<Tag className="w-3.5 h-3.5" />} value={tagCount} label="Tags" tone="text-fuchsia-400" />
@@ -65,16 +70,27 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
 }
 
 
-function StatTile({ icon, value, label, tone }: {
+function StatTile({ icon, value, label, tone, atLeast = false, failure }: {
     icon: ReactNode; value: number | null; label: string; tone: string
+    /** The value is a floor (the count stopped short) — shown as "≥ N". */
+    atLeast?: boolean
+    /** Why the value could not be read; shown instead of a number. */
+    failure?: string
 }) {
     return (
         <div className="flex flex-col items-center text-center gap-0.5 rounded-xl px-1 py-1.5">
             <span className={cn('inline-flex items-center justify-center w-6 h-6 rounded-lg bg-canvas-base/50', tone)}>
                 {icon}
             </span>
-            <span className="text-[15px] font-bold tabular-nums leading-none text-ink" title={value === null ? undefined : value.toLocaleString()}>
-                {value === null ? <span className="inline-block w-5 h-3.5 rounded skeleton align-middle" /> : compactNum(value)}
+            <span
+                className="text-[15px] font-bold tabular-nums leading-none text-ink"
+                title={failure ?? (value === null ? undefined : `${atLeast ? 'at least ' : ''}${value.toLocaleString()}`)}
+            >
+                {failure
+                    ? <span className="text-ink-muted" aria-label={failure}>—</span>
+                    : value === null
+                        ? <span className="inline-block w-5 h-3.5 rounded skeleton align-middle" />
+                        : `${atLeast ? '≥' : ''}${compactNum(value)}`}
             </span>
             <span className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-ink-muted/80">
                 {label}

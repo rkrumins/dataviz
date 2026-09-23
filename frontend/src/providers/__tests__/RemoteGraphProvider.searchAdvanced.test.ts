@@ -35,6 +35,7 @@ function okJson(body: unknown): Response {
     status: 200,
     headers: { get: () => null },
     json: async () => body,
+    text: async () => JSON.stringify(body),
   } as unknown as Response
 }
 

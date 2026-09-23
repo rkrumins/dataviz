@@ -293,7 +293,7 @@ function leafSentence(p: Predicate): ReactNode {
             return (
                 <>
                     <Value>{p.key}</Value> {verb}{' '}
-                    <Value>{formatValue(p.value)}</Value>
+                    <PropertyValue value={p.value} between={op === 'between'} />
                 </>
             )
         }
@@ -325,12 +325,22 @@ function leafSentence(p: Predicate): ReactNode {
 }
 
 
-function formatValue(v: unknown): string {
-    if (v === null || v === undefined) return '∅'
-    if (Array.isArray(v)) return v.map(formatValue).join(', ')
-    if (typeof v === 'string') return v
-    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
-    return JSON.stringify(v)
+/** A property value as the query will compare it: text quoted, numbers and
+ *  booleans bare, a list as its items, a range as both ends, and an empty
+ *  value as a gap waiting to be filled — never as `""`, which read as "equals
+ *  the empty string". */
+function PropertyValue({ value, between }: { value: unknown; between?: boolean }) {
+    const one = (v: unknown, key?: number) => {
+        if (v === null || v === undefined || v === '') {
+            return <span key={key} className="text-ink-muted">…</span>
+        }
+        if (typeof v === 'string') return <Value key={key}>{v}</Value>
+        return <Value key={key} quoted={false}>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</Value>
+    }
+    if (!Array.isArray(value)) return one(value)
+    if (between) return <>{one(value[0], 0)} and {one(value[1], 1)}</>
+    if (value.length === 0) return one(undefined)
+    return <>{value.map((v, i) => <span key={i}>{i > 0 && ', '}{one(v)}</span>)}</>
 }
 
 
@@ -343,7 +353,7 @@ function Inline({ children }: { children: ReactNode }) {
 }
 
 
-function Value({ children }: { children: ReactNode }) {
+function Value({ children, quoted }: { children: ReactNode; quoted?: boolean }) {
     return (
         <span className={cn(
             'inline-flex items-center px-1.5 py-0',
@@ -351,7 +361,7 @@ function Value({ children }: { children: ReactNode }) {
             'bg-canvas-elevated/70 border border-glass-border/60',
             'text-ink',
         )}>
-            {typeof children === 'string' ? `"${children}"` : children}
+            {(quoted ?? typeof children === 'string') ? `"${children}"` : children}
         </span>
     )
 }

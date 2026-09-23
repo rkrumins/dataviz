@@ -23,7 +23,7 @@
  * values) is invoked with ``portal={true}`` for the same reason.
  */
 import { ExternalLink, X } from 'lucide-react'
-import { type FC, type ReactNode, memo, useEffect, useMemo, useState } from 'react'
+import { type FC, type KeyboardEvent, type ReactNode, memo, useEffect, useMemo, useState } from 'react'
 
 import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
@@ -679,10 +679,15 @@ function PropertyEditor({
 }: Omit<EditorCtx, 'value'> & { value: PropertyPredicate }) {
     const keys = pickKeyOptions(discovery, activeEntityTypes)
     const op: PropertyOp = value.op ?? 'eq'
+    const arity = valueArity(op)
     const samples = value.key ? discovery.getValueSamples(value.key) : []
     const sampleStrings = samples
         .map((v) => (typeof v === 'string' ? v : JSON.stringify(v)))
         .filter((s) => s.length > 0)
+    const listValue = (Array.isArray(value.value) ? value.value : [value.value])
+        .filter(isFilled)
+        .map(valueText)
+    const missingValue = value.key.trim() !== '' && !hasValueFor(value)
     return (
         <div className="flex flex-col gap-3">
             <div className="grid grid-cols-2 gap-3">
@@ -701,27 +706,47 @@ function PropertyEditor({
                 <Field label="Operator">
                     <OperatorMenu
                         value={op}
-                        onChange={(v) => onChange({ ...value, op: v })}
+                        onChange={(v) => onChange({ ...value, op: v, value: reshapeValue(value.value, v) })}
                         options={PROPERTY_OP_OPTIONS}
                         ariaLabel="Property operator"
                     />
                 </Field>
             </div>
-            <Field label="Value">
-                {sampleStrings.length > 0 ? (
+            <Field label={arity === 'list' ? 'Values' : arity === 'pair' ? 'Range' : 'Value'}>
+                {arity === 'list' ? (
                     <UnifiedPicker
-                        value={value.value == null ? '' : String(value.value)}
-                        onChange={(next) => onChange({ ...value, value: coerceValue(next) })}
+                        multiple
+                        value={listValue}
+                        onChange={(next) => onChange({
+                            ...value, value: next.map((s) => coerceValue(s, samples)),
+                        })}
                         options={sampleStrings.map((s) => ({ value: s }))}
-                        placeholder="pick or type a value…"
+                        placeholder="pick samples or type values — paste a list…"
+                        emptyHint="No samples discovered — type a value and press Enter."
+                        portal
+                    />
+                ) : arity === 'pair' ? (
+                    <RangeInputs
+                        value={value.value}
+                        onChange={(pair) => onChange({
+                            ...value, value: pair.map((s) => coerceValue(s, samples)),
+                        })}
+                        onSubmit={onSubmit}
+                    />
+                ) : sampleStrings.length > 0 ? (
+                    <UnifiedPicker
+                        value={valueText(value.value)}
+                        onChange={(next) => onChange({ ...value, value: coerceValue(next, samples) })}
+                        options={sampleStrings.map((s) => ({ value: s }))}
+                        placeholder="pick a sample or type any value…"
                         emptyHint="No samples discovered — type a value."
                         portal
                     />
                 ) : (
                     <input
                         type="text"
-                        value={value.value == null ? '' : String(value.value)}
-                        onChange={(e) => onChange({ ...value, value: coerceValue(e.target.value) })}
+                        value={valueText(value.value)}
+                        onChange={(e) => onChange({ ...value, value: coerceValue(e.target.value, samples) })}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter' && onSubmit) {
                                 e.preventDefault()
@@ -733,6 +758,56 @@ function PropertyEditor({
                     />
                 )}
             </Field>
+            {missingValue && (
+                <p className="text-[11px] text-ink-muted -mt-1">
+                    Not applied yet — {arity === 'pair' ? 'enter both ends of the range' : 'enter a value'}.
+                </p>
+            )}
+        </div>
+    )
+}
+
+
+/** Both ends of a ``between``, kept as typed. The old builder's range field
+ *  ran each end through ``Number(x) || 0``, which rounded long ids and turned
+ *  an empty end into a silent 0. */
+function RangeInputs({
+    value, onChange, onSubmit,
+}: {
+    value: unknown
+    onChange: (next: [string, string]) => void
+    onSubmit?: () => void
+}) {
+    const pair = Array.isArray(value) ? value : []
+    const lo = valueText(pair[0])
+    const hi = valueText(pair[1])
+    const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter' && onSubmit) {
+            e.preventDefault()
+            onSubmit()
+        }
+    }
+    return (
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <input
+                type="text"
+                value={lo}
+                onChange={(e) => onChange([e.target.value, hi])}
+                onKeyDown={onKeyDown}
+                placeholder="from"
+                aria-label="Range from"
+                className={cn(inputClass, 'tabular-nums')}
+            />
+            <span className="text-[11px] text-ink-muted">and</span>
+            <input
+                type="text"
+                value={hi}
+                onChange={(e) => onChange([lo, e.target.value])}
+                onKeyDown={onKeyDown}
+                placeholder="to"
+                aria-label="Range to"
+                className={cn(inputClass, 'tabular-nums')}
+            />
         </div>
     )
 }
@@ -996,13 +1071,70 @@ function pickKeyOptions(
 }
 
 
-function coerceValue(s: string): unknown {
+/** What one typed value is sent as.
+ *
+ *  Text stays text unless EVERY known value of the property is a number (or
+ *  every one a boolean) and the text reads as one exactly. So "007" stays
+ *  "007", "true" typed against a text property stays text, and an id longer
+ *  than a double can hold stays its digits — the backend compares text
+ *  against the stored value's text form, which is exact at any size, where
+ *  ``Number()`` would have sent a different integer. */
+function coerceValue(s: string, samples: readonly unknown[]): unknown {
     const t = s.trim()
     if (t === '') return ''
-    if (t === 'true') return true
-    if (t === 'false') return false
-    if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t)
+    if (samples.length > 0 && samples.every((x) => typeof x === 'boolean')) {
+        if (t === 'true') return true
+        if (t === 'false') return false
+    }
+    if (samples.length > 0 && samples.every((x) => typeof x === 'number')
+        && /^-?(0|[1-9]\d*)(\.\d+)?$/.test(t)) {
+        const n = Number(t)
+        if (Number.isFinite(n) && (t.includes('.') || Number.isSafeInteger(n))) return n
+    }
     return s
+}
+
+
+/** How many values an operator takes: one, a list, or a pair. */
+function valueArity(op: PropertyOp): 'scalar' | 'list' | 'pair' {
+    if (op === 'in' || op === 'notIn') return 'list'
+    if (op === 'between') return 'pair'
+    return 'scalar'
+}
+
+
+/** Carry the value across an operator change instead of dropping it: one
+ *  value becomes a one-item list, a list's first item becomes the value, a
+ *  pair keeps its first bound. */
+function reshapeValue(v: unknown, op: PropertyOp): unknown {
+    const items = (Array.isArray(v) ? v : [v]).filter(isFilled)
+    const arity = valueArity(op)
+    if (arity === 'list') return items
+    if (arity === 'pair') return [items[0] ?? '', items[1] ?? '']
+    return items[0] ?? ''
+}
+
+
+function isFilled(v: unknown): boolean {
+    return v != null && !(typeof v === 'string' && v.trim() === '')
+}
+
+
+function valueText(v: unknown): string {
+    if (v == null) return ''
+    return typeof v === 'string' ? v : String(v)
+}
+
+
+/** A property row is only a filter once its value is there: an empty value
+ *  compiled to ``CONTAINS ''``, which every node carrying the key matches. */
+function hasValueFor(p: PropertyPredicate): boolean {
+    const arity = valueArity(p.op ?? 'eq')
+    if (arity === 'list') return Array.isArray(p.value) ? p.value.some(isFilled) : isFilled(p.value)
+    if (arity === 'pair') {
+        return Array.isArray(p.value) && p.value.length === 2 && p.value.every(isFilled)
+    }
+    return isFilled(p.value)
 }
 
 
@@ -1013,7 +1145,7 @@ function isIncomplete(p: Predicate): boolean {
         case 'tag':          return p.values.length === 0
         case 'layer':        return !p.layerAssignment.trim()
         case 'hasProperty':  return !p.key.trim()
-        case 'property':     return !p.key.trim()
+        case 'property':     return !p.key.trim() || !hasValueFor(p)
         case 'descendantOf': return p.urns.length === 0
         case 'withinHops':   return p.urns.length === 0
         case 'path':         return p.sourceUrns.length === 0 || p.targetUrns.length === 0

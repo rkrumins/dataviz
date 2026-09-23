@@ -1081,8 +1081,15 @@ export function ContextViewCanvas({
       assignments: next.assignments,
       ...(next.defaultNodeSortMode ? { defaultNodeSortMode: next.defaultNodeSortMode } : {}),
     }
+    // The LOCAL copy keeps the view's display rules. Written without them, a
+    // later return to this view in the same session hydrated an empty rule set,
+    // and the next layout save sent that empty set to the server — the rules
+    // were gone after one layer gesture and one view switch.
     useSchemaStore.getState().updateView(view.id, {
-      layout: { ...(view.layout ?? {}), referenceLayout },
+      layout: {
+        ...(view.layout ?? {}),
+        referenceLayout: { ...referenceLayout, displayRules: useReferenceModelStore.getState().displayRules },
+      },
       content: { ...view.content, entityScope },
     })
     // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
@@ -1130,10 +1137,12 @@ export function ContextViewCanvas({
   // debounced durable save — which always sends the live displayRules (see doLayoutSave), so a
   // layer-only save never wipes them. Guards: ignore a stale render whose captured rules the store
   // has already moved past (e.g. a switch just re-hydrated), and skip when the view already carries
-  // these rules (the hydration seed / no net change). Managers only.
+  // these rules (the hydration seed / no net change). Gated on canEdit, the same
+  // VIEW capability the endpoint checks (can_edit_view): gating on datasource-manage
+  // let a view editor author rules that were silently never saved.
   useEffect(() => {
     if (useReferenceModelStore.getState().displayRules !== displayRules) return
-    if (!canManage) return
+    if (!viewCaps.canEdit) return
     const view = useSchemaStore.getState().getActiveView()
     if (!view?.id) return
     const savedRaw = view.layout?.referenceLayout?.displayRules
@@ -1149,7 +1158,7 @@ export function ContextViewCanvas({
     })
     pendingLayoutSave.current = { viewId: view.id, referenceLayout: norm, entityScope, branchId: effectiveBranchId }
     armLayoutSave()
-  }, [displayRules, canManage, armLayoutSave, effectiveBranchId])
+  }, [displayRules, viewCaps.canEdit, armLayoutSave, effectiveBranchId])
 
   // Step 2: Load assignments from backend when layers are synced and nodes are available
   // Uses a ref to track what we've computed for, preventing cascading re-fetches.

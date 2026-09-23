@@ -137,3 +137,26 @@ describe('predicateSentence — plain-English summary', () => {
         expect(text).toContain('PII')
     })
 })
+
+
+describe('predicateSentence — property values read as what they are', () => {
+    const prop = (op: string, value: unknown): Predicate =>
+        ({ kind: 'property', key: 'gvHash', op, value } as Predicate)
+
+    it('quotes text and leaves numbers bare', () => {
+        expect(rendered(prop('eq', 'gold'))).toContain('"gvHash" equals "gold"')
+        expect(rendered(prop('gt', 15))).toContain('"gvHash" is greater than 15')
+        expect(rendered(prop('eq', true))).toContain('"gvHash" equals true')
+    })
+
+    it('shows a range as both ends and a list as its items', () => {
+        expect(rendered(prop('between', [10, 20]))).toContain('is between 10 and 20')
+        expect(rendered(prop('in', ['a', 'b']))).toContain('is one of "a", "b"')
+    })
+
+    it('shows a missing value as a gap, not as the empty string', () => {
+        const text = rendered(prop('contains', ''))
+        expect(text).toContain('"gvHash" contains …')
+        expect(text).not.toContain('""')
+    })
+})

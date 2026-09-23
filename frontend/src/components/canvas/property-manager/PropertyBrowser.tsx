@@ -624,9 +624,15 @@ function RowAction({ icon, label, onClick, danger }: { icon: React.ReactNode; la
 }
 
 
-/** Coerce a string sample value to its inferred type for `property = value`. */
+/** Coerce a string sample value to its inferred type for `property = value`.
+ *  An integer a double cannot hold stays its exact digits: the backend matches
+ *  text against the stored value's text form, where `Number()` would send a
+ *  neighbouring integer that no node carries. */
 function coerceValue(raw: string, type: ValueType): string | number | boolean {
-    if (type === 'number') { const n = Number(raw); return Number.isFinite(n) ? n : raw }
+    if (type === 'number') {
+        const n = Number(raw)
+        return Number.isFinite(n) && (raw.includes('.') || Number.isSafeInteger(n)) ? n : raw
+    }
     if (type === 'boolean') return raw === 'true'
     return raw
 }

@@ -1,6 +1,7 @@
 import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { readJsonLossless } from '@/lib/losslessJson'
 import {
     MAX_READ_RETRIES,
     isClientTimeout,
@@ -421,7 +422,9 @@ export class RemoteGraphProvider implements GraphDataProvider {
                     )
                 }
 
-                const data = await response.json() as T
+                // Lossless: an integer past 2^53 (ids, hashes) arrives as its exact
+                // digits instead of a rounded double nobody's graph holds.
+                const data = await readJsonLossless<T>(response)
 
                 // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
                 // metadata 60s, default 2s) so a "expand all" doesn't re-fire

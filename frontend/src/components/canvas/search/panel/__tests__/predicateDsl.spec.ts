@@ -241,3 +241,65 @@ describe('predicateComposition — wrap / duplicate / root NOT', () => {
         expect(next.children).toHaveLength(2)
     })
 })
+
+
+// ---------------------------------------------------------------------------
+// Property predicates round-trip through Code mode — every operator, and the
+// value's TYPE with it. The writer always emitted CONTAINS / STARTS WITH /
+// IN / BETWEEN, but the parser only read = != < <= > >=, so opening Code mode
+// turned `gvHash CONTAINS 74` into three text searches, and a text "15"
+// came back as the number 15.
+// ---------------------------------------------------------------------------
+
+describe('predicateDsl — property operators round-trip', () => {
+    const prop = (op: string, value: unknown, key = 'owner'): Predicate =>
+        ({ kind: 'property', key, op, value } as Predicate)
+    const roundTrip = (p: Predicate) => parsePredicate(stringifyPredicate(p)).predicate
+
+    it.each([
+        ['eq', 'fin'], ['neq', 'fin'], ['gt', 5], ['lte', 2.5],
+        ['contains', 'fin'], ['startsWith', 'team-'], ['endsWith', 'ops'],
+        ['in', ['gold', 'silver']], ['notIn', ['bronze']], ['between', [10, 20]],
+    ])('%s survives', (op, value) => {
+        expect(roundTrip(prop(op, value))).toEqual(prop(op, value))
+    })
+
+    it('keeps text that reads like a number, boolean or null as text', () => {
+        for (const v of ['15', '007', 'true', 'null', '1.50']) {
+            expect(roundTrip(prop('eq', v))).toEqual(prop('eq', v))
+        }
+    })
+
+    it('keeps an integer too long for a double as its exact digits', () => {
+        const r = parsePredicate('gvHash = -3746471915534727923')
+        expect(r.predicate).toEqual(prop('eq', '-3746471915534727923', 'gvHash'))
+    })
+
+    it('quotes a key with spaces and reads it back', () => {
+        const p = prop('eq', 'Bob', 'Asset Owner')
+        expect(stringifyPredicate(p)).toBe('"Asset Owner" = Bob')
+        expect(roundTrip(p)).toEqual(p)
+    })
+
+    it('reads BETWEEN low AND high as well as BETWEEN (low, high)', () => {
+        expect(parsePredicate('rows BETWEEN 10 AND 20').predicate).toEqual(prop('between', [10, 20], 'rows'))
+        expect(parsePredicate('rows BETWEEN (10, 20)').predicate).toEqual(prop('between', [10, 20], 'rows'))
+    })
+
+    it('an empty value survives as an empty (incomplete) row, not a parse error', () => {
+        expect(roundTrip(prop('contains', ''))).toEqual(prop('contains', ''))
+    })
+
+    it('STARTS WITH on a name field is a prefix text match', () => {
+        const p = parsePredicate('name STARTS WITH cust').predicate as any
+        expect(p).toMatchObject({ kind: 'text', target: 'name', match: 'prefix', value: 'cust' })
+    })
+
+    it('plain words that happen to be operators stay a text search', () => {
+        for (const q of ['sales contains', 'values between', 'starts with']) {
+            const r = parsePredicate(q)
+            expect(r.error).toBeUndefined()
+            expect(JSON.stringify(r.predicate)).not.toContain('"kind":"property"')
+        }
+    })
+})

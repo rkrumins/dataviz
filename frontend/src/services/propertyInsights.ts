@@ -24,10 +24,14 @@ export interface PropertyUsage {
     total: number
     /** Per-entity-type breakdown, descending by count. */
     byEntityType: { type: string; count: number }[]
+    /** True when ``total`` is a floor, not the answer: the backend stopped
+     *  short (candidate cap, deadline) without an exact count. Show it as
+     *  "≥ N", never as N. */
+    atLeast: boolean
 }
 
 
-const EMPTY_USAGE: PropertyUsage = { total: 0, byEntityType: [] }
+const EMPTY_USAGE: PropertyUsage = { total: 0, byEntityType: [], atLeast: false }
 
 
 /**
@@ -61,9 +65,20 @@ async function aggregateByEntityType(
         .filter((x) => x.count > 0)
         .sort((a, b) => b.count - a.count)
 
+    // An aggregates-only request makes the backend run the uncapped count
+    // beside the (capped) facet, and ``totalCount`` is that answer. Summing
+    // the facet buckets instead topped out at the candidate cap on any view
+    // bigger than it.
+    if (typeof result.totalCount === 'number') {
+        return { total: result.totalCount, byEntityType, atLeast: false }
+    }
     const summed = byEntityType.reduce((s, x) => s + x.count, 0)
     const total = summed > 0 ? summed : (result.candidateCount ?? 0)
-    return { total, byEntityType }
+    return {
+        total,
+        byEntityType,
+        atLeast: Boolean(result.truncated || result.deadlineExceeded),
+    }
 }
 
 
@@ -195,6 +210,8 @@ export async function getAffectedSample(
 export interface CatalogOverview {
     totalEntities: number
     byEntityType: { type: string; count: number }[]
+    /** ``totalEntities`` is a floor — see ``PropertyUsage.atLeast``. */
+    atLeast: boolean
 }
 
 /** Total entity count + per-entity-type breakdown for the whole view. */
@@ -203,13 +220,16 @@ export async function getCatalogOverview(
     viewId: string,
     signal?: AbortSignal,
 ): Promise<CatalogOverview> {
+    // "Everything in the view" is its own predicate: the empty AND group this
+    // used to send is rejected by the model (422), and the header showed the
+    // failure as "0 entities".
     const usage = await aggregateByEntityType(
         provider,
         viewId,
-        { kind: 'group', op: 'and', children: [] } as Predicate,
+        { kind: 'all' } as Predicate,
         signal,
     )
-    return { totalEntities: usage.total, byEntityType: usage.byEntityType }
+    return { totalEntities: usage.total, byEntityType: usage.byEntityType, atLeast: usage.atLeast }
 }
 
 

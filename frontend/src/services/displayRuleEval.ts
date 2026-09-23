@@ -109,13 +109,12 @@ export function buildViewScopedQuery(
     predicate: Predicate,
     options: SearchQuery['options'],
 ): SearchQuery {
-    const rootUrns = resolveScopeRootUrns()
-
-    const scope: SearchScope = {
-        viewId,
-        scopeMode: 'view',
-        ...(rootUrns.length > 0 ? { rootUrns } : {}),
-    }
+    // No rootUrns: the backend resolves the view's own boundary from
+    // ``viewId`` on every request and only ever NARROWS by a client hint.
+    // The hint this sent was the canvas's guess at the roots, capped at 256,
+    // so on a larger view it hid every match under root #257 — the reason
+    // Advanced Search stopped sending one (see useAdvancedSearch).
+    const scope: SearchScope = { viewId, scopeMode: 'view' }
 
     // The backend predicate compiler mishandles bare top-level leaf
     // predicates — wrap leaves in a single-child AND group (mirrors
