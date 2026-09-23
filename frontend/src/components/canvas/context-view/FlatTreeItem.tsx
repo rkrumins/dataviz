@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import type { PlacedOut, PlacementInfo } from './placement'
+import { PlacedTag } from '@/components/ui/PlacedTag'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
@@ -1037,10 +1038,7 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
         aria-label={explain}
         className="flex items-center gap-1.5 min-w-0 text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
       >
-        <span className="inline-flex items-center gap-1 flex-shrink-0 px-1.5 py-px rounded-md border border-violet-400/30 bg-violet-500/10 text-violet-600 dark:text-violet-300 text-[9.5px] font-semibold tracking-wide">
-          <LucideIcons.LayoutGrid className="w-2.5 h-2.5" aria-hidden />
-          Placed
-        </span>
+        <PlacedTag />
         <span className="text-[10.5px] text-ink-muted truncate">
           Part of <span className="text-ink font-medium">{lead}{shown.join(' › ')}</span>
           <span className="text-ink-muted/70"> · in {placement.parentLayerName}</span>
