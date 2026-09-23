@@ -50,44 +50,6 @@ const staged = () => useStagedChangesStore.getState().changes
 const moves = () => staged().filter((c) => c.type === 'move_entity')
 const parentLinks = (child: string) => useCanvasStore.getState().edges.filter((e) => e.target === child)
 
-describe('useReparentNode — a drop on a layer COLUMN follows the ontology', () => {
-  beforeEach(() => {
-    notify.mockClear(); resetStaged()
-    useBranchStore.setState({ currentBranchId: 'br_1' } as never)
-  })
-  const layer3 = { id: 'L3', name: 'Layer 3' }
-
-  it('refuses to leave a non-top-level type without a parent, and says where it can go', () => {
-    setCanvas([node('S', 'system'), node('D', 'dataset')],
-      [{ id: 'S-D', source: 'S', target: 'D', data: { edgeType: 'CONTAINS' } }])
-    const { result } = renderHook(() => useReparentNode())
-    expect(result.current.moveToColumn('D', layer3)).toBe(true)          // handled: refused
-    expect(staged()).toHaveLength(0)
-    expect(notify).toHaveBeenCalledWith('error', expect.stringMatching(/can't be at the top level.*System.*Layer 3/))
-    expect(parentLinks('D').map((e) => e.id)).toEqual(['S-D'])          // untouched
-  })
-
-  it('moves a top-level type out of its parent to the top level of the column', () => {
-    // a `system` may be top-level (root type); here one sits inside another system's CONTAINS
-    setCanvas([node('S', 'system'), node('S2', 'system')],
-      [{ id: 'S-S2', source: 'S', target: 'S2', data: { edgeType: 'CONTAINS' } }])
-    const { result } = renderHook(() => useReparentNode())
-    expect(result.current.moveToColumn('S2', layer3)).toBe(true)
-    expect(moves()).toHaveLength(1)
-    const m = moves()[0].after as any
-    expect([m.parentId, m.edgeId, m.layerId]).toEqual([null, null, 'L3'])
-    expect(parentLinks('S2')).toHaveLength(0)
-    expect(moves()[0].summary).toMatch(/to the top level of Layer 3/)
-  })
-
-  it('leaves a top-level entity to the ordinary column placement', () => {
-    setCanvas([node('S', 'system')])
-    const { result } = renderHook(() => useReparentNode())
-    expect(result.current.moveToColumn('S', layer3)).toBe(false)
-    expect(staged()).toHaveLength(0)
-  })
-})
-
 describe('useReparentNode', () => {
   beforeEach(() => {
     notify.mockClear(); resetStaged()

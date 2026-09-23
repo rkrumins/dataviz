@@ -2295,6 +2295,60 @@ class GraphVersioningService:
                 out.add(eid)
         return out
 
+    async def ancestor_chains(
+        self, *, graph_id: str, branch_id: str, urns: Sequence[str],
+        containment_edge_types: Sequence[str], as_of_seq: Optional[int] = None,
+    ) -> Dict[str, List[str]]:
+        """Each urn's containment chain on a branch — ``{urn: [parent, …, root]}``, ``[]`` for a root —
+        read from the branch's own state (a draft's moves included). An urn that is not a live node
+        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not urns or not cset:
+            return {}
+        async with self._session() as s:
+            # urn → live entity id, in batches (a node's id is usually its urn; imported ones may not be).
+            cand: Dict[str, set] = {}
+            for u in urns:
+                if u.startswith("gv:"):
+                    cand.setdefault(u[3:], set()).add(u)
+                cand.setdefault(u, set()).add(u)
+            for chunk in _chunks(list(urns), _IN_LIST_MAX):
+                for eid, urn in (await s.execute(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn.in_(chunk),
+                    ).distinct()
+                )).all():
+                    cand.setdefault(eid, set()).add(urn)
+            vals = await self._current_values(s, graph_id, branch_id, list(cand), as_of_seq)
+            eid_of: Dict[str, str] = {}
+            for eid, asked in cand.items():
+                v = vals.get(eid)
+                if v is None or _is_edge_payload(v):
+                    continue
+                for u in asked:
+                    if v.get("urn") == u or f"gv:{eid}" == u or eid == u:
+                        eid_of.setdefault(u, eid)
+            if not eid_of:
+                return {}
+            seen, edges = await self._containment_parents_climb(
+                s, graph_id, branch_id, set(eid_of.values()), cset, as_of_seq)
+            parent: Dict[str, str] = {}
+            for p in edges.values():
+                a, b = _edge_src_tgt(p)
+                if a and b:
+                    parent.setdefault(b, a)
+            node_vals = await self._current_values(s, graph_id, branch_id, list(seen), as_of_seq)
+            urn_of = {e: ((v or {}).get("urn") or f"gv:{e}") for e, v in node_vals.items()}
+            out: Dict[str, List[str]] = {}
+            for u, eid in eid_of.items():
+                chain, at, guard = [], parent.get(eid), set()
+                while at and at not in guard:
+                    guard.add(at)
+                    chain.append(urn_of.get(at, at))
+                    at = parent.get(at)
+                out[u] = chain
+            return out
+
     async def get_node_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, containment_edge_types: Optional[Sequence[str]] = None,

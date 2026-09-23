@@ -31,7 +31,6 @@ import {
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
-import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
@@ -62,6 +61,8 @@ import {
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useAncestorChains } from '@/hooks/useAncestorChains'
+import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
+import { buildPlacements, type PlacementInfo } from './placement'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
@@ -1234,17 +1235,12 @@ export function ContextViewCanvas({
   const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
   const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
 
-  const { moveToColumn } = useReparentNode()
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
     // Drop-to-assign is a layout WRITE; a trace is read-only. (The columns
     // also render the overlay's lanes, so the drop target isn't the browse
     // tree the assignment would be recorded against.)
     if (traceWriteLocked()) return
     const before = currentLayout()
-    // An entity inside a parent is MOVED (to the column's top level, where the ontology allows its
-    // type there) or refused — never pinned apart from its parent. Only a top-level entity is placed.
-    const dropLayer = before.layers.find(l => l.id === layerId)
-    if (moveToColumn(entityId, { id: layerId, name: dropLayer?.name ?? 'this layer' })) return
     // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
     const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
 
@@ -1294,7 +1290,7 @@ export function ContextViewCanvas({
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout, traceWriteLocked, moveToColumn])
+  }, [currentLayout, persistReferenceLayout, traceWriteLocked])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -1883,20 +1879,30 @@ export function ContextViewCanvas({
     sortOverrides,
   })
 
-  // An entity drawn as a root of one column while its parent sits in another (it has its own
-  // layer placement): say where it belongs, so it never reads as a stray duplicate.
-  const placedApart = useMemo(() => {
-    const out = new Map<string, string>()
+  // An entity PLACED in one column while its parent sits in another (view arrangement only — the
+  // data is unchanged): it carries its full path in the data, so it reads as a deliberate placement
+  // rather than a stray duplicate. The path's unloaded top is asked of the server once.
+  const placementInputs = useMemo(() => {
     const layerName = new Map(sortedLayers.map(l => [l.id, l.name]))
-    for (const [child, parent] of parentMap) {
-      const own = nodeLayerMap.get(child)
-      const theirs = nodeLayerMap.get(parent)
-      if (!own || !theirs || own === theirs) continue
-      const parentName = (nodeMap.get(parent)?.data as Record<string, unknown> | undefined)?.label as string | undefined
-      out.set(child, `Part of ${parentName ?? 'another entity'} (in the ${layerName.get(theirs) ?? 'other'} layer)`)
+    return {
+      parentMap,
+      nodeLayerMap,
+      facts: (id: string) => {
+        const d = nodeMap.get(id)?.data as Record<string, unknown> | undefined
+        return d ? { name: String(d.label ?? id), type: String(d.type ?? '') } : undefined
+      },
+      layerName: (id: string) => layerName.get(id) ?? 'another layer',
     }
-    return out
   }, [parentMap, nodeLayerMap, nodeMap, sortedLayers])
+  const placementTops = useMemo(
+    () => buildPlacements({ ...placementInputs, ancestry: new Map() }).unknownTops,
+    [placementInputs],
+  )
+  const placementAncestry = usePlacementAncestry(placementTops)
+  const placedApart = useMemo(
+    () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }).placements,
+    [placementInputs, placementAncestry],
+  )
 
   // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
   // sort handlers keep a stable identity and LayerColumn's memo holds).
@@ -2748,8 +2754,6 @@ export function ContextViewCanvas({
 
     const before = currentLayout()
     const targetLayer = before.layers.find(l => l.id === layerId)
-    // Same rule as a column drop: an entity inside a parent is moved (ontology-checked), not pinned.
-    if (moveToColumn(entity.urn, { id: layerId, name: targetLayer?.name ?? 'this layer' })) return
     const prevLayerId = before.assignments[entity.urn]?.layerId
     const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
     const after = assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants })
@@ -2772,7 +2776,7 @@ export function ContextViewCanvas({
     )
 
     interactions.closeContextMenu()
-  }, [displayMap, parentMap, currentLayout, persistReferenceLayout, interactions, moveToColumn])
+  }, [displayMap, parentMap, currentLayout, persistReferenceLayout, interactions])
 
   // Stage a view-layout change so it (a) shows in Review & Save under "View layout", (b) is undoable via
   // the shared Undo/Redo (undo runs `discard` → persistReferenceLayout(before)), while staying DECOUPLED
@@ -3539,6 +3543,13 @@ export function ContextViewCanvas({
     }
     return revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
+
+  // A placed entity's path → its parent in the data, opened and scrolled to (the reveal walk expands
+  // each ancestor on the way, exactly as for a search hit).
+  const revealPlacementParent = useCallback((placement: PlacementInfo) => {
+    const parent = placement.path[placement.path.length - 1]
+    if (parent) void revealSearchHit(parent.urn, placement.path.slice(0, -1))
+  }, [revealSearchHit])
 
   // Close the loop on the wrapper the search session was handed above.
   // The trace-aware `revealSearchHit`, not the bare browse walk: a reveal
@@ -6062,6 +6073,7 @@ export function ContextViewCanvas({
                 exhaustedParents={exhaustedParents}
                 loadedChildren={childMap}
                 placedApart={placedApart}
+                onRevealPlacement={revealPlacementParent}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
                 onScroll={handleLayerScroll}

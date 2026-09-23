@@ -556,6 +556,20 @@ class DraftOverlayProvider:
         )
 
     # ---- writes: commit to the draft (reused from the branch provider) -- #
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """Containment chains on the DRAFT (its moves included) — the branch reader's walk over the
+        draft's composed state. ``{urn: [parent, …, root]}``; absent = unknown, ``[]`` = a root."""
+        return await self._writer.get_ancestor_chains(urns)
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        """An entity's ancestors in the draft, parent first, root last (as the main reader)."""
+        chain = (await self.get_ancestor_chains([urn])).get(urn, [])[offset: offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain)))
+        by_urn = {n.urn: n for n in nodes}
+        return [by_urn[u] for u in chain if u in by_urn]
+
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         self._delta = None
         return await self._writer.create_node(node, containment_edge)

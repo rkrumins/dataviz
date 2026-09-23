@@ -99,6 +99,14 @@ async def _run() -> None:
     await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_n("R3", "Roots")], **kw)  # allowed
     assert await _parents(svc, gid, d, "X") == ["R1"]           # nothing refused above was written
 
+    # The draft's containment paths reflect the draft's own moves (placement paths, roll-ups).
+    chains = await svc.ancestor_chains(graph_id=gid, branch_id=d, urns=["Y", "Z", "R2", "NOPE"],
+                                       containment_edge_types=CSET)
+    assert chains == {"Y": ["X", "R1"], "Z": ["R2"], "R2": []}, chains   # unknown urn: absent
+    main_chains = await svc.ancestor_chains(graph_id=gid, branch_id=main, urns=["Z"],
+                                            containment_edge_types=CSET)
+    assert main_chains == {}, main_chains                                  # Z exists only in the draft
+
     # Published, main holds exactly the moved hierarchy.
     await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="moves", **kw)
     assert await _parents(svc, gid, main, "X") == ["R1"]

@@ -207,19 +207,16 @@ export function useLayerAssignment({
       : undefined
 
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies).
-    // Per-node precedence:
+    // Per-node precedence — an EXPLICIT per-entity assignment wins at ANY depth:
     //   1. instanceAssignments (live user drag in this session)
     //   2. the node's OWN canonical entry (referenceLayout.assignments)
     //   3. containment inheritance (parent's effective layer, gated by the
     //      parent's `inheritsChildren` when children are pushed below)
     //   4. scope-specific fallbacks (closed-scope drop / open-scope chain)
-    // 1 and 2 place only an entity with no parent on the canvas (or one whose parent pushes its
-    // children out, `inheritsChildren: false`): a child ALWAYS renders under its parent, in its
-    // parent's column. USER RULING 2026-09-23 — the hierarchy is truthful, there are no split-outs:
-    // a child drawn as a root of another column (from a pin its create wrote, or a column drop) read
-    // as a stray duplicate, left its parent a "Load 1 more" that never came, and a pin left over
-    // from before a move kept it there after the move. Moving an entity to another column is a real
-    // move (to that column's top level, where the ontology allows it); see useReparentNode.
+    // A child placed on a DIFFERENT layer than its parent splits out of the
+    // parent's subtree and renders as a visual root of its own column (the
+    // wizard writes exactly such placements); entry-less children still
+    // inherit, so type rules never break a nested subtree apart.
     const roots = nodes.filter((n: any) => !parentMap.has(n.id))
     const stack: Array<{ nodeId: string; inheritedLayerId?: string }> = []
     // Push roots in reverse so first root is processed first
@@ -252,13 +249,11 @@ export function useLayerAssignment({
       //    nested subtree renders together and type rules never break it apart.
       const hasContainmentParent = parentMap.has(nodeId)
 
-      // A placement applies unless the node follows a parent (see the precedence note above).
-      const followsParent = hasContainmentParent && !!inheritedLayerId
-      if (instanceAssignment && !followsParent) {
+      if (instanceAssignment) {
         myLayerId = instanceAssignment.layerId
-      } else if (explicitLayerId && !followsParent) {
+      } else if (explicitLayerId) {
         myLayerId = explicitLayerId
-      } else if (followsParent) {
+      } else if (hasContainmentParent && inheritedLayerId) {
         myLayerId = inheritedLayerId
       } else {
         // 4. Scope-specific fallback chain — see resolveRootLayer for full

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
+import type { PlacementInfo } from './placement'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
@@ -32,8 +33,9 @@ export interface RowSelectModifiers {
 }
 
 interface FlatTreeItemProps {
-  /** Set when this row is drawn apart from its parent (another column): where it belongs. */
-  placedApartNote?: string
+  /** Set when this row is PLACED in this column apart from its parent: its path in the data. */
+  placement?: PlacementInfo
+  onRevealPlacement?: (placement: PlacementInfo) => void
   node: HierarchyNode
   depth: number
   isLast: boolean
@@ -106,7 +108,8 @@ const FLAT_ROW_STYLE: Record<string, string> = {
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
-  placedApartNote,
+  placement,
+  onRevealPlacement,
   depth,
   isLast,
   parentIsLast,
@@ -753,11 +756,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
         )}
-        {placedApartNote && (
-          <span className="text-[10.5px] text-ink-muted truncate mt-0.5 flex items-center gap-1" title={placedApartNote}>
-            <LucideIcons.CornerLeftUp className="w-3 h-3 flex-shrink-0" aria-hidden />
-            {placedApartNote}
-          </span>
+        {placement && (
+          <PlacementPath
+            placement={placement}
+            entityName={node.name}
+            onReveal={onRevealPlacement}
+          />
         )}
         {/* Display-rule tags — shared chip cluster (premium chips +
             overflow popover) so all canvases render identically. */}
@@ -968,3 +972,38 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
 // `formatBreakdown` + `pluralize` moved into ./SearchMatchBadge.tsx
 // alongside the tooltip rendering that consumes them.
+
+/**
+ * "Placed" + the entity's path in the data. The tag says this column is a view arrangement; the path
+ * says where the entity really sits (root → parent), and a click goes there. A long path keeps its
+ * start and its last two steps; the tooltip carries all of it.
+ */
+function PlacementPath({ placement, entityName, onReveal }: {
+  placement: PlacementInfo
+  entityName: string
+  onReveal?: (placement: PlacementInfo) => void
+}) {
+  const names = placement.path.map((a) => a.displayName)
+  const shown = names.length > 3 ? [names[0], '…', ...names.slice(-2)] : names
+  const lead = placement.complete ? '' : '… › '
+  const full = `${placement.complete ? '' : '… › '}${names.join(' › ')}`
+  const explain = `Placed in ${placement.placedLayerName} for this view only. In the data, ${entityName} sits inside `
+    + `${full} (shown in ${placement.parentLayerName}). Click to go to its parent.`
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onReveal?.(placement) }}
+      title={explain}
+      aria-label={explain}
+      className="mt-1 flex items-center gap-1.5 min-w-0 max-w-full text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+    >
+      <span className="inline-flex items-center gap-1 flex-shrink-0 px-1.5 py-px rounded-md border border-violet-400/30 bg-violet-500/10 text-violet-600 dark:text-violet-300 text-[9.5px] font-semibold tracking-wide">
+        <LucideIcons.LayoutGrid className="w-2.5 h-2.5" aria-hidden />
+        Placed
+      </span>
+      <span className="text-[10.5px] text-ink-muted truncate">
+        {lead}{shown.join(' › ')}
+      </span>
+    </button>
+  )
+}

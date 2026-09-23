@@ -23,7 +23,7 @@ import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { layoutWriter } from '@/store/canvasLayoutBridge'
 import type { MoveAfter } from '@/store/stagedOverlay'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
-import { assignEntities, unassignEntities } from './assignmentMutations'
+import { unassignEntities } from './assignmentMutations'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { generateId } from '@/lib/utils'
 import {
@@ -64,8 +64,7 @@ export function useReparentNode() {
   // child's own layer pin cleared so it follows its new parent (a pin from where it was created kept
   // it ALSO split out in its old column). The staged overlay keeps all of that across any reload.
   const restageContainment = useCallback(
-    (childKey: string, parentKey: string | null, parentLabel: string, containmentType: string | null,
-     topLevelLayer?: { id: string; name: string }) => {
+    (childKey: string, parentKey: string, parentLabel: string, containmentType: string) => {
       const canvas = useCanvasStore.getState()
       const staged = useStagedChangesStore.getState()
       const prior = staged.changes.find(
@@ -84,25 +83,21 @@ export function useReparentNode() {
       const label = (id: string) =>
         (canvas.nodes.find((n) => n.id === id)?.data?.label as string | undefined) ?? id
       const fromLabels = [...new Set(before.removedLinks.map((e) => label(e.source)))]
-      // Under a parent: a new pending link. To the top level: no link, and the entity is placed in
-      // the column it was dropped on (a top-level entity has nothing to inherit a column from).
-      const edgeId = parentKey && containmentType ? generateId('staged-edge') : null
-      const newLink: LineageEdge | null = edgeId && parentKey && containmentType ? {
+      const edgeId = generateId('staged-edge')
+      const newLink: LineageEdge = {
         id: edgeId, source: parentKey, target: childKey, type: 'containment',
         data: { edgeType: containmentType, relationship: containmentType.toLowerCase(), isPending: 'create' },
-      } : null
+      }
       const after: MoveAfter = {
         childId: childKey, parentId: parentKey, edgeId, edgeType: containmentType,
         containmentTypes: containmentEdgeTypes.map((t) => t.toUpperCase()),
-        ...(topLevelLayer ? { layerId: topLevelLayer.id, layerName: topLevelLayer.name } : {}),
       }
       const show = () => {
         const cs = useCanvasStore.getState()
         for (const e of cs.edges.filter((x) => x.target === childKey && isContainment(x))) cs.removeEdge(e.id)
-        if (newLink) cs.addEdges([newLink])
+        cs.addEdges([newLink])
         const w = layoutWriter()
-        if (w && topLevelLayer) w.persist(assignEntities(w.current(), [childKey], topLevelLayer.id))
-        else if (w?.current().assignments[childKey]) w.persist(unassignEntities(w.current(), [childKey]))
+        if (w?.current().assignments[childKey]) w.persist(unassignEntities(w.current(), [childKey]))
         useReferenceModelStore.getState().removeEntityAssignment(childKey)
       }
       show()
@@ -114,12 +109,12 @@ export function useReparentNode() {
           targetUrn: (canvas.nodes.find((n) => n.id === childKey)?.data?.urn as string) ?? childKey,
           before,
           after,
-          summary: `Move '${label(childKey)}'`
-            + (fromLabels.length > 0 ? ` from '${fromLabels.join("', '")}'` : '')
-            + (topLevelLayer ? ` to the top level of ${topLevelLayer.name}` : ` to '${parentLabel}'`),
+          summary: fromLabels.length > 0
+            ? `Move '${label(childKey)}' from '${fromLabels.join("', '")}' to '${parentLabel}'`
+            : `Move '${label(childKey)}' to '${parentLabel}'`,
           discard: () => {
             const cs = useCanvasStore.getState()
-            if (edgeId) cs.removeEdge(edgeId)
+            cs.removeEdge(edgeId)
             if (priorAfter?.edgeId) cs.removeEdge(priorAfter.edgeId)
             cs.addEdges(before.removedLinks)
             if (before.layout) layoutWriter()?.persist(before.layout)
@@ -205,44 +200,6 @@ export function useReparentNode() {
     notify('success', `Moved under ${(newParent.data?.label as string) || parentKey}.`)
   }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment])
 
-  // moveToColumn — an entity dropped on a layer COLUMN (not onto another entity). For an entity that
-  // sits inside a parent this is a real move, decided by the ontology: a type allowed at the top
-  // level moves to the top level of that column; any other type is refused, naming the parents it
-  // can go in (drop it onto one of those in that column instead). Returns false when the entity has
-  // no parent — the caller then just places it in the column, as for any top-level entity.
-  const moveToColumn = useCallback((entityId: string, layer: { id: string; name: string }): boolean => {
-    const { nodes, edges } = useCanvasStore.getState()
-    const node = nodes.find((n) => n.id === entityId || (n.data?.urn as string) === entityId)
-    if (!node) return false
-    const childKey = node.id
-    const contained = edges.some((e) => e.target === childKey && isContainment(e))
-    if (!contained) return false
-    const name = (node.data?.label as string) || 'This entity'
-
-    if (node.data?.isPending === 'create') {
-      notify('info', `'${name}' is new — save it first, then you can move it.`,
-        { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
-      return true
-    }
-    if (!useBranchStore.getState().currentBranchId) {
-      notify('info', 'Switch to a draft to move an entity.')
-      return true
-    }
-    const type = String(node.data?.type ?? '')
-    if (rootEntityTypes.some((t) => t.toLowerCase() === type.toLowerCase())) {
-      restageContainment(childKey, null, '', null, layer)
-      notify('success', `Moved '${name}' to the top level of ${layer.name}.`)
-      return true
-    }
-    const parents = entityTypes
-      .filter((t) => setHasId(allowedChildTypeIds(t.id, entityTypes, rootEntityTypes, hierarchyMap), type))
-      .map((t) => t.name || t.id)
-    notify('error', `A ${type} can't be at the top level — it must sit inside ${
-      parents.length ? parents.join(' or ') : 'a parent'}. To put '${name}' in ${layer.name}, drop it onto ${
-      parents.length === 1 ? `a ${parents[0]}` : 'one of those'} there.`)
-    return true
-  }, [entityTypes, rootEntityTypes, hierarchyMap, notify, isContainment, restageContainment])
-
   // retypeContainment — keep the SAME parent, switch the containment relationship
   // TYPE. The backend edge_type is immutable, so this is a delete-old + create-new
   // (NOT an update). No-op when the type is unchanged.
@@ -289,5 +246,5 @@ export function useReparentNode() {
     notify('success', 'Relationship updated.')
   }, [relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment])
 
-  return { reparent, retypeContainment, moveToColumn }
+  return { reparent, retypeContainment }
 }

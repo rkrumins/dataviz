@@ -28,6 +28,7 @@ import {
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type RowSelectModifiers } from './FlatTreeItem'
+import type { PlacementInfo } from './placement'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -114,8 +115,10 @@ interface LayerColumnProps {
    *  map). A child placed in another column is loaded — counting only this column's rows offered a
    *  "Load 1 more" for it that could never arrive. */
   loadedChildren?: Map<string, string[]>
-  /** Entity id → "Part of <parent> · <layer>" for entities drawn apart from their parent. */
-  placedApart?: Map<string, string>
+  /** Entities PLACED in a column apart from their parent, with their full path in the data. */
+  placedApart?: Map<string, PlacementInfo>
+  /** Take the reader to a placed entity's parent (expanding its path on the way). */
+  onRevealPlacement?: (placement: PlacementInfo) => void
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
@@ -292,6 +295,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   exhaustedParents,
   loadedChildren,
   placedApart,
+  onRevealPlacement,
   feedMore,
   onFeedMore,
   onScroll,
@@ -2631,7 +2635,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <div style={animStyle}>
                       <FlatTreeItem
                         node={node}
-                        placedApartNote={depth === 0 ? placedApart?.get(node.id) : undefined}
+                        placement={depth === 0 ? placedApart?.get(node.id) : undefined}
+                        onRevealPlacement={onRevealPlacement}
                         depth={depth}
                         isLast={isLast}
                         parentIsLast={parentIsLast}
