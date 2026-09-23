@@ -11,7 +11,7 @@
  *   └ timeline: each version with where it came from, who, when, what changed in size;
  *     compare it with now or with the one before, restore it, or export it ┘
  */
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { useModalA11y } from '@/hooks/useModalA11y'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useSchemaStore } from '@/store/schema'
 import { useFeature } from '@/store/features'
@@ -56,9 +57,17 @@ export function ViewVersionsDrawer({ viewId, viewName, isOpen, onClose, canEdit 
   const [restoring, setRestoring] = useState<ViewVersionSummary | null>(null)
   const [exporting, setExporting] = useState<number | null>(null)
 
-  const pages = history.data?.pages ?? []
-  const versions = useMemo(() => pages.flatMap(p => p.items), [pages])
-  const working = pages[0]?.workingCopy
+  // Escape closes it, Tab stays inside it, and focus goes back afterwards; a dialog opened on top
+  // (restore, export) answers for itself. The callback stays stable: the hook re-focuses the panel
+  // whenever it changes, which would pull the cursor out of the note field on a parent re-render.
+  const onCloseRef = useRef(onClose)
+  useEffect(() => { onCloseRef.current = onClose })
+  const close = useCallback(() => onCloseRef.current(), [])
+  const panelRef = useModalA11y(isOpen && !restoring && exporting === null, close)
+
+  const pages = history.data?.pages
+  const versions = useMemo(() => (pages ?? []).flatMap(p => p.items), [pages])
+  const working = pages?.[0]?.workingCopy
   const origin = status.data?.origin
 
   if (!isOpen) return null
@@ -67,13 +76,15 @@ export function ViewVersionsDrawer({ viewId, viewName, isOpen, onClose, canEdit 
     <>
       <Backdrop open onClick={onClose} zClassName="z-[70]" />
       <motion.aside
+        ref={panelRef}
+        tabIndex={-1}
         initial={{ x: '100%' }}
         animate={{ x: 0 }}
         transition={MOTION.drawerSlide}
         role="dialog"
         aria-modal="true"
         aria-label={`Versions of ${viewName}`}
-        className="fixed right-0 top-0 bottom-0 z-[71] w-full max-w-xl bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
+        className="fixed right-0 top-0 bottom-0 z-[71] w-full max-w-xl bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col outline-none"
       >
         <div className="flex items-center gap-3 px-5 py-4 border-b border-glass-border shrink-0">
           {comparison ? (
@@ -314,12 +325,21 @@ function RestoreConfirm({ viewId, version, head, dirty, onClose }: {
   const restore = useRestoreViewVersion(viewId)
   const { notify } = useAppNotifications()
   const becomes = head + (dirty ? 2 : 1)
+  // Escape cancels, unless the restore is already under way.
+  const pendingRef = useRef(false)
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    pendingRef.current = restore.isPending
+    onCloseRef.current = onClose
+  })
+  const cancel = useCallback(() => { if (!pendingRef.current) onCloseRef.current() }, [])
+  const dialogRef = useModalA11y(true, cancel)
   return (
     <>
       <Backdrop open onClick={restore.isPending ? undefined : onClose} zClassName="z-[80]" className="bg-black/40" />
       <div className="fixed inset-0 z-[81] flex items-center justify-center p-4 pointer-events-none">
-        <div role="alertdialog" aria-modal="true" aria-labelledby="restore-title"
-          className="pointer-events-auto w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-2xl p-6 space-y-4">
+        <div ref={dialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="restore-title"
+          className="pointer-events-auto w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-2xl p-6 space-y-4 outline-none">
           <div className="flex items-start gap-3">
             <span className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-500 flex items-center justify-center shrink-0"><RotateCcw className="w-5 h-5" /></span>
             <div>

@@ -5,7 +5,8 @@
  *   - comparing shows what changed;
  *   - restoring explains itself (a NEW version, unsaved work kept first, graph data untouched)
  *     and asks the server for exactly that version;
- *   - a reader sees the history but no way to save or restore.
+ *   - a reader sees the history but no way to save or restore;
+ *   - Escape closes the drawer, or only the restore question when that is open.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -67,11 +68,11 @@ function page(): ViewVersionPage {
   }
 }
 
-function renderDrawer(canEdit = true) {
+function renderDrawer(canEdit = true, onClose = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={client}>
-      <ViewVersionsDrawer viewId="view_1" viewName="Finance" isOpen onClose={vi.fn()} canEdit={canEdit} />
+      <ViewVersionsDrawer viewId="view_1" viewName="Finance" isOpen onClose={onClose} canEdit={canEdit} />
     </QueryClientProvider>,
   )
 }
@@ -118,6 +119,18 @@ describe('ViewVersionsDrawer', () => {
     expect(screen.getByText(/saved first, as v4/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Restore v2' }))
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith('view_1', 2))
+  })
+
+  it('closes on Escape, or closes only the restore question when that is open', async () => {
+    const onClose = vi.fn()
+    renderDrawer(true, onClose)
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Restore' }))[0])
+    expect(screen.getByText('Restore v2?')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByText('Restore v2?')).not.toBeInTheDocument())
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('lets a reader read, and only read', async () => {
