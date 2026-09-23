@@ -165,9 +165,9 @@ interface CanvasState {
   clearNodeFetchFailures: () => void
 
   // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
-  // graph didn't return (a curated view's load; failed batches are left out, since those are
-  // unknown rather than absent). A view brought in from another environment keeps these, marked
-  // not found. `null` = not checked (an open view loads by type, which proves nothing).
+  // graph didn't return (failed batches are left out, since those are unknown rather than
+  // absent). A view brought in from another environment keeps these, marked not found.
+  // `null` = not checked yet.
   placementsNotFound: { viewId: string; urns: string[] } | null
   setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
 

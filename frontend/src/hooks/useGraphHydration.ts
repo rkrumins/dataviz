@@ -661,17 +661,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         )
                         if (controller.signal.aborted) return
 
-                        // Placements the graph was asked for and didn't return: a view brought in
-                        // from another environment keeps these, marked not found (the canvas
-                        // shows them; see CanvasStatusChips).
-                        if (activeView?.id) {
-                            const returned = new Set(allNodes.map(n => n.urn))
-                            useCanvasStore.getState().setPlacementsNotFound({
-                                viewId: activeView.id,
-                                urns: [...assignedUrns].filter(u => !returned.has(u) && !failedUrns.has(u) && !isTempUrn(u)),
-                            })
-                        }
-
                         // Children are NOT prefetched. Top-level assigned entities
                         // render collapsed; expanding a parent fires the lazy loader
                         // (loadChildren below) for its first CHILDREN_PAGE_SIZE page,
@@ -740,6 +729,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             if (controller.signal.aborted) return
                             allNodes = [...allNodes, ...placed]
                         }
+                    }
+
+                    // Placements the graph was asked for and didn't return: a view brought in
+                    // from another environment keeps these, marked not found (the canvas shows
+                    // them; see CanvasStatusChips). Either scope asks for every placement by URN
+                    // that nothing else brought, so what isn't here now was looked for and absent.
+                    if (activeView?.id) {
+                        const returned = new Set(allNodes.map(n => n.urn))
+                        useCanvasStore.getState().setPlacementsNotFound({
+                            viewId: activeView.id,
+                            urns: [...assignedUrns].filter(u => !returned.has(u) && !failedUrns.has(u) && !isTempUrn(u)),
+                        })
                     }
 
                     // ── Anchored columns ──────────────────────────────
