@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@/services/adminUserService', () => ({
     adminUserService: {
         listUsers: vi.fn(),
+        getStats: vi.fn(),
         approveUser: vi.fn(),
         suspendUser: vi.fn(),
         reactivateUser: vi.fn(),
@@ -54,13 +55,19 @@ function user(over: Partial<AdminUserResponse> = {}): AdminUserResponse {
     }
 }
 
+/** One server page holding exactly these rows. */
+const page = (...items: AdminUserResponse[]) => ({ items, total: items.length })
+
 const raised = () => useNotificationStore.getState().notifications
 const messages = () => raised().map(n => n.message)
 
 beforeEach(() => {
     vi.clearAllMocks()
     useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
-    vi.mocked(adminUserService.listUsers).mockResolvedValue([user()])
+    vi.mocked(adminUserService.listUsers).mockResolvedValue(page(user()))
+    vi.mocked(adminUserService.getStats).mockResolvedValue({
+        total: 1, pending: 0, active: 1, suspended: 0, admins: 0, resetRequested: 0,
+    })
     vi.mocked(adminUserService.approveUser).mockResolvedValue(undefined as never)
     vi.mocked(adminUserService.suspendUser).mockResolvedValue(undefined as never)
     vi.mocked(adminUserService.changeRole).mockResolvedValue(undefined as never)
@@ -69,7 +76,7 @@ beforeEach(() => {
 
 describe('AdminUsers — the bespoke banners are gone', () => {
     it('an approval speaks through the one stack, and nothing is added to the page flow', async () => {
-        vi.mocked(adminUserService.listUsers).mockResolvedValue([user({ status: 'pending' })])
+        vi.mocked(adminUserService.listUsers).mockResolvedValue(page(user({ status: 'pending' })))
         const u = userEvent.setup()
         render(<AdminUsers />)
         await u.click(await screen.findByRole('button', { name: /Approve/i }))

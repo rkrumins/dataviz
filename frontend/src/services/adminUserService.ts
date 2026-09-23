@@ -1,7 +1,7 @@
 /**
  * Admin User Service — manage user accounts, roles, and approvals.
  */
-import { authFetch } from './apiClient'
+import { authFetch, authFetchPage } from './apiClient'
 
 const ADMIN_USERS_API = '/api/v1/admin/users'
 
@@ -39,6 +39,32 @@ export interface AdminUserResponse {
     /** Break-glass: keeps password sign-in under SSO enforcement, and
      *  forced sign-out sweeps skip it. */
     isSystemAccount: boolean
+}
+
+/** The admin user list's sortable columns. The server sorts by what each
+ *  column shows (the resolved display name, the role or its default). */
+export type AdminUserSort = 'name' | 'email' | 'status' | 'role' | 'createdAt'
+
+export interface ListUsersParams {
+    status?: string
+    /** Matched server-side against name, email, user id, role and the
+     *  linked sign-in providers. */
+    search?: string
+    sort?: AdminUserSort
+    order?: 'asc' | 'desc'
+    limit: number
+    offset?: number
+}
+
+/** Counts across every account — the list itself is paged. */
+export interface AdminUserStats {
+    total: number
+    pending: number
+    active: number
+    suspended: number
+    /** Platform admins: super_admin + org_admin. */
+    admins: number
+    resetRequested: number
 }
 
 export interface ResetTokenResponse {
@@ -143,9 +169,22 @@ export interface CreateInviteOptions {
 }
 
 export const adminUserService = {
-    listUsers(status?: string): Promise<AdminUserResponse[]> {
-        const params = status ? `?status=${encodeURIComponent(status)}` : ''
-        return authFetch<AdminUserResponse[]>(`${ADMIN_USERS_API}${params}`)
+    /** One page of accounts, searched and sorted server-side. ``total`` is
+     *  how many match across EVERY page — never infer it from the page. */
+    listUsers(params: ListUsersParams): Promise<{ items: AdminUserResponse[]; total: number }> {
+        const query = new URLSearchParams({
+            limit: String(params.limit),
+            offset: String(params.offset ?? 0),
+        })
+        if (params.status) query.set('status', params.status)
+        if (params.search?.trim()) query.set('search', params.search.trim())
+        if (params.sort) query.set('sort', params.sort)
+        if (params.order) query.set('order', params.order)
+        return authFetchPage<AdminUserResponse>(`${ADMIN_USERS_API}?${query}`)
+    },
+
+    getStats(): Promise<AdminUserStats> {
+        return authFetch<AdminUserStats>(`${ADMIN_USERS_API}/stats`)
     },
 
     approveUser(userId: string): Promise<{ detail: string }> {

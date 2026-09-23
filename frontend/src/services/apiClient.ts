@@ -13,10 +13,12 @@ import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
-export async function authFetch<T>(
+/** The request + failure handling every helper here shares: a failure
+ *  throws a readable Error, success hands back the Response. */
+async function checkedFetch(
     url: string,
     init?: RequestInit & { silent403?: boolean },
-): Promise<T> {
+): Promise<Response> {
     let res: Response
     try {
         res = await fetchWithTimeout(url, init)
@@ -40,7 +42,28 @@ export async function authFetch<T>(
         if (res.status === 401) throw new Error('Session expired')
         throw new Error(detail)
     }
+    return res
+}
 
+export async function authFetch<T>(
+    url: string,
+    init?: RequestInit & { silent403?: boolean },
+): Promise<T> {
+    const res = await checkedFetch(url, init)
     if (res.status === 204) return undefined as T
     return res.json()
+}
+
+/**
+ * One page of a list endpoint that reports its full size in
+ * ``X-Total-Count`` (``GET /admin/users``, ``GET /admin/workspaces?limit=``).
+ * A server that doesn't send the header yields the page length, so a pager
+ * degrades to "what we can see" instead of breaking — the same fallback as
+ * ``workspaceService.listPage``.
+ */
+export async function authFetchPage<T>(url: string): Promise<{ items: T[]; total: number }> {
+    const res = await checkedFetch(url)
+    const items: T[] = await res.json()
+    const header = res.headers.get('X-Total-Count')
+    return { items, total: header ? Number(header) : items.length }
 }

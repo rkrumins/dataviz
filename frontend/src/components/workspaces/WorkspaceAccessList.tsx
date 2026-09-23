@@ -23,9 +23,15 @@ import {
     type WorkspaceAccessGrant,
 } from '@/services/workspaceMembersService'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
+
+
+/** People per page. Everyone is loaded (search stays exact across them all);
+ *  only a page of rows is mounted, so thousands of people stay responsive. */
+const PAGE_SIZE = 25
 
 
 function roleLabel(role: string): string {
@@ -208,6 +214,7 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
     )
     const [error, setError] = useState<string | null>(null)
     const [search, setSearch] = useState('')
+    const [page, setPage] = useState(0)
     const { notify } = useAppNotifications()
 
     const fetchAccess = useCallback(async () => {
@@ -247,6 +254,11 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
         )
     }, [users, search])
 
+    // Clamped, so a refresh that shrinks the list can't strand us past its end.
+    const pageCount = Math.max(1, Math.ceil(shown.length / PAGE_SIZE))
+    const clampedPage = Math.min(page, pageCount - 1)
+    const paged = shown.slice(clampedPage * PAGE_SIZE, (clampedPage + 1) * PAGE_SIZE)
+
     return (
         <div className="space-y-4">
             {/* Intro + totals */}
@@ -285,12 +297,12 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
                     type="text"
                     placeholder="Search people, groups, roles…"
                     value={search}
-                    onChange={(e) => setSearch(e.target.value)}
+                    onChange={(e) => { setSearch(e.target.value); setPage(0) }}
                     className="input pl-9 h-9 text-sm bg-white/50 dark:bg-black/20 w-full"
                 />
                 {search && (
                     <button
-                        onClick={() => setSearch('')}
+                        onClick={() => { setSearch(''); setPage(0) }}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink"
                     >
                         <X className="w-3.5 h-3.5" />
@@ -329,9 +341,18 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
                     </p>
                 </div>
             ) : (
-                <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden shadow-sm">
-                    {shown.map(u => <AccessRow key={u.userId} user={u} />)}
-                </div>
+                <>
+                    <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden shadow-sm">
+                        {paged.map(u => <AccessRow key={u.userId} user={u} />)}
+                    </div>
+                    <TablePagination
+                        className="justify-end"
+                        page={clampedPage}
+                        pageSize={PAGE_SIZE}
+                        total={shown.length}
+                        onPageChange={setPage}
+                    />
+                </>
             )}
         </div>
     )
