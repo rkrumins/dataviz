@@ -87,3 +87,15 @@ tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_top_level_provider_kwargs.py
 tests/test_versioning_read_only_queries.py
+tests/test_view_bundle_schema.py
+tests/test_view_live_filter.py
+tests/test_view_portability_switch.py
+tests/test_view_transfer_canonical.py
+tests/test_view_transfer_export.py
+tests/test_view_transfer_import.py
+tests/test_view_transfer_package.py
+tests/test_view_transfer_packages_api.py
+tests/test_view_transfer_reconcile_merge.py
+tests/test_view_transfer_references.py
+tests/test_view_transfer_staging.py
+tests/test_view_versions.py
