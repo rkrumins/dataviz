@@ -50,6 +50,7 @@ from backend.common.models.search import (
     IsOrphanPredicate,
     IsRootPredicate,
     LayerPredicate,
+    MatchAllPredicate,
     PathPredicate,
     PropertyPredicate,
     SearchOptions,
@@ -748,6 +749,30 @@ class TestCompilerLeaves:
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="notIn", value=["A"]))
         assert where == "NOT (n.`logicalType` IN $p0)"
+
+    def test_match_all_compiles_to_true(self):
+        """"Everything in this view" is spelled out rather than sent as an
+        empty group, which the model refuses (a client bug that dropped
+        every condition must not quietly match the whole view)."""
+        c = _Compiler()
+        assert c.compile(MatchAllPredicate()) == "true"
+        q = SearchQuery.model_validate({"predicate": {"kind": "all"}, "scope": {"viewId": "v"}})
+        assert isinstance(q.predicate, MatchAllPredicate)
+        with pytest.raises(Exception):
+            SearchQuery.model_validate({
+                "predicate": {"kind": "group", "op": "and", "children": []},
+                "scope": {"viewId": "v"},
+            })
+
+    def test_property_in_single_value_is_one_element(self):
+        """A scalar used to go through ``list()``: a string became its
+        characters and a number raised (a 500)."""
+        c = _Compiler()
+        c.compile(PropertyPredicate(key="logicalType", op="in", value="STRING"))
+        assert c.params == {"p0": ["STRING"]}
+        c = _Compiler()
+        c.compile(PropertyPredicate(key="rows", op="notIn", value=5))
+        assert c.params == {"p0": [5]}
 
     def test_property_contains(self):
         c = _Compiler()
@@ -1915,6 +1940,51 @@ class TestAggregationByProperty:
         assert "count(DISTINCT n) AS mc" in cypher
         assert "ORDER BY mc DESC LIMIT 20" in cypher
         assert "collect(DISTINCT n)[..3]" in cypher
+        # The ranking rides the aggregating WITH: FalkorDB drops an ORDER BY
+        # on a RETURN that follows an aggregation, which returned arbitrary
+        # buckets instead of the top ones.
+        assert cypher.index("ORDER BY mc DESC") < cypher.index("RETURN")
+        # The key is a parameter, never a quoted literal in the text.
+        assert "$_aggPropertyKey AS etype" in cypher
+        assert prov.calls[0][1]["_aggPropertyKey"] == "layer"
+
+    @pytest.mark.asyncio
+    async def test_key_with_an_apostrophe_stays_out_of_the_query_text(self):
+        class _CapturingProvider:
+            calls: list = []
+
+            async def _ro_query(self, cypher, *, params=None, timeout=None):
+                self.calls.append((cypher, params))
+                class R:
+                    result_set = []
+                return R()
+
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_property,
+        )
+        prov = _CapturingProvider()
+        await _run_aggregation_property(
+            prov, "MATCH (n) WITH n", {},
+            AggregationSpec(by="property", propertyKey="owner's team"),
+            timeout_s=3.0,
+        )
+        cypher, params = prov.calls[0]
+        assert "'owner's team'" not in cypher
+        assert params["_aggPropertyKey"] == "owner's team"
+
+    def test_buckets_come_back_fullest_first(self):
+        """Whatever order the rows arrive in, the buckets are ranked."""
+        from backend.app.providers.falkordb_deep_search import _rows_to_buckets
+
+        class _P:
+            def _extract_node_from_result(self, _row):
+                return None
+
+        rows = [["", "b", "k", 2, []], ["", "a", "k", 9, []], ["", "c", "k", 2, []]]
+        buckets = _rows_to_buckets(_P(), rows)
+        assert [(b.ancestor_display_name, b.match_count) for b in buckets] == [
+            ("a", 9), ("b", 2), ("c", 2),
+        ]
 
     @pytest.mark.asyncio
     async def test_missing_property_key_raises(self):
@@ -4150,6 +4220,58 @@ class TestDiscoverStripsProviderOwnedFields:
         assert list(
             result["labels"]["dataset"]["valueSamplesByKey"],
         ) == ["rowCount"]
+
+    @pytest.mark.asyncio
+    async def test_projector_fingerprint_is_not_offered(self):
+        """`gvHash` is the projector's int64 content fingerprint on every
+        projected node. Offered as a property it was the only "value" a
+        freshly projected graph showed, and the browser rounded it."""
+        prov = _DiscoverProvider({"dataset": [{
+            "urn": "urn:a", "gvHash": -3746471915534727923, "rowCount": 12,
+        }]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["labels"]["dataset"]["keys"] == ["rowCount"]
+        assert "gvHash" not in result["labels"]["dataset"]["valueSamplesByKey"]
+
+
+class TestDiscoverSkipsPlatformLabels:
+    """`db.labels()` walks the schema table, so the platform's own
+    bookkeeping labels stay listed after their rows are gone. Their keys
+    (`id`, `seq`, …) were offered in the Property Manager as properties of
+    a type called `_GVRollupMeta`."""
+
+    @pytest.mark.asyncio
+    async def test_derived_labels_are_not_sampled(self):
+        prov = _DiscoverProvider({
+            "dataset": [{"urn": "urn:a", "rowCount": 12}],
+            "_GVRollupMeta": [{"id": "meta", "seq": 2}],
+            "_AggMeta": [{"purgedAt": "2026-01-01"}],
+        })
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert set(result["labels"]) == {"dataset"}
+
+    @pytest.mark.asyncio
+    async def test_any_underscore_label_is_platform_owned(self):
+        """A bookkeeping label added later is excluded before anyone
+        remembers to list it in `DERIVED_LABELS`."""
+        prov = _DiscoverProvider({
+            "dataset": [{"urn": "urn:a", "rowCount": 12}],
+            "_SomethingNew": [{"marker": 1}],
+        })
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert set(result["labels"]) == {"dataset"}
+
+    @pytest.mark.asyncio
+    async def test_an_underscore_label_the_ontology_declares_stays(self):
+        """No platform label is ever an ontology type, so a source type
+        whose id sanitised to a leading underscore keeps its properties."""
+        prov = _DiscoverProvider({
+            "_legacy_table": [{"urn": "urn:a", "rowCount": 12}],
+            "_AggMeta": [{"purgedAt": "2026-01-01"}],
+        })
+        prov._entity_type_levels = {"_legacy_table": 1}
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert set(result["labels"]) == {"_legacy_table"}
 
 
 class TestDiscoverTagValues:

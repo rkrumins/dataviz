@@ -14,6 +14,9 @@
 # `tests/test_ci_required_list.py`, which fails if an entry stops existing or
 # if the workflow stops reading this file.
 tests/test_additive_migrations_mirror.py
+tests/test_advanced_search.py
+tests/test_advanced_search_stub.py
+tests/test_advanced_search_view_scope.py
 tests/test_aggregated_read_budget.py
 tests/test_aggregation_admission.py
 tests/test_aggregation_at_scale.py
@@ -67,6 +70,7 @@ tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
 tests/test_metrics_backend.py
 tests/test_nav_catalogue.py
+tests/test_node_property_hygiene.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
@@ -80,10 +84,13 @@ tests/test_read_pressure_yield.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
 tests/test_run_step_ledger.py
+tests/test_search_schema_endpoint.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_top_level_provider_kwargs.py
+tests/test_typed_patch_merge.py
 tests/test_versioning_read_only_queries.py
+tests/test_view_layout_rules_preserved.py

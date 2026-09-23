@@ -65,6 +65,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.common.derived_artifacts import is_derived_label
 from backend.common.models.search import (
     AggregationSpec,
     AncestorRef,
@@ -114,6 +115,20 @@ def __getattr__(name: str):
 # ---------------------------------------------------------------------------
 # Predicate → Cypher compiler
 # ---------------------------------------------------------------------------
+
+def _as_value_list(value: Any) -> List[Any]:
+    """The list an ``in`` / ``notIn`` predicate compares against.
+
+    A single value is a one-element list. ``list(value)`` used to do the
+    coercion: a string became its characters (``in "abc"`` matched "a", "b"
+    and "c") and a number raised a TypeError the route answered with a 500.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
 
 def _safe_property_name(key: str) -> str:
     """Escape a property name for safe interpolation into Cypher.
@@ -230,6 +245,8 @@ class _Compiler:
             return self._visit_tag(p)
         if kind == "hasProperty":
             return self._visit_has_property(p)
+        if kind == "all":
+            return "true"
         if kind == "entityType":
             return self._visit_entity_type(p)
         if kind == "layer":
@@ -420,7 +437,7 @@ class _Compiler:
             return f"{col_expr} {keyword} ${pn}"
         if op in ("in", "notIn"):
             pn = self._next()
-            self.params[pn] = list(p.value or [])
+            self.params[pn] = _as_value_list(p.value)
             return (f"NOT ({col} IN ${pn})" if op == "notIn"
                     else f"{col} IN ${pn}")
         if op == "between":
@@ -717,7 +734,7 @@ class _Compiler:
             return f"{col} {keyword} ${pn}"
         if op in ("in", "notIn"):
             pn = self._next()
-            self.params[pn] = list(ep.value or [])
+            self.params[pn] = _as_value_list(ep.value)
             return (f"NOT ({col} IN ${pn})" if op == "notIn"
                     else f"{col} IN ${pn}")
         if op == "between":
@@ -1759,6 +1776,20 @@ async def discover_native_property_keys(
     except Exception as exc:
         logger.warning("discover: CALL db.labels() failed: %s", exc)
         labels = []
+    # The platform's own bookkeeping labels (``_GVRollupMeta``, ``_AggMeta``,
+    # ``_Projection``, ``_PropReserve``) sit in the label catalogue for good —
+    # ``db.labels()`` walks the schema, not the rows — and their keys (``id``,
+    # ``seq``, …) were offered as properties somebody had written. The
+    # underscore prefix is the platform's naming for all of them, so a future
+    # one is excluded before it is added to ``DERIVED_LABELS`` — unless the
+    # live ontology declares it, which no platform label ever is (a source
+    # type whose id sanitised to a leading "_" stays searchable).
+    declared = set(getattr(provider, "_entity_type_levels", None) or {})
+    labels = [
+        lbl for lbl in labels
+        if not is_derived_label(lbl)
+        and (not str(lbl).startswith("_") or lbl in declared)
+    ]
     labels = labels[:max_labels]
 
     # Step 2: per label, sample nodes + extract native keys + values
@@ -2650,9 +2681,9 @@ async def _run_aggregation_ancestor_type(
         f"WHERE labels(anc)[0] IN $_aggTypes "
         f"WITH anc, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         f"RETURN anc.urn AS urn, anc.displayName AS name, "
-        f"labels(anc)[0] AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        f"labels(anc)[0] AS etype, mc, samples"
     )
     params = dict(cand_params)
     params["_aggTypes"] = list(spec.ancestor_entity_types)
@@ -2671,8 +2702,8 @@ async def _run_aggregation_entity_type(
         f"WITH labels(n)[0] AS etype, n "
         f"WITH etype, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
-        f"RETURN '' AS urn, etype AS name, etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
+        f"RETURN '' AS urn, etype AS name, etype, mc, samples"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2705,12 +2736,17 @@ async def _run_aggregation_property(
         f"WITH n.{key} AS pkey, n "
         f"WITH pkey, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         f"RETURN '' AS urn, toString(pkey) AS name, "
-        f"'{key}' AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        f"$_aggPropertyKey AS etype, mc, samples"
     )
+    # The key rides in as a parameter: interpolated into a quoted literal,
+    # a key with an apostrophe ("owner's team") broke the query and every
+    # other key came back wrapped in its Cypher backticks.
     result = await provider._ro_query(
-        agg_cypher, params=cand_params, timeout=timeout_s,
+        agg_cypher,
+        params={**cand_params, "_aggPropertyKey": spec.property_key},
+        timeout=timeout_s,
     )
     return _rows_to_buckets(provider, result.result_set or [])
 
@@ -2732,9 +2768,9 @@ async def _run_aggregation_layer(
         "WITH n.layerAssignment AS layer, n "
         "WITH layer, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         "RETURN '' AS urn, toString(layer) AS name, "
-        "'layer' AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        "'layer' AS etype, mc, samples"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2770,9 +2806,9 @@ async def _run_aggregation_parent(
         f"MATCH (parent)-[:{rel}]->(n) "
         "WITH parent, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         "RETURN parent.urn AS urn, parent.displayName AS name, "
-        "labels(parent)[0] AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        "labels(parent)[0] AS etype, mc, samples"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2821,9 +2857,9 @@ async def _run_aggregation_ancestor_level(
             "WITH n AS anc, n "
             "WITH anc, count(DISTINCT n) AS mc, "
             f"collect(DISTINCT n)[..{k}] AS samples "
+            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
             "RETURN anc.urn AS urn, anc.displayName AS name, "
-            "labels(anc)[0] AS etype, mc, samples "
-            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+            "labels(anc)[0] AS etype, mc, samples"
         )
     else:
         rel = "|".join(_sanitize_label(t) for t in ctypes)
@@ -2834,9 +2870,9 @@ async def _run_aggregation_ancestor_level(
             f"MATCH (anc)-[:{rel}*{level}..{level}]->(n) "
             "WITH anc, count(DISTINCT n) AS mc, "
             f"collect(DISTINCT n)[..{k}] AS samples "
+            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
             "RETURN anc.urn AS urn, anc.displayName AS name, "
-            "labels(anc)[0] AS etype, mc, samples "
-            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+            "labels(anc)[0] AS etype, mc, samples"
         )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2926,6 +2962,14 @@ async def _run_aggregation_ancestor(
 
 
 def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
+    """Rows → buckets, fullest first.
+
+    The Cypher already orders on the aggregating ``WITH`` (FalkorDB drops an
+    ``ORDER BY`` on a ``RETURN`` that follows an aggregation — see
+    :func:`_run_aggregation_ancestor`); the sort here makes the order a
+    property of this function rather than of the engine's plan, and breaks
+    ties by name so two runs of the same query agree.
+    """
     buckets: List[SearchAggregateBucket] = []
     for row in rows:
         urn, name, etype, mc, samples_raw = (
@@ -2944,6 +2988,7 @@ def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
             match_count=int(mc),
             sample_hits=sample_hits,
         ))
+    buckets.sort(key=lambda b: (-b.match_count, b.ancestor_display_name, b.ancestor_urn))
     return buckets
 
 

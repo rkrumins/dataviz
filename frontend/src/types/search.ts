@@ -54,6 +54,7 @@ import type {
     HasIncomingPredicate as GenHasIncomingPredicate,
     HasOutgoingPredicate as GenHasOutgoingPredicate,
     PathPredicate as GenPathPredicate,
+    MatchAllPredicate as GenMatchAllPredicate,
     GroupPredicate as GenGroupPredicate,
     EdgePropertyPredicate as GenEdgePropertyPredicate,
     EdgeHasPropertyPredicate as GenEdgeHasPropertyPredicate,
@@ -84,6 +85,7 @@ export type IsRootPredicate = GenIsRootPredicate
 export type HasIncomingPredicate = GenHasIncomingPredicate
 export type HasOutgoingPredicate = GenHasOutgoingPredicate
 export type PathPredicate = GenPathPredicate
+export type MatchAllPredicate = GenMatchAllPredicate
 export type GroupPredicate = GenGroupPredicate
 export type EdgePropertyPredicate = GenEdgePropertyPredicate
 export type EdgeHasPropertyPredicate = GenEdgeHasPropertyPredicate

@@ -77,6 +77,21 @@ def test_sanitize_strips_reserved_keys_mirrored_into_properties():
     assert not (set(out["properties"]) & _RESERVED_NODE_KEYS)         # nothing left for the projector to drop
 
 
+def test_projector_fingerprint_never_reads_back_as_a_user_property():
+    """The projector SETs `n.gvHash` (an int64 content fingerprint) on every node. Read back as a
+    user property it reached the browser, which cannot represent it, and the canvas then saved the
+    ROUNDED copy into the payload — where `n += nativeProps` overwrote the real fingerprint."""
+    stored = {"urn": "urn:li:dataset:x", "displayName": "X", "gvHash": -3746471915534727923,
+              "owner": "fin"}
+    node = _node_from_props(stored)
+    assert node.properties == {"owner": "fin"}
+
+
+def test_sanitize_strips_a_round_tripped_fingerprint():
+    payload = {"urn": "urn:li:dataset:x", "properties": {"owner": "fin", "gvHash": -3746471915534728000}}
+    assert _sanitize_node_properties(payload)["properties"] == {"owner": "fin"}
+
+
 def test_sanitize_is_identity_for_clean_payloads():
     """A clean payload (or one with no `properties`) is returned UNCHANGED — same object — so the
     content hash of an already-clean entity is byte-identical before and after this change."""

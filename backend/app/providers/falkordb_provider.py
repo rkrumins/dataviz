@@ -1529,6 +1529,14 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     # rewrite its own previous work without ever touching a node that carried a
     # native urn / displayName. Provider-owned bookkeeping, not user data.
     "urnSource", "nameSource",
+    # The versioning projector's content fingerprint (``_node_merge_cypher``
+    # SETs ``n.gvHash`` on every projected node). Unreserved, it read back as
+    # a user property — a 19-digit int64 the browser cannot represent — and
+    # the canvas round-trips ``properties`` on save, so every drawer edit wrote
+    # the ROUNDED copy back and ``n += nativeProps`` overwrote the fingerprint
+    # the reconcile compares against. Reserving it closes both: the read path
+    # stops offering it and the write-side sanitiser strips it.
+    "gvHash",
 })
 
 

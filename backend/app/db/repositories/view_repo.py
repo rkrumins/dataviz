@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
 from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -643,6 +643,10 @@ async def update_view(
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
+        _keep_display_rules(
+            _reference_layout_of(req.config),
+            _reference_layout_of(json.loads(row.config or "{}")),
+        )
         row.config = json.dumps(req.config)
     # visibility is NOT written here: it is a security field with its own
     # authorization (publish gate) — see update_visibility. The endpoint
@@ -660,6 +664,28 @@ async def update_view(
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row)
+
+
+def _keep_display_rules(new_layout: Any, previous_layout: Any) -> None:
+    """Carry the stored ``displayRules`` onto a replacement ``referenceLayout``
+    that does not say anything about them.
+
+    Every layout writer replaces ``referenceLayout`` wholesale, and the rules
+    live inside it. A caller that edits layers only — the View Wizard, a
+    config save that rebuilt the layout from its own normalised copy — sends a
+    layout without the key, and the replacement silently deleted every rule on
+    the view. An explicit ``displayRules`` (including ``[]``) is still
+    honoured: only an ABSENT key inherits.
+    """
+    if not isinstance(new_layout, dict) or "displayRules" in new_layout:
+        return
+    if isinstance(previous_layout, dict) and isinstance(previous_layout.get("displayRules"), list):
+        new_layout["displayRules"] = previous_layout["displayRules"]
+
+
+def _reference_layout_of(config: Any) -> Any:
+    layout = config.get("layout") if isinstance(config, dict) else None
+    return layout.get("referenceLayout") if isinstance(layout, dict) else None
 
 
 async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
@@ -714,6 +740,7 @@ async def update_view_layout(
     layout = config.get("layout")
     if not isinstance(layout, dict):
         layout = {}
+    previous_layout = layout.get("referenceLayout")
     # Self-heal invalid node-ordering fields (drop, never reject — see
     # sanitize_node_ordering) before the wholesale write, then apply the
     # nodeSortingEnabled kill switch.
@@ -731,6 +758,8 @@ async def update_view_layout(
 
     if req.display_rules is not None:
         layout["referenceLayout"]["displayRules"] = req.display_rules
+    else:
+        _keep_display_rules(layout["referenceLayout"], previous_layout)
 
     layer_ids = {
         layer.get("id") for layer in req.reference_layout.get("layers", [])
@@ -880,6 +909,8 @@ async def update_overlay_layout(
     ))
     if req.display_rules is not None:
         reference_layout["displayRules"] = req.display_rules
+    else:
+        _keep_display_rules(reference_layout, json.loads(overlay.reference_layout or "{}"))
     overlay.reference_layout = json.dumps(reference_layout)
     if req.entity_scope is not None:
         overlay.entity_scope = req.entity_scope

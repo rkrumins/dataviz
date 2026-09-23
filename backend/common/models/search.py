@@ -145,6 +145,16 @@ class HasPropertyPredicate(_Base):
     negate: bool = False
 
 
+class MatchAllPredicate(_Base):
+    """Every entity in scope — "all in this view", "count everything".
+
+    An ``and`` group with no children would mean the same, and the model
+    refuses one on purpose: a client bug that dropped every condition must
+    not quietly match the whole view. Asking for everything is spelled out.
+    """
+    kind: Literal["all"] = "all"
+
+
 class DescendantOfPredicate(_Base):
     """Clamp matches to the subtree(s) rooted at ``urns``.
 
@@ -431,6 +441,7 @@ Predicate = Annotated[
         HasIncomingPredicate,
         HasOutgoingPredicate,
         PathPredicate,
+        MatchAllPredicate,
         GroupPredicate,
     ],
     Field(discriminator="kind"),

@@ -414,7 +414,7 @@ class AdvancedSearchService:
         )
 
         try:
-            page = await self._engine.provider.deep_search(
+            page = await self._provider_op("deep_search")(
                 query, deadline_ms=deadline_ms,
             )
             page.scope_diagnostics = self._build_scope_diagnostics(
@@ -453,7 +453,7 @@ class AdvancedSearchService:
             query, entity_types_capped=entity_types_note is not None,
         )
         try:
-            result = await self._engine.provider.deep_search_explain(query)
+            result = await self._provider_op("deep_search_explain")(query)
         except CompileError as exc:
             raise ValidationError(str(exc)) from exc
         # Attach the resolved-scope summary so the dev panel can show
@@ -478,9 +478,25 @@ class AdvancedSearchService:
         graph, per entity-type label. Diagnostic counterpart to the
         predicate compiler — answers "what can I actually query?".
         """
-        return await self._engine.provider.deep_search_discover(
+        return await self._provider_op("deep_search_discover")(
             sample_per_label=sample_per_label,
         )
+
+    def _provider_op(self, name: str):
+        """The active provider's deep-search method, or ``NotImplementedError``
+        (the route's 501) when it has none.
+
+        Only FalkorDB and the stub implement the Protocol. Neo4j, Spanner and
+        DataHub simply lack the methods, and the circuit-breaker proxy lets
+        the lookup's ``AttributeError`` through — so the route answered 500
+        for what is a plain "not supported on this data source". Resolving
+        the method first keeps a genuine ``AttributeError`` inside a search
+        a 500, as it should be.
+        """
+        op = getattr(self._engine.provider, name, None)
+        if op is None:
+            raise NotImplementedError()
+        return op
 
     def _build_scope_diagnostics(
         self,

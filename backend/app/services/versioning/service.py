@@ -40,6 +40,7 @@ from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
+from .typed_merge import preserve_stored_type
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
     validate_entities, validate_entities_rich,
@@ -5259,11 +5260,19 @@ class GraphVersioningService:
     def _patch_payload(base: Optional[dict], patch: dict) -> dict:
         """Apply a partial update `patch` onto `base`: top-level fields override, and the
         nested ``properties`` dict is DEEP-merged (a partial properties patch must not drop
-        the keys it didn't mention). Mirrors the merge the canvas endpoint used to do."""
+        the keys it didn't mention). Mirrors the merge the canvas endpoint used to do.
+
+        A key the base already has keeps its stored value when the patch sends the same
+        value back in a lossier form — the browser's rounded copy of a 19-digit integer,
+        or digits as text (``typed_merge.preserve_stored_type``) — so a drawer edit of
+        one field can no longer rewrite every other property it round-trips."""
         base = base or {}
         out = {**base, **patch}
         if patch.get("properties") is not None or base.get("properties") is not None:
-            merged = {**(base.get("properties") or {}), **(patch.get("properties") or {})}
+            base_props = base.get("properties") or {}
+            merged = {**base_props}
+            for k, v in (patch.get("properties") or {}).items():
+                merged[k] = preserve_stored_type(base_props[k], v) if k in base_props else v
             # A bulk import can explicitly REMOVE a property by patching it with this sentinel
             # (rowmodel.PROP_DELETE — a `\N` cell / properties_json null); drop those keys. The
             # literal never occurs in real data, so this is inert for every other write path.

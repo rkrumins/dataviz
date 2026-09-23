@@ -183,6 +183,7 @@ export type Predicate =
     | HasIncomingPredicate
     | HasOutgoingPredicate
     | PathPredicate
+    | MatchAllPredicate
     | GroupPredicate
 /**
  * Relevance multiplier when match='fulltext'.
@@ -317,6 +318,7 @@ export type Sourceurns = string[]
  * Endpoint nodes. Paths terminate here.
  */
 export type Targeturns = string[]
+export type Kind18 = 'all'
 export type Children1 = (
     | TextPredicate
     | PropertyPredicate
@@ -333,9 +335,10 @@ export type Children1 = (
     | HasIncomingPredicate
     | HasOutgoingPredicate
     | PathPredicate
+    | MatchAllPredicate
     | GroupPredicate
 )[]
-export type Kind18 = 'group'
+export type Kind19 = 'group'
 export type Op6 = 'and' | 'or' | 'not'
 /**
  * Optional. Must be ⊆ view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.
@@ -851,6 +854,16 @@ export interface PathPredicate {
     targetUrns: Targeturns
 }
 /**
+ * Every entity in scope — "all in this view", "count everything".
+ *
+ * An ``and`` group with no children would mean the same, and the model
+ * refuses one on purpose: a client bug that dropped every condition must
+ * not quietly match the whole view. Asking for everything is spelled out.
+ */
+export interface MatchAllPredicate {
+    kind?: Kind18
+}
+/**
  * Boolean composition of child predicates.
  *
  * ``op='not'`` must have exactly one child — the service-layer validator
@@ -859,7 +872,7 @@ export interface PathPredicate {
  */
 export interface GroupPredicate {
     children: Children1
-    kind?: Kind18
+    kind?: Kind19
     op?: Op6
 }
 /**

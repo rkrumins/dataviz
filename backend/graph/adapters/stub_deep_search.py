@@ -33,6 +33,7 @@ from backend.common.models.search import (
     GroupPredicate,
     HasPropertyPredicate,
     LayerPredicate,
+    MatchAllPredicate,
     PropertyPredicate,
     SearchHit,
     SearchQuery,
@@ -280,6 +281,9 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
             # Validator enforces exactly one child.
             return not _matches(node, predicate.children[0])
         raise CompileError(f"stub: unsupported group op {predicate.op!r}")
+
+    if isinstance(predicate, MatchAllPredicate):
+        return True
 
     if isinstance(predicate, EntityTypePredicate):
         et = node.get("entityType")

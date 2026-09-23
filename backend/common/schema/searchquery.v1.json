@@ -546,6 +546,7 @@
           "items": {
             "discriminator": {
               "mapping": {
+                "all": "#/$defs/MatchAllPredicate",
                 "degree": "#/$defs/DegreePredicate",
                 "descendantOf": "#/$defs/DescendantOfPredicate",
                 "entityType": "#/$defs/EntityTypePredicate",
@@ -610,6 +611,9 @@
               },
               {
                 "$ref": "#/$defs/PathPredicate"
+              },
+              {
+                "$ref": "#/$defs/MatchAllPredicate"
               },
               {
                 "$ref": "#/$defs/GroupPredicate"
@@ -890,6 +894,19 @@
         "layerAssignment"
       ],
       "title": "LayerPredicate",
+      "type": "object"
+    },
+    "MatchAllPredicate": {
+      "description": "Every entity in scope \u2014 \"all in this view\", \"count everything\".\n\nAn ``and`` group with no children would mean the same, and the model\nrefuses one on purpose: a client bug that dropped every condition must\nnot quietly match the whole view. Asking for everything is spelled out.",
+      "properties": {
+        "kind": {
+          "const": "all",
+          "default": "all",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "MatchAllPredicate",
       "type": "object"
     },
     "PathHit": {
@@ -1726,6 +1743,7 @@
         "predicate": {
           "discriminator": {
             "mapping": {
+              "all": "#/$defs/MatchAllPredicate",
               "degree": "#/$defs/DegreePredicate",
               "descendantOf": "#/$defs/DescendantOfPredicate",
               "entityType": "#/$defs/EntityTypePredicate",
@@ -1790,6 +1808,9 @@
             },
             {
               "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/MatchAllPredicate"
             },
             {
               "$ref": "#/$defs/GroupPredicate"
