@@ -28,10 +28,11 @@ class XlsxAdapter:
     async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
         import openpyxl  # lazy — only when xlsx is actually used
 
-        buf = b""
+        buf = bytearray()   # amortized appends; `bytes +=` re-copied the whole buffer per chunk
         async for chunk in chunks:
             buf += chunk
         wb = openpyxl.load_workbook(io.BytesIO(buf), read_only=True, data_only=True)
+        del buf   # BytesIO copied it (only exact bytes are shared): don't hold the upload twice
         try:
             for sheet_name, kind in ((_NODE_SHEET, "node"), (_EDGE_SHEET, "edge")):
                 ws = _find_sheet(wb, sheet_name)

@@ -14,6 +14,11 @@ async def _one(b):
     yield b
 
 
+async def _pieces(b, size):
+    for i in range(0, len(b), size):
+        yield b[i:i + size]
+
+
 async def _run() -> None:
     ad = get_adapter("xlsx")
     records = [
@@ -58,6 +63,9 @@ async def _run() -> None:
     parsed = [r async for r in ad.parse(_one(out.getvalue()))]
     assert parsed == [{"entity_id": "n1", "prop.tags": ["a", "b"], "prop.mixed": [1, 2.5, True, None],
                        "prop.label": "[draft]", "prop.count": 3, "kind": "node"}], parsed
+
+    # ---- an upload arrives in chunks: they are reassembled into the whole workbook ----
+    assert [r async for r in ad.parse(_pieces(out.getvalue(), 997))] == parsed
 
 
 def test_import_xlsx():
