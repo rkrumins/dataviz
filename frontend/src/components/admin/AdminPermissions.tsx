@@ -44,6 +44,8 @@ import {
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { TablePagination } from '@/components/ui/TablePagination'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -1222,6 +1224,9 @@ function PermissionCatalogTab({
 // Tab 3 — By user (subject lens)
 // ─────────────────────────────────────────────────────────────────────
 
+/** Users per page in the By-user picker; the server searches and pages. */
+const BY_USER_PAGE_SIZE = 25
+
 function ByUserTab({
     permissions: _permissions, initialUserId,
 }: {
@@ -1231,7 +1236,11 @@ function ByUserTab({
     initialUserId?: string | null
 }) {
     void _permissions
+    /** One page of matching users; null until the first arrives. */
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
+    /** Users matching the search across every page. */
+    const [userTotal, setUserTotal] = useState(0)
+    const [userPage, setUserPage] = useState(0)
     const [search, setSearch] = useState('')
     const [selectedId, setSelectedId] = useState<string | null>(initialUserId ?? null)
 
@@ -1246,16 +1255,28 @@ function ByUserTab({
     const [error, setError] = useState<string | null>(null)
     const { notify } = useAppNotifications()
 
-    // Initial user list
+    // Searched and paged by the server, so every account is reachable —
+    // this list used to hold only the first page (fifty) of them.
+    const debouncedSearch = useDebouncedValue(search.trim(), 300)
     useEffect(() => {
-        ;(async () => {
-            try {
-                setUsers(await adminUserService.listUsers())
-            } catch (err) {
-                notify('error', err instanceof Error ? err.message : 'Failed to load users')
-            }
-        })()
-    }, [notify])
+        let cancelled = false
+        adminUserService.listUsers({
+            search: debouncedSearch,
+            sort: 'name',
+            order: 'asc',
+            limit: BY_USER_PAGE_SIZE,
+            offset: userPage * BY_USER_PAGE_SIZE,
+        })
+            .then(({ items, total }) => {
+                if (cancelled) return
+                setUsers(items)
+                setUserTotal(total)
+            })
+            .catch(err => {
+                if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load users')
+            })
+        return () => { cancelled = true }
+    }, [debouncedSearch, userPage, notify])
 
     // Fetch selected user's access
     useEffect(() => {
@@ -1275,14 +1296,6 @@ function ByUserTab({
         })()
     }, [selectedId])
 
-    const filteredUsers = useMemo(() => {
-        if (!users) return []
-        const q = search.trim().toLowerCase()
-        return users
-            .filter(u => !q || u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
-            .sort((a, b) => a.displayName.localeCompare(b.displayName))
-    }, [users, search])
-
     return (
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5 min-h-[60vh]">
             {/* Left pane — user picker */}
@@ -1294,7 +1307,7 @@ function ByUserTab({
                             type="text"
                             placeholder="Search users..."
                             value={search}
-                            onChange={(e) => setSearch(e.target.value)}
+                            onChange={(e) => { setSearch(e.target.value); setUserPage(0) }}
                             className="input pl-9 h-9 text-sm bg-glass-base/40 w-full"
                         />
                     </div>
@@ -1305,10 +1318,10 @@ function ByUserTab({
                             <Loader2 className="w-4 h-4 animate-spin inline-block mr-2" />
                             Loading…
                         </div>
-                    ) : filteredUsers.length === 0 ? (
+                    ) : users.length === 0 ? (
                         <div className="p-8 text-center text-ink-muted text-sm">No matching users.</div>
                     ) : (
-                        filteredUsers.map(u => {
+                        users.map(u => {
                             const isSel = selectedId === u.id
                             return (
                                 <button
@@ -1337,6 +1350,13 @@ function ByUserTab({
                         })
                     )}
                 </div>
+                <TablePagination
+                    className="justify-end px-3 py-2 border-t border-glass-border"
+                    page={userPage}
+                    pageSize={BY_USER_PAGE_SIZE}
+                    total={userTotal}
+                    onPageChange={setUserPage}
+                />
             </div>
 
             {/* Right pane — access detail */}

@@ -41,6 +41,7 @@ import {
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -863,6 +864,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
 // ── Add Member modal ────────────────────────────────────────────────
 
+/** Users per picker page — the server searches and pages every account. */
+const USER_PICKER_PAGE_SIZE = 25
+
 function AddMemberModal({
     workspaceId, existingBindings, onClose, onSubmit, submitting,
 }: {
@@ -879,7 +883,11 @@ function AddMemberModal({
     submitting: boolean
 }) {
     const [subjectType, setSubjectType] = useState<SubjectType>('user')
+    /** One page of matching active users; null until the first arrives. */
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
+    /** Active users matching the search across every page. */
+    const [userTotal, setUserTotal] = useState(0)
+    const [userPage, setUserPage] = useState(0)
     const [groups, setGroups] = useState<GroupResponse[] | null>(null)
     const [availableRoles, setAvailableRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [search, setSearch] = useState('')
@@ -936,13 +944,35 @@ function AddMemberModal({
         return out
     }, [existingBindings, subjectType])
 
+    // Users are searched and paged by the server, so every active account is
+    // reachable — the picker used to offer only the first page the user list
+    // returned (fifty people). Groups are still one local list.
+    const debouncedSearch = useDebouncedValue(search.trim(), 300)
+    useEffect(() => {
+        if (subjectType !== 'user') return
+        let cancelled = false
+        adminUserService.listUsers({
+            status: 'active',
+            search: debouncedSearch,
+            sort: 'name',
+            order: 'asc',
+            limit: USER_PICKER_PAGE_SIZE,
+            offset: userPage * USER_PICKER_PAGE_SIZE,
+        })
+            .then(({ items, total }) => {
+                if (cancelled) return
+                setUsers(items)
+                setUserTotal(total)
+            })
+            .catch(err => {
+                if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load')
+            })
+        return () => { cancelled = true }
+    }, [subjectType, debouncedSearch, userPage, notify])
+
     useEffect(() => {
         ;(async () => {
             try {
-                if (subjectType === 'user' && users === null) {
-                    const data = await adminUserService.listUsers()
-                    setUsers(data)
-                }
                 if (subjectType === 'group' && groups === null) {
                     const data = await groupsService.list({ limit: 500 })
                     setGroups(data)
@@ -951,19 +981,15 @@ function AddMemberModal({
                 notify('error', err instanceof Error ? err.message : 'Failed to load')
             }
         })()
-    }, [subjectType, users, groups, notify])
+    }, [subjectType, groups, notify])
 
     // Reset selection when toggling subject type
     useEffect(() => { setSelected(null) }, [subjectType])
 
     const candidates = useMemo(() => {
+        // Already active-only, searched and name-sorted by the server.
+        if (subjectType === 'user') return users ?? []
         const q = search.trim().toLowerCase()
-        if (subjectType === 'user') {
-            return (users ?? [])
-                .filter(u => u.status === 'active')
-                .filter(u => !q || u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
-                .sort((a, b) => a.displayName.localeCompare(b.displayName))
-        }
         return (groups ?? [])
             .filter(g => !q || g.name.toLowerCase().includes(q) || (g.description ?? '').toLowerCase().includes(q))
             .sort((a, b) => a.name.localeCompare(b.name))
@@ -1022,7 +1048,7 @@ function AddMemberModal({
                             type="text"
                             placeholder={subjectType === 'user' ? 'Search users...' : 'Search groups...'}
                             value={search}
-                            onChange={(e) => setSearch(e.target.value)}
+                            onChange={(e) => { setSearch(e.target.value); setUserPage(0) }}
                             className="input pl-9 h-9 w-full text-sm"
                             autoFocus
                         />
@@ -1069,6 +1095,15 @@ function AddMemberModal({
                             })
                         )}
                     </div>
+                    {subjectType === 'user' && (
+                        <TablePagination
+                            className="justify-end"
+                            page={userPage}
+                            pageSize={USER_PICKER_PAGE_SIZE}
+                            total={userTotal}
+                            onPageChange={setUserPage}
+                        />
+                    )}
                 </div>
 
                 {/* Role grid */}

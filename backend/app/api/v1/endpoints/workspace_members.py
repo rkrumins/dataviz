@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.common.display_name import resolve_display_name
-from backend.app.db.models import GroupORM, UserORM, WorkspaceORM
+from backend.app.db.models import GroupORM, WorkspaceORM
 from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
 from backend.app.services.permission_service import simulate_for_user
 from backend.app.services.revocation_service import revoke_subject_sessions
@@ -62,44 +62,59 @@ router = APIRouter()
 
 # ── helpers ──────────────────────────────────────────────────────────
 
+async def _hydrate_subjects(
+    session: AsyncSession, subjects: list[tuple[str, str]],
+) -> dict[tuple[str, str], WorkspaceMemberSubject]:
+    """Resolve display fields for bound subjects, keyed by
+    ``(subject_type, subject_id)``.
+
+    Three queries for any number of subjects — users, groups, group member
+    counts — where resolving them one at a time cost a query or two per
+    binding, and a workspace with thousands of members that many.
+
+    Best-effort: a subject that was deleted is absent from the map, and the
+    caller renders its binding with ``display_name=None`` (the binding is
+    then orphaned and the admin needs to revoke it manually).
+    """
+    user_ids = [sid for stype, sid in subjects if stype == "user"]
+    group_ids = [sid for stype, sid in subjects if stype == "group"]
+    out: dict[tuple[str, str], WorkspaceMemberSubject] = {}
+
+    # ``name`` is ``resolve_display_name``: the chosen display name wins over
+    # the reconstructed halves — rebuilding "first last" here ignored the
+    # override column and, for a full-name-only IdP, rendered a raw user id
+    # in the UI. Soft-deleted users are included, as they always were here.
+    for uid, ident in (await user_repo.get_identities_by_ids(session, user_ids)).items():
+        out[("user", uid)] = WorkspaceMemberSubject(
+            type="user",
+            id=uid,
+            display_name=ident["name"] or ident["email"] or None,
+            secondary=ident["email"],
+        )
+
+    if group_ids:
+        counts = await group_repo.count_members_batch(session, group_ids)
+        rows = await session.execute(
+            select(GroupORM.id, GroupORM.name).where(GroupORM.id.in_(group_ids))
+        )
+        for gid, name in rows.all():
+            member_count = counts.get(gid, 0)
+            out[("group", gid)] = WorkspaceMemberSubject(
+                type="group",
+                id=gid,
+                display_name=name,
+                secondary=f"{member_count} member{'s' if member_count != 1 else ''}",
+            )
+    return out
+
+
 async def _hydrate_subject(
     session: AsyncSession, subject_type: str, subject_id: str
 ) -> WorkspaceMemberSubject:
-    """Resolve display fields for the bound subject.
-
-    Best-effort: returns a row with ``display_name=None`` when the
-    subject was deleted (the binding is then orphaned and the admin
-    needs to revoke it manually).
-    """
-    if subject_type == "user":
-        row = await session.execute(select(UserORM).where(UserORM.id == subject_id))
-        user_orm = row.scalar_one_or_none()
-        if user_orm is None:
-            return WorkspaceMemberSubject(type=subject_type, id=subject_id)
-        # The chosen display name wins over the reconstructed halves —
-        # rebuilding "first last" here ignored the override column and,
-        # for a full-name-only IdP, rendered a raw user id in the UI.
-        shown = resolve_display_name(
-            user_orm.display_name, user_orm.first_name,
-            user_orm.last_name,
-        )
-        return WorkspaceMemberSubject(
-            type="user",
-            id=subject_id,
-            display_name=shown or user_orm.email or None,
-            secondary=user_orm.email,
-        )
-
-    row = await session.execute(select(GroupORM).where(GroupORM.id == subject_id))
-    group_orm = row.scalar_one_or_none()
-    if group_orm is None:
-        return WorkspaceMemberSubject(type=subject_type, id=subject_id)
-    member_count = await group_repo.count_members(session, group_orm.id)
-    return WorkspaceMemberSubject(
-        type="group",
-        id=subject_id,
-        display_name=group_orm.name,
-        secondary=f"{member_count} member{'s' if member_count != 1 else ''}",
+    """Resolve display fields for one bound subject (see :func:`_hydrate_subjects`)."""
+    resolved = await _hydrate_subjects(session, [(subject_type, subject_id)])
+    return resolved.get((subject_type, subject_id)) or WorkspaceMemberSubject(
+        type=subject_type, id=subject_id,
     )
 
 
@@ -130,9 +145,14 @@ async def list_members(
     bindings = await binding_repo.list_for_scope(
         session, scope_type="workspace", scope_id=ws_id,
     )
+    subjects = await _hydrate_subjects(
+        session, [(b.subject_type, b.subject_id) for b in bindings],
+    )
     out: list[WorkspaceMemberResponse] = []
     for b in bindings:
-        subject = await _hydrate_subject(session, b.subject_type, b.subject_id)
+        subject = subjects.get((b.subject_type, b.subject_id)) or WorkspaceMemberSubject(
+            type=b.subject_type, id=b.subject_id,
+        )
         out.append(
             WorkspaceMemberResponse(
                 binding_id=b.id,

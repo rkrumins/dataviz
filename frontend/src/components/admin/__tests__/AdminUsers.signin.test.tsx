@@ -5,8 +5,9 @@
  * an account signs in, so telling a directory-provisioned account from
  * a password one meant opening the SSO Diagnostics tab one user at a
  * time. These tests pin the chips: Local, provider-by-name, both, the
- * +N collapse, the stranded no-sign-in state, and search matching
- * provider names.
+ * +N collapse, the stranded no-sign-in state, and a provider name typed
+ * into the search reaching the server (which matches it — see
+ * backend/tests/test_admin_users_paging.py).
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -15,6 +16,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@/services/adminUserService', () => ({
     adminUserService: {
         listUsers: vi.fn(),
+        getStats: vi.fn(),
     },
 }))
 vi.mock('@/services/permissionsService', () => ({
@@ -61,9 +63,15 @@ function user(over: Partial<AdminUserResponse> = {}): AdminUserResponse {
     }
 }
 
+/** One server page holding exactly these rows. */
+const page = (...items: AdminUserResponse[]) => ({ items, total: items.length })
+
 beforeEach(() => {
     vi.clearAllMocks()
-    listUsers.mockResolvedValue([user()])
+    listUsers.mockResolvedValue(page(user()))
+    vi.mocked(adminUserService.getStats).mockResolvedValue({
+        total: 1, pending: 0, active: 1, suspended: 0, admins: 0, resetRequested: 0,
+    })
 })
 
 describe('the sign-in column', () => {
@@ -73,19 +81,19 @@ describe('the sign-in column', () => {
     })
 
     it('an SSO account names its provider instead', async () => {
-        listUsers.mockResolvedValue([user({
+        listUsers.mockResolvedValue(page(user({
             hasPassword: false, signupSource: 'sso_jit',
             identities: [identity()],
-        })])
+        })))
         render(<AdminUsers />)
         expect(await screen.findByText('Corporate Entra')).toBeInTheDocument()
         expect(screen.queryByText('Local')).not.toBeInTheDocument()
     })
 
     it('an account with both shows the provider and a key', async () => {
-        listUsers.mockResolvedValue([user({
+        listUsers.mockResolvedValue(page(user({
             hasPassword: true, identities: [identity()],
-        })])
+        })))
         render(<AdminUsers />)
         expect(await screen.findByText('Corporate Entra')).toBeInTheDocument()
         expect(screen.getByLabelText('Also has a password')).toBeInTheDocument()
@@ -93,14 +101,14 @@ describe('the sign-in column', () => {
     })
 
     it('collapses past two providers into +N', async () => {
-        listUsers.mockResolvedValue([user({
+        listUsers.mockResolvedValue(page(user({
             hasPassword: false,
             identities: [
                 identity(),
                 identity({ providerId: 'idp_2', slug: 'okta', displayName: 'Corp Okta' }),
                 identity({ providerId: 'idp_3', slug: 'gw', displayName: 'Gateway', kind: 'backchannel' }),
             ],
-        })])
+        })))
         render(<AdminUsers />)
         expect(await screen.findByText('Corporate Entra')).toBeInTheDocument()
         expect(screen.getByText('Corp Okta')).toBeInTheDocument()
@@ -109,15 +117,15 @@ describe('the sign-in column', () => {
     })
 
     it('an account with no way in says so', async () => {
-        listUsers.mockResolvedValue([user({
+        listUsers.mockResolvedValue(page(user({
             hasPassword: false, identities: [],
-        })])
+        })))
         render(<AdminUsers />)
         expect(await screen.findByText('No sign-in')).toBeInTheDocument()
     })
 
     it('a break-glass account leads with a System chip', async () => {
-        listUsers.mockResolvedValue([user({ isSystemAccount: true })])
+        listUsers.mockResolvedValue(page(user({ isSystemAccount: true })))
         render(<AdminUsers />)
         expect(await screen.findByText('System')).toBeInTheDocument()
         // Alongside, not instead of, how it signs in.
@@ -130,12 +138,13 @@ describe('the sign-in column', () => {
         expect(screen.queryByText('System')).not.toBeInTheDocument()
     })
 
-    it('search matches provider names, so "who comes from Entra" is one query', async () => {
-        listUsers.mockResolvedValue([
-            user({ id: 'usr_sso', email: 'sso@example.com', displayName: 'Sso Person',
-                   hasPassword: false, identities: [identity()] }),
-            user({ id: 'usr_local', email: 'local@example.com', displayName: 'Local Person' }),
-        ])
+    it('search reaches the server, so "who comes from Entra" is one query over everyone', async () => {
+        const sso = user({ id: 'usr_sso', email: 'sso@example.com', displayName: 'Sso Person',
+                           hasPassword: false, identities: [identity()] })
+        const local = user({ id: 'usr_local', email: 'local@example.com', displayName: 'Local Person' })
+        // The server matches the provider name; this stands in for its answer.
+        listUsers.mockImplementation(async ({ search }) =>
+            search === 'entra' ? page(sso) : page(sso, local))
         const u = userEvent.setup()
         render(<AdminUsers />)
         expect(await screen.findByText('Sso Person')).toBeInTheDocument()
@@ -149,5 +158,8 @@ describe('the sign-in column', () => {
             expect(screen.queryByText('Local Person')).not.toBeInTheDocument()
         })
         expect(screen.getByText('Sso Person')).toBeInTheDocument()
+        expect(listUsers).toHaveBeenLastCalledWith(
+            expect.objectContaining({ search: 'entra', offset: 0 }),
+        )
     })
 })

@@ -5,7 +5,8 @@ Authenticated:
     GET  /api/v1/users/me
 
 Admin:
-    GET   /api/v1/admin/users?status=pending
+    GET   /api/v1/admin/users?status=pending&search=&sort=&order=&limit=&offset=
+    GET   /api/v1/admin/users/stats
     POST  /api/v1/admin/users/{user_id}/approve
     POST  /api/v1/admin/users/{user_id}/reject
     PUT   /api/v1/admin/users/{user_id}/role
@@ -20,7 +21,7 @@ import json
 import logging
 import re
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from slowapi import Limiter
@@ -55,6 +56,7 @@ from backend.common.models.auth import (
     AdminCreateUserResponse,
     AdminUserIdentityRef,
     AdminUserResponse,
+    AdminUserStatsResponse,
     AdminResetPasswordRequest,
     ChangeMyPasswordRequest,
     BulkCreateUsersRequest,
@@ -592,13 +594,31 @@ admin_router = APIRouter()
 
 @admin_router.get("", response_model=list[AdminUserResponse])
 async def list_users(
+    response: Response,
     status_filter: Optional[str] = Query(None, alias="status"),
+    search: Optional[str] = Query(None, max_length=200),
+    sort: Literal["name", "email", "status", "role", "createdAt"] = Query("createdAt"),
+    order: Literal["asc", "desc"] = Query("desc"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
     admin=Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    users = await user_repo.list_users(session, status=status_filter, limit=limit, offset=offset)
+    """One page of accounts, searched and sorted in SQL.
+
+    ``X-Total-Count`` is how many accounts match ``status`` + ``search``
+    across ALL pages — the page alone can't say, and a client that only ever
+    fetched the first page (with its default ``limit``) is how the admin
+    table came to stop at fifty people. ``search`` covers what a row shows:
+    name, email, id, role, and the providers the account signs in with.
+    """
+    users = await user_repo.list_users(
+        session, status=status_filter, limit=limit, offset=offset,
+        search=search, sort=sort, order=order,
+    )
+    response.headers["X-Total-Count"] = str(await user_repo.count_users(
+        session, status=status_filter, search=search,
+    ))
     # One query for the whole page's identities, not one per row.
     linked = await user_identity_repo.list_for_users(
         session, [u.id for u in users],
@@ -607,6 +627,15 @@ async def list_users(
         await _admin_response(session, u, identities=linked.get(u.id, []))
         for u in users
     ]
+
+
+@admin_router.get("/stats", response_model=AdminUserStatsResponse)
+async def admin_user_stats(
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Counts across every account for the admin list's cards and tabs."""
+    return AdminUserStatsResponse(**await user_repo.user_stats(session))
 
 
 @admin_router.post("/{user_id}/approve", status_code=status.HTTP_200_OK)
