@@ -75,12 +75,16 @@ async def describe_source(
     return descriptor
 
 
-async def engine_for(session: AsyncSession, workspace_id: str, data_source_id: Optional[str]):
+async def engine_for(session: AsyncSession, workspace_id: str, data_source_id: Optional[str], *,
+                     branch_id: Optional[str] = None, actor: Optional[str] = None):
     """A context engine scoped to one data source: its ``provider`` is what identity lookups go
-    through, and it resolves the ontology. Raises when the provider can't be reached."""
+    through, and it resolves the ontology. With ``branch_id`` (a draft of a version-controlled
+    source) it reads that draft: published data with the draft's changes on top. Raises when the
+    provider can't be reached."""
     from backend.app.providers.manager import provider_manager as provider_registry
     from backend.app.services.context_engine import ContextEngine
 
     return await ContextEngine.for_workspace(
         workspace_id, provider_registry, session, data_source_id=data_source_id,
+        branch_id=branch_id, actor=actor,
     )

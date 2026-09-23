@@ -233,14 +233,18 @@ class ImportExportService:
         select_ids: Optional[List[str]] = None,
         select_types: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
+        package: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
         ``branch_id`` exports that working branch's composed state (main + committed + draft),
         defaulting to published main. Export options (``props``/``ids``/``types``) ride in
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
-        row-scope to just those entities / entity types."""
+        row-scope to just those entities / entity types. ``package`` makes the job a view package's
+        (view_transfer.package): the data is written, then packaged with the views."""
         options: Dict[str, Any] = {}
+        if package:
+            options["package"] = package
         if extra_props:
             options["props"] = extra_props
         if select_ids:
@@ -275,7 +279,15 @@ class ImportExportService:
             # Branch-effective: an export of a draft branch scopes to that
             # draft's own view assignments (base ⊕ overlay).
             scope = await self._scope_resolver(ws, ds, view_id, branch_id)
-        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {}).run(job_id)
+        after_write = None
+        package = (options or {}).get("package")
+        if package:
+            from backend.app.services.view_transfer.package import finish_export
+
+            async def after_write(job_id, result_uri, summary):
+                return await finish_export(self._store, job_id, result_uri, summary, package=package)
+        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {},
+                                  after_write=after_write).run(job_id)
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)
@@ -327,4 +339,7 @@ class ImportExportService:
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,
                 "createdAt": row.created_at, "completedAt": row.completed_at,
+                # A view package names its own download (view_transfer.package).
+                "fileName": ((row.field_scope or {}).get("package") or {}).get("fileName")
+                if isinstance(row.field_scope, dict) else None,
             }

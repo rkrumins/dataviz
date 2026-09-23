@@ -85,6 +85,32 @@ def capability_for(provider_type: Optional[str]) -> ProviderCapability:
     return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
 
 
+async def resolve_identities_by_query(provider: Any, urns: List[str], *, chunk: int = 1000,
+                                      ) -> Dict[str, Optional[Dict[str, Any]]]:
+    """:meth:`GraphDataProvider.resolve_identities` for any object with an async ``get_nodes``:
+    ``chunk`` URNs per call, found / ``None`` (absent) / left out (a chunk whose lookup failed,
+    so unknown, never missing)."""
+    out: Dict[str, Optional[Dict[str, Any]]] = {}
+    wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
+    for start in range(0, len(wanted), chunk):
+        batch = wanted[start:start + chunk]
+        try:
+            nodes = await provider.get_nodes(
+                NodeQuery(urns=batch, include_child_count=False, limit=len(batch))
+            )
+        except Exception:
+            continue  # absent = unknown, never missing
+        found = {n.urn: n for n in nodes}
+        for urn in batch:
+            node = found.get(urn)
+            out[urn] = (
+                {"type": node.entity_type, "name": node.display_name,
+                 "qualifiedName": node.qualified_name}
+                if node is not None else None
+            )
+    return out
+
+
 class GraphDataProvider(ABC):
     """
     Abstract interface for graph data providers.
@@ -497,26 +523,7 @@ class GraphDataProvider(ABC):
         provider whose ``get_nodes`` swallows partial failures must override this (FalkorDB
         does).
         """
-        out: Dict[str, Optional[Dict[str, Any]]] = {}
-        wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
-        size = self.RESOLVE_IDENTITIES_CHUNK
-        for start in range(0, len(wanted), size):
-            chunk = wanted[start:start + size]
-            try:
-                nodes = await self.get_nodes(
-                    NodeQuery(urns=chunk, include_child_count=False, limit=len(chunk))
-                )
-            except Exception:
-                continue  # absent = unknown, never missing
-            found = {n.urn: n for n in nodes}
-            for urn in chunk:
-                node = found.get(urn)
-                out[urn] = (
-                    {"type": node.entity_type, "name": node.display_name,
-                     "qualifiedName": node.qualified_name}
-                    if node is not None else None
-                )
-        return out
+        return await resolve_identities_by_query(self, urns, chunk=self.RESOLVE_IDENTITIES_CHUNK)
 
     @abstractmethod
     async def get_descendants(

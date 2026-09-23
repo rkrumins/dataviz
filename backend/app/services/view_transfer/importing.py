@@ -44,6 +44,9 @@ class Target:
     workspace_id: str
     data_source_id: Optional[str]
     view: Optional[ViewORM] = None       # set when updating / overwriting
+    #: A draft of the data source to check against (and, when staging, to stage into): its
+    #: entities count as there, e.g. the data a view package brought with it.
+    branch_id: Optional[str] = None
 
 
 @dataclass
@@ -124,7 +127,8 @@ async def _target_facts(session: AsyncSession, target: Target, urns: List[str]):
     lookup: Dict[str, Optional[dict]] = {}
     types = TargetTypes()
     try:
-        engine = await engine_for(session, target.workspace_id, target.data_source_id)
+        engine = await engine_for(session, target.workspace_id, target.data_source_id,
+                                  branch_id=target.branch_id)
     except Exception as exc:  # noqa: BLE001 — every entity becomes "unknown", never "missing"
         logger.warning("reconcile: target %s/%s unreachable: %s",
                        target.workspace_id, target.data_source_id, exc)
@@ -154,10 +158,15 @@ async def _target_facts(session: AsyncSession, target: Target, urns: List[str]):
 async def reconcile_items(session: AsyncSession, items: List[ReconcileItem]) -> Dict[str, Any]:
     prepared = [await _prepare(session, item) for item in items]
 
-    groups: Dict[Tuple[str, Optional[str]], List[Prepared]] = {}
+    def graph_of(p: Prepared) -> Tuple[str, Optional[str], Optional[str]]:
+        """One lookup per graph read: a data source, as published or as one of its drafts."""
+        target = p.item.target
+        return target.workspace_id, target.data_source_id, target.branch_id
+
+    groups: Dict[Tuple[str, Optional[str], Optional[str]], List[Prepared]] = {}
     for p in prepared:
-        groups.setdefault((p.item.target.workspace_id, p.item.target.data_source_id), []).append(p)
-    facts: Dict[Tuple[str, Optional[str]], tuple] = {}
+        groups.setdefault(graph_of(p), []).append(p)
+    facts: Dict[Tuple[str, Optional[str], Optional[str]], tuple] = {}
     for key, members in groups.items():
         urns = sorted({u for m in members for u in collect(m.effective).urns})
         facts[key] = await _target_facts(session, members[0].item.target, urns)
@@ -165,7 +174,7 @@ async def reconcile_items(session: AsyncSession, items: List[ReconcileItem]) -> 
     results = []
     reports = []
     for p in prepared:
-        lookup, types = facts[(p.item.target.workspace_id, p.item.target.data_source_id)]
+        lookup, types = facts[graph_of(p)]
         report = reconcile_view(
             p.effective, exported=p.item.exported, lookup=lookup, types=types,
             policy=await _policy(session, p.item.view_type),
@@ -260,8 +269,9 @@ async def _report_on(session: AsyncSession, item: ImportItem, definition: dict, 
                      view_type: str) -> Dict[str, Any]:
     """How ``definition`` matches the target graph: the authoritative record, taken on what is
     actually written."""
-    lookup, types = await _target_facts(session, Target(workspace_id, item.target.data_source_id),
-                                        sorted(collect(definition).urns))
+    lookup, types = await _target_facts(
+        session, Target(workspace_id, item.target.data_source_id, branch_id=item.target.branch_id),
+        sorted(collect(definition).urns))
     return reconcile_view(definition, exported=item.exported, lookup=lookup, types=types,
                           policy=await _policy(session, view_type),
                           entities_resolved_at_export=item.entities_resolved)

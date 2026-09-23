@@ -25,6 +25,7 @@ from .rowmodel import denormalize_edge, denormalize_node
 _NODE_COL_ORDER = ["entity_id", "urn", "entityType", "displayName", "qualifiedName",
                    "description", "sourceSystem", "layerAssignment", "tags", "baseVersion"]
 _EDGE_COL_ORDER = ["entity_id", "edgeType", "sourceQualifiedName", "targetQualifiedName",
+                   "sourceUrn", "targetUrn",
                    "source_entity_id", "target_entity_id", "confidence", "baseVersion"]
 
 
@@ -35,6 +36,7 @@ def _now() -> str:
 def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[Dict[str, Any]]:
     """Denormalize a materialized ``{nodes, edges}`` state into template-shaped export records."""
     eid_to_qname = {eid: p.get("qualifiedName") for eid, p in nodes.items()}
+    eid_to_urn = {eid: p.get("urn") for eid, p in nodes.items()}
     node_records = [
         {"kind": "node", **denormalize_node(eid, content_hash(p), p)} for eid, p in nodes.items()
     ]
@@ -42,7 +44,9 @@ def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[D
         {"kind": "edge", **denormalize_edge(
             eid, content_hash(p), p,
             source_qname=eid_to_qname.get(p.get("sourceEntityId")),
-            target_qname=eid_to_qname.get(p.get("targetEntityId")))}
+            target_qname=eid_to_qname.get(p.get("targetEntityId")),
+            source_urn=eid_to_urn.get(p.get("sourceEntityId")),
+            target_urn=eid_to_urn.get(p.get("targetEntityId")))}
         for eid, p in edges.items()
     ]
     return node_records + edge_records
@@ -184,10 +188,14 @@ def filter_to_selection(nodes, edges, ids=None, types=None):
 
 class ExportWorker:
     def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None,
-                 options: Optional[Dict[str, Any]] = None) -> None:
+                 options: Optional[Dict[str, Any]] = None, after_write=None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope
+        # Optional async ``(job_id, result_uri, summary) -> {"resultUri"?, "summary"?}``, run once the
+        # artifact is written and before the job completes: how a view package is built around the
+        # data (view_transfer.package.finish_export). What it returns updates the job.
+        self._after_write = after_write
         options = options or {}
         # Property names to emit as (empty) columns — "add a new property".
         self._extra_props = [p for p in (options.get("props") or []) if str(p).strip()]
@@ -230,10 +238,14 @@ class ExportWorker:
         stat = await self._store.put_stream(result_uri, adapter.write(_iter(), columns=columns))
 
         summary = {"nodes": len(nodes), "edges": len(edges), "bytes": stat.size}
+        finished = (await self._after_write(job_id, result_uri, summary) or {}) if self._after_write else {}
+        summary = {**summary, **(finished.get("summary") or {})}
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             row.status = "completed"
             row.completed_at = _now()
             row.updated_at = _now()
             row.summary = summary
+            if finished.get("resultUri"):
+                row.result_uri = finished["resultUri"]
         return summary

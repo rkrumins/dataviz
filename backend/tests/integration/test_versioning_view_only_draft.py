@@ -3,7 +3,8 @@
 Such a draft has no graph changes, yet publishing it is real: its views go live with it. So
 publishing it directly still resolves the review raised from it (a live review on a merged
 branch would be a zombie: unmergeable, yet shown as actionable), and ``branch_statuses`` tells
-the views' settling pass which drafts are merged or abandoned.
+the views' settling pass which drafts are merged or abandoned. ``claim_draft`` lets a view
+imported with a package's data go into the draft that data opened, and only its owner's.
 """
 import asyncio
 import os
@@ -11,7 +12,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 
 
 async def _run() -> None:
@@ -37,6 +38,17 @@ async def _run() -> None:
     assert await svc.branch_statuses([views_only, abandoned, still_open, "br_missing"]) == {
         views_only: "merged", abandoned: "abandoned", still_open: "open",
     }
+
+    # A package's data opened a draft for no view yet; the new view imported with it claims it.
+    for_data = await svc.open_draft(graph_id=gid, owner="alice", name="Import: Finance lineage")
+    claimed = await svc.claim_draft(graph_id=gid, branch_id=for_data, actor="alice", view_id="view_new")
+    assert claimed["originating_view_id"] == "view_new"
+    again = await svc.claim_draft(graph_id=gid, branch_id=for_data, actor="alice", view_id="view_other")
+    assert again["originating_view_id"] == "view_new", "a draft already for a view stays that view's"
+    with pytest.raises(AccessDenied):
+        await svc.claim_draft(graph_id=gid, branch_id=for_data, actor="bob")
+    with pytest.raises(ValueError):
+        await svc.claim_draft(graph_id=gid, branch_id=abandoned, actor="alice")
 
     await db.dispose_engine()
 

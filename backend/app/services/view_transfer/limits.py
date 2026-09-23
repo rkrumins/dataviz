@@ -23,3 +23,13 @@ MAX_JSON_DEPTH = 64
 
 #: Longest string accepted for a name.
 MAX_NAME_LENGTH = 500
+
+#: Bytes in one uploaded view package (a view with its data), compressed.
+MAX_PACKAGE_BYTES = 100 * 1024 * 1024
+
+#: Bytes the data part of a package may decompress to. Graph data compresses about ten to one;
+#: this is the ceiling that stops a small archive from unpacking into something enormous.
+MAX_PACKAGE_DATA_BYTES = 2 * 1024 * 1024 * 1024
+
+#: Bytes a package's manifest may be.
+MAX_PACKAGE_MANIFEST_BYTES = 1024 * 1024

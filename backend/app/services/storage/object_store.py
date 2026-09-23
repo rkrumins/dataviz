@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Dict, Optional, Protocol
@@ -116,6 +117,27 @@ class LocalFsObjectStore:
     def upload_target(self, key: str) -> UploadTarget:
         self._resolve(key)  # validate the key up front
         return UploadTarget(key=key, mode="backend", url=None)
+
+    async def prune_older_than(self, prefix: str, seconds: float) -> int:
+        """Delete each entry directly under ``prefix`` last changed more than ``seconds`` ago.
+        Returns how many went. Optional: callers check for it (see view_transfer.package)."""
+        root = self._resolve(prefix)
+
+        def _prune() -> int:
+            if not root.is_dir():
+                return 0
+            cutoff = time.time() - seconds
+            gone = 0
+            for entry in root.iterdir():
+                if entry.stat().st_mtime < cutoff:
+                    if entry.is_dir():
+                        shutil.rmtree(entry, True)
+                    else:
+                        entry.unlink(True)
+                    gone += 1
+            return gone
+
+        return await asyncio.to_thread(_prune)
 
 
 def get_object_store() -> ObjectStore:

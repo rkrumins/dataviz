@@ -2616,9 +2616,10 @@ async def download_export(
     if job.get("status") != "completed":
         raise HTTPException(status_code=409, detail={"type": "not_ready", "status": job.get("status")})
     fmt = job.get("importFormat") or "ndjson"
+    filename = job.get("fileName") or f"export-{job_id}.{fmt}"      # a view package names itself
     return StreamingResponse(
-        stream, media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="export-{job_id}.{fmt}"'})
+        stream, media_type="application/zip" if filename.endswith(".zip") else "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 # --------------------------------------------------------------------------- #

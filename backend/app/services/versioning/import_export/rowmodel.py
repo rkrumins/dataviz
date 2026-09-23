@@ -5,7 +5,7 @@ One shared column schema across every format (xlsx/csv/tsv/ndjson/json):
     locked identity : entity_id, urn, baseVersion (=content_hash)
     node core       : entityType, displayName, qualifiedName, description, sourceSystem,
                       layerAssignment, tags
-    edge core       : edgeType, sourceQualifiedName, targetQualifiedName,
+    edge core       : edgeType, sourceQualifiedName, targetQualifiedName, sourceUrn, targetUrn,
                       source_entity_id, target_entity_id, confidence
     properties      : dynamic ``prop.<name>`` columns + a ``properties_json`` overflow
     op              : ``_op`` (blank = upsert, ``delete`` = delete)
@@ -28,6 +28,9 @@ _NODE_CORE = (
 )
 _EDGE_CORE = (
     "edgeType", "sourceQualifiedName", "targetQualifiedName",
+    # Endpoint URNs: entity ids are minted per graph, so an edge exported from one environment
+    # finds its endpoints in another by URN (the same data source onboarded twice shares them).
+    "sourceUrn", "targetUrn",
     "source_entity_id", "target_entity_id",
 )
 
@@ -149,8 +152,10 @@ def denormalize_edge(
     *,
     source_qname: Optional[str] = None,
     target_qname: Optional[str] = None,
+    source_urn: Optional[str] = None,
+    target_urn: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Edge version payload -> flat export record (endpoint ids + human qualified names)."""
+    """Edge version payload -> flat export record (endpoint ids, human qualified names and URNs)."""
     rec: Dict[str, Any] = {"entity_id": entity_id or "", "baseVersion": base_version or "", "_op": ""}
     if payload.get("edgeType") is not None:
         rec["edgeType"] = payload["edgeType"]
@@ -162,6 +167,10 @@ def denormalize_edge(
         rec["sourceQualifiedName"] = source_qname
     if target_qname is not None:
         rec["targetQualifiedName"] = target_qname
+    if source_urn:
+        rec["sourceUrn"] = source_urn
+    if target_urn:
+        rec["targetUrn"] = target_urn
     if payload.get("confidence") is not None:
         rec["confidence"] = payload["confidence"]
     _spill_properties(rec, payload.get("properties"))

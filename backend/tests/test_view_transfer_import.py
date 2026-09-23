@@ -54,8 +54,10 @@ class _Engine:
 @pytest.fixture
 def graph(monkeypatch):
     provider = _Provider()
+    provider.branches = []            # the draft each lookup read, if any
 
-    async def _engine_for(session, workspace_id, data_source_id):
+    async def _engine_for(session, workspace_id, data_source_id, *, branch_id=None, actor=None):
+        provider.branches.append(branch_id)
         return _Engine(provider)
 
     for module in ("export", "inspect", "importing"):

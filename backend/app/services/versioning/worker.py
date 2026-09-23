@@ -100,6 +100,12 @@ class ProjectionWorker:
             await draft_views.settle(self._versioning)
         except Exception:  # noqa: BLE001 — the drafts are swept; their views settle next pass
             logger.exception("settling the views of finished drafts failed")
+        try:
+            from backend.app.services.view_transfer.package import prune_uploads
+
+            await prune_uploads()
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("pruning view package uploads failed")
         return swept
 
     async def evict_once(self):

@@ -9,6 +9,10 @@ a large view's identity check is legitimately longer than the 30s default.
     POST /reconcile   views bound to targets → what matches there, and what would be written
     POST /import      one view → written, with an ``import`` version that proves what was stored;
                       or, on a version-controlled data source, staged in a draft to go live with it
+    POST /packages    views WITH their graph data → a View Package, built by an export job
+    POST /packages/inspect            a package (raw body) → verified, kept, and described
+    POST /packages/{uploadId}/data    its data → a new draft of the target, by an import job;
+                                      the view then follows into that draft (/import, stage)
 
 Import is one view per call: every request stays well inside the timeout tier, a multi-view
 import reports honest progress, one failure doesn't block the rest, and ``requestId`` makes a
@@ -16,17 +20,24 @@ retry safe.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
+import tempfile
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.v1.endpoints.versioning import _domain_errors, get_versioning_service
+from backend.app.api.v1.endpoints.versioning import (
+    _domain_errors, get_import_export_service, get_versioning_service,
+)
 from backend.app.api.v1.endpoints.view_guards import editable_view, readable_view
 from backend.app.api.v1.endpoints.views import (
     _compute_ontology_digest,
@@ -40,7 +51,8 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.db.repositories import data_source_repo, view_activity_repo, view_repo
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services.view_transfer import importing, limits
+from backend.app.services.storage.object_store import storage_key
+from backend.app.services.view_transfer import importing, limits, package
 from backend.app.services.view_transfer.bundle import BundleError, check_depth, parse_bundle
 from backend.app.services.view_transfer.export import export_views
 from backend.app.services.view_transfer.inspect import identity_matches, target_suggestions, view_payload
@@ -119,6 +131,301 @@ async def export_view_file(
         headers["X-View-Version"] = str(sealed[0].version.version)
     body = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
     return Response(content=body, media_type="application/json", headers=headers)
+
+
+# ── A view with its data: the View Package ──────────────────────────────────
+
+
+class PackageRequest(BaseModel):
+    views: List[ExportViewRef] = Field(..., min_length=1, max_length=limits.MAX_VIEWS_PER_BUNDLE)
+    #: ``view``: the one view's own entities; ``source``: the whole data source.
+    scope: Literal["view", "source"] = "view"
+    #: ``published``, or ``draft``: the caller's own draft of the view.
+    dataVersion: Literal["published", "draft"] = "published"
+    message: Optional[str] = Field(None, max_length=500)
+
+
+async def _package_bytes(data: bytes):
+    yield data
+
+
+@router.post("/packages", dependencies=[Depends(require_feature("viewExportEnabled")),
+                                        Depends(require_feature("graphExportEnabled"))])
+async def export_view_package(
+    background: BackgroundTasks,
+    req: PackageRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Package views with their graph data, for another environment to import into a draft.
+
+    A package holds views from ONE version-controlled data source. The views are sealed as
+    versions, exactly as a view file's are; the data is the data source's own export (the
+    view's entities, or the whole source), written by an export job that packages the two. Poll
+    and download it through the data source's export endpoints; the download is named for it.
+    """
+    if req.scope == "view" and len(req.views) != 1:
+        raise HTTPException(status_code=422, detail=(
+            "A package of one view's data holds that one view. Package the whole data source to "
+            "take several views."))
+    seen = set()
+    requests = []
+    for ref in req.views:
+        if ref.viewId in seen:
+            raise HTTPException(status_code=422, detail=f"View '{ref.viewId}' is listed twice")
+        seen.add(ref.viewId)
+        requests.append((await readable_view(session, ref.viewId, user, claims), ref.version))
+    first = requests[0][0]
+    sources = {(ds.id if ds else None) for ds in [await effective_data_source(session, row) for row, _ in requests]}
+    ds_id = next(iter(sources))
+    if len(sources) != 1 or ds_id is None or any(row.workspace_id != first.workspace_id for row, _ in requests):
+        raise HTTPException(status_code=422, detail="A package holds views from one data source.")
+    if not has_permission(claims, "workspace:datasource:read", workspace_id=first.workspace_id):
+        raise HTTPException(status_code=403, detail="Missing permission: workspace:datasource:read")
+    graph = await svc.get_graph_by_data_source(ds_id)
+    if graph is None or graph.get("workspace_id") != first.workspace_id:
+        raise HTTPException(status_code=422, detail={
+            "type": "not_versioned",
+            "message": "Only a data source under version control can be packaged with its data.",
+        })
+    actor = _actor(user)
+    branch_id = None
+    if req.dataVersion == "draft":
+        resolved = await svc.resolve_graph(data_source_id=ds_id, actor=actor, workspace_id=first.workspace_id,
+                                           open_draft_if_absent=False, originating_view_id=first.id)
+        branch_id = ((resolved or {}).get("my_draft") or {}).get("branch_id")
+        if not branch_id:
+            raise HTTPException(status_code=422, detail="You have no draft of this view to package.")
+
+    try:
+        bundle, sealed = await export_views(session, requests, actor=actor, message=req.message)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    for item in sealed:
+        await view_activity_repo.record_view_activity(
+            session, view_id=item.row.id, workspace_id=item.row.workspace_id, action="exported",
+            actor=actor, summary=f"Exported v{item.version.version} with its data to a package",
+            changes={"version": item.version.version, "definitionHash": item.version.content_hash,
+                     "package": {"scope": req.scope, "dataVersion": req.dataVersion}},
+        )
+    if len(sealed) == 1:
+        filename = f"{_slug(sealed[0].label.get('name'))}.v{sealed[0].version.version}.view-package.zip"
+    else:
+        filename = f"{len(sealed)}-views.view-package.zip"
+
+    with _domain_errors():
+        created = await ie.create_export_job(
+            workspace_id=first.workspace_id, data_source_id=ds_id, graph_id=graph["graph_id"], actor=actor,
+            export_format="ndjson", scope_view_id=first.id if req.scope == "view" else None,
+            branch_id=branch_id, provider_id=graph.get("provider_id"),
+            package={"fileName": filename, "scope": req.scope, "dataVersion": req.dataVersion,
+                     "views": len(sealed), "bundleHash": bundle["bundleHash"]},
+        )
+    prefix = created["result_uri"].rsplit("/", 1)[0]
+    await ie.store.put_stream(f"{prefix}/view-bundle.json",
+                              _package_bytes(json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")))
+    background.add_task(ie.run_export_safe, created["job_id"])
+    return {"jobId": created["job_id"], "graphId": graph["graph_id"], "workspaceId": first.workspace_id,
+            "fileName": filename, "bundleHash": bundle["bundleHash"], "status": "running",
+            "views": [{"viewId": item.row.id, "version": item.version.version} for item in sealed]}
+
+
+#: Where an inspected package waits for its data to be imported (pruned after a day).
+_UPLOADS = package.UPLOADS_PREFIX
+_UPLOAD_ID = re.compile(r"^up_[0-9a-f]{32}$")
+
+
+def _upload_key(upload_id: str, name: str) -> str:
+    return storage_key(_UPLOADS, upload_id, name)
+
+
+def _package_error(exc: package.PackageError) -> HTTPException:
+    return HTTPException(status_code=413 if exc.code == "too_large" else 422, detail={
+        "type": "invalid_package", "code": exc.code, "message": str(exc),
+    })
+
+
+async def _spool(request: Request, cap: int) -> str:
+    """The request body in a temporary file (the caller removes it), refused (413) as soon as it
+    passes ``cap``."""
+    too_big = HTTPException(status_code=413, detail={
+        "type": "invalid_package", "code": "too_large",
+        "message": f"This file is larger than {cap // (1024 * 1024)} MB, the most a package can be.",
+    })
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > cap:
+        raise too_big
+    fd, path = tempfile.mkstemp(suffix=".zip")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > cap:
+                    raise too_big
+                await asyncio.to_thread(out.write, chunk)
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
+
+
+async def _read_json(store, key: str) -> Optional[Dict[str, Any]]:
+    if not (await store.stat(key)).exists:
+        return None
+    return json.loads(b"".join([c async for c in store.open_stream(key)]).decode("utf-8"))
+
+
+@router.post("/packages/inspect", dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def inspect_view_package(
+    request: Request,
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Read a view package (the raw body): verify every part, keep it for the data import that
+    follows (``uploadId``), and describe it as ``/inspect`` describes a view file, plus the
+    package itself. Only data sources under version control can take its data, since it goes into
+    a draft, so each suggested target says whether it is (``versioned``)."""
+    await require_versioning_enabled()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to import a view with its data.")
+    path = await _spool(request, limits.MAX_PACKAGE_BYTES)
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        if head != _ZIP_MAGIC:
+            raise HTTPException(status_code=422, detail={
+                "type": "invalid_package", "code": "view_file",
+                "message": "This is a view file, without data. Import it with \"Import a view\".",
+            })
+        try:
+            parsed_package = await asyncio.to_thread(package.read_package, path)
+        except package.PackageError as exc:
+            raise _package_error(exc)
+    finally:
+        os.unlink(path)
+    try:
+        try:
+            parsed = parse_bundle(parsed_package.bundle)
+        except BundleError as exc:
+            raise _bundle_error(exc)
+        upload_id = f"up_{uuid.uuid4().hex}"
+        await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_DATA),
+                                  package.file_chunks(parsed_package.data_path))
+    finally:
+        os.unlink(parsed_package.data_path)
+    manifest = parsed_package.manifest
+    await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD), _package_bytes(json.dumps({
+        "owner": user.id, "createdAt": datetime.now(timezone.utc).isoformat(),
+        "views": [(v.raw.get("metadata") or {}).get("name") for v in parsed.views],
+    }).encode("utf-8")))
+
+    ctx = await _viewer_context(session, user, claims) if rbac_flag("RBAC_ENFORCE_VIEWS") else None
+    suggestions = await target_suggestions(session, parsed, claims)
+    versioned: Dict[str, bool] = {}
+    for items in suggestions.values():
+        for item in items:
+            ds = item.get("dataSourceId")
+            if ds not in versioned:
+                graph = await svc.get_graph_by_data_source(ds) if ds else None
+                versioned[ds] = graph is not None and graph.get("workspace_id") == item.get("workspaceId")
+            item["versioned"] = versioned[ds]
+    return {
+        "uploadId": upload_id,
+        "package": {
+            "scope": manifest.get("scope"), "data": manifest.get("data"), "createdAt": manifest.get("createdAt"),
+            "parts": parsed_package.parts,
+            "integrity": "verified" if parsed_package.verified else "modified",
+        },
+        "bundle": parsed.bundle.model_dump(mode="json", exclude={"views"}),
+        "integrity": parsed.integrity,
+        "notices": parsed.notices,
+        "views": view_payload(parsed),
+        "identityMatches": await identity_matches(session, parsed, ctx),
+        "targetSuggestions": suggestions,
+    }
+
+
+class PackageDataRequest(BaseModel):
+    workspaceId: str = Field(..., max_length=128)
+    dataSourceId: str = Field(..., max_length=128)
+    #: The view here the package's view will update, if it updates one: the draft is for it.
+    viewId: Optional[str] = Field(None, max_length=128)
+    draftName: Optional[str] = Field(None, max_length=200)
+
+
+@router.post("/packages/{upload_id}/data", dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def import_package_data(
+    upload_id: str,
+    background: BackgroundTasks,
+    body: PackageDataRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Bring an inspected package's graph data into a new draft of the target data source: the
+    first half of importing a view with its data. The view follows into the same draft
+    (``/import`` with ``stage`` and this draft as ``target.branchId``), so the two are reviewed
+    and published together. It only ever adds and updates: a package never deletes anything.
+
+    Progress is the import job's, through the data source's import endpoints. Asking again for
+    the same upload answers with the job already started.
+    """
+    await require_versioning_enabled()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to import a view with its data.")
+    expired = HTTPException(status_code=404, detail="This package upload has expired. Choose the file again.")
+    if not _UPLOAD_ID.match(upload_id):
+        raise expired
+    record = await _read_json(ie.store, _upload_key(upload_id, package.UPLOAD_RECORD))
+    if record is None or record.get("owner") != user.id:
+        raise expired
+    if record.get("data"):
+        return record["data"]
+
+    workspace = await session.get(WorkspaceORM, body.workspaceId)
+    if workspace is None or workspace.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Workspace '{body.workspaceId}' not found")
+    ds = await data_source_repo.get_data_source_orm(session, body.dataSourceId)
+    if ds is None or ds.workspace_id != body.workspaceId:
+        raise HTTPException(status_code=422, detail="That data source isn't part of this workspace.")
+    target = importing.Target(body.workspaceId, body.dataSourceId)
+    graph = await _draft_graph(svc, target, claims)
+    if body.viewId:
+        row = await editable_view(session, body.viewId, user, claims)
+        view_ds = await effective_data_source(session, row)
+        if view_ds is None or view_ds.id != body.dataSourceId:
+            raise HTTPException(status_code=422, detail="That view reads another data source.")
+    if not (await ie.store.stat(_upload_key(upload_id, package.UPLOAD_DATA))).exists:
+        raise expired
+
+    names = record.get("views") or []
+    name = (body.draftName or (f"Import: {names[0]}" if len(names) == 1 else f"Import: {len(names)} views"))[:200]
+    with _domain_errors():
+        branch_id = await svc.open_draft(graph_id=graph["graph_id"], owner=user.id, name=name,
+                                         originating_view_id=body.viewId)
+        created = await ie.create_import_job(
+            workspace_id=body.workspaceId, data_source_id=body.dataSourceId, graph_id=graph["graph_id"],
+            actor=user.id, import_format="ndjson", branch_id=branch_id, reconcile_mode="upsert",
+            idempotency_key=upload_id, name=name,
+        )
+    await ie.store.put_stream(created["source_uri"],
+                              ie.store.open_stream(_upload_key(upload_id, package.UPLOAD_DATA)))
+    data = {"jobId": created["job_id"], "branchId": branch_id, "graphId": graph["graph_id"],
+            "workspaceId": body.workspaceId, "dataSourceId": body.dataSourceId, "draftName": name}
+    await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
+                              _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
+    await ie.store.delete(_upload_key(upload_id, package.UPLOAD_DATA))     # the job has its own copy
+    background.add_task(ie.run_import_safe, created["job_id"])
+    return data
 
 
 # ── Import ──────────────────────────────────────────────────────────────────
@@ -223,6 +530,9 @@ class TargetRef(BaseModel):
     workspaceId: Optional[str] = Field(None, max_length=128)
     dataSourceId: Optional[str] = Field(None, max_length=128)
     viewId: Optional[str] = Field(None, max_length=128)
+    #: One of the caller's drafts of that data source: checked against as the draft reads (a
+    #: package's data counts as there), and, when staging, the draft the view goes into.
+    branchId: Optional[str] = Field(None, max_length=128)
 
 
 class ReconcileView(BaseModel):
@@ -244,13 +554,31 @@ class ReconcileRequest(BaseModel):
 
 async def _resolve_target(
     session: AsyncSession, target: TargetRef, action: str, portable_id: Optional[str],
-    user, claims: PermissionClaims,
+    user, claims: PermissionClaims, svc: Optional[GraphVersioningService] = None,
 ) -> importing.Target:
-    """Check the caller may import there, and pin down the data source it reads.
+    """Check the caller may import there, and pin down the data source (and draft) it reads.
 
     Update and overwrite need edit access to the view and keep the view's own scope. Create and
     copy need ``workspace:view:create`` in the workspace, and a data source that is part of it.
+    A draft named in the target must be the caller's own open draft of that data source.
     """
+    resolved = await _resolve_scope(session, target, action, portable_id, user, claims)
+    if target.branchId:
+        if svc is None or user is None:
+            raise HTTPException(status_code=422, detail="Drafts can't be read here.")
+        graph = await svc.get_graph_by_data_source(resolved.data_source_id) if resolved.data_source_id else None
+        if graph is None or graph.get("workspace_id") != resolved.workspace_id:
+            raise HTTPException(status_code=422, detail="That draft isn't a draft of this data source.")
+        with _domain_errors():
+            await svc.claim_draft(graph_id=graph["graph_id"], branch_id=target.branchId, actor=user.id)
+        resolved.branch_id = target.branchId
+    return resolved
+
+
+async def _resolve_scope(
+    session: AsyncSession, target: TargetRef, action: str, portable_id: Optional[str],
+    user, claims: PermissionClaims,
+) -> importing.Target:
     if action in ("update", "overwrite"):
         if not target.viewId:
             raise HTTPException(status_code=422, detail="Choose the view to update.")
@@ -296,12 +624,14 @@ async def reconcile_view_file(
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """What each view would be, and how well it matches, where it's going. Writes nothing.
 
     For each view: the definition that would be written (the file's, merged with the view here
-    when asked, with the resolutions applied) and its reconciliation against the target graph.
-    Views sharing a target data source share one identity lookup.
+    when asked, with the resolutions applied) and its reconciliation against the target graph,
+    or the caller's draft of it when the target names one. Views sharing a target graph share
+    one identity lookup.
     """
     seen = set()
     total = 0
@@ -322,7 +652,7 @@ async def reconcile_view_file(
             entities_resolved=view.manifest.entitiesResolved,
             history_hashes=view.history, action=view.action, strategy=view.strategy,
             rewrite=view.resolutions.to_rewrite(),
-            target=await _resolve_target(session, view.target, view.action, view.portableId, user, claims),
+            target=await _resolve_target(session, view.target, view.action, view.portableId, user, claims, svc),
         ))
     return await importing.reconcile_items(session, items)
 
@@ -431,6 +761,9 @@ async def import_view_file(
             raise HTTPException(status_code=422, detail=(
                 "A view imported into a draft goes live as private or shared with its workspace. "
                 "Publish it to everyone once it's live."))
+    if req.target.branchId and not req.stage:
+        raise HTTPException(status_code=422, detail=(
+            "A view checked against a draft goes into that draft: import it with stage set."))
     if req.requestId:
         previous = await importing.replay(session, req.requestId, actor)
         if previous is not None:
@@ -442,7 +775,7 @@ async def import_view_file(
     if _assignment_count(definition) > limits.MAX_ASSIGNMENTS_PER_BUNDLE:
         raise HTTPException(status_code=422, detail=(
             f"This view holds more than {limits.MAX_ASSIGNMENTS_PER_BUNDLE:,} assignments."))
-    target = await _resolve_target(session, req.target, req.action, req.origin.portableId, user, claims)
+    target = await _resolve_target(session, req.target, req.action, req.origin.portableId, user, claims, svc)
     view_type = req.metadata.viewType
     if req.action in ("create", "copy"):
         await authorize_view_create(claims, session, workspace_id=target.workspace_id,
@@ -470,7 +803,9 @@ async def import_view_file(
 
     async def own_draft_for(row: ViewORM) -> str:
         """An update goes into the importer's draft for the view: the one they have open, or a
-        new one (a person has one draft per view)."""
+        new one (a person has one draft per view); or into the draft the target names."""
+        if target.branch_id:
+            return target.branch_id
         with _domain_errors():
             resolved = await svc.resolve_graph(
                 data_source_id=target.data_source_id, actor=actor, workspace_id=target.workspace_id,
@@ -482,8 +817,13 @@ async def import_view_file(
         return draft["branch_id"]
 
     async def new_draft_for(row: ViewORM) -> str:
-        """A new view gets a draft of its own, named for it."""
+        """A new view gets a draft of its own, named for it; or goes into the draft the target
+        names (the one its package's data went into), which becomes its draft if it has no view."""
         with _domain_errors():
+            if target.branch_id:
+                await svc.claim_draft(graph_id=graph["graph_id"], branch_id=target.branch_id,
+                                      actor=actor, view_id=row.id)
+                return target.branch_id
             return await svc.open_draft(graph_id=graph["graph_id"], owner=actor,
                                         name=f"Import: {row.name}"[:200], originating_view_id=row.id)
 

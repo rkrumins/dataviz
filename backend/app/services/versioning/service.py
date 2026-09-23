@@ -1802,6 +1802,26 @@ class GraphVersioningService:
             pr.merged_via = merged_via
             pr.updated_at = _now()
 
+    async def claim_draft(
+        self, *, graph_id: str, branch_id: str, actor: str, view_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """A draft an import writes into: open, on ``graph_id``, and ``actor``'s own. With
+        ``view_id``, a draft that names no view yet becomes that view's (a draft opened for a
+        package's data, then given the new view that came with it), so the view opens on it.
+
+        Raises ``ValueError`` for an unknown or closed draft and :class:`AccessDenied` for someone
+        else's."""
+        async with self._session() as s:
+            draft = await self._get_branch(s, graph_id, branch_id)
+            if draft.kind != "draft":
+                raise ValueError("not a draft")
+            self._require_open(draft)
+            if draft.owner != actor:
+                raise AccessDenied("this draft belongs to someone else")
+            if view_id and draft.originating_view_id is None:
+                draft.originating_view_id = view_id
+            return {"branch_id": draft.id, "name": draft.name, "originating_view_id": draft.originating_view_id}
+
     async def branch_statuses(self, branch_ids: Sequence[str]) -> Dict[str, str]:
         """The status (open, publishing, merged, abandoned) of each branch named that exists."""
         ids = sorted(set(branch_ids))
