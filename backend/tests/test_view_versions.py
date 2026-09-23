@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import json
 
+import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -13,6 +14,8 @@ from backend.app.db.models import ViewActivityLogORM, ViewLayoutOverlayORM, View
 from backend.app.db.repositories import view_repo, view_version_repo
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
+
+pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
 
 
 async def _workspace(client: AsyncClient) -> str:

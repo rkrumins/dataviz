@@ -358,9 +358,15 @@ The transfer routes run under a 120-second timeout tier (`_TimeoutMiddleware`), 
 
 ## Switches, activity and telemetry
 
-- **Admin → Features → Export views** (`viewExportEnabled`) and **Import views**
-  (`viewImportEnabled`), both on by default. A view with its data needs **Export graph data**
-  (`graphExportEnabled`) as well to export, and version control to import.
+- **Admin → Features → View versions, import and export** (`viewPortabilityEnabled`) is a
+  preview, **off by default**. While it is off, Versions, Export and Import appear nowhere, and
+  the server refuses every route above except `view-changes` with `403 feature_disabled`.
+  Versions are still recorded, so turning it on shows each view's whole history. A draft that
+  already holds an import still goes live, or is discarded, with that draft.
+- **Export views** (`viewExportEnabled`) and **Import views** (`viewImportEnabled`), both on by
+  default, then decide which directions are allowed. They do nothing while the preview is off.
+  A view with its data needs **Export graph data** (`graphExportEnabled`) as well to export, and
+  version control to import.
 - **Activity**: `exported`, `imported`, `version_saved` and `version_restored` entries on the view,
   for example "Imported from dev · Finance lineage v12 · 99.5% matched".
 - **Telemetry**: `view.export` (how many views, current or earlier version, with or without data)

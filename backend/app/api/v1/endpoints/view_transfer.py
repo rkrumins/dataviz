@@ -62,7 +62,9 @@ from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.models.view_transfer import HistoryEntry, Manifest
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+# The whole feature is a preview behind one switch (Admin → Features); each route below also
+# answers to its own direction's switch.
+router = APIRouter(dependencies=[Depends(require_feature("viewPortabilityEnabled"))])
 
 
 def _actor(user) -> Optional[str]:

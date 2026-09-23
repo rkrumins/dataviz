@@ -60,7 +60,7 @@ import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
-import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
@@ -180,8 +180,7 @@ export default function WorkspaceViewsSection({
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
-    const exportEnabled = useFeature('viewExportEnabled')
-    const importEnabled = useFeature('viewImportEnabled')
+    const { canExport: exportEnabled, canImport: importEnabled } = useViewPortability()
     const [shareView, setShareView] = useState<{ id: string; name: string; visibility: string } | null>(null)
     const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
     const [showBulkDelete, setShowBulkDelete] = useState(false)

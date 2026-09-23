@@ -348,6 +348,29 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Exports already downloaded are not recalled — this stops NEW ones",
         ),
     ),
+    # The preview switch for view versions and for moving views between environments: it gates
+    # every surface of both, router-wide on the server. Export views and Import views then decide
+    # which directions are allowed, and do nothing while this is off.
+    "viewPortabilityEnabled": FeatureWiring(
+        key="viewPortabilityEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Every /views/transfer route — export, inspect, reconcile, import, packages",
+            "Every /views/{id}/versions route — history, compare, save, restore",
+        ),
+        ui_surfaces=(
+            "Versions and Export on the view header, the view card menu and the Explorer bulk bar",
+            "The 'Import a view' journey in the View wizard, and 'Import view' in the Explorer "
+            "and the workspace Views manager",
+            "The 'This view' section of the canvas Import / Export menu",
+        ),
+        still_allowed=(
+            "Every view keeps working exactly as it is",
+            "Versions keep being recorded, so turning this on shows each view's whole history",
+            "Imports already waiting in a draft go live, or are discarded, with their draft",
+        ),
+    ),
     "viewExportEnabled": FeatureWiring(
         key="viewExportEnabled",
         posture="capability",
@@ -363,6 +386,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Reading, editing and versioning every view",
             "Files already downloaded are not recalled — this stops NEW ones",
         ),
+        depends_on=("viewPortabilityEnabled",),
     ),
     "viewImportEnabled": FeatureWiring(
         key="viewImportEnabled",
@@ -377,6 +401,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "'Import view' buttons in the Explorer and the workspace Views manager",
         ),
         still_allowed=("Building views in the wizard", "Exporting views"),
+        depends_on=("viewPortabilityEnabled",),
     ),
     "blankModelsEnabled": FeatureWiring(
         key="blankModelsEnabled",

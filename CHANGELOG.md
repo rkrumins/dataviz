@@ -68,9 +68,13 @@ view's card menu in the Explorer has **Export…**, **Versions** and **Update fr
 canvas's **Import / Export** menu has a new **This view** section: export the view, export it with
 its data, or update it from a file.
 
-**Two admin switches**, Admin → Features → **Export views** (`viewExportEnabled`) and **Import
-views** (`viewImportEnabled`), on by default. Exporting a view with its data also needs **Export
-graph data**; importing one needs version control.
+**All of this is a preview, off until an admin turns it on**: Admin → Features → **View versions,
+import and export** (`viewPortabilityEnabled`). While it is off, none of the actions above appear
+and the server refuses their requests. Versions are recorded all the same, so turning it on shows
+each view's whole history. Two more switches, **Export views** (`viewExportEnabled`) and **Import
+views** (`viewImportEnabled`), are on by default and decide which directions are allowed once the
+preview is on. Exporting a view with its data also needs **Export graph data**; importing one needs
+version control.
 
 The formats, rules and API are in `docs/features/view-portability.md`. The file format's JSON
 Schema is `docs/features/view-bundle.v1.schema.json`, rendered from the importer's own model.
@@ -106,6 +110,9 @@ existing views in batches) and the `view_versions` table, and widens the view-ac
 `20260925_1000_view_draft_stage` adds `views.draft_branch_id` and the staged-import columns on
 `view_layout_overlays`. Existing views get no versions up front; each gets its first the first time
 it is needed.
+
+Nothing changes for users on upgrade: the feature is a preview and ships off. To try it, turn on
+Admin → Features → **View versions, import and export**.
 
 The transfer routes run under a new 120-second timeout tier (`HTTP_TIMEOUT_VIEW_TRANSFER_SECS`),
 below nginx's 180 s. Package uploads wait in the object store under `transfer-uploads/` and the

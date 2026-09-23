@@ -33,6 +33,7 @@ from backend.app.db.models import (
     OntologyORM,
     UserORM,
     ViewORM,
+    ViewVersionORM,
     view_is_live,
 )
 
@@ -167,6 +168,25 @@ async def _layer_history_probe(session: AsyncSession) -> list[ImpactFact]:
     ]
 
 
+async def _view_history_probe(session: AsyncSession) -> list[ImpactFact]:
+    r = await session.execute(
+        select(func.count(func.distinct(ViewVersionORM.view_id)))
+        .join(ViewORM, ViewORM.id == ViewVersionORM.view_id)
+        .where(view_is_live())
+    )
+    views = int(r.scalar() or 0)
+    if not views:
+        return []
+    return [
+        ImpactFact(
+            count=views,
+            label="views with a version history" if views != 1 else "view with a version history",
+            consequence="Their history is hidden, not deleted. Versions keep being recorded, and all of them return the moment this is switched back on.",
+            tone="neutral",
+        )
+    ]
+
+
 async def _signup_probe(session: AsyncSession) -> list[ImpactFact]:
     since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     r = await session.execute(
@@ -248,6 +268,7 @@ PROBES: dict[str, Callable[[AsyncSession], Awaitable[list[ImpactFact]]]] = {
     "semanticLayerImportEnabled": _semantic_layers_probe,
     "semanticLayerNonAdminEditing": _semantic_layers_probe,
     "semanticLayerVersionHistory": _layer_history_probe,
+    "viewPortabilityEnabled": _view_history_probe,
     "signupEnabled": _signup_probe,
     "inviteLinksEnabled": _invite_links_probe,
     "announcementsEnabled": _announcements_probe,

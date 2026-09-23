@@ -84,6 +84,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "graphExportEnabled":
         "Exporting graph data is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "viewPortabilityEnabled":
+        "View versions, import and export are a preview that is turned off for this deployment. "
+        "An administrator can turn them on under Admin → Features.",
     "viewExportEnabled":
         "Exporting views to a file is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -518,6 +521,33 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "viewPortabilityEnabled",
+        "name": "View versions, import and export",
+        "description": (
+            "Keep a history of each view's design that people can compare and restore, and let "
+            "them move views between environments as files, with or without their graph data. "
+            "Export views and Import views decide which directions are allowed."
+        ),
+        "impact_when_off": (
+            "Versions, Export and Import disappear from every view, the Explorer and the View "
+            "wizard, and the server refuses those requests. Views keep working exactly as they "
+            "are, and versions keep being recorded, so turning this on later shows each view's "
+            "whole history. Imports already waiting in a draft go live, or are discarded, with "
+            "their draft."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. Turn it on to try moving views from one environment to another, for "
+            "example from development to production, and to give people a view's history."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
         "key": "viewExportEnabled",
         "name": "Export views",
         "description": (
@@ -539,7 +569,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "places, not the graph data itself; exporting the data is 'Export graph data'. "
             "Turn both off if nothing about your lineage should leave the product."
         ),
-        "sort_order": 2,
+        "sort_order": 3,
         "deprecated": False,
     },
     {
@@ -562,7 +592,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "Turn this off to make every view in this environment be built here, in the wizard, "
             "rather than arrive as a file from somewhere else."
         ),
-        "sort_order": 3,
+        "sort_order": 4,
         "deprecated": False,
     },
     # ── Display & UI ──────────────────────────────────────────────────────────

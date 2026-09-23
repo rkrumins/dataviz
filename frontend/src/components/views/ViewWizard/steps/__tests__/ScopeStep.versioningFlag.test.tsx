@@ -33,8 +33,10 @@ vi.mock('@/store/providerHealthModel', () => ({
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { ScopeStep } from '../ScopeStep'
 
-function setVersioning(on: boolean, viewImportEnabled = true) {
-  useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: on, viewImportEnabled } })
+function setVersioning(on: boolean, viewImportEnabled = true, viewPortabilityEnabled = true) {
+  useFeaturesStore.setState({
+    values: { ...DEFAULT_FEATURES, versioningEnabled: on, viewPortabilityEnabled, viewImportEnabled },
+  })
 }
 
 function renderScope() {
@@ -89,5 +91,12 @@ describe('ScopeStep · the versioningEnabled gate', () => {
     expect(screen.getByText('Use existing data')).toBeInTheDocument()
     expect(screen.getByText('Import a view')).toBeInTheDocument()
     expect(screen.queryByText('Start from blank')).not.toBeInTheDocument()
+  })
+
+  it('does not offer importing a view while its preview is off, even with Import views on', () => {
+    setVersioning(true, true, false)
+    renderScope()
+    expect(screen.getByText('Start from blank')).toBeInTheDocument()
+    expect(screen.queryByText('Import a view')).not.toBeInTheDocument()
   })
 })

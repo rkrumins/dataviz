@@ -94,6 +94,7 @@ import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
 import { useViewVersionStatus } from '@/hooks/useViewVersions'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { timeAgo } from '@/lib/timeAgo'
 import {
@@ -103,7 +104,6 @@ import {
 import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
-import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
@@ -209,11 +209,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     }
     const [shareOpen, setShareOpen] = useState(false)
     const [exportOpen, setExportOpen] = useState(false)
-    const exportEnabled = useFeature('viewExportEnabled')
+    // Versions and Export are a preview behind one switch (Admin → Features).
+    const portability = useViewPortability()
+    const exportEnabled = portability.canExport
     const [versionsOpen, setVersionsOpen] = useState(false)
     // The latest version of the view's design, and whether it has changed since: the chip's
     // "v8 •". Above the `!view` guard, like every hook here.
-    const { data: versionStatus } = useViewVersionStatus(viewId)
+    const { data: versionStatus } = useViewVersionStatus(viewId, portability.versions)
     // Double-click the name to rename it — the affordance came up with the name
     // when the canvas toolbar's duplicate title was removed. The long way round
     // (Details → Name) is unchanged; this is the shortcut people already had.
@@ -660,30 +662,32 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {/* The history of the view's DESIGN, which every view has; not the
                         graph's drafts and commits, which Reviews opens. The dot says the
                         design has changed since its latest version. */}
-                    <HoverTip
-                        className="inline-flex"
-                        label="Versions of this view’s design: its layers, placements and settings"
-                        detail={versionStatus?.dirty
-                            ? `Changed since v${versionStatus.headVersion ?? 1}. Save it as a version, compare, or go back to an earlier one`
-                            : 'Compare versions, or go back to an earlier one'}
-                    >
-                        <button
-                            type="button"
-                            onClick={() => setVersionsOpen(true)}
-                            className={actionButtonClass}
-                            aria-label={versionStatus?.headVersion
-                                ? `Versions, at v${versionStatus.headVersion}${versionStatus.dirty ? ' with unsaved changes' : ''}`
-                                : 'Versions'}
+                    {portability.versions && (
+                        <HoverTip
+                            className="inline-flex"
+                            label="Versions of this view’s design: its layers, placements and settings"
+                            detail={versionStatus?.dirty
+                                ? `Changed since v${versionStatus.headVersion ?? 1}. Save it as a version, compare, or go back to an earlier one`
+                                : 'Compare versions, or go back to an earlier one'}
                         >
-                            <Milestone className="w-3.5 h-3.5" aria-hidden />
-                            <span className="hidden lg:inline">
-                                {versionStatus?.headVersion ? `v${versionStatus.headVersion}` : 'Versions'}
-                            </span>
-                            {versionStatus?.dirty && (
-                                <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                            )}
-                        </button>
-                    </HoverTip>
+                            <button
+                                type="button"
+                                onClick={() => setVersionsOpen(true)}
+                                className={actionButtonClass}
+                                aria-label={versionStatus?.headVersion
+                                    ? `Versions, at v${versionStatus.headVersion}${versionStatus.dirty ? ' with unsaved changes' : ''}`
+                                    : 'Versions'}
+                            >
+                                <Milestone className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">
+                                    {versionStatus?.headVersion ? `v${versionStatus.headVersion}` : 'Versions'}
+                                </span>
+                                {versionStatus?.dirty && (
+                                    <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                )}
+                            </button>
+                        </HoverTip>
+                    )}
 
                     {/* Anyone who can read the view can take a copy of its design
                         elsewhere; the admin switch withdraws the button and the

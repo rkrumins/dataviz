@@ -11,6 +11,7 @@
 
 import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
 import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
@@ -716,7 +717,7 @@ export function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange:
     // and history with it — so nobody ever did, and the rule went unenforced.
     const blankAvailable = useFeature('versioningEnabled') && useFeature('blankModelsEnabled')
     // Importing a view from another environment is the third way to start, and its own switch.
-    const importAvailable = useFeature('viewImportEnabled')
+    const importAvailable = useViewPortability().canImport
     const options: { id: ScopeMode; label: string; icon: ReactNode }[] = [
         { id: 'existing', label: 'Use existing data', icon: <Database className="w-4 h-4" /> },
         ...(blankAvailable
@@ -1135,7 +1136,7 @@ export function ScopeStep({
     aboveSlot,
 }: ScopeStepProps) {
     const isBlank = scopeMode === 'blank'
-    const importModeAvailable = useFeature('viewImportEnabled')
+    const importModeAvailable = useViewPortability().canImport
     // Blank models are versioning-native (authored via drafts/publishes) — the
     // whole mode disappears when the admin turns version control off.
     const blankModeAvailable = useFeature('versioningEnabled') && useFeature('blankModelsEnabled')

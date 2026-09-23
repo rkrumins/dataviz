@@ -25,6 +25,8 @@ from backend.tests.test_view_transfer_import import (  # noqa: F401 — graph is
     _as, _assignments, _edit, _file, _import, _layout, _user, _view, _workspace, graph,
 )
 
+pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
+
 
 class _Versioning:
     """Just enough graph version control: a versioned graph per data source, and drafts that

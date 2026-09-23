@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.view_guards import editable_view, readable_view
+from backend.app.api.v1.feature_gate import require_feature
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import view_activity_repo, view_repo, view_version_repo
@@ -30,7 +31,10 @@ from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.view_transfer.diff import diff_definitions
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+# A preview behind the same switch as moving views between environments (Admin → Features).
+# Versions are still RECORDED while it is off (see view_version_repo.checkpoint); only reading
+# and restoring them here is refused.
+router = APIRouter(dependencies=[Depends(require_feature("viewPortabilityEnabled"))])
 
 
 class SaveVersionRequest(BaseModel):

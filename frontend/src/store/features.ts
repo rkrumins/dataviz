@@ -40,6 +40,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
     graphExportEnabled: true,
+    viewPortabilityEnabled: false,        // experimental preview — ships OFF
     viewExportEnabled: true,
     viewImportEnabled: true,
     blankModelsEnabled: true,

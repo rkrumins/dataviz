@@ -25,7 +25,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useSchemaStore } from '@/store/schema'
-import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { viewToViewConfig } from '@/services/viewApiService'
 import type { ViewDefinitionDiff, ViewVersionSource, ViewVersionSummary } from '@/services/viewVersionsApiService'
 import {
@@ -52,7 +52,7 @@ export function ViewVersionsDrawer({ viewId, viewName, isOpen, onClose, canEdit 
 }) {
   const history = useViewVersionHistory(viewId, isOpen)
   const status = useViewVersionStatus(viewId, isOpen)
-  const exportEnabled = useFeature('viewExportEnabled')
+  const exportEnabled = useViewPortability().canExport
   const [comparison, setComparison] = useState<Comparison | null>(null)
   const [restoring, setRestoring] = useState<ViewVersionSummary | null>(null)
   const [exporting, setExporting] = useState<number | null>(null)

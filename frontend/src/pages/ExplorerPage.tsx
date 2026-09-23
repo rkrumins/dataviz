@@ -48,7 +48,7 @@ import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useCopyViewLink } from '@/lib/viewShareLink'
@@ -108,7 +108,7 @@ export function ExplorerPage() {
   const { openViewEditor } = useViewEditorModal()
   // A view from another environment: the wizard's Import journey, from the button or a file
   // dropped anywhere on the page.
-  const importEnabled = useFeature('viewImportEnabled')
+  const { canImport: importEnabled, canExport: exportEnabled } = useViewPortability()
   const openImport = useCallback(
     (file?: File) => openViewEditor(undefined, { journey: 'import', importFile: file }),
     [openViewEditor],
@@ -185,7 +185,6 @@ export function ExplorerPage() {
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
-  const exportEnabled = useFeature('viewExportEnabled')
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   

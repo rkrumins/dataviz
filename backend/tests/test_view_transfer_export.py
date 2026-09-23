@@ -13,6 +13,8 @@ from backend.app.services.feature_flags import feature_flags
 from backend.app.services.view_transfer import bundle as bundle_mod
 from backend.app.services.view_transfer.canonical import content_hash, portable_definition
 
+pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
+
 
 class _FakeProvider:
     def __init__(self, known):

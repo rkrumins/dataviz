@@ -137,7 +137,7 @@ See recommended cadence and conventions in [Ways of Working](/guide/ways-of-work
 | A teammate can't find your View | Visibility too narrow, or wrong workspace — widen visibility or share explicitly |
 | View opens empty | You're in the wrong workspace, or its data source changed — open **Workspaces** from the sidebar to confirm you're in the right one |
 | Can't edit a View | You have *viewer* access only — ask the owner for an *editor* grant |
-| No **Export** or **Import view** | Your administrator has turned it off (Admin → Features → Export views / Import views) |
+| No **Versions**, **Export** or **Import view** | They are a preview, off until your administrator turns it on (Admin → Features → View versions, import and export). Export and Import each have their own switch too (Export views / Import views) |
 
 More in [Troubleshooting](/guide/troubleshooting).
 

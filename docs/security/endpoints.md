@@ -296,13 +296,13 @@
 | `GET` | `/api/v1/views/me/recent` | authenticated | n/a |
 | `GET` | `/api/v1/views/popular` | authenticated | n/a |
 | `GET` | `/api/v1/views/stats` | authenticated | n/a |
-| `POST` | `/api/v1/views/transfer/export` | viewExportEnabled + read access to every view (in handler) | enforced |
-| `POST` | `/api/v1/views/transfer/import` | viewImportEnabled + the POST /views create gates, or edit access to the target view; staging: sign-in + workspace:datasource:manage (in handler) | enforced |
-| `POST` | `/api/v1/views/transfer/inspect` | viewImportEnabled; writes nothing — matches only views the caller can read (in handler) | enforced |
-| `POST` | `/api/v1/views/transfer/packages` | viewExportEnabled + graphExportEnabled + read access to every view + workspace:datasource:read (in handler) | enforced |
-| `POST` | `/api/v1/views/transfer/packages/inspect` | viewImportEnabled + versioningEnabled + sign-in (in handler) | enforced |
-| `POST` | `/api/v1/views/transfer/packages/{upload_id}/data` | viewImportEnabled + versioningEnabled + sign-in as the uploader + workspace:datasource:manage (in handler) | enforced |
-| `POST` | `/api/v1/views/transfer/reconcile` | viewImportEnabled + workspace:view:create in the target workspace, or edit access to the target view (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/export` | viewPortabilityEnabled + viewExportEnabled + read access to every view (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/import` | viewPortabilityEnabled + viewImportEnabled + the POST /views create gates, or edit access to the target view; staging: sign-in + workspace:datasource:manage (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/inspect` | viewPortabilityEnabled + viewImportEnabled; writes nothing — matches only views the caller can read (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/packages` | viewPortabilityEnabled + viewExportEnabled + graphExportEnabled + read access to every view + workspace:datasource:read (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/packages/inspect` | viewPortabilityEnabled + viewImportEnabled + versioningEnabled + sign-in (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/packages/{upload_id}/data` | viewPortabilityEnabled + viewImportEnabled + versioningEnabled + sign-in as the uploader + workspace:datasource:manage (in handler) | enforced |
+| `POST` | `/api/v1/views/transfer/reconcile` | viewPortabilityEnabled + viewImportEnabled + workspace:view:create in the target workspace, or edit access to the target view (in handler) | enforced |
 | `GET` | `/api/v1/views/workspace/{workspace_id}/activity` | **NONE — unauthenticated** | n/a |
 | `DELETE` | `/api/v1/views/{view_id}` | **NONE — unauthenticated** | enforced |
 | `GET` | `/api/v1/views/{view_id}` | **NONE — unauthenticated** | n/a |
@@ -320,12 +320,12 @@
 | `POST` | `/api/v1/views/{view_id}/publish-request/approve` | authenticated | enforced |
 | `POST` | `/api/v1/views/{view_id}/publish-request/deny` | authenticated | enforced |
 | `POST` | `/api/v1/views/{view_id}/restore` | **NONE — unauthenticated** | enforced |
-| `GET` | `/api/v1/views/{view_id}/versions` | read access to the view; saving a version: edit access (in handler) | n/a |
-| `POST` | `/api/v1/views/{view_id}/versions` | read access to the view; saving a version: edit access (in handler) | enforced |
-| `GET` | `/api/v1/views/{view_id}/versions/compare` | read access to the view (in handler) | n/a |
-| `GET` | `/api/v1/views/{view_id}/versions/status` | read access to the view (in handler) | n/a |
-| `GET` | `/api/v1/views/{view_id}/versions/{version}` | read access to the view (in handler) | n/a |
-| `POST` | `/api/v1/views/{view_id}/versions/{version}/restore` | edit access to the view (in handler) | enforced |
+| `GET` | `/api/v1/views/{view_id}/versions` | viewPortabilityEnabled + read access to the view; saving a version: edit access (in handler) | n/a |
+| `POST` | `/api/v1/views/{view_id}/versions` | viewPortabilityEnabled + read access to the view; saving a version: edit access (in handler) | enforced |
+| `GET` | `/api/v1/views/{view_id}/versions/compare` | viewPortabilityEnabled + read access to the view (in handler) | n/a |
+| `GET` | `/api/v1/views/{view_id}/versions/status` | viewPortabilityEnabled + read access to the view (in handler) | n/a |
+| `GET` | `/api/v1/views/{view_id}/versions/{version}` | viewPortabilityEnabled + read access to the view (in handler) | n/a |
+| `POST` | `/api/v1/views/{view_id}/versions/{version}/restore` | viewPortabilityEnabled + edit access to the view (in handler) | enforced |
 | `PUT` | `/api/v1/views/{view_id}/visibility` | **NONE — unauthenticated** | enforced |
 | `POST` | `/api/v1/views/{view_id}/visit` | **NONE — unauthenticated** | enforced |
 | `GET` | `/api/v1/{ws_id}/assets/rule-sets` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a |

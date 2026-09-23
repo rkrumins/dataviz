@@ -18,6 +18,8 @@ from backend.app.services.view_transfer import limits
 from backend.app.services.view_transfer.canonical import canonical_json
 from backend.auth_service.interface import User
 
+pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
+
 
 class _Provider:
     """One physical graph, onboarded in every workspace the tests use."""
@@ -448,6 +450,7 @@ async def test_target_policy_that_strips_data_is_reported(test_client, graph):
     assert (integrity["verified"], integrity["adjusted"]) == (False, True)
     assert "node order" in integrity["adjustments"][0]
     assert body["version"]["provenance"]["adjustments"] == integrity["adjustments"]
+
 
 
 def _user(uid: str) -> User:

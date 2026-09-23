@@ -28,6 +28,8 @@ from backend.tests.test_view_transfer_import import (  # noqa: F401 — graph is
 )
 from backend.tests.test_view_transfer_staging import _data_source, _Versioning as _StagingVersioning
 
+pytestmark = pytest.mark.usefixtures("view_portability_enabled")  # the preview ships off
+
 
 class _Versioning(_StagingVersioning):
     async def claim_draft(self, *, graph_id, branch_id, actor, view_id=None):

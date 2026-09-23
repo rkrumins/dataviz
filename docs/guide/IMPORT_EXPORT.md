@@ -158,8 +158,10 @@ View — for example where the data is already there — choose **View only** on
 File step. A package of several Views brings its data with one of them; import
 the others from the same file with **View only**.
 
-> **Note:** If **Export** or **Import view** is missing, your administrator has
-> turned it off (Admin → Features → **Export views** / **Import views**).
+> **Note:** Moving Views between environments is a preview. If **Export** or
+> **Import view** is missing, your administrator hasn't turned it on (Admin →
+> Features → **View versions, import and export**), or has turned one direction
+> off (**Export views** / **Import views**).
 
 ---
 

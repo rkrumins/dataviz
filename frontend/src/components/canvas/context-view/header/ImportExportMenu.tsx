@@ -19,6 +19,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 
 /** Moving this view between environments (see the "This view" section). */
 export interface ViewFileActions {
@@ -47,8 +48,7 @@ export function ImportExportMenu({ onImport, onExport, isDraft, thisView }: Impo
   // itself still walked out through here. Locking the shape of the estate while leaving the
   // contents open is the kind of gap that only looks safe.
   const exportEnabled = useFeature('graphExportEnabled')
-  const viewExportEnabled = useFeature('viewExportEnabled')
-  const viewImportEnabled = useFeature('viewImportEnabled')
+  const { canExport: viewExportEnabled, canImport: viewImportEnabled } = useViewPortability()
   const viewItems: Array<{ key: string; icon: LucideIcons.LucideIcon; label: string; detail: string; run: () => void }> = []
   if (viewExportEnabled && thisView?.onExport) {
     viewItems.push({

@@ -14,7 +14,7 @@ def test_the_committed_schema_is_current():
     assert main(["--check"]) == 0
 
 
-async def test_the_schema_describes_everything_an_export_writes(test_client, graph):
+async def test_the_schema_describes_everything_an_export_writes(test_client, graph, view_portability_enabled):
     """Every key an exported file carries is one the schema (and so the importer) knows, and
     every key the schema requires is there: a key only the exporter knew would be dropped on
     import without a word."""

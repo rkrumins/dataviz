@@ -266,6 +266,39 @@
       ]
     },
     {
+      "key": "viewPortabilityEnabled",
+      "name": "View versions, import and export",
+      "description": "Keep a history of each view's design that people can compare and restore, and let them move views between environments as files, with or without their graph data. Export views and Import views decide which directions are allowed.",
+      "category": "governance",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A preview. Turn it on to try moving views from one environment to another, for example from development to production, and to give people a view's history.",
+      "impactWhenOff": "Versions, Export and Import disappear from every view, the Explorer and the View wizard, and the server refuses those requests. Views keep working exactly as they are, and versions keep being recorded, so turning this on later shows each view's whole history. Imports already waiting in a draft go live, or are discarded, with their draft.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Every /views/transfer route \u2014 export, inspect, reconcile, import, packages",
+        "Every /views/{id}/versions route \u2014 history, compare, save, restore"
+      ],
+      "uiSurfaces": [
+        "Versions and Export on the view header, the view card menu and the Explorer bulk bar",
+        "The 'Import a view' journey in the View wizard, and 'Import view' in the Explorer and the workspace Views manager",
+        "The 'This view' section of the canvas Import / Export menu"
+      ],
+      "stillAllowed": [
+        "Every view keeps working exactly as it is",
+        "Versions keep being recorded, so turning this on shows each view's whole history",
+        "Imports already waiting in a draft go live, or are discarded, with their draft"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "viewExportEnabled",
       "name": "Export views",
       "description": "Let people download a view \u2014 its layers, assignments and settings \u2014 as a file, to bring it into another environment or keep a copy of its design.",
@@ -276,7 +309,7 @@
       "helpUrl": null,
       "adminHint": "A view file holds the view's design and the names and types of the entities it places, not the graph data itself; exporting the data is 'Export graph data'. Turn both off if nothing about your lineage should leave the product.",
       "impactWhenOff": "The Export actions disappear and the server refuses to build the file. Views keep working and their version history is unaffected. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
-      "sortOrder": 2,
+      "sortOrder": 3,
       "deprecated": false,
       "stage": "active",
       "implemented": true,
@@ -294,7 +327,9 @@
         "Reading, editing and versioning every view",
         "Files already downloaded are not recalled \u2014 this stops NEW ones"
       ],
-      "dependsOn": []
+      "dependsOn": [
+        "viewPortabilityEnabled"
+      ]
     },
     {
       "key": "viewImportEnabled",
@@ -307,7 +342,7 @@
       "helpUrl": null,
       "adminHint": "Turn this off to make every view in this environment be built here, in the wizard, rather than arrive as a file from somewhere else.",
       "impactWhenOff": "The Import journey disappears from the View wizard and the server refuses uploads. Views can still be built in the wizard, and exporting still works.",
-      "sortOrder": 3,
+      "sortOrder": 4,
       "deprecated": false,
       "stage": "active",
       "implemented": true,
@@ -326,7 +361,9 @@
         "Building views in the wizard",
         "Exporting views"
       ],
-      "dependsOn": []
+      "dependsOn": [
+        "viewPortabilityEnabled"
+      ]
     },
     {
       "key": "nodeSortingEnabled",
@@ -756,6 +793,7 @@
     "traceEnabled": true,
     "graphExportEnabled": true,
     "blankModelsEnabled": true,
+    "viewPortabilityEnabled": false,
     "viewExportEnabled": true,
     "viewImportEnabled": true,
     "nodeSortingEnabled": true,
