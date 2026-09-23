@@ -9,6 +9,8 @@ Output layout (under ``--out-dir``)::
 
     searchquery.v{N}.json    — pretty-printed for diff / human review
     searchquery.v{N}.min.json — minified (stable key order) for codegen
+    searchoperators.v{N}.json — the property-operator table
+                                (``search_semantics.OPERATOR_TABLE``)
 
 A separate npm-publish step (run from CI) consumes the .json file via
 ``json-schema-to-typescript`` to produce ``@synodic/search-schema``'s
@@ -37,6 +39,7 @@ from backend.common.models.search import (
     SearchApiContract,
     SearchQuery,
 )
+from backend.common.search_semantics import operator_table
 
 
 # Default destination — sits inside backend/common/ so the artifact
@@ -79,14 +82,28 @@ def canonical_json(schema: dict, *, indent: int | None = None) -> str:
     return json.dumps(schema, sort_keys=True, indent=indent, separators=(",", ":") if indent is None else (",", ": "))
 
 
-def write_artifact(out_dir: Path, schema: dict) -> tuple[Path, Path]:
-    """Write the pretty and minified artifacts; return both paths."""
+def write_artifact(out_dir: Path, schema: dict) -> tuple[Path, Path, Path]:
+    """Write the pretty and minified artifacts and the operator table;
+    return the three paths."""
     out_dir.mkdir(parents=True, exist_ok=True)
     pretty_path = out_dir / f"searchquery.v{SCHEMA_VERSION}.json"
     min_path = out_dir / f"searchquery.v{SCHEMA_VERSION}.min.json"
     pretty_path.write_text(canonical_json(schema, indent=2) + "\n", encoding="utf-8")
     min_path.write_text(canonical_json(schema), encoding="utf-8")
-    return pretty_path, min_path
+    ops_path = operator_table_path(out_dir)
+    ops_path.write_text(operator_table_text(), encoding="utf-8")
+    return pretty_path, min_path, ops_path
+
+
+def operator_table_path(out_dir: Path) -> Path:
+    return out_dir / f"searchoperators.v{SCHEMA_VERSION}.json"
+
+
+def operator_table_text() -> str:
+    """What each property operator takes and compares as — the frontend
+    generates its operator metadata from this file, so an operator's
+    arity, value types and negativity are defined once, in Python."""
+    return canonical_json(operator_table(), indent=2) + "\n"
 
 
 def check_drift(out_dir: Path, schema: dict) -> int:
@@ -105,7 +122,9 @@ def check_drift(out_dir: Path, schema: dict) -> int:
         return 1
     on_disk = min_path.read_text(encoding="utf-8")
     fresh = canonical_json(schema)
-    if on_disk == fresh:
+    ops_path = operator_table_path(out_dir)
+    ops_on_disk = ops_path.read_text(encoding="utf-8") if ops_path.exists() else None
+    if on_disk == fresh and ops_on_disk == operator_table_text():
         return 0
     print(
         f"[export_search_schema] DRIFT detected against {min_path}\n"
@@ -138,9 +157,8 @@ def main() -> int:
     if args.check:
         return check_drift(args.out_dir, schema)
 
-    pretty, mini = write_artifact(args.out_dir, schema)
-    print(f"[export_search_schema] v{SCHEMA_VERSION} -> {pretty}")
-    print(f"[export_search_schema] v{SCHEMA_VERSION} -> {mini}")
+    for path in write_artifact(args.out_dir, schema):
+        print(f"[export_search_schema] v{SCHEMA_VERSION} -> {path}")
     return 0
 
 

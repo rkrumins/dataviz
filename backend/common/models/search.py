@@ -95,7 +95,17 @@ class TextPredicate(_Base):
 PropertyOp = Literal[
     "eq", "neq", "gt", "gte", "lt", "lte",
     "in", "notIn", "contains", "startsWith", "endsWith", "between",
+    "notContains", "containsAll", "withinLast",
+    "isSet", "isNotSet", "isEmpty", "isNotEmpty",
 ]
+"""Every operator a property comparison takes. What each one means — its
+value shape, the types it compares as, how a missing key and a list value
+are treated — is ``backend/common/search_semantics.OPERATOR_TABLE``."""
+
+ValueType = Literal["auto", "string", "number", "boolean", "date"]
+"""How a comparison reads stored values (``search_semantics``). ``auto``
+lets the value decide: text compares as text, numbers as numbers — the
+behaviour every predicate written before types existed was built on."""
 
 EdgeClass = Literal["lineage", "containment", "any"]
 """Edge-class selector shared by DegreePredicate, WithinHopsPredicate,
@@ -106,19 +116,26 @@ via the active ontology — never hardcoded relationship names."""
 class PropertyPredicate(_Base):
     """Typed comparison against a single user-property.
 
-    After the storage refactor, user properties are native FalkorDB
-    fields, so these compile to ``WHERE n.<key> <op> $val`` — no Python
-    post-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))
-    <op> toLower($val)``) when ``value`` is a string and
-    ``case_sensitive`` is false; a non-string value (or
-    ``case_sensitive=True``) keeps the raw, indexed column comparison.
-    ``between`` expects ``value`` to be a two-element list ``[lo, hi]``.
+    ``value_type`` says how stored values are read — under ``number`` a
+    stored "15" is 15, under ``string`` a stored 15 is "15" — and the
+    comparison holds for any stored kind, a list included (it matches when
+    an element does). ``value`` is shaped by ``op``: one value, a list
+    (``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an
+    ISO duration such as ``"P30D"`` (``withinLast``) or nothing (``isSet``,
+    ``isEmpty`` and their negations). An integer beyond 2^53 is best sent
+    as its digits in a string with ``value_type='number'``: it is compared
+    exactly. Text comparisons are case-insensitive unless
+    ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
+    ``notContains`` match entities without the key. The full contract is
+    ``backend/common/search_semantics``.
     """
     kind: Literal["property"] = "property"
     key: str = Field(min_length=1, max_length=128)
     op: PropertyOp = "eq"
     value: Any = None
+    value_type: ValueType = Field("auto", alias="valueType")
     case_sensitive: bool = Field(False, alias="caseSensitive")
+    include_missing: bool = Field(False, alias="includeMissing")
 
 
 class TagPredicate(_Base):
@@ -139,10 +156,16 @@ class HasPropertyPredicate(_Base):
     Compiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).
     Native-property storage makes this cheap; pre-refactor this required
     parsing the blob in Python for every node.
+
+    ``key_match`` searches by the NAME instead: ``prefix`` / ``contains``
+    match any user property whose name starts with / contains ``key``,
+    case-insensitively ("a property whose name contains 'owner'").
     """
     kind: Literal["hasProperty"] = "hasProperty"
     key: str = Field(min_length=1, max_length=128)
     negate: bool = False
+    key_match: Literal["exact", "prefix", "contains"] = Field(
+        "exact", alias="keyMatch")
 
 
 class MatchAllPredicate(_Base):
@@ -172,15 +195,17 @@ class EdgePropertyPredicate(_Base):
     """Typed comparison against a single edge property.
 
     Evaluated against each traversed relationship inside a
-    ``PathPredicate`` or ``WithinHopsPredicate``. Compiles to
-    ``rel.<key> <op> $val`` inside an ``ALL(rel IN relationships(p) …)``
-    block. ``between`` expects ``value`` to be a two-element list
-    ``[lo, hi]``.
+    ``PathPredicate`` or ``WithinHopsPredicate``, inside an
+    ``ALL(rel IN relationships(p) …)`` block. The comparison itself is
+    ``PropertyPredicate``'s — same operators, value shapes and types.
     """
     kind: Literal["edgeProperty"] = "edgeProperty"
     key: str = Field(min_length=1, max_length=128)
     op: PropertyOp = "eq"
     value: Any = None
+    value_type: ValueType = Field("auto", alias="valueType")
+    case_sensitive: bool = Field(False, alias="caseSensitive")
+    include_missing: bool = Field(False, alias="includeMissing")
 
 
 class EdgeHasPropertyPredicate(_Base):

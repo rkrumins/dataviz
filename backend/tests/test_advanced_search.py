@@ -29,6 +29,7 @@ from backend.app.providers.falkordb_deep_search import (
     match_hash,
     query_hash,
 )
+from backend.app.providers.falkordb_typed_ops import compile_comparison
 from backend.app.services.advanced_search_service import (
     MAX_LEAF_COUNT,
     MAX_OR_BRANCH,
@@ -60,6 +61,23 @@ from backend.common.models.search import (
     TextPredicate,
     WithinHopsPredicate,
 )
+from backend.common.search_semantics import resolve_comparison
+
+
+def _typed(col, op, value, *, first=0, **kw):
+    """The fragment and params ``compile_comparison`` emits for one typed
+    comparison — what every property leaf must delegate to. What the
+    fragment MEANS is pinned by ``test_search_semantics.py`` and the live
+    parity test; these tests pin the delegation, the quoting of the key
+    and the typed, case-folded parameter values."""
+    params = {}
+
+    def bind(v):
+        name = f"p{first + len(params)}"
+        params[name] = v
+        return f"${name}"
+
+    return compile_comparison(col, resolve_comparison(op, value, **kw), bind), params
 
 
 # Compiler fixture for degree-family tests: inject a realistic lineage
@@ -298,6 +316,36 @@ class TestServiceValidator:
             scope=_TEST_SCOPE,
         )
         assert _count_and_validate(q) == 3
+
+    def test_a_value_that_cannot_compare_names_its_condition(self):
+        """A typed value that cannot be compared is a 400 that says WHICH
+        condition and why — not a compile error from somewhere below."""
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["A"]),
+                PropertyPredicate(key="size", op="gt", value="big",
+                                  value_type="number"),
+            ]),
+            scope=_TEST_SCOPE,
+        )
+        with pytest.raises(ValidationError,
+                           match=r'\$\.children\[1\] \(size\): "big" is not a number'):
+            _count_and_validate(q)
+
+    def test_edge_comparisons_are_validated_too(self):
+        q = SearchQuery(
+            predicate=PathPredicate.model_validate({
+                "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+                "edgePredicate": {"kind": "edgeGroup", "op": "and", "children": [
+                    {"kind": "edgeProperty", "key": "w", "op": "between",
+                     "value": [1]},
+                ]},
+            }),
+            scope=_TEST_SCOPE,
+        )
+        with pytest.raises(ValidationError, match=(
+                r"\$\.edgePredicate\.children\[0\] \(w\): between needs")):
+            _count_and_validate(q)
 
     def test_depth_cap_enforced(self):
         # Build a chain of nested AND groups exceeding MAX_TREE_DEPTH
@@ -601,8 +649,10 @@ class TestCompilerLeaves:
         ))
         # Backtick-wrapped per the new ``_safe_property_name`` — any
         # user-supplied property key is quoted to allow spaces /
-        # punctuation safely.
-        assert where == "toLower(toString(n.`logicalType`)) STARTS WITH $p0"
+        # punctuation safely — and compared as typed TEXT, so a list
+        # value cannot abort the query the way ``toString(list)`` did.
+        assert (where, c.params) == _typed(
+            "n.`logicalType`", "startsWith", "abc", value_type="string")
 
     def test_text_predicate_property_target_with_spaces(self):
         """Per-call-site coverage for the property-name backtick fix:
@@ -616,7 +666,8 @@ class TestCompilerLeaves:
             value="ops", target="property", property_key="Asset Owner",
             match="prefix",
         ))
-        assert where == "toLower(toString(n.`Asset Owner`)) STARTS WITH $p0"
+        assert (where, c.params) == _typed(
+            "n.`Asset Owner`", "startsWith", "ops", value_type="string")
         assert c.params == {"p0": "ops"}
 
     def test_text_target_any_matches_display_name(self):
@@ -709,46 +760,59 @@ class TestCompilerLeaves:
         # All user-supplied property keys are backtick-quoted by
         # ``_safe_property_name`` so spaces / punctuation work safely.
         # ``eq`` case-folds by default, same as contains/startsWith/endsWith.
-        assert where == "toLower(toString(n.`logicalType`)) = $p0"
+        assert (where, c.params) == _typed("n.`logicalType`", "eq", "STRING")
+        assert "toLower(" in where
         assert c.params == {"p0": "string"}
 
     def test_property_eq_case_sensitive_bypasses_fold(self):
-        # ``case_sensitive=True`` skips the toLower/toString wrap — the
-        # same bypass the contains/startsWith/endsWith branch already has.
+        # ``case_sensitive=True`` skips the toLower fold — the same bypass
+        # the contains/startsWith/endsWith branch already has.
         c = _Compiler()
         where = c.compile(PropertyPredicate(
             key="logicalType", op="eq", value="STRING", case_sensitive=True,
         ))
-        assert where == "n.`logicalType` = $p0"
+        assert (where, c.params) == _typed(
+            "n.`logicalType`", "eq", "STRING", case_sensitive=True)
+        assert "toLower(" not in where
         assert c.params == {"p0": "STRING"}
 
     def test_property_neq_case_folds_by_default(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="neq", value="STRING"))
-        assert where == "toLower(toString(n.`logicalType`)) <> $p0"
+        assert (where, c.params) == _typed("n.`logicalType`", "neq", "STRING")
+        # A negative operator leaves entities without the key out unless
+        # ``includeMissing`` asks for them.
+        assert where.startswith("(n.`logicalType` IS NOT NULL AND NOT ")
         assert c.params == {"p0": "string"}
+
+    def test_property_neq_include_missing(self):
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(
+            key="owner", op="neq", value="alice", include_missing=True))
+        assert where.startswith("(n.`owner` IS NULL OR NOT ")
 
     def test_property_between(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="rowCount", op="between", value=[100, 200]))
-        assert where == "(n.`rowCount` >= $p0 AND n.`rowCount` <= $p1)"
+        assert (where, c.params) == _typed("n.`rowCount`", "between", [100, 200])
         assert c.params == {"p0": 100, "p1": 200}
 
     def test_property_between_bad_value(self):
         c = _Compiler()
-        with pytest.raises(CompileError, match="value="):
+        with pytest.raises(CompileError, match="lower and an upper value"):
             c.compile(PropertyPredicate(key="x", op="between", value=[1]))
 
     def test_property_in(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="in", value=["A", "B"]))
-        assert where == "n.`logicalType` IN $p0"
-        assert c.params == {"p0": ["A", "B"]}
+        assert (where, c.params) == _typed("n.`logicalType`", "in", ["A", "B"])
+        # Text compares case-insensitively, a list value element by element.
+        assert c.params == {"p0": ["a", "b"]}
 
     def test_property_not_in(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="notIn", value=["A"]))
-        assert where == "NOT (n.`logicalType` IN $p0)"
+        assert (where, c.params) == _typed("n.`logicalType`", "notIn", ["A"])
 
     def test_match_all_compiles_to_true(self):
         """"Everything in this view" is spelled out rather than sent as an
@@ -769,7 +833,7 @@ class TestCompilerLeaves:
         characters and a number raised (a 500)."""
         c = _Compiler()
         c.compile(PropertyPredicate(key="logicalType", op="in", value="STRING"))
-        assert c.params == {"p0": ["STRING"]}
+        assert c.params == {"p0": ["string"]}
         c = _Compiler()
         c.compile(PropertyPredicate(key="rows", op="notIn", value=5))
         assert c.params == {"p0": [5]}
@@ -777,7 +841,8 @@ class TestCompilerLeaves:
     def test_property_contains(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="dataType", op="contains", value="INT"))
-        assert where == "toLower(toString(n.`dataType`)) CONTAINS $p0"
+        assert (where, c.params) == _typed("n.`dataType`", "contains", "INT")
+        assert " CONTAINS $p0" in where
         assert c.params == {"p0": "int"}
 
     def test_property_with_spaces_compiles_safely(self):
@@ -787,7 +852,7 @@ class TestCompilerLeaves:
         the backticked identifier is unambiguous Cypher."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="Asset Owner", op="eq", value="ops"))
-        assert where == "toLower(toString(n.`Asset Owner`)) = $p0"
+        assert (where, c.params) == _typed("n.`Asset Owner`", "eq", "ops")
         assert c.params == {"p0": "ops"}
 
     def test_property_with_hyphens_and_dots_compiles_safely(self):
@@ -795,7 +860,7 @@ class TestCompilerLeaves:
         real-world property names (``pii-class``, ``user.id``)."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="pii-class", op="eq", value="high"))
-        assert where == "toLower(toString(n.`pii-class`)) = $p0"
+        assert (where, c.params) == _typed("n.`pii-class`", "eq", "high")
 
     def test_property_injection_neutralised_by_backticks(self):
         """Cypher injection attempts now compile to safe Cypher
@@ -804,7 +869,9 @@ class TestCompilerLeaves:
         reach the Cypher parser as syntax."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="x); DROP TABLE", op="eq", value="y"))
-        assert where == "toLower(toString(n.`x); DROP TABLE`)) = $p0"
+        assert (where, c.params) == _typed("n.`x); DROP TABLE`", "eq", "y")
+        # Outside the one backticked identifier there is nothing to run.
+        assert "DROP" not in where.replace("`x); DROP TABLE`", "")
         assert c.params == {"p0": "y"}
 
     def test_property_internal_backtick_escaped(self):
@@ -813,30 +880,57 @@ class TestCompilerLeaves:
         backticks aren't terminated early."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="a`b", op="eq", value="z"))
-        assert where == "toLower(toString(n.`a``b`)) = $p0"
+        assert (where, c.params) == _typed("n.`a``b`", "eq", "z")
 
     def test_property_with_leading_digit_compiles_safely(self):
         """Backticked identifiers may begin with a digit; common in
         year-prefixed property names (``2024_revenue``). ``value=100``
-        is an int, so ``eq`` does NOT case-fold — raw indexed compare."""
+        is an int, so ``eq`` compares NUMBERS, not folded text."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="2024_revenue", op="eq", value=100))
-        assert where == "n.`2024_revenue` = $p0"
+        assert (where, c.params) == _typed("n.`2024_revenue`", "eq", 100)
+        assert "toLower(" not in where
         assert c.params == {"p0": 100}
 
-    def test_property_eq_neq_non_string_values_stay_raw(self):
-        """Only string values case-fold for eq/neq (see
-        ``test_property_eq`` / ``test_property_neq_case_folds_by_default``).
-        Typed values — int, float, None, list — must compile to the
-        original raw ``col <op> $p`` with the value passed through
-        untouched, so they stay index-eligible and keep their type's
-        own equality semantics instead of being silently stringified."""
-        for op, symbol in (("eq", "="), ("neq", "<>")):
-            for value in (100, 1.5, None, ["a"]):
-                c = _Compiler()
-                where = c.compile(PropertyPredicate(key="k", op=op, value=value))
-                assert where == f"n.`k` {symbol} $p0"
-                assert c.params == {"p0": value}
+    def test_property_values_compare_as_their_type(self):
+        """Under ``valueType='auto'`` the value decides the type: a number
+        compares as a number (a stored "100" matches), a boolean as a
+        boolean, text as text — and a value that is no value at all is a
+        clear error, not ``col = null`` quietly matching nothing."""
+        for value, typed in ((100, 100), (1.5, 1.5), (True, True), (["a"], "a")):
+            c = _Compiler()
+            where = c.compile(PropertyPredicate(key="k", op="eq", value=value))
+            assert (where, c.params) == _typed("n.`k`", "eq", value)
+            assert c.params == {"p0": typed}
+        with pytest.raises(CompileError, match="enter a value"):
+            _Compiler().compile(PropertyPredicate(key="k", op="eq", value=None))
+
+    def test_property_declared_number_type_reads_text_as_numbers(self):
+        """``valueType='number'`` with a 19-digit id sent as its digits —
+        the way the browser must send an int64 — compares the exact
+        integer, not a rounded double."""
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(
+            key="gvHash", op="eq", value="-3746471915534727923",
+            value_type="number"))
+        assert (where, c.params) == _typed(
+            "n.`gvHash`", "eq", "-3746471915534727923", value_type="number")
+        assert c.params == {"p0": -3746471915534727923}
+
+    def test_property_value_that_cannot_compare_is_a_compile_error(self):
+        with pytest.raises(CompileError, match="'size'.*not a number"):
+            _Compiler().compile(PropertyPredicate(
+                key="size", op="gt", value="big", value_type="number"))
+
+    def test_presence_operators_take_no_value(self):
+        for op, expected in (("isSet", "n.`k` IS NOT NULL"),
+                             ("isNotSet", "n.`k` IS NULL")):
+            c = _Compiler()
+            assert c.compile(PropertyPredicate(key="k", op=op)) == expected
+            assert c.params == {}
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(key="k", op="isEmpty"))
+        assert where.startswith("coalesce(n.`k` IS NULL OR n.`k` = [] OR ")
 
     def test_tag_has(self):
         c = _Compiler()
@@ -866,6 +960,24 @@ class TestCompilerLeaves:
         c = _Compiler()
         where = c.compile(HasPropertyPredicate(key="pii_class", negate=True))
         assert where == "NOT (EXISTS(n.`pii_class`))"
+
+    def test_has_property_by_name(self):
+        """``keyMatch`` searches property NAMES — any user property whose
+        name contains / starts with the text, case-insensitively, with the
+        platform's own fields excluded."""
+        from backend.app.providers.falkordb_provider import platform_property_names
+        c = _Compiler()
+        where = c.compile(HasPropertyPredicate(key="Owner", key_match="contains"))
+        assert where == (
+            "ANY(_k IN keys(n) WHERE NOT _k IN $p0 AND toLower(_k) CONTAINS $p1)")
+        assert c.params["p0"] == sorted(platform_property_names())
+        assert "urn" in c.params["p0"] and "gvHash" in c.params["p0"]
+        assert c.params["p1"] == "owner"
+        c = _Compiler()
+        where = c.compile(HasPropertyPredicate(
+            key="pii", key_match="prefix", negate=True))
+        assert where.startswith("NOT (ANY(_k IN keys(n) WHERE ")
+        assert "STARTS WITH $p1" in where
 
     def test_has_property_predicate_with_spaces(self):
         """Per-call-site coverage: HasPropertyPredicate (compile site
@@ -1175,9 +1287,8 @@ class TestCompilerGroups:
             TagPredicate(values=["PII"]),
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
-        assert where == (
-            "((n.tags CONTAINS $p0) AND toLower(toString(n.`logicalType`)) = $p1)"
-        )
+        typed, _ = _typed("n.`logicalType`", "eq", "STRING", first=1)
+        assert where == f"((n.tags CONTAINS $p0) AND {typed})"
         assert c.params == {"p0": '"PII"', "p1": "string"}
 
     def test_or(self):
@@ -1211,7 +1322,8 @@ class TestCompilerGroups:
             DescendantOfPredicate(urns=["urn:domain:A", "urn:domain:B"]),
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
-        assert where == "(true AND toLower(toString(n.`logicalType`)) = $p0)"
+        typed, _ = _typed("n.`logicalType`", "eq", "STRING")
+        assert where == f"(true AND {typed})"
         assert c.hoisted_root_urns == [["urn:domain:A", "urn:domain:B"]]
 
     def test_descendant_of_inside_or_rejected(self):
@@ -2350,8 +2462,10 @@ class TestEdgePredicateCompile:
                               "key": "confidence", "op": "eq", "value": 0.5},
         }))
         # Edge property keys are backtick-quoted by ``_safe_property_name``
-        # exactly like node property keys — same safety story.
-        assert c.hoisted_path["edge_where"] == "rel.`confidence` = $p0"
+        # exactly like node property keys — same safety story — and the
+        # comparison is the node property's, typed.
+        assert (c.hoisted_path["edge_where"], c.params) == _typed(
+            "rel.`confidence`", "eq", 0.5)
         assert c.params == {"p0": 0.5}
 
     def test_edge_property_predicate_with_spaces(self):
@@ -2366,7 +2480,8 @@ class TestEdgePredicateCompile:
                               "key": "Edge Weight", "op": "eq",
                               "value": 0.5},
         }))
-        assert c.hoisted_path["edge_where"] == "rel.`Edge Weight` = $p0"
+        assert (c.hoisted_path["edge_where"], c.params) == _typed(
+            "rel.`Edge Weight`", "eq", 0.5)
         assert c.params == {"p0": 0.5}
 
     def test_edge_property_between(self):
@@ -2377,13 +2492,13 @@ class TestEdgePredicateCompile:
                               "key": "weight", "op": "between",
                               "value": [0.1, 0.9]},
         }))
-        assert c.hoisted_path["edge_where"] == \
-            "(rel.`weight` >= $p0 AND rel.`weight` <= $p1)"
+        assert (c.hoisted_path["edge_where"], c.params) == _typed(
+            "rel.`weight`", "between", [0.1, 0.9])
 
     def test_edge_property_between_invalid_raises(self):
         from backend.common.models.search import EdgePropertyPredicate
         c = _degree_compiler()
-        with pytest.raises(CompileError, match="value=\\[lo, hi\\]"):
+        with pytest.raises(CompileError, match="lower and an upper value"):
             c.compile(PathPredicate(
                 source_urns=["urn:a"], target_urns=["urn:b"],
                 edge_predicate=EdgePropertyPredicate(
@@ -2436,8 +2551,8 @@ class TestEdgePredicateCompile:
                 ],
             },
         }))
-        assert c.hoisted_path["edge_where"] == \
-            "(rel.`confidence` > $p0 AND EXISTS(rel.`producedBy`))"
+        typed, _ = _typed("rel.`confidence`", "gt", 0.9)
+        assert c.hoisted_path["edge_where"] == f"({typed} AND EXISTS(rel.`producedBy`))"
 
     def test_edge_group_or(self):
         c = _degree_compiler()
@@ -2504,8 +2619,9 @@ class TestEdgePredicateCompile:
         cont, _, _ = _build_within_hops_continuation(
             c.hoisted_within_hops, c._param_counter,
         )
+        typed, _ = _typed("rel.`weight`", "gte", 0.5)
         assert "_whP0 = (anchor)" in cont
-        assert "ALL(rel IN relationships(_whP0) WHERE rel.`weight` >= $p0)" in cont
+        assert f"ALL(rel IN relationships(_whP0) WHERE {typed})" in cont
 
     def test_within_hops_continuation_no_edge_predicate(self):
         # Regression: legacy shape still produces no per-edge filter

@@ -28,6 +28,13 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from backend.app.services.deep_search import CompileError
 from backend.app.services.deep_search.settings import get_deep_search_settings
+from backend.common.search_semantics import (
+    SemanticsError,
+    evaluate,
+    fold_case,
+    resolve_comparison,
+    resolve_predicate,
+)
 from backend.common.models.search import (
     EntityTypePredicate,
     GroupPredicate,
@@ -49,6 +56,14 @@ from backend.common.models.search import (
 # ``layerAssignment`` (str, optional), and any number of arbitrary
 # property keys. Edge dict shape: ``source`` / ``target`` / ``type``
 # (all strs) plus optional property keys.
+
+# The fixture fields that are the node's own, not user properties — what a
+# search BY property name must not match (the FalkorDB compiler excludes
+# ``platform_property_names()`` for the same reason).
+_NODE_FIELDS = frozenset({
+    "urn", "entityType", "displayName", "qualifiedName", "description",
+    "tags", "layerAssignment", "searchableText",
+})
 
 
 class StubDeepSearchProvider:
@@ -310,6 +325,15 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         # qualifiedName) — never a space-joined haystack across fields
         # — so exact/prefix/suffix semantics hold per field.
         target = predicate.target or "any"
+        if target == "property" and predicate.property_key:
+            # Same typed text comparison the compiler makes for it.
+            op = {"exact": "eq", "prefix": "startsWith",
+                  "suffix": "endsWith"}.get(predicate.match, "contains")
+            return evaluate(
+                node.get(predicate.property_key),
+                resolve_comparison(op, predicate.value, value_type="string",
+                                   case_sensitive=predicate.case_sensitive),
+            )
         needle = (predicate.value or "").lower()
         if not needle:
             return True
@@ -347,50 +371,27 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         return False
 
     if isinstance(predicate, PropertyPredicate):
-        v = node.get(predicate.key)
-        op = predicate.op
-        target = predicate.value
-        if op in ("eq", "neq"):
-            # Mirror the compiler's case-fold rule (falkordb_deep_search.py
-            # ``_visit_property``): once the fold triggers (predicate
-            # value is a string, not case_sensitive), the compiler
-            # wraps the STORED column unconditionally in
-            # toLower(toString(col)) — so a stored int 100 matches
-            # predicate value "100". Coerce any non-None stored value
-            # to str before lowering to match. ``toString(NULL)`` is
-            # NULL in Cypher, so a None stored value stays None (no
-            # match for eq; neq's None handling is unchanged below).
-            if isinstance(target, str) and not predicate.case_sensitive:
-                lhs = str(v).lower() if v is not None else None
-                rhs = target.lower()
-            else:
-                lhs, rhs = v, target
-            return (lhs == rhs) if op == "eq" else (lhs != rhs)
-        if op == "gt":
-            return v is not None and v > target
-        if op == "gte":
-            return v is not None and v >= target
-        if op == "lt":
-            return v is not None and v < target
-        if op == "lte":
-            return v is not None and v <= target
-        if op == "in":
-            return v in set(target or [])
-        if op == "notIn":
-            return v not in set(target or [])
-        if op == "contains":
-            return v is not None and str(target) in str(v)
-        if op == "startsWith":
-            return isinstance(v, str) and v.startswith(str(target))
-        if op == "endsWith":
-            return isinstance(v, str) and v.endswith(str(target))
-        if op == "between":
-            lo, hi = target  # validator ensures 2-tuple
-            return v is not None and lo <= v <= hi
-        raise CompileError(f"stub: unsupported property op {op!r}")
+        # The reference evaluator IS the compiled Cypher's meaning (the
+        # live parity test holds them together), so the stub answers a
+        # typed comparison exactly as FalkorDB would.
+        try:
+            cmp = resolve_predicate(predicate)
+        except SemanticsError as exc:
+            raise CompileError(f"property {predicate.key!r}: {exc}") from exc
+        return evaluate(node.get(predicate.key), cmp)
 
     if isinstance(predicate, HasPropertyPredicate):
-        return predicate.key in node and node[predicate.key] is not None
+        if predicate.key_match == "exact":
+            present = node.get(predicate.key) is not None
+        else:
+            needle = fold_case(predicate.key)
+            present = any(
+                (fold_case(k).startswith(needle) if predicate.key_match == "prefix"
+                 else needle in fold_case(k))
+                for k, v in node.items()
+                if k not in _NODE_FIELDS and v is not None
+            )
+        return not present if predicate.negate else present
 
     if isinstance(predicate, TagPredicate):
         tags = set(node.get("tags") or [])

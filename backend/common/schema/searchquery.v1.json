@@ -313,8 +313,18 @@
       "type": "object"
     },
     "EdgePropertyPredicate": {
-      "description": "Typed comparison against a single edge property.\n\nEvaluated against each traversed relationship inside a\n``PathPredicate`` or ``WithinHopsPredicate``. Compiles to\n``rel.<key> <op> $val`` inside an ``ALL(rel IN relationships(p) \u2026)``\nblock. ``between`` expects ``value`` to be a two-element list\n``[lo, hi]``.",
+      "description": "Typed comparison against a single edge property.\n\nEvaluated against each traversed relationship inside a\n``PathPredicate`` or ``WithinHopsPredicate``, inside an\n``ALL(rel IN relationships(p) \u2026)`` block. The comparison itself is\n``PropertyPredicate``'s \u2014 same operators, value shapes and types.",
       "properties": {
+        "caseSensitive": {
+          "default": false,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "includeMissing": {
+          "default": false,
+          "title": "Includemissing",
+          "type": "boolean"
+        },
         "key": {
           "maxLength": 128,
           "minLength": 1,
@@ -341,7 +351,14 @@
             "contains",
             "startsWith",
             "endsWith",
-            "between"
+            "between",
+            "notContains",
+            "containsAll",
+            "withinLast",
+            "isSet",
+            "isNotSet",
+            "isEmpty",
+            "isNotEmpty"
           ],
           "title": "Op",
           "type": "string"
@@ -349,6 +366,18 @@
         "value": {
           "default": null,
           "title": "Value"
+        },
+        "valueType": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "string",
+            "number",
+            "boolean",
+            "date"
+          ],
+          "title": "Valuetype",
+          "type": "string"
         }
       },
       "required": [
@@ -729,12 +758,22 @@
       "type": "object"
     },
     "HasPropertyPredicate": {
-      "description": "\"Does this node have a property named X\" \u2014 key presence only.\n\nCompiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).\nNative-property storage makes this cheap; pre-refactor this required\nparsing the blob in Python for every node.",
+      "description": "\"Does this node have a property named X\" \u2014 key presence only.\n\nCompiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).\nNative-property storage makes this cheap; pre-refactor this required\nparsing the blob in Python for every node.\n\n``key_match`` searches by the NAME instead: ``prefix`` / ``contains``\nmatch any user property whose name starts with / contains ``key``,\ncase-insensitively (\"a property whose name contains 'owner'\").",
       "properties": {
         "key": {
           "maxLength": 128,
           "minLength": 1,
           "title": "Key",
+          "type": "string"
+        },
+        "keyMatch": {
+          "default": "exact",
+          "enum": [
+            "exact",
+            "prefix",
+            "contains"
+          ],
+          "title": "Keymatch",
           "type": "string"
         },
         "kind": {
@@ -1064,11 +1103,16 @@
       "type": "object"
     },
     "PropertyPredicate": {
-      "description": "Typed comparison against a single user-property.\n\nAfter the storage refactor, user properties are native FalkorDB\nfields, so these compile to ``WHERE n.<key> <op> $val`` \u2014 no Python\npost-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))\n<op> toLower($val)``) when ``value`` is a string and\n``case_sensitive`` is false; a non-string value (or\n``case_sensitive=True``) keeps the raw, indexed column comparison.\n``between`` expects ``value`` to be a two-element list ``[lo, hi]``.",
+      "description": "Typed comparison against a single user-property.\n\n``value_type`` says how stored values are read \u2014 under ``number`` a\nstored \"15\" is 15, under ``string`` a stored 15 is \"15\" \u2014 and the\ncomparison holds for any stored kind, a list included (it matches when\nan element does). ``value`` is shaped by ``op``: one value, a list\n(``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an\nISO duration such as ``\"P30D\"`` (``withinLast``) or nothing (``isSet``,\n``isEmpty`` and their negations). An integer beyond 2^53 is best sent\nas its digits in a string with ``value_type='number'``: it is compared\nexactly. Text comparisons are case-insensitive unless\n``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /\n``notContains`` match entities without the key. The full contract is\n``backend/common/search_semantics``.",
       "properties": {
         "caseSensitive": {
           "default": false,
           "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "includeMissing": {
+          "default": false,
+          "title": "Includemissing",
           "type": "boolean"
         },
         "key": {
@@ -1097,7 +1141,14 @@
             "contains",
             "startsWith",
             "endsWith",
-            "between"
+            "between",
+            "notContains",
+            "containsAll",
+            "withinLast",
+            "isSet",
+            "isNotSet",
+            "isEmpty",
+            "isNotEmpty"
           ],
           "title": "Op",
           "type": "string"
@@ -1105,6 +1156,18 @@
         "value": {
           "default": null,
           "title": "Value"
+        },
+        "valueType": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "string",
+            "number",
+            "boolean",
+            "date"
+          ],
+          "title": "Valuetype",
+          "type": "string"
         }
       },
       "required": [

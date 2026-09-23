@@ -1,0 +1,149 @@
+{
+  "between": {
+    "arity": "pair",
+    "negative": false,
+    "types": [
+      "number",
+      "date",
+      "string"
+    ]
+  },
+  "contains": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "string"
+    ]
+  },
+  "containsAll": {
+    "arity": "many",
+    "negative": false,
+    "types": [
+      "string",
+      "number",
+      "boolean"
+    ]
+  },
+  "endsWith": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "string"
+    ]
+  },
+  "eq": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "string",
+      "number",
+      "boolean",
+      "date"
+    ]
+  },
+  "gt": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "number",
+      "date",
+      "string"
+    ]
+  },
+  "gte": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "number",
+      "date",
+      "string"
+    ]
+  },
+  "in": {
+    "arity": "many",
+    "negative": false,
+    "types": [
+      "string",
+      "number",
+      "boolean"
+    ]
+  },
+  "isEmpty": {
+    "arity": "none",
+    "negative": false,
+    "types": []
+  },
+  "isNotEmpty": {
+    "arity": "none",
+    "negative": false,
+    "types": []
+  },
+  "isNotSet": {
+    "arity": "none",
+    "negative": false,
+    "types": []
+  },
+  "isSet": {
+    "arity": "none",
+    "negative": false,
+    "types": []
+  },
+  "lt": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "number",
+      "date",
+      "string"
+    ]
+  },
+  "lte": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "number",
+      "date",
+      "string"
+    ]
+  },
+  "neq": {
+    "arity": "one",
+    "negative": true,
+    "types": [
+      "string",
+      "number",
+      "boolean",
+      "date"
+    ]
+  },
+  "notContains": {
+    "arity": "one",
+    "negative": true,
+    "types": [
+      "string"
+    ]
+  },
+  "notIn": {
+    "arity": "many",
+    "negative": true,
+    "types": [
+      "string",
+      "number",
+      "boolean"
+    ]
+  },
+  "startsWith": {
+    "arity": "one",
+    "negative": false,
+    "types": [
+      "string"
+    ]
+  },
+  "withinLast": {
+    "arity": "duration",
+    "negative": false,
+    "types": [
+      "date"
+    ]
+  }
+}

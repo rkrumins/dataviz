@@ -36,13 +36,19 @@ from backend.app.services.view_scope import (
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
     SEARCH_SCOPE_ENTITY_TYPES_MAX,
+    EdgeGroupPredicate,
+    EdgePropertyPredicate,
     GroupPredicate,
+    PathPredicate,
+    PropertyPredicate,
     ScopeDiagnostics,
     SearchQuery,
     SearchResultPage,
     SearchScope,
     TextPredicate,
+    WithinHopsPredicate,
 )
+from backend.common.search_semantics import SemanticsError, resolve_predicate
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +105,35 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
                 child, depth=depth + 1, path=f"{path}.children[{i}]",
             )
         return total
+    _validate_comparisons(predicate, path)
     return 1  # leaf
+
+
+def _validate_comparisons(predicate, path: str) -> None:
+    """Resolve every typed comparison up front (``search_semantics``), so
+    a value that cannot be compared the way it asks — "abc" as a number,
+    ``between`` with one end — is a 400 naming the condition, not a
+    compile error with no idea where it came from."""
+    if isinstance(predicate, PropertyPredicate):
+        _resolve_or_raise(predicate, path)
+    elif (isinstance(predicate, (WithinHopsPredicate, PathPredicate))
+            and predicate.edge_predicate is not None):
+        _validate_edge_comparisons(predicate.edge_predicate, f"{path}.edgePredicate")
+
+
+def _validate_edge_comparisons(predicate, path: str) -> None:
+    if isinstance(predicate, EdgeGroupPredicate):
+        for i, child in enumerate(predicate.children):
+            _validate_edge_comparisons(child, f"{path}.children[{i}]")
+    elif isinstance(predicate, EdgePropertyPredicate):
+        _resolve_or_raise(predicate, path)
+
+
+def _resolve_or_raise(predicate, path: str) -> None:
+    try:
+        resolve_predicate(predicate)
+    except SemanticsError as exc:
+        raise ValidationError(f"{path} ({predicate.key}): {exc}") from exc
 
 
 def _count_and_validate(query: SearchQuery) -> int:

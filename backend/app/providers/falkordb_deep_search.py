@@ -14,9 +14,10 @@ v1 surface (intentionally bounded)
 **Compiled to Cypher natively** — all in a single WHERE fragment:
     TextPredicate    target=name|qualifiedName|description|tags|property
                      match=exact|prefix|substring
-    PropertyPredicate eq|neq|gt|gte|lt|lte|in|notIn|contains|startsWith|endsWith|between
+    PropertyPredicate every search_semantics operator, typed
+                     (falkordb_typed_ops.compile_comparison)
     TagPredicate     has|hasAll|hasAny|notHas  (JSON-substring on n.tags)
-    HasPropertyPredicate  EXISTS(n.<key>)
+    HasPropertyPredicate  EXISTS(n.<key>); keyMatch prefix|contains on keys(n)
     EntityTypePredicate   in|notIn on labels(n)[0]
     LayerPredicate        n.layerAssignment equality
     GroupPredicate        and|or|not, recursive
@@ -63,9 +64,19 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
-from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+from backend.app.providers.falkordb_provider import (
+    _RESERVED_NODE_KEYS,
+    platform_property_names,
+)
+from backend.app.providers.falkordb_typed_ops import compile_comparison
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.derived_artifacts import is_derived_label
+from backend.common.search_semantics import (
+    SemanticsError,
+    element_texts,
+    fold_case,
+    resolve_predicate,
+)
 from backend.common.models.search import (
     AggregationSpec,
     AncestorRef,
@@ -116,18 +127,18 @@ def __getattr__(name: str):
 # Predicate → Cypher compiler
 # ---------------------------------------------------------------------------
 
-def _as_value_list(value: Any) -> List[Any]:
-    """The list an ``in`` / ``notIn`` predicate compares against.
+_TEXT_MATCH_OPS = {
+    "exact": "eq", "prefix": "startsWith", "suffix": "endsWith",
+    "substring": "contains",
+}
 
-    A single value is a one-element list. ``list(value)`` used to do the
-    coercion: a string became its characters (``in "abc"`` matched "a", "b"
-    and "c") and a number raised a TypeError the route answered with a 500.
-    """
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
+
+def _text_on_property(t: TextPredicate) -> PropertyPredicate:
+    """A ``target='property'`` text match as the property comparison it is."""
+    return PropertyPredicate(
+        key=t.property_key, op=_TEXT_MATCH_OPS[t.match], value=t.value,
+        value_type="string", case_sensitive=t.case_sensitive,
+    )
 
 
 def _safe_property_name(key: str) -> str:
@@ -348,7 +359,13 @@ class _Compiler:
                 raise CompileError(
                     "text target='property' requires propertyKey"
                 )
-            cols = [f"n.{_safe_property_name(t.property_key)}"]
+            # A property holds any kind — ``toString`` on a list aborts the
+            # whole query — so this is the typed TEXT comparison a
+            # PropertyPredicate makes, not a raw column wrap.
+            return self._compile_comparison(
+                f"n.{_safe_property_name(t.property_key)}",
+                _text_on_property(t),
+            )
         elif target == "any":
             # n.searchableText is denormalised at write-time (already
             # lowercased, includes description + string-valued user
@@ -399,57 +416,21 @@ class _Compiler:
         return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
-        col = f"n.{_safe_property_name(p.key)}"
-        op = p.op
-        if op in ("eq", "neq"):
-            symbol = {"eq": "=", "neq": "<>"}[op]
-            pn = self._next()
-            # Case-fold ONLY when the value is a string (and not
-            # case_sensitive) — a typed comparison (int/float/bool/None/
-            # list) must keep its raw column reference and untouched
-            # value so it stays index-eligible and keeps its original
-            # type semantics (e.g. numeric equality, not a stringified
-            # one).
-            if isinstance(p.value, str) and not p.case_sensitive:
-                col_expr = f"toLower(toString({col}))"
-                self.params[pn] = p.value.lower()
-            else:
-                col_expr = col
-                self.params[pn] = p.value
-            return f"{col_expr} {symbol} ${pn}"
-        if op in ("gt", "gte", "lt", "lte"):
-            symbol = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
-            pn = self._next()
-            self.params[pn] = p.value
-            return f"{col} {symbol} ${pn}"
-        if op in ("contains", "startsWith", "endsWith"):
-            pn = self._next()
-            v = "" if p.value is None else str(p.value)
-            if p.case_sensitive:
-                self.params[pn] = v
-                col_expr = col
-            else:
-                self.params[pn] = v.lower()
-                col_expr = f"toLower(toString({col}))"
-            keyword = {"contains": "CONTAINS",
-                       "startsWith": "STARTS WITH",
-                       "endsWith": "ENDS WITH"}[op]
-            return f"{col_expr} {keyword} ${pn}"
-        if op in ("in", "notIn"):
-            pn = self._next()
-            self.params[pn] = _as_value_list(p.value)
-            return (f"NOT ({col} IN ${pn})" if op == "notIn"
-                    else f"{col} IN ${pn}")
-        if op == "between":
-            if not isinstance(p.value, list) or len(p.value) != 2:
-                raise CompileError(
-                    "property op='between' requires value=[lo, hi]"
-                )
-            lo_p, hi_p = self._next(), self._next()
-            self.params[lo_p] = p.value[0]
-            self.params[hi_p] = p.value[1]
-            return f"({col} >= ${lo_p} AND {col} <= ${hi_p})"
-        raise CompileError(f"unknown property op: {op!r}")
+        return self._compile_comparison(f"n.{_safe_property_name(p.key)}", p)
+
+    def _compile_comparison(self, col: str, p) -> str:
+        """A typed comparison (``search_semantics``) of the stored value
+        ``col`` — the one path node and edge properties share."""
+        try:
+            cmp = resolve_predicate(p)
+        except SemanticsError as exc:
+            raise CompileError(f"property {p.key!r}: {exc}") from exc
+        return compile_comparison(col, cmp, self._bind)
+
+    def _bind(self, value: Any) -> str:
+        pn = self._next()
+        self.params[pn] = value
+        return f"${pn}"
 
     def _visit_tag(self, t) -> str:
         # tags is currently stored as JSON-stringified list. Each value
@@ -473,7 +454,17 @@ class _Compiler:
         raise CompileError(f"unknown tag op: {t.op!r}")
 
     def _visit_has_property(self, h) -> str:
-        expr = f"EXISTS(n.{_safe_property_name(h.key)})"
+        if h.key_match == "exact":
+            expr = f"EXISTS(n.{_safe_property_name(h.key)})"
+        else:
+            # By name: any USER property whose name starts with / contains
+            # the text — the platform's own fields (urn, displayName,
+            # searchableText, …) are not what a person means by "a
+            # property called …".
+            keyword = "STARTS WITH" if h.key_match == "prefix" else "CONTAINS"
+            platform = self._bind(sorted(platform_property_names()))
+            expr = (f"ANY(_k IN keys(n) WHERE NOT _k IN {platform} "
+                    f"AND toLower(_k) {keyword} {self._bind(fold_case(h.key))})")
         return f"NOT ({expr})" if h.negate else expr
 
     def _visit_entity_type(self, e) -> str:
@@ -716,37 +707,7 @@ class _Compiler:
         raise CompileError(f"unknown edge predicate kind: {kind!r}")
 
     def _visit_edge_property(self, ep) -> str:
-        col = f"rel.{_safe_property_name(ep.key)}"
-        op = ep.op
-        if op in ("eq", "neq", "gt", "gte", "lt", "lte"):
-            symbol = {"eq": "=", "neq": "<>", "gt": ">",
-                      "gte": ">=", "lt": "<", "lte": "<="}[op]
-            pn = self._next()
-            self.params[pn] = ep.value
-            return f"{col} {symbol} ${pn}"
-        if op in ("contains", "startsWith", "endsWith"):
-            pn = self._next()
-            v = "" if ep.value is None else str(ep.value)
-            self.params[pn] = v
-            keyword = {"contains": "CONTAINS",
-                       "startsWith": "STARTS WITH",
-                       "endsWith": "ENDS WITH"}[op]
-            return f"{col} {keyword} ${pn}"
-        if op in ("in", "notIn"):
-            pn = self._next()
-            self.params[pn] = _as_value_list(ep.value)
-            return (f"NOT ({col} IN ${pn})" if op == "notIn"
-                    else f"{col} IN ${pn}")
-        if op == "between":
-            if not isinstance(ep.value, list) or len(ep.value) != 2:
-                raise CompileError(
-                    "edgeProperty op='between' requires value=[lo, hi]"
-                )
-            lo_p, hi_p = self._next(), self._next()
-            self.params[lo_p] = ep.value[0]
-            self.params[hi_p] = ep.value[1]
-            return f"({col} >= ${lo_p} AND {col} <= ${hi_p})"
-        raise CompileError(f"unknown edge property op: {op!r}")
+        return self._compile_comparison(f"rel.{_safe_property_name(ep.key)}", ep)
 
     def _visit_edge_has_property(self, ep) -> str:
         expr = f"EXISTS(rel.{_safe_property_name(ep.key)})"
@@ -3054,6 +3015,7 @@ _ELLIPSIS = "…"
 _PROPERTY_OP_MODES = {
     "eq": "exact",
     "in": "exact",
+    "containsAll": "exact",
     "contains": "substring",
     "startsWith": "prefix",
     "endsWith": "suffix",
@@ -3101,23 +3063,25 @@ def _collect_text_leaves(predicate) -> List[Tuple[int, Any]]:
 def _leaf_needles(pred) -> Tuple[List[str], str]:
     """The literal(s) a leaf searches for, and the mode to score under.
 
-    A ``PropertyPredicate`` only has textual provenance when both its op
-    and its value are textual; a typed comparison returns no needles and
+    A ``PropertyPredicate`` only has textual provenance when it compares
+    as TEXT (``search_semantics``): a number, boolean or date compared as
+    one is not a substring of anything, so it returns no needles and
     contributes nothing to the score.
     """
     if isinstance(pred, PropertyPredicate):
         mode = _PROPERTY_OP_MODES.get(pred.op)
         if mode is None:
             return [], "substring"
-        if pred.op == "in":
-            values = [v for v in (pred.value or []) if isinstance(v, str)]
-        else:
-            values = [pred.value] if isinstance(pred.value, str) else []
-        # An empty needle is satisfied by every field trivially
-        # (``CONTAINS ''`` is true for any non-null column) — it would
+        try:
+            cmp = resolve_predicate(pred)
+        except SemanticsError:
+            return [], mode
+        if cmp.type != "string":
+            return [], mode
+        # An empty needle is satisfied by every field trivially — it would
         # score the whole result set at the prefix tier and highlight
         # nothing. Drop it.
-        return [v for v in values if v], mode
+        return [v for v in cmp.values if v], mode
     return [pred.value], pred.match
 
 
@@ -3135,16 +3099,13 @@ def _scored_fields(node, pred) -> List[Tuple[str, str, float]]:
     they matched is capped separately — see ``_tier_ceiling``.
     """
     if isinstance(pred, PropertyPredicate):
-        # The compiled column is ``toLower(toString(n.<key>))`` for the
-        # textual ops, so a non-string scalar is matchable: ``version:
-        # 3`` really does satisfy ``op='eq', value='3'``. Coerce it the
-        # same way the compiler does rather than dropping the
-        # provenance of a row the query already returned.
+        # A text comparison reads the text of every stored kind — a
+        # ``version: 3`` really does satisfy ``op='eq', value='3'`` — and
+        # each element of a list on its own. Score the same texts, so a
+        # highlight points at what the query actually matched.
         value = (node.properties or {}).get(pred.key)
-        text = "" if value is None else str(value)
-        if not text:
-            return []
-        return [(f"property:{pred.key}", text, _FIELD_WEIGHTS["property"])]
+        return [(f"property:{pred.key}", text, _FIELD_WEIGHTS["property"])
+                for text in element_texts(value) if text]
 
     fields: List[Tuple[str, str, float]] = []
 
@@ -3163,11 +3124,11 @@ def _scored_fields(node, pred) -> List[Tuple[str, str, float]]:
         for tag in node.tags or []:
             add("tags", tag)
     if target == "property" and pred.property_key:
-        # The compiled column is ``toLower(toString(n.<key>))``, so a
-        # non-string scalar is matchable — stringify it the same way.
+        # Compiled as a typed text comparison, which reads every stored
+        # kind as text and each list element on its own — score the same.
         value = (node.properties or {}).get(pred.property_key)
-        add(f"property:{pred.property_key}",
-            None if value is None else str(value), "property")
+        for text in element_texts(value):
+            add(f"property:{pred.property_key}", text, "property")
     if target == "any":
         for key, value in (node.properties or {}).items():
             if isinstance(value, str):
