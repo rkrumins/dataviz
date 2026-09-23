@@ -176,23 +176,28 @@ export function triggerBrowserDownload(url: string, filename: string): void {
   a.remove()
 }
 
-/** Detect a file's format from its CONTENT (universal — never relies on the extension, which may
- *  be missing after a download). Reads the first line and classifies json-lines vs csv vs tsv. */
+/** Detect a file's import format. An unambiguous extension wins; otherwise (none after a download,
+ *  or an unknown one) the CONTENT decides: a "PK" zip signature is a workbook, and the first
+ *  non-whitespace character tells a JSON array (`[`) from json-lines (`{`) — never a JSON.parse of
+ *  the first line, which a single-line array longer than the read truncates. Else tsv when the
+ *  first line has a tab and no comma, otherwise csv. */
 export async function detectFormat(file: File): Promise<ImportFormat> {
-  // xlsx is a binary zip (PK signature) — detect by extension/magic BEFORE any text read.
   const ext = file.name.toLowerCase().split('.').pop() || ''
+  if (ext === 'json') return 'json'
+  if (ext === 'ndjson' || ext === 'jsonl') return 'ndjson'
+  if (ext === 'csv') return 'csv'
+  if (ext === 'tsv' || ext === 'tab') return 'tsv'
   if (ext === 'xlsx' || ext === 'xlsm') return 'xlsx'
   try {
     const sig = new Uint8Array(await file.slice(0, 4).arrayBuffer())
     if (sig[0] === 0x50 && sig[1] === 0x4b) return 'xlsx'   // "PK" → an Excel workbook
-    const head = (await file.slice(0, 8192).text()).replace(/^﻿/, '')
+    const head = (await file.slice(0, 8192).text()).replace(/^\uFEFF/, '')
+    const first = head.trimStart()[0]
+    if (first === '[') return 'json'
+    if (first === '{') return 'ndjson'
     const firstLine = (head.split(/\r?\n/).find((l) => l.trim().length > 0) || '').trim()
-    if (firstLine.startsWith('{') || firstLine.startsWith('[')) {
-      try { JSON.parse(firstLine); return 'ndjson' } catch { /* not json-lines */ }
-    }
-    if (firstLine.includes('\t') && !firstLine.includes(',')) return 'tsv'
-    if (firstLine.includes(',')) return 'csv'
-  } catch { /* fall through to extension */ }
+    return firstLine.includes('\t') && !firstLine.includes(',') ? 'tsv' : 'csv'
+  } catch { /* unreadable — fall back to the name */ }
   return inferFormat(file.name)
 }
 
