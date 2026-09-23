@@ -46,11 +46,11 @@ function page(): ViewVersionPage {
   }
 }
 
-function renderDialog() {
+function renderDialog(props: Partial<React.ComponentProps<typeof ExportViewDialog>> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={client}>
-      <ExportViewDialog views={[{ id: 'view_1', name: 'Finance lineage' }]} onClose={vi.fn()} />
+      <ExportViewDialog views={[{ id: 'view_1', name: 'Finance lineage' }]} onClose={vi.fn()} {...props} />
     </QueryClientProvider>,
   )
 }
@@ -85,6 +85,13 @@ describe('ExportViewDialog — a view with its data', () => {
     ])
     expect(await screen.findByText('Packaged')).toBeInTheDocument()
     expect(screen.getByText(/120 entities and 80 relationships/)).toBeInTheDocument()
+  })
+
+  it('opens on the view with its data when asked (the canvas’s “Export view + data…”)', async () => {
+    resolveGraphMock.mockResolvedValue({ graphId: 'g1', mainBranchId: 'main', mainHeadCommitSeq: 9, myDraft: null })
+    renderDialog({ initialContent: 'data' })
+    expect(await screen.findByText('finance-lineage.v3.view-package.zip')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /View \+ data/ })).toHaveAttribute('aria-checked', 'true')
   })
 
   it('says why the data can’t come along from a data source without version control', async () => {

@@ -4,6 +4,10 @@
  * always reachable; the Import item is disabled with an explainer when not in Edit mode, because
  * import targets the working draft and there is no branch to write to in a published View.
  *
+ * Below the graph's own items, "This view" moves the VIEW between environments: its design as a
+ * view file, or its design with its data as a package, and updating it from a file. Each item
+ * shows only where its switch is on and the host passed its callback.
+ *
  * Mirrors the header's portal-menu pattern (ViewTitleMenu / DisplayMenu): trigger + fixed-positioned
  * portal to document.body (escapes the header's backdrop-blur stacking context), outside-click/Escape
  * to close. Store-free — props + callbacks only.
@@ -16,16 +20,25 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useFeature } from '@/store/features'
 
+/** Moving this view between environments (see the "This view" section). */
+export interface ViewFileActions {
+  onExport?: () => void
+  onExportWithData?: () => void
+  /** Only for someone who may edit the view. */
+  onUpdateFromFile?: () => void
+}
+
 export interface ImportExportMenuProps {
   onImport?: () => void
   onExport?: () => void
   /** Edit mode (a draft is open). Import requires it; Export does not. */
   isDraft: boolean
+  thisView?: ViewFileActions
 }
 
 const POPOVER_WIDTH = 268
 
-export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMenuProps) {
+export function ImportExportMenu({ onImport, onExport, isDraft, thisView }: ImportExportMenuProps) {
   // Bulk import writes to a draft — pointless (and misleading) when the admin
   // has versioning off, so the item is hidden entirely.
   const versioningEnabled = useFeature('versioningEnabled')
@@ -34,6 +47,28 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
   // itself still walked out through here. Locking the shape of the estate while leaving the
   // contents open is the kind of gap that only looks safe.
   const exportEnabled = useFeature('graphExportEnabled')
+  const viewExportEnabled = useFeature('viewExportEnabled')
+  const viewImportEnabled = useFeature('viewImportEnabled')
+  const viewItems: Array<{ key: string; icon: LucideIcons.LucideIcon; label: string; detail: string; run: () => void }> = []
+  if (viewExportEnabled && thisView?.onExport) {
+    viewItems.push({
+      key: 'export', icon: LucideIcons.FileDown, label: 'Export view…', run: thisView.onExport,
+      detail: 'Its design as a file, to import in another environment.',
+    })
+  }
+  // A view with its data is a view export AND a graph export: both switches must be on.
+  if (viewExportEnabled && exportEnabled && versioningEnabled && thisView?.onExportWithData) {
+    viewItems.push({
+      key: 'export-data', icon: LucideIcons.PackageOpen, label: 'Export view + data…', run: thisView.onExportWithData,
+      detail: 'Its design and its graph data, in one package.',
+    })
+  }
+  if (viewImportEnabled && thisView?.onUpdateFromFile) {
+    viewItems.push({
+      key: 'update', icon: LucideIcons.FileUp, label: 'Update this view from a file…', run: thisView.onUpdateFromFile,
+      detail: 'Bring in a newer design of it from another environment.',
+    })
+  }
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -193,6 +228,27 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
                   </span>
                 </button>
                 </HoverTip>
+              )}
+
+              {viewItems.length > 0 && (
+                <div role="group" aria-label="This view" className="mt-1 pt-1 border-t border-black/[0.06] dark:border-white/[0.06]">
+                  <p className="px-3 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-muted">This view</p>
+                  {viewItems.map(({ key, icon: Icon, label, detail, run }) => (
+                    <button
+                      key={key}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => runItem(run)}
+                      className="w-full flex items-start gap-2.5 px-3 py-2 text-left text-ink hover:bg-accent-lineage/[0.08] dark:hover:bg-accent-lineage/[0.12] transition-colors"
+                    >
+                      <Icon className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
+                      <span className="min-w-0">
+                        <span className="block text-[13px] font-medium">{label}</span>
+                        <span className="block text-[11px] text-ink-muted leading-snug">{detail}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
               )}
             </motion.div>
           )}

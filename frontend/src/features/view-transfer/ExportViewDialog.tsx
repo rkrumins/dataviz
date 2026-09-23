@@ -46,6 +46,9 @@ export interface ExportViewDialogProps {
   views: Array<{ id: string; name: string }>
   /** Pre-select an earlier version (single view only), e.g. "Export v6" from the history. */
   initialVersion?: number
+  /** Open on "View + data" (the canvas's "Export view + data…"); it explains itself when the
+   *  data can't come along. */
+  initialContent?: 'view' | 'data'
   onClose: () => void
 }
 
@@ -84,14 +87,14 @@ function usePackageOption(views: Array<{ id: string }>) {
   }
 }
 
-export function ExportViewDialog({ views, initialVersion, onClose }: ExportViewDialogProps) {
+export function ExportViewDialog({ views, initialVersion, initialContent = 'view', onClose }: ExportViewDialogProps) {
   const single = views.length === 1
   const [phase, setPhase] = useState<Phase>('choose')
   const [pick, setPick] = useState<'current' | number>(initialVersion ?? 'current')
   const [note, setNote] = useState('')
   const [result, setResult] = useState<ExportedFile | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [content, setContent] = useState<'view' | 'data'>('view')
+  const [content, setContent] = useState<'view' | 'data'>(initialContent)
   const [scope, setScope] = useState<PackageScope>(single ? 'view' : 'source')
   const [dataVersion, setDataVersion] = useState<PackageDataVersion>('published')
   const [packaged, setPackaged] = useState<ExportedPackage | null>(null)

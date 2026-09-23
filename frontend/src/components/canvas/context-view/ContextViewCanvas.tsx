@@ -13,7 +13,7 @@
  * highlight state, and rendering to extracted hooks and components.
  */
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useContext } from 'react'
 import { AnimatePresence, motion, useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import {
@@ -261,6 +261,8 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
@@ -871,6 +873,17 @@ export function ContextViewCanvas({
     canAdminPerm,
     canPublishPerm,
   })
+  // The Import / Export menu's "This view": moving the view itself between environments. Updating
+  // it from a file opens the View wizard's Import journey on it, for someone who may edit it.
+  const viewEditor = useContext(ViewEditorContext)
+  const activeViewId = activeView?.id ?? null
+  const thisView = useMemo(() => activeViewId ? {
+    onExport: () => setViewExport('view'),
+    onExportWithData: () => setViewExport('data'),
+    onUpdateFromFile: viewCaps.canEdit && viewEditor
+      ? () => viewEditor.openViewEditor(undefined, { journey: 'import', importIntoViewId: activeViewId })
+      : undefined,
+  } : undefined, [activeViewId, viewCaps.canEdit, viewEditor])
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
@@ -1472,6 +1485,8 @@ export function ContextViewCanvas({
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
+  // The view itself, exported for another environment: its design alone, or with its data.
+  const [viewExport, setViewExport] = useState<'view' | 'data' | null>(null)
   const [showStartEditing, setShowStartEditing] = useState(false)
   // An import commits to the draft server-side; we refresh only when the user LEAVES the import
   // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
@@ -5017,6 +5032,7 @@ export function ContextViewCanvas({
         onOpenStagedChanges={openStagedChangesPanel}
         onImport={() => setShowImportDialog(true)}
         onExport={() => setShowExportDialog(true)}
+        thisView={thisView}
         canUndo={stagedChangeList.length > 0}
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
@@ -5261,6 +5277,13 @@ export function ContextViewCanvas({
             branchId={useBranchStore.getState().isDraftMode()
               ? (useBranchStore.getState().currentBranchId ?? undefined) : undefined}
             onClose={() => setShowExportDialog(false)}
+          />
+        )}
+        {viewExport && activeView && (
+          <ExportViewDialog
+            views={[{ id: activeView.id, name: activeView.name }]}
+            initialContent={viewExport}
+            onClose={() => setViewExport(null)}
           />
         )}
         {/* Start editing — the deliberate branch chooser that replaces the silent draft resume/create. */}
