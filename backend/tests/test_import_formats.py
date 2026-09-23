@@ -2,16 +2,22 @@
 
 Adapters feed the ONE normalized row model: ``parse`` streams a byte iterator into raw column
 dicts (reassembling records split across chunk boundaries — a 5M-row file is never buffered
-whole); ``write`` serializes records back. The registry resolves a format name to its adapter.
-Parsing stays linear in the file size. Pure — runs under the per-file runner.
+whole); ``write`` serializes records back. The registry resolves a format name to its adapter,
+after the import worker's content sniff corrects a declared ndjson/json. Parsing stays linear in
+the file size. Pure — runs under the per-file runner.
 """
 import asyncio
 import csv
 import io
 import json
+import logging
+import shutil
+import tempfile
 import time
 
+from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning.import_export.formats import _lines, get_adapter
+from backend.app.services.versioning.import_export.import_worker import ImportWorker, _sniff_format
 from backend.app.services.versioning.import_export.resolve import _changed_props
 from backend.app.services.versioning.import_export.rowmodel import cell_text, normalize
 
@@ -114,6 +120,48 @@ async def _run() -> None:
     assert recs == [{"prop.s": "[1,2]"}], recs
 
 
+async def _worker_parse(declared: str, body: bytes):
+    """Drive the real ``ImportWorker._parse`` over a LocalFs store, capturing the staged rows
+    instead of flushing them to Postgres. Returns ``(row count, normalized rows)``."""
+    root = tempfile.mkdtemp(prefix="import-sniff-")
+    try:
+        store = LocalFsObjectStore(root)
+        await store.put_stream("source", _achunks(body))
+        worker = ImportWorker(versioning=None, store=store)
+        staged = []
+
+        async def _capture(batch):
+            staged.extend(batch)
+        worker._flush = _capture
+        count = await worker._parse("job_1", "source", declared)
+        return count, [row.raw for row in staged]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def _run_sniff() -> None:
+    # ---- the sniff: for a declared ndjson/json, the first non-whitespace byte (after an optional
+    #      BOM) decides — '[' is a JSON array, '{' is json-lines; None keeps the declaration ----
+    assert _sniff_format("ndjson", b'[{"kind": "node"}]') == "json"
+    assert _sniff_format("json", b'{"kind": "node"}\n{"kind": "edge"}\n') == "ndjson"
+    assert _sniff_format("NDJSON", b"\xef\xbb\xbf \r\n\t[") == "json"
+    assert _sniff_format("json", b"[{}]") is None and _sniff_format("ndjson", b"{}") is None
+    assert _sniff_format("ndjson", b"") is None and _sniff_format("json", b"kind,urn") is None
+    for declared in ("csv", "tsv", "xlsx"):                  # never second-guessed
+        assert _sniff_format(declared, b"[{}]") is None and _sniff_format(declared, b"{}") is None
+
+    # ---- wired into the worker: a JSON array declared ndjson imports via the json adapter and
+    #      json-lines declared json via the ndjson adapter; the sniffed first chunk still reaches
+    #      the parser (the first record is staged) ----
+    records = [{"kind": "node", "urn": "urn:a", "displayName": "A"},
+               {"kind": "node", "urn": "urn:b", "displayName": "B"}]
+    array_body = b"\xef\xbb\xbf\n" + json.dumps(records).encode()
+    lines_body = ("\n".join(json.dumps(r) for r in records) + "\n").encode()
+    for declared, body in (("ndjson", array_body), ("json", lines_body)):
+        count, rows = await _worker_parse(declared, body)
+        assert count == 2 and [r["urn"] for r in rows] == ["urn:a", "urn:b"], (declared, rows)
+
+
 async def _run_scale() -> None:
     # ---- _lines: a large multi-chunk file with a BOM + CRLF endings yields exactly the written
     #      lines (an empty one included) — whatever the chunk boundaries split (the BOM, a CRLF
@@ -155,11 +203,18 @@ def test_import_formats():
     asyncio.run(_run())
 
 
+def test_import_format_sniff(caplog):
+    with caplog.at_level(logging.INFO, logger=ImportWorker.__module__):
+        asyncio.run(_run_sniff())
+    assert "overridden to 'json'" in caplog.text and "overridden to 'ndjson'" in caplog.text
+
+
 def test_import_formats_scale():
     asyncio.run(_run_scale())
 
 
 if __name__ == "__main__":
     asyncio.run(_run())
+    asyncio.run(_run_sniff())
     asyncio.run(_run_scale())
     print("import formats: OK")
