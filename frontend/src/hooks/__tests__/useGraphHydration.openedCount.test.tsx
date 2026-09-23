@@ -21,13 +21,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 /** The fields of the provider's GraphNode that this journey reads. */
 interface FetchedNode { urn: string; entityType: string; displayName: string }
 
-const { mockProvider } = vi.hoisted(() => ({
-  mockProvider: {
+const { mockProvider } = vi.hoisted(() => {
+  const mockProvider = {
     getNodes: vi.fn(async (_query: { entityTypes?: string[] }): Promise<FetchedNode[]> => []),
     getEdgesBetween: vi.fn(async () => []),
     getChildren: vi.fn(async () => []),
-  },
-}))
+    // Type and root loads page through getNodesPage; it answers from this
+    // file's own getNodes mock, so each test's getNodes behaviour applies.
+    getNodesPage: vi.fn(async (q: { offset?: number }) => {
+      const nodes = await (mockProvider.getNodes as (q: unknown) => Promise<unknown[]>)(q)
+      return { nodes, hasMore: false, nextOffset: (q.offset ?? 0) + nodes.length }
+    }),
+  }
+  return { mockProvider }
+})
 
 vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => mockProvider,

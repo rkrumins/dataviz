@@ -28,7 +28,7 @@ import {
   useViewRelationshipTypes,
   useViewEntityTypes,
 } from '@/hooks/useViewSchema'
-import { useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
+import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
@@ -75,6 +75,11 @@ import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveR
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
 import { MemoryGauge } from './MemoryGauge'
+import { BulkLinkPanel } from './BulkLinkPanel'
+import { BulkLinkCard } from './BulkLinkCard'
+import { BulkLinkMarks } from './BulkLinkMarks'
+import { useBulkLinkStore } from './bulkLinkStore'
+import { dropVerdict, type LinkPair } from '@/lib/bulkLinks'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation, useViewportReservation } from './useBandReservation'
@@ -765,9 +770,18 @@ export function ContextViewCanvas({
 
   // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
   // stage a RAW create_edge. Only offered in draft (authoring) mode.
+  // A card that is part of a multi-selection drags the whole selection, and
+  // one card dropped on a selected card links into the whole selection —
+  // both open the bulk card at the drop (BulkLinkCard).
   const edgeConnect = useEdgeConnect({
     onConnect: (sourceUrn, targetUrn, edgeType) =>
       interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
+    groupOf: (id) => {
+      const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+      return sel.length > 1 && sel.includes(id) ? sel : null
+    },
+    onBulkDrop: ({ direction, picked, at }) =>
+      useBulkLinkStore.getState().openCard({ direction, picked, anchor: at }),
   })
   edgeConnectRef.current = edgeConnect
 
@@ -1720,6 +1734,10 @@ export function ContextViewCanvas({
    * child the user moved elsewhere still counts as loaded and the row does not
    * offer a page that will never arrive.
    */
+  // Read from the store here, not from useGraphHydration below — this memo is
+  // declared first. The server's "no more pages" beats the count — while the
+  // anchor still has the childCount it was said against.
+  const childPaging = useCanvasStore(s => s.childPaging)
   const anchorMoreByLayer = useMemo(() => {
     const out = new Map<string, { anchorUrn: string; remaining: number }>()
     for (const layer of sortedLayers) {
@@ -1727,13 +1745,15 @@ export function ContextViewCanvas({
       const anchor = nodeMap.get(layer.anchorUrn)
       if (!anchor) continue
       const total = Number((anchor.data as Record<string, unknown> | undefined)?.childCount ?? 0) || 0
+      const pager = childPaging[layer.anchorUrn]
+      if (pager && !pager.hasMore && pager.childCount === total) continue
       const loaded = (childMap.get(layer.anchorUrn) ?? []).length
       if (total > loaded) {
         out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
       }
     }
     return out
-  }, [sortedLayers, nodeMap, childMap])
+  }, [sortedLayers, nodeMap, childMap, childPaging])
 
 
   // Helper: Calculate currently visible top-level nodes (containers)
@@ -1942,6 +1962,67 @@ export function ContextViewCanvas({
   // columns still show browse and every authoring affordance on them still
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
+  // Bulk links: the Link panel, the card a drag drops, picking on the canvas.
+  const bulkLinkSurface = useBulkLinkStore((s) => s.surface)
+  const bulkLinkPicked = useBulkLinkStore((s) => s.picked)
+  const bulkLinkDirection = useBulkLinkStore((s) => s.direction)
+  const bulkLinkPickingOnCanvas = useBulkLinkStore((s) => s.pickingOnCanvas)
+  const bulkSelection = useMemo(() => selectedNodeIds.filter(isSelectableNode), [selectedNodeIds])
+  const bulkSelectionCount = bulkSelection.length
+  // Closes itself when the canvas or the selection stops allowing it.
+  useEffect(() => {
+    if (bulkLinkSurface && (!canvasWritable || bulkSelectionCount < 2)) useBulkLinkStore.getState().close()
+  }, [bulkLinkSurface, canvasWritable, bulkSelectionCount])
+  useEffect(() => () => useBulkLinkStore.getState().close(), [])
+  // While picking on the canvas, a click adds a card to the other side (or
+  // takes it off) instead of changing the selection.
+  const handleRowSelect = useCallback((id: string, multi?: boolean) => {
+    const bulk = useBulkLinkStore.getState()
+    if (bulk.surface && bulk.pickingOnCanvas) {
+      if (isSelectableNode(id) && !useCanvasStore.getState().selectedNodeIds.includes(id)) bulk.togglePicked(id)
+      return
+    }
+    selectNode(id, multi)
+  }, [selectNode])
+  const stageBulkLinks = useCallback((pairs: LinkPair[], edgeType: string) => {
+    // Judged by the view's own ontology — the one the preview used.
+    const outcome = interactions.stageEdgeCreateMany(pairs, edgeType, {
+      relationshipTypes,
+      containmentEdgeTypes,
+      entityTypes: schemaEntityTypes,
+    })
+    if (outcome.staged > 0) {
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: `Added ${outcome.staged.toLocaleString()} ${outcome.staged === 1 ? 'link' : 'links'} to your draft — save when you're done.`,
+      })
+    }
+    return outcome
+  }, [interactions, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
+  // Mid-drag, what dropping on the card under the pointer would do. Recomputed
+  // per card hovered, never per pointer move.
+  const dragHoverId = edgeConnect.state.mode === 'dragging' ? edgeConnect.state.hoverId : null
+  const dragSourceIds = edgeConnect.state.sourceIds
+  const dragHint = useMemo(() => {
+    if (!dragHoverId || dragSourceIds.length === 0) return null
+    const typeOf = new Map<string, string>()
+    for (const n of useCanvasStore.getState().nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) typeOf.set(n.id, t)
+    }
+    const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+    // One card onto a selected card links it into the whole selection.
+    const targets = dragSourceIds.length === 1 && sel.length > 1 && sel.includes(dragHoverId) && !sel.includes(dragSourceIds[0])
+      ? sel
+      : [dragHoverId]
+    return dropVerdict(dragSourceIds, targets, {
+      typeOf: (id) => typeOf.get(id) ?? null,
+      relationshipTypes,
+      containmentEdgeTypes,
+      entityTypes: schemaEntityTypes,
+      existingEdges: useCanvasStore.getState().edges,
+    })
+  }, [dragHoverId, dragSourceIds, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // A SHARED TRACE (`?trace=…`) — decoded once during the first render, so
   // the trace opens on the shared picture with no un-restored flash, and so
@@ -2995,7 +3076,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -3065,6 +3146,52 @@ export function ContextViewCanvas({
     if (traceWriteLocked()) return
     void loadMoreRoots()
   }, [loadMoreRoots, traceWriteLocked])
+
+  // ── Open-scope type feeds, per column ─────────────────────────────
+  // A column pages the feeds of the types it holds by rule; the column that
+  // takes unassigned entities pages every feed no layer claims. Matched
+  // case-insensitively: a rule and a feed can spell a type differently
+  // (observed vs declared), and a missed match is a column that silently
+  // never loads more.
+  const typeFeeds = useCanvasStore(s => s.typeFeeds)
+  const feedTypesByLayer = useMemo(() => {
+    const out = new Map<string, string[]>()
+    const feedTypes = Object.keys(typeFeeds)
+    if (feedTypes.length === 0) return out
+    const byFold = new Map(feedTypes.map(t => [t.toLowerCase(), t]))
+    const claimed = new Set<string>()
+    for (const layer of sortedLayers) {
+      const types = (layer.entityTypes ?? [])
+        .map(t => byFold.get(String(t).toLowerCase()))
+        .filter((t): t is string => !!t)
+      if (types.length === 0) continue
+      out.set(layer.id, types)
+      types.forEach(t => claimed.add(t))
+    }
+    const fallback = sortedLayers.find(l => l.showUnassigned === true)
+    if (fallback) {
+      const rest = feedTypes.filter(t => !claimed.has(t))
+      if (rest.length > 0) out.set(fallback.id, [...(out.get(fallback.id) ?? []), ...rest])
+    }
+    return out
+  }, [typeFeeds, sortedLayers])
+  const feedMoreByLayer = useMemo(() => {
+    const out = new Map<string, { loading: boolean; failed: boolean }>()
+    for (const [layerId, types] of feedTypesByLayer) {
+      const keys = types.filter(t => typeFeeds[t]?.hasMore).map(t => `TYPE:${t}`)
+      if (keys.length === 0) continue
+      out.set(layerId, {
+        loading: keys.some(k => loadingNodes.has(k)),
+        failed: keys.some(k => failedNodes.has(k)),
+      })
+    }
+    return out
+  }, [feedTypesByLayer, typeFeeds, loadingNodes, failedNodes])
+  const onFeedMore = useCallback((layerId: string) => {
+    if (traceWriteLocked()) return
+    const types = feedTypesByLayer.get(layerId)
+    if (types && types.length > 0) void loadMoreFeeds(types)
+  }, [feedTypesByLayer, loadMoreFeeds, traceWriteLocked])
 
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge
@@ -5397,7 +5524,7 @@ export function ContextViewCanvas({
         {/* What the canvas is holding, and what the actions will do with it.
             Hidden during a trace: the trace dock is then the thing being read,
             and the selection has already been spent on it. */}
-        {!traceActive && (
+        {!traceActive && bulkLinkSurface !== 'panel' && (
           <SelectionBar
             nodeIds={selectedNodeIds}
             labelFor={(id) => displayMap.get(id)?.name || id}
@@ -5405,8 +5532,33 @@ export function ContextViewCanvas({
             onClear={clearSelection}
             onTrace={() => startCanvasTrace(selectedNodeIds)}
             onOpenLens={() => openLensForSelection(selectedNodeIds)}
+            onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
           />
         )}
+        {/* Link the selection to other entities in one go — a draft being
+            edited only, like every other write. Closes itself when the
+            selection or the canvas stops allowing it. */}
+        {bulkLinkSurface === 'panel' && canvasWritable && bulkSelectionCount > 1 && (
+          <BulkLinkPanel
+            selection={bulkSelection}
+            labelFor={(id) => displayMap.get(id)?.name || id}
+            onCreate={stageBulkLinks}
+            onClose={() => useBulkLinkStore.getState().close()}
+          />
+        )}
+        {bulkLinkSurface === 'card' && canvasWritable && bulkSelectionCount > 1 && (
+          <BulkLinkCard
+            selection={bulkSelection}
+            labelFor={(id) => displayMap.get(id)?.name || id}
+            onCreate={stageBulkLinks}
+            onClose={() => useBulkLinkStore.getState().close()}
+          />
+        )}
+        <BulkLinkMarks
+          picked={bulkLinkSurface ? bulkLinkPicked : []}
+          pickedRole={bulkLinkDirection === 'selection-feeds' ? 'Target' : 'Source'}
+          hover={dragHoverId && dragHint ? { id: dragHoverId, level: dragHint.level } : null}
+        />
 
         <div
           ref={edgeLegendRef}
@@ -5773,8 +5925,9 @@ export function ContextViewCanvas({
           {/* In-progress edge while dragging a connection (shares the overlay
               coordinate space — absolute sibling inside the scroll container). */}
           <ConnectionDragLayer
-            sourceId={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceId : null}
+            sourceIds={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceIds : []}
             pointer={edgeConnect.state.pointer}
+            hint={dragHint}
           />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
@@ -5873,7 +6026,7 @@ export function ContextViewCanvas({
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedForRender}
                 searchResults={advancedMatchUrns}
-                onSelect={selectNode}
+                onSelect={bulkLinkPickingOnCanvas ? handleRowSelect : selectNode}
                 onSelectRange={setSelection}
                 selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}
@@ -5903,6 +6056,9 @@ export function ContextViewCanvas({
                 onRevealSearchHit={revealSearchHit}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
+                exhaustedParents={exhaustedParents}
+                feedMore={feedMoreByLayer.get(layer.id)}
+                onFeedMore={onFeedMore}
                 onScroll={handleLayerScroll}
                 onAssignToLayer={handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).

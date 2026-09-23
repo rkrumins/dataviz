@@ -10,7 +10,7 @@ from typing import Awaitable, Callable, List, Optional, Dict, Any
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
-    ChildrenWithEdgesResult, TopLevelNodesResult,
+    ChildrenWithEdgesResult, TopLevelNodesResult, NodePage,
     TraceResult, TraceClosureResult,
 )
 
@@ -143,6 +143,17 @@ class GraphDataProvider(ABC):
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
         pass
 
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """One page of `get_nodes`, with whether another follows and where it
+        starts. Asks for one row more than the page to know `has_more` exactly;
+        a provider that adds or drops rows around the rows it read (a draft
+        overlay) overrides this so the position stays in the base's order."""
+        limit = query.limit or 100
+        offset = query.offset or 0
+        rows = await self.get_nodes(query.model_copy(update={"limit": limit + 1}))
+        page = rows[:limit]
+        return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
+
     @abstractmethod
     async def search_nodes(self, query: str, limit: int = 10) -> List[GraphNode]:
         pass
@@ -189,11 +200,16 @@ class GraphDataProvider(ABC):
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
         sort_direction: str = "asc",
+        lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         """Get children with containment and optionally lineage edges in one round-trip.
 
         Default implementation delegates to get_children + get_edges.
         Providers may override with an optimized single-query implementation.
+
+        ``lineage_scope="siblings"`` asks for lineage between this page and EVERY
+        child of the parent, loaded or not (see FalkorDBProvider), so a client
+        paging a large container gets its cross-page edges with each page.
         """
         from ..models.graph import EdgeQuery
         children = await self.get_children(
@@ -208,6 +224,7 @@ class GraphDataProvider(ABC):
         # Fetch containment edges between parent and children
         containment_edges: List[GraphEdge] = []
         lineage_edges: List[GraphEdge] = []
+        siblings = lineage_scope == "siblings" and include_lineage_edges
         if child_urns:
             edges = await self.get_edges(EdgeQuery(
                 source_urns=all_urns, target_urns=all_urns, limit=len(all_urns) * 10,
@@ -217,9 +234,12 @@ class GraphDataProvider(ABC):
             for e in edges:
                 if e.edge_type.upper() in containment_types:
                     containment_edges.append(e)
-                elif include_lineage_edges:
+                elif include_lineage_edges and not siblings:
                     if lineage_filter is None or e.edge_type.upper() in lineage_filter:
                         lineage_edges.append(e)
+            if siblings:
+                lineage_edges = await self._default_sibling_lineage(
+                    parent_urn, child_urns, edge_types, lineage_edge_types, lineage_filter)
 
         # We don't know total_children without a count query; approximate
         has_more = len(children) >= limit
@@ -233,7 +253,68 @@ class GraphDataProvider(ABC):
             totalChildren=total,
             hasMore=has_more,
             nextCursor=next_cursor,
+            nextOffset=offset + len(children),
         )
+
+    async def _default_sibling_lineage(
+        self, parent_urn: str, page_urns: List[str], edge_types: Optional[List[str]],
+        lineage_edge_types: Optional[List[str]], lineage_filter: Optional[set],
+    ) -> List[GraphEdge]:
+        """Lineage between this page and {parent} ∪ every child of the parent, for
+        providers without a native query. Three anchored reads, each bounded by the
+        page's own degree — never by what the client has loaded: edges out of and
+        into the page, then which far ends the parent contains."""
+        page = set(page_urns)
+        containment_types = {t.upper() for t in (edge_types or [])}
+
+        def is_lineage(e: GraphEdge) -> bool:
+            t = e.edge_type.upper()
+            return t not in containment_types and (lineage_filter is None or t in lineage_filter)
+
+        touching = [
+            e for q in (EdgeQuery(source_urns=page_urns, edge_types=lineage_edge_types),
+                        EdgeQuery(target_urns=page_urns, edge_types=lineage_edge_types))
+            for e in await self._collect_edges(q) if is_lineage(e)
+        ]
+        far = {e.target_urn if e.source_urn in page else e.source_urn for e in touching}
+        far -= page | {parent_urn}
+        siblings: set = set()
+        if far and edge_types:
+            # The caller's spelling, as get_children used it — an adapter that
+            # compares types exactly finds no children under an upper-cased name.
+            contained = await self._collect_edges(EdgeQuery(
+                source_urns=[parent_urn], target_urns=sorted(far), edge_types=list(edge_types)))
+            siblings = {e.target_urn for e in contained}
+        keep = page | siblings | {parent_urn}
+        out: List[GraphEdge] = []
+        seen: set = set()
+        for e in touching:
+            key = (e.source_urn, e.target_urn, e.edge_type.upper(), e.id)
+            if e.source_urn in keep and e.target_urn in keep and key not in seen:
+                seen.add(key)
+                out.append(e)
+        return out
+
+    async def _collect_edges(self, query: EdgeQuery, page_size: int = 10_000, max_pages: int = 20) -> List[GraphEdge]:
+        """Every edge a query matches, read in pages — the default limit is 100 and
+        some adapters cap a read. Stops on a page that brings nothing new, so an
+        adapter that ignores `offset` returns its first page instead of looping."""
+        out: List[GraphEdge] = []
+        seen: set = set()
+        offset = 0
+        for _ in range(max_pages):
+            rows = await self.get_edges(query.model_copy(update={"offset": offset, "limit": page_size}))
+            fresh = 0
+            for e in rows:
+                key = (e.source_urn, e.target_urn, e.edge_type.upper(), e.id)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(e)
+                    fresh += 1
+            if len(rows) < page_size or fresh == 0:
+                break
+            offset += len(rows)
+        return out
 
     @abstractmethod
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:

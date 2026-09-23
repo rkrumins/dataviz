@@ -101,6 +101,15 @@ interface LayerColumnProps {
   onRevealSearchHit?: (urn: string, ancestorPath: AncestorRef[]) => void
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
+  /** Open scope: this column's type feeds still have more (present only then).
+   *  Drawn as a column-level row that auto-loads while the column GROWS and
+   *  offers a click when a page lands elsewhere — never an unattended drain. */
+  feedMore?: { loading: boolean; failed: boolean }
+  onFeedMore?: (layerId: string) => void
+  /** Parents the server says have no further pages, with the childCount that
+   *  was said against: no load-more row while the parent still has that count,
+   *  even when some of its children render in other columns. */
+  exhaustedParents?: Map<string, number>
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
@@ -274,6 +283,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   onRevealSearchHit,
   loadingNodes,
   failedNodes,
+  exhaustedParents,
+  feedMore,
+  onFeedMore,
   onScroll,
   onAssignToLayer,
   onRenameLayer,
@@ -486,11 +498,33 @@ export const LayerColumn = React.memo(function LayerColumn({
     // Iterative flat-tree builder using explicit stack
     type FrameItem =
       | { kind: 'node'; node: HierarchyNode; depth: number; isLast: boolean; parentIsLast: boolean[] }
-      | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number }
+      | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number | null; feed?: boolean }
       | { kind: 'searchHits'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]
           rows: InlineSearchHitRow[]; overflow: number; endsTheGroup: boolean }
 
     const stack: FrameItem[] = []
+    // Open scope: the column's type feeds have more. Pushed FIRST so the LIFO
+    // stack emits it LAST — the very foot of the column, below any anchor row.
+    if (feedMore && !localFocusId) {
+      stack.push({
+        kind: 'loadMore',
+        parent: {
+          id: `feed:${layer.id}`,
+          urn: `feed:${layer.id}`,
+          name: layer.name,
+          typeId: '',
+          data: {},
+          children: [],
+          depth: 0,
+          entityTypeOption: '',
+          tags: [],
+        } as HierarchyNode,
+        depth: 0,
+        parentIsLast: [],
+        count: null,
+        feed: true,
+      })
+    }
     // An ANCHORED column draws the anchor's children as its roots, so the
     // anchor row that would normally carry "Load more" is not on screen. Give
     // the COLUMN one instead, standing in for the anchor: LoadMoreItem keys off
@@ -534,6 +568,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           parentIsLast: frame.parentIsLast,
           isLoadMore: true,
           loadMoreCount: frame.count,
+          isFeedMore: frame.feed === true,
         })
         continue
       }
@@ -630,6 +665,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
         const hasMore = !isTracing && node.children.length < childCount && !activeQuery
+          && exhaustedParents?.get(node.id) !== childCount
 
         // What the session found INSIDE this container, at any depth — the
         // half of the answer that is NOT already on the canvas. These rows
@@ -681,7 +717,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents, feedMore, layer.id, layer.name])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -2540,9 +2576,26 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentId={item.node.id}
                         depth={item.depth}
                         parentIsLast={item.parentIsLast}
-                        count={item.loadMoreCount!}
-                        isLoading={loadingNodes?.has(item.node.id) ?? false}
-                        onLoadMore={(auto) => handleLoadMore(item.node.id, auto)}
+                        count={item.loadMoreCount ?? null}
+                        {...(item.isFeedMore
+                          // A type page's rows may render under parents in OTHER
+                          // columns, so this row re-arms only when THIS column
+                          // grows (latch on its row count) — never an unattended
+                          // drain of the whole type.
+                          ? {
+                            isLoading: feedMore?.loading ?? false,
+                            failed: (feedMore?.failed ?? false) && !(feedMore?.loading ?? false),
+                            rearmKey: visibleCount,
+                            onLoadMore: () => onFeedMore?.(layer.id),
+                          }
+                          : {
+                            isLoading: loadingNodes?.has(item.node.id) ?? false,
+                            // Re-arm only when THIS column grows: children placed in
+                            // another column must not drain this parent unattended.
+                            rearmKey: visibleCount,
+                            failed: (failedNodes?.has(item.node.id) ?? false) && !(loadingNodes?.has(item.node.id) ?? false),
+                            onLoadMore: (auto?: boolean) => handleLoadMore(item.node.id, auto),
+                          })}
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are
                         // filtered out of the tree and the pinned row

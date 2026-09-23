@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, TypeVar
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
-    GraphNode, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
+    GraphNode, NodePage, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
 from .versioned_branch_provider import VersionedBranchProvider
 
@@ -83,6 +83,37 @@ class _OverlayDelta:
         if not adj:
             return node
         return node.model_copy(update={"child_count": max(0, (node.child_count or 0) + adj)})
+
+    def compose_page(
+        self, base_items: List[GraphNode], added: List[GraphNode], *, first_page: bool,
+        base_total: Optional[int], removed: int,
+    ) -> "tuple[List[GraphNode], Optional[int]]":
+        """ONE rule for every listing the draft patches (a container's children, the
+        top-level set): main's page with each item overlaid or dropped, the draft's NEW
+        items on the first page only, and the listing's size as main's plus what the
+        draft added minus what it removed from it.
+
+        Positions — where the next page starts, whether there is one — stay MAIN's
+        (the caller passes the base page's through): that is what lets a client that
+        holds the draft's new items plus main's first pages ask for the next page and
+        get exactly the rows it has not seen. Serving the new items on every page
+        repeated them; counting them into the position skipped a row of main per item
+        (a new child pushed an existing sibling out of view, and "Load N more" asked
+        past the end forever); reporting the page length as the total invented or hid
+        a remainder."""
+        items: List[GraphNode] = []
+        for n in base_items:
+            merged = self.overlay_existing(n)
+            if merged is not None:
+                items.append(merged)
+        if first_page:
+            present = {n.urn for n in items}
+            for n in added:
+                if n.urn not in present:
+                    items.append(n)
+                    present.add(n.urn)
+        total = None if base_total is None else max(0, base_total + len(added) - removed)
+        return items, total
 
     def overlay_existing(self, base_node: GraphNode) -> Optional[GraphNode]:
         """The visible form of a node that EXISTS in base (main): removed → None; modified → the
@@ -221,6 +252,31 @@ class DraftOverlayProvider:
                 out.append(d.with_child_count(n))
         return out
 
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """A page in MAIN's order: `has_more` and `next_offset` are the base's, so a
+        draft that deletes rows can't end paging early and the draft's new nodes —
+        on the first page only — can't push the next page past rows of main."""
+        base = await self._base.get_nodes_page(query)
+        d = await self._delta_()
+        if d.empty:
+            return base
+        seen: set = set()
+        out: List[GraphNode] = []
+        for n in base.nodes:
+            if n.urn in d.node_remove:
+                continue
+            merged = d.overlay_existing(n)
+            if merged is not None:
+                out.append(merged)
+            seen.add(n.urn)
+        if not (query.offset or 0):
+            for urn, n in d.node_upsert.items():
+                if urn in seen or urn not in d.node_new:
+                    continue
+                if self._matches(n, query):
+                    out.append(d.with_child_count(n))
+        return NodePage(nodes=out, hasMore=base.has_more, nextOffset=base.next_offset)
+
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         base = await self._base.search_nodes(query, limit=limit, offset=offset)
         d = await self._delta_()
@@ -270,30 +326,31 @@ class DraftOverlayProvider:
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
-        sort_direction: str = "asc",
+        sort_direction: str = "asc", lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
         base = await self._base.get_children_with_edges(
             parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, offset=offset, limit=limit,
             include_lineage_edges=include_lineage_edges, sort_property=sort_property, cursor=cursor,
-            sort_direction=sort_direction)
+            sort_direction=sort_direction, **scope_kw)
         d = await self._delta_()
         if d.empty:
             return base
-        # children: drop removed, overlay modified (keeping each child's base childCount so a renamed
-        # child isn't orphaned), add the draft's new containment children of THIS parent.
-        children = []
-        for c in base.children:
-            if c.urn in d.node_remove:
-                continue
-            merged = d.overlay_existing(c)
-            if merged is not None:
-                children.append(merged)
+        # children: main's page overlaid (a renamed child keeps its base childCount so it
+        # isn't orphaned), the draft's new children of THIS parent — see compose_page.
+        added = [d.with_child_count(d.node_upsert[e.target_urn]) for e in d.cont_added
+                 if e.source_urn == parent_urn and e.target_urn in d.node_upsert
+                 and e.target_urn not in d.node_remove]
+        if search_query:
+            q = search_query.lower()
+            added = [n for n in added
+                     if q in (n.display_name or "").lower() or q in (n.urn or "").lower()]
+        removed = sum(1 for e in d.cont_removed if e.source_urn == parent_urn)
+        children, total_children = d.compose_page(
+            base.children, added, first_page=(offset == 0 and not cursor),
+            base_total=base.total_children, removed=removed)
         present = {c.urn for c in children}
-        for e in d.cont_added:
-            if e.source_urn == parent_urn and e.target_urn in d.node_upsert and e.target_urn not in present:
-                children.append(d.with_child_count(d.node_upsert[e.target_urn]))
-                present.add(e.target_urn)
         # containment edges under this parent
         cont = [e for e in base.containment_edges if e.id not in d.edge_remove]
         cont += [e for e in d.cont_added if e.source_urn == parent_urn]
@@ -304,11 +361,27 @@ class DraftOverlayProvider:
             seen = {e.id for e in lineage}
             scope = present | {parent_urn}
             for e in d.lineage_added:
-                if e.id not in seen and e.source_urn in scope and e.target_urn in scope:
+                if e.id in seen:
+                    continue
+                if lineage_scope == "siblings":
+                    # The far end may sit on a page not loaded yet; the delta is
+                    # small, so hand over every draft edge touching this page and
+                    # let the client keep it once both ends are loaded.
+                    if e.source_urn in present or e.target_urn in present:
+                        lineage.append(e)
+                elif e.source_urn in scope and e.target_urn in scope:
                     lineage.append(e)
+        # Where the next page starts and whether there is one are facts about MAIN's
+        # order, which only the base knows — a draft that drops a page's rows must
+        # neither end paging nor move the next page.
         return ChildrenWithEdgesResult(
             children=children, containmentEdges=cont, lineageEdges=lineage,
-            totalChildren=len(children), hasMore=base.has_more, nextCursor=base.next_cursor)
+            totalChildren=total_children if total_children is not None else len(children),
+            hasMore=base.has_more, nextCursor=base.next_cursor,
+            nextOffset=base.next_offset if base.next_offset is not None else offset + len(base.children),
+            # A base page whose lineage could not be read stays marked as such:
+            # the draft's answer is cached too, and must not pass for complete.
+            degradedDetail=base.degraded_detail)
 
     async def get_children(
         self, parent_urn: str, entity_types: Optional[List[str]] = None,
@@ -341,22 +414,19 @@ class DraftOverlayProvider:
         # main (outside the draft delta), so it keeps its real position; hoisting it was what made a
         # single rename "break the containment tree" (the node jumped to the root with childCount 0).
         has_parent = {e.target_urn for e in d.cont_added}
-        nodes = []
-        for n in base.nodes:
-            if n.urn in d.node_remove:
-                continue
-            merged = d.overlay_existing(n)
-            if merged is not None:
-                nodes.append(merged)
-        present = {n.urn for n in nodes}
         et = set(entity_types or [])
-        for urn, n in d.node_upsert.items():
-            if urn in present or urn in has_parent or urn not in d.node_new:
-                continue
-            if et and n.entity_type not in et:
-                continue
-            nodes.append(d.with_child_count(n))
-        return base.model_copy(update={"nodes": nodes, "total_count": len(nodes)})
+        q = (search_query or "").lower()
+        added = [d.with_child_count(n) for urn, n in d.node_upsert.items()
+                 if urn in d.node_new and urn not in has_parent and urn not in d.node_remove
+                 and (not et or n.entity_type in et)
+                 and (not q or q in (n.display_name or "").lower() or q in urn.lower())]
+        # A removed node was a root of main unless the draft also removed a parent link to it.
+        had_parent = {e.target_urn for e in d.cont_removed}
+        removed = sum(1 for urn in d.node_remove if urn not in had_parent and urn not in d.node_new)
+        nodes, total = d.compose_page(
+            base.nodes, added, first_page=not cursor,
+            base_total=base.total_count, removed=removed)
+        return base.model_copy(update={"nodes": nodes, "total_count": total})
 
     async def get_aggregated_edges_between(
         self, source_urns: List[str], target_urns: Optional[List[str]],

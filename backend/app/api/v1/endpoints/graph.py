@@ -19,7 +19,7 @@ from backend.app.models.graph import (
     CreateNodeRequest, CreateNodeResult,
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
     BatchCommandRequest, BatchCommandResult, BatchResponse,
-    ChildrenWithEdgesResult, TopLevelNodesResult,
+    ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
@@ -70,7 +70,11 @@ from backend.insights_service.enqueue import (
 )
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-router = APIRouter()
+from backend.app.api.raw_path_route import RawPathSegmentRoute
+
+# Graph routes take URNs as path segments, and URNs carry '/': match on the RAW
+# path so an encoded slash stays inside its parameter (see RawPathSegmentRoute).
+router = APIRouter(route_class=RawPathSegmentRoute)
 
 # Workspace-scoped mutation gate. The router-level dependency in api.py
 # already enforces ``workspace:datasource:read`` for every graph route;
@@ -1578,6 +1582,14 @@ async def get_children_with_edges(
         "asc", alias="sortDirection", pattern="^(asc|desc)$",
         description="Sort direction on sortProperty. Cursors are direction-bound.",
     ),
+    lineage_scope: str = Query(
+        "page", alias="lineageScope", pattern="^(page|siblings)$",
+        description=(
+            "Far end of the lineage leg. 'page': lineage among the parent and this page. "
+            "'siblings': lineage between this page and the parent or ANY of its children, "
+            "so a client paging a large container gets cross-page edges per page."
+        ),
+    ),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get children with containment and lineage edges in a single round-trip."""
@@ -1591,6 +1603,7 @@ async def get_children_with_edges(
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
             sort_direction=sort_direction,
+            lineage_scope=lineage_scope,
         )
 
     scope = _cache_scope(engine)
@@ -1612,6 +1625,12 @@ async def get_children_with_edges(
                 "cursor": cursor,
                 "includeLineageEdges": include_lineage_edges,
                 "sortDirection": sort_direction,
+                # A cached page-scope answer must never be served to a
+                # siblings-scope request (it would drop edges) — so a widened
+                # scope is part of the key. Only when widened: every existing
+                # key stays byte-identical, so a deploy doesn't cold-miss the
+                # whole children cache at once.
+                **({"lineageScope": lineage_scope} if lineage_scope != "page" else {}),
             },
             compute=_bounded_compute(engine, compute),
             model_cls=ChildrenWithEdgesResult,
@@ -2268,6 +2287,45 @@ async def query_nodes(
         expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
     )
     return result.root
+
+
+@router.post("/nodes/page", response_model=NodePage, response_model_by_alias=True)
+async def query_nodes_page(
+    response: Response,
+    query: NodeQuery = Body(..., embed=True),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """One page of an advanced node query, with `hasMore` and `nextOffset` — for
+    a client paging a whole entity type. The provider says where the next page
+    starts: a draft overlay adds and drops rows around the page it read, so a
+    count of the rows returned would skip or repeat rows.
+
+    Only what pages losslessly is accepted: entity types (optionally a search).
+    Property / tag / name filters are applied AFTER the database's SKIP/LIMIT, so
+    a filtered page's length says nothing about what follows; a URN lookup is not
+    a feed. Those stay on /nodes/query."""
+    if not query.entity_types or query.urns or query.property_filters or query.tag_filters or query.name_filter:
+        raise HTTPException(
+            status_code=422,
+            detail="/nodes/page pages by entity type only; use /nodes/query for URN lookups and filtered queries",
+        )
+
+    async def compute() -> NodePage:
+        return await engine.get_nodes_page(query)
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        return await _bounded_compute(engine, compute)()
+    return await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_NODES_QUERY,
+        # Same namespace as /nodes/query, never the same key: the answers differ.
+        params={**_node_query_cache_params(query), "paged": True},
+        compute=_bounded_compute(engine, compute),
+        model_cls=NodePage,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
+    )
 
 
 def _node_query_cache_params(query) -> dict:

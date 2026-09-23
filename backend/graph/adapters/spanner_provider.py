@@ -846,6 +846,9 @@ class SpannerProvider(GraphDataProvider):
             "cursor": _ParamTypes.STRING,
         }
         safe_limit = _safe_int(limit, default=100, max_value=1_000)
+        # Paged by POSITION when no cursor is given — the canvas and the wizard
+        # page every provider that way. Without it every page was page 1.
+        safe_offset = 0 if cursor else _safe_int(offset, default=0, max_value=1_000_000)
         desc = (sort_direction or "asc").lower() == "desc"
         cmp, dir_kw = ("<", " DESC") if desc else (">", "")
         gql = (
@@ -859,8 +862,10 @@ class SpannerProvider(GraphDataProvider):
             f"       LAX_STRING(child.properties.displayName) {cmp} @cursor)\n"
             "RETURN child.urn AS urn, child.label AS label,\n"
             "       TO_JSON(child.properties) AS properties\n"
-            f"ORDER BY LAX_STRING(child.properties.displayName){dir_kw}\n"
-            f"LIMIT {safe_limit}"
+            # urn breaks name ties: a TOTAL order, so a position means the same
+            # row in every page query.
+            f"ORDER BY LAX_STRING(child.properties.displayName){dir_kw}, child.urn{dir_kw}\n"
+            f"LIMIT {safe_limit} OFFSET {safe_offset}"
         )
         rows = await self._execute_query(
             gql,

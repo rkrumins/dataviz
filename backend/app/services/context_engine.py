@@ -8,7 +8,7 @@ from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
     RelationshipVisualSchema, FieldSchema, AggregatedEdgeRequest, AggregatedEdgeResult, AggregatedEdgeInfo,
-    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, TopLevelNodesResult,
+    CreateNodeRequest, CreateNodeResult, ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
@@ -716,18 +716,23 @@ class ContextEngine:
         sort_property: Optional[str] = "displayName",
         cursor: Optional[str] = None,
         sort_direction: str = "asc",
+        lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         edge_types = await self._ensure_containment_edge_types(edge_types)
         if not lineage_edge_types:
             resolved = await self._resolve_ontology()
             if resolved and resolved.lineage_edge_types:
                 lineage_edge_types = list(resolved.lineage_edge_types)
+        # Forwarded only when widened, so a provider override that predates the
+        # parameter keeps working for every default-scope caller.
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
         return await self.provider.get_children_with_edges(
             urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
             search_query=search_query, limit=limit, offset=offset,
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
             sort_direction=sort_direction,
+            **scope_kw,
         )
 
     async def get_top_level_or_orphan_nodes(
@@ -823,6 +828,11 @@ class ContextEngine:
     async def get_nodes_query(self, query: NodeQuery) -> List[GraphNode]:
         """Execute an advanced node query."""
         return await self.provider.get_nodes(query)
+
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """One page of a node query, with whether another follows and where it
+        starts — as the provider counts it (see NodePage)."""
+        return await self.provider.get_nodes_page(query)
 
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         """Get distinct values for a node property."""

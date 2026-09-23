@@ -10,7 +10,7 @@
  * - Conflict detection and warnings
  */
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -27,7 +27,8 @@ import {
     Filter,
     CornerDownRight,
     Info,
-    Loader2
+    Loader2,
+    RotateCw
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -678,8 +679,8 @@ export function WizardAssignmentTree({
     // Flatten tree for virtualized rendering — server handles search/filter,
     // so no client-side matchesSearch/matchesType needed. Insert "Load more"
     // sentinels where browser.hasMore is true (same pattern as LayerColumn).
-    const flattenedNodes = useMemo<(FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number })[]>(() => {
-        const result: (FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number })[] = []
+    const flattenedNodes = useMemo<(FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number; failed?: boolean })[]>(() => {
+        const result: (FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number; failed?: boolean })[] = []
 
         const traverse = (nodes: EntityTreeNode[]) => {
             nodes.forEach(node => {
@@ -694,14 +695,19 @@ export function WizardAssignmentTree({
                     if (node.children.length > 0) {
                         traverse(node.children)
                     }
-                    // "Load more" sentinel for this parent (from API hasMore)
+                    // "Load more" sentinel for this parent (from API hasMore) — and
+                    // for a parent whose last page FAILED, including its FIRST page:
+                    // an expanded node with nothing under it must say why, not
+                    // look like it has no children.
                     const entry = browser.nodes.get(node.id)
-                    if (entry?.hasMore) {
+                    const failed = browser.failedIds.has(node.id)
+                    if (entry?.hasMore || failed) {
                         result.push({
                             id: `__more:${node.id}`,
                             isLoadMore: true as const,
                             parentId: node.id,
                             depth: node.depth + 1,
+                            failed,
                         })
                     }
                 }
@@ -711,16 +717,18 @@ export function WizardAssignmentTree({
         traverse(entityTree)
 
         // Top-level "load more" sentinel
-        if (browser.topLevelHasMore) {
+        const topFailed = browser.failedIds.has('__top-level')
+        if (browser.topLevelHasMore || topFailed) {
             result.push({
                 id: '__more:top-level',
                 isLoadMore: true as const,
                 depth: 0,
+                failed: topFailed,
             })
         }
 
         return result
-    }, [entityTree, expandedIds, selectedIds, browser.nodes, browser.topLevelHasMore])
+    }, [entityTree, expandedIds, selectedIds, browser.nodes, browser.topLevelHasMore, browser.failedIds])
 
     // Virtualization
     const rowVirtualizer = useVirtualizer({
@@ -750,12 +758,15 @@ export function WizardAssignmentTree({
             const parentId = 'parentId' in row ? row.parentId : undefined
             const key = parentId ?? '__top-level'
             if (b.loadingNodes.has(key)) continue
+            // A failed page waits for a click: auto-retrying would hammer a
+            // server that is failing.
+            if (row.failed) continue
 
-            // Cursor identity — advances with every loaded page.
-            const cursor = parentId
-                ? b.peekNode(parentId)?.nextCursor ?? ''
-                : String(b.topLevelIds.length)
-            const guard = `${key}:${cursor}`
+            // Re-arm only when the LIST grows. Keyed on the page position, a row
+            // that stayed on screen because a filter ("Unassigned only", a type)
+            // hid every row it loaded fired again for every page — an unattended
+            // walk of the whole container. Stalled like that, it waits for a click.
+            const guard = `${key}:${flattenedNodes.length}`
             if (autoLoadedRef.current.has(guard)) continue
             autoLoadedRef.current.add(guard)
 
@@ -1030,8 +1041,10 @@ export function WizardAssignmentTree({
     // Search is server-side — no client-side auto-expand needed.
     // Results come back as flat root items from the API.
 
-    // Keyboard shortcuts
-    useEffect(() => {
+    // Keyboard shortcuts. A layout effect swaps the listener in the same commit
+    // that paints the selection: a passive one lagged a task behind, so a digit
+    // pressed as "250 selected" appeared assigned the PREVIOUS selection.
+    useLayoutEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             const target = e.target as HTMLElement | null
             // Never hijack typing — search box, rename inputs, quick-assign selects.
@@ -1408,6 +1421,41 @@ export function WizardAssignmentTree({
                             if ('isLoadMore' in node && node.isLoadMore) {
                                 const parentId = 'parentId' in node ? node.parentId : undefined
                                 const isLoadingMore = browser.loadingNodes.has(parentId ?? '__top-level')
+                                if (node.failed && !isLoadingMore) {
+                                    // Retry what failed: the first page when nothing
+                                    // loaded yet, otherwise the next one.
+                                    const retry = () => {
+                                        if (!parentId) return void browser.loadMoreTopLevel()
+                                        if (browser.peekNode(parentId)?.loaded) void browser.loadMoreChildren(parentId)
+                                        else void browser.expandNode(parentId)
+                                    }
+                                    return (
+                                        <div
+                                            key={node.id}
+                                            style={{
+                                                position: 'absolute',
+                                                top: 0,
+                                                left: 0,
+                                                width: '100%',
+                                                height: `${virtualRow.size}px`,
+                                                transform: `translateY(${virtualRow.start}px)`
+                                            }}
+                                        >
+                                            <div
+                                                className="flex items-center gap-1"
+                                                style={{ paddingLeft: `${(node.depth ?? 0) * 20 + 32}px` }}
+                                            >
+                                                <button
+                                                    className="flex items-center gap-2 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-xl transition-colors"
+                                                    onClick={retry}
+                                                >
+                                                    <RotateCw className="w-3.5 h-3.5" />
+                                                    Couldn't load · Retry
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )
+                                }
                                 const entry = parentId ? browser.nodes.get(parentId) : undefined
                                 // Only claim a remaining COUNT when we actually know the total
                                 // (see BrowserNode.totalIsExact — a paged response's

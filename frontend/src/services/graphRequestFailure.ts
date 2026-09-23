@@ -197,6 +197,7 @@ export function retryDelayMs(err: unknown, attempt: number): number {
  *  `/graph` segment. */
 const READ_ONLY_POST_PATHS = [
   /^\/nodes\/query$/,
+  /^\/nodes\/page$/,
   /^\/nodes\/degree$/,
   /^\/nodes\/ancestor-chains$/,
   /^\/edges\/query$/,

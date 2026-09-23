@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
-    GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult,
+    GraphEdge, GraphNode, GraphSchemaStats, NodePage, NodeQuery, TagSummary, TopLevelNodesResult,
     TraceClosureResult, TraceFocus, TraceResult,
 )
 
@@ -108,6 +108,15 @@ class VersionedBranchProvider:
         "couldn't be checked"."""
         return await resolve_identities_by_query(self, urns)
 
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        # Same probe as the interface default (this class doesn't inherit it):
+        # one row past the page says exactly whether another follows.
+        limit = query.limit or 100
+        offset = query.offset or 0
+        rows = await self.get_nodes(query.model_copy(update={"limit": limit + 1}))
+        page = rows[:limit]
+        return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
+
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         rows = await self._svc.search_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
@@ -139,13 +148,15 @@ class VersionedBranchProvider:
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
-        sort_direction: str = "asc",
+        sort_direction: str = "asc", lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
+        # Pages by OFFSET (the cursor is not an input here) — which is why paging
+        # clients send both: FalkorDB takes the cursor, this path the offset.
         d = await self._svc.get_children_with_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             parent_urn=parent_urn, containment_edge_types=edge_types or [],
             lineage_edge_types=lineage_edge_types, include_lineage_edges=include_lineage_edges,
-            limit=limit, offset=offset)
+            limit=limit, offset=offset, lineage_scope=lineage_scope)
         result = ChildrenWithEdgesResult(**d)
         if sort_direction == "desc":
             result.children = self._page_resort(result.children, sort_direction)

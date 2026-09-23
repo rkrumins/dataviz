@@ -148,6 +148,11 @@ PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1")
 # is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
 # can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
 PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
+# Largest rollup change the projector applies itself, by delta (a window's or a reconcile's
+# lineage-edge contributions; a moved container's subtree). Chains are resolved in one batched
+# climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
+# past this the aggregation batch job — which also writes only the difference — takes over.
+PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):

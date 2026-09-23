@@ -15,7 +15,7 @@ from backend.app.services.versioning.service import AccessDenied, GraphVersionin
 
 def _n(eid):
     return {"op": "create", "entity_kind": "node", "entity_id": eid,
-            "payload": {"displayName": eid}}
+            "payload": {"entityType": "Dataset", "displayName": eid}}
 
 
 async def _stage(svc, gid, bid, actor, eid):

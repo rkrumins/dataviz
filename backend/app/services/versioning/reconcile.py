@@ -168,6 +168,67 @@ async def falkor_counts(client) -> Tuple[int, int]:
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
 
+@dataclass
+class RollupHealth:
+    """What a graph's ``:AGGREGATED`` rollups can be trusted for. The ONE reading of it —
+    the projector decides "move by delta vs hand to the batch job" on it, and "Check sync"
+    reports it — so the two can never disagree about a graph."""
+    aggregated: int              # rollup relationships stored
+    stubs: int                   # rollups with no aggKey: rows replayed from an old import, never computed
+    baseline: bool               # an aggregation run derived the whole set (its _AggMeta stamp is present)
+    maintained: bool             # the projector has been moving them by delta (_GVRollupMeta present)
+    reconcile_interrupted: bool  # a reconcile died between its raw and rollup writes, and no
+                                 # aggregation run has STARTED since to re-derive them
+
+    def trusted(self, lineage_edges: int) -> bool:
+        """Exactly what the raw edges imply, so a difference can be applied by delta: a set an
+        aggregation run derived (and deltas have kept since), or the empty set over no lineage.
+        Anything else — a first seed, a restore after eviction, a graph no run ever covered —
+        goes to the batch job, which also writes the _AggMeta stamp readers need."""
+        if self.stubs or self.reconcile_interrupted:
+            return False
+        return self.baseline or (self.aggregated == 0 and lineage_edges == 0)
+
+    @property
+    def status(self) -> str:
+        if self.stubs or self.reconcile_interrupted:
+            return "untrusted"
+        if self.aggregated == 0 and not (self.baseline or self.maintained):
+            return "missing"
+        return "ok"
+
+
+async def _one(client, cypher: str):
+    res = await _bounded_query(client, cypher)
+    rows = getattr(res, "result_set", None) or []
+    return rows[0][0] if rows and rows[0] else None
+
+
+async def reconcile_interrupted(client) -> bool:
+    """Two point reads — cheap enough for every projection pass. See :class:`RollupHealth`."""
+    reconciling = await _one(client, "MATCH (m:_GVRollupMeta) RETURN m.reconciling")
+    if not reconciling:
+        return False
+    run_start = await _one(client, "MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.runStartMs")
+    return not (run_start and int(run_start) > int(reconciling))
+
+
+async def rollup_health(client) -> RollupHealth:
+    """Read a graph's rollup health (a few small reads; the stub count scans the rollup layer
+    only). A reconcile's ``reconciling`` flag is cleared by the reconcile that set it, or
+    superseded by an aggregation run that STARTED after it (``_AggMeta.runStartMs``) — a run
+    that read the graph before the interruption cannot vouch for what was written after."""
+    aggregated = int(await _one(client, "MATCH ()-[r:AGGREGATED]->() RETURN count(r)") or 0)
+    stubs = int(await _one(
+        client, "MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL RETURN count(r)") or 0) \
+        if aggregated else 0
+    baseline = int(await _one(client, "MATCH (m:_AggMeta {id: 'singleton'}) RETURN count(m)") or 0) > 0
+    maintained = int(await _one(client, "MATCH (m:_GVRollupMeta) RETURN count(m)") or 0) > 0
+    interrupted = await reconcile_interrupted(client)
+    return RollupHealth(aggregated=aggregated, stubs=stubs, baseline=baseline,
+                        maintained=maintained, reconcile_interrupted=interrupted)
+
+
 # --- Scan cypher (streamed via SKIP/LIMIT; see docstring on the pagination cost) --- #
 # Ordered by the stable ``entityId`` / ``r.id`` so the Postgres keyset stream (also ordered by
 # entity_id) and this scan sorted-merge without either side materialising. SKIP/LIMIT re-scans per
@@ -219,6 +280,7 @@ class DriftReport:
     checked_at: str
     duration_ms: int
     skipped_reason: Optional[str] = None                 # "no projection target" | "projection in flight"
+    rollups: Optional[dict] = None                        # {status, aggregated, stubs} — see RollupHealth
 
 
 _SENTINEL = object()
@@ -346,7 +408,15 @@ class ProjectionReconciler:
             and not mismatched and not edge_mismatched
             and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
+        try:
+            health = await rollup_health(client)
+            rollups = {"status": health.status, "aggregated": health.aggregated,
+                       "stubs": health.stubs}
+        except Exception:                                # pragma: no cover - infra
+            logger.debug("rollup health unavailable for %s", graph_id, exc_info=True)
+            rollups = None
         return _report(
+            rollups=rollups,
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
             missing_edges=[], extra_edges=[],

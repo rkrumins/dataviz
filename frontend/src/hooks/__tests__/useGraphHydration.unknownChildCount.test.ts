@@ -79,7 +79,9 @@ function seedWith(childCount: number | null | undefined) {
 describe('loadChildren and an unknown child count', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set() })
+    // childPaging too: the pager remembers the server's "no more" for PARENT,
+    // and every case here asks about the same parent afresh.
+    useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set(), childPaging: {} })
   })
 
   it('ASKS when the count is null — /ancestors cannot count, that is not "childless"', async () => {

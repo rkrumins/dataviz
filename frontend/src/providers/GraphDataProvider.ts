@@ -454,6 +454,15 @@ export interface NodeQuery {
     limit?: number
 }
 
+/** One page of a node query. `nextOffset` is where the next page starts, in the
+ *  PROVIDER's order — a draft overlay adds and drops rows around the page it
+ *  read, so counting the rows returned would skip or repeat rows. */
+export interface NodePage {
+    nodes: GraphNode[]
+    hasMore: boolean
+    nextOffset: number
+}
+
 export interface EdgeQuery {
     /** Filter by source URNs */
     sourceUrns?: URN[]
@@ -762,6 +771,12 @@ export interface GraphDataProvider {
     getNodes(query: NodeQuery): Promise<GraphNode[]>
 
     /**
+     * One page of a node query, with whether another follows and where it starts
+     * — for paging a whole type. Page with `offset: page.nextOffset`.
+     */
+    getNodesPage(query: NodeQuery): Promise<NodePage>
+
+    /**
      * TOTAL lineage degree (in/out) per URN over the full graph —
      * optional capability. Absent URNs in the result are UNKNOWN, never
      * zero. The canvas derives "lineage outside this view" as
@@ -836,6 +851,10 @@ export interface GraphDataProvider {
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
             sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
+            /** Far end of the lineage leg: 'page' (default) = among the parent and this
+             *  page; 'siblings' = between this page and the parent or ANY of its children,
+             *  loaded or not. A pager uses 'siblings' so cross-page edges arrive per page. */
+            lineageScope?: 'page' | 'siblings'
         }
     ): Promise<{
         children: GraphNode[]
@@ -844,6 +863,8 @@ export interface GraphDataProvider {
         totalChildren: number
         hasMore: boolean
         nextCursor?: string | null
+        /** Where the next page starts (see NodePage). Absent from an older server. */
+        nextOffset?: number | null
     }>
 
     /**
