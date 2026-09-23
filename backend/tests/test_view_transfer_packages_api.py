@@ -51,6 +51,8 @@ class _ImportExport:
         self.exports: list = []
         self.imports: list = []
         self.ran: list = []
+        #: A job's status, as the data source's import endpoints report it; pending until set.
+        self.status: dict = {}
 
     async def create_export_job(self, **kwargs):
         job_id = f"exp_{len(self.exports) + 1}"
@@ -69,6 +71,14 @@ class _ImportExport:
 
     async def run_import_safe(self, job_id):
         self.ran.append(job_id)
+
+    async def get_job(self, job_id):
+        job = next((j for j in self.imports if j["job_id"] == job_id), None)
+        if job is None:
+            return None
+        source = job.get("source_uri") or (
+            f"{job['workspace_id']}/{job['data_source_id']}/{job['graph_id']}/{job_id}/source.ndjson")
+        return {"jobId": job_id, "status": self.status.get(job_id, "pending"), "sourceUri": source}
 
 
 @pytest.fixture
@@ -200,6 +210,19 @@ async def test_a_package_brings_its_data_into_a_draft_and_the_view_follows(
     assert elsewhere.status_code == 409 and "Import: Finance lineage" in elsewhere.json()["detail"], \
         "the data already went with the first job: somewhere else needs the file again"
     assert len(jobs.imports) == 1 and len(versioning.drafts) == 1
+
+    # A job that failed runs again when asked, in place: same draft, the job's own copy of the data.
+    jobs.status[job["job_id"]] = "failed"
+    retried = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["jobId"] != started["jobId"] and retried.json()["branchId"] == started["branchId"]
+    first, second = jobs.imports
+    assert (second["branch_id"], second["source_uri"], second["idempotency_key"]) == \
+        (started["branchId"], f"{uat}/{ds}/g_{ds}/{first['job_id']}/source.ndjson", f"{upload}:2")
+    assert len(versioning.drafts) == 1 and jobs.ran[-1] == second["job_id"]
+    assert (await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})).json()["jobId"] == \
+        second["job_id"], "while the retry runs, asking again answers with it"
+    started = retried.json()
 
     # The view is checked against the draft, then staged into it: a new view claims the draft.
     view = body["views"][0]

@@ -302,7 +302,8 @@ download is named for the package.
 2. `POST /api/v1/views/transfer/packages/{uploadId}/data` brings the data into a **new draft** of
    the target data source, through the data source's own import job, adding and updating only
    (a package never deletes). For an update, name the view (`viewId`): the draft is opened for it.
-   Asking again for the same target returns the same job; the data goes with that job, so
+   Asking again for the same target returns the same job, or, when that job failed, runs the data
+   again into the same draft from the job's own copy of it. The data goes with that job, so
    another target is refused with 409 and needs the file again.
 3. The view is reconciled against **that draft** (`target.branchId`), so the entities the data
    brought count as found, then imported into it with `stage` set. A new view claims the draft as
@@ -402,5 +403,3 @@ The transfer routes run under a 120-second timeout tier (`_TimeoutMiddleware`), 
 - **Files are not signed.** The hashes prove a file wasn't changed since it was exported, not who
   exported it.
 - **A package brings one view with its data** (see above).
-- **A failed package data import can't be retried in place.** Choose the file again; the draft the
-  failed attempt opened is the person's to abandon.

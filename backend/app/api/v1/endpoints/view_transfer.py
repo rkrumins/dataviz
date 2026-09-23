@@ -406,7 +406,8 @@ async def import_package_data(
     and published together. It only ever adds and updates: a package never deletes anything.
 
     Progress is the import job's, through the data source's import endpoints. Asking again for
-    the same upload answers with the job already started.
+    the same upload answers with the job already started, or, when that job failed, runs the same
+    data again into the same draft (from the job's own copy of it: the upload's went with the job).
     """
     await require_versioning_enabled()
     if user is None:
@@ -425,7 +426,24 @@ async def import_package_data(
             raise HTTPException(status_code=409, detail=(
                 f"This package's data already went into the draft “{done.get('draftName')}”. "
                 "Choose the file again to bring it in here."))
-        return done
+        job = await ie.get_job(done["jobId"])
+        if (job or {}).get("status") not in ("failed", "cancelled"):
+            return done
+        source = (job or {}).get("sourceUri")
+        if not source or not (await ie.store.stat(source)).exists:
+            raise expired
+        attempt = int(done.get("attempt") or 1) + 1
+        with _domain_errors():
+            created = await ie.create_import_job(
+                workspace_id=done["workspaceId"], data_source_id=done["dataSourceId"], graph_id=done["graphId"],
+                actor=user.id, import_format="ndjson", source_uri=source, branch_id=done["branchId"],
+                reconcile_mode="upsert", idempotency_key=f"{upload_id}:{attempt}", name=done.get("draftName"),
+            )
+        data = {**done, "jobId": created["job_id"], "attempt": attempt}
+        await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
+                                  _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
+        background.add_task(ie.run_import_safe, created["job_id"])
+        return data
 
     workspace = await session.get(WorkspaceORM, body.workspaceId)
     if workspace is None or workspace.deleted_at is not None:

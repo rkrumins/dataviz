@@ -20,7 +20,8 @@
  *   - a view with its data (a package): its data goes into a new draft of a version-controlled
  *     target, the view is checked against that draft and goes into it too, and opens there; a
  *     target that can't take the data is refused (the view alone still can be imported); and data
- *     that already went into a draft elsewhere asks for the file again.
+ *     that already went into a draft elsewhere asks for the file again; a data import that failed
+ *     can be tried again, into the same draft.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -657,6 +658,28 @@ describe('ViewWizard — a view with its data', () => {
       summary: { new: 118, updated: 2, unchanged: 0, deleted: 0, invalid: 0 },
       sample: [{ rowIndex: 0, kind: 'node', status: 'new', label: 'revenue' }],
     })
+  })
+
+  it('tries a failed data import again, into the same draft', async () => {
+    packageDataMock
+      .mockResolvedValueOnce(DATA_STARTED)
+      .mockResolvedValueOnce({ ...DATA_STARTED, jobId: 'imp_2', attempt: 2 })
+    getImportMock
+      .mockResolvedValueOnce({ jobId: 'imp_1', jobType: 'ingest', status: 'failed', graphId: 'g1', errorMessage: 'The graph was busy' })
+      .mockResolvedValue({ jobId: 'imp_2', jobType: 'ingest', status: 'completed', graphId: 'g1', branchId: 'br_data' })
+    renderPackage()
+    await screen.findByText('Import a view with its data')
+    await next()                                          // → Target
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: /Bring the data into a draft/ }))
+
+    expect(await screen.findByText('The graph was busy')).toBeInTheDocument()
+    expect(screen.getByText(/It runs again into the same draft, “Import: Finance lineage”/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Try again/ }))
+
+    expect(await screen.findByText('The data is in the draft')).toBeInTheDocument()
+    expect(packageDataMock).toHaveBeenCalledTimes(2)
+    expect(packageDataMock.mock.calls[1]).toEqual(packageDataMock.mock.calls[0])
   })
 
   it('brings the data into a draft, checks the view against it, and puts the view there too', async () => {

@@ -126,8 +126,6 @@ the package limit.
 - **Files are not signed.** The hashes prove a file wasn't changed after export, not who exported it.
 - **A package brings its data with one of its views**, because a draft belongs to one view. Import
   the package's other views afterwards with **View only**.
-- **A failed package data import can't be retried in place**: choose the file again. The draft the
-  failed attempt opened is yours to abandon.
 
 ---
 

@@ -131,10 +131,14 @@ export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
           {mine.started ? (
             <>
               <p>
-                The draft “{mine.started.draftName}” was opened for it and is yours: abandon it from its data source if nothing in it is needed.
-                To try again, choose the file again.
+                It runs again into the same draft, “{mine.started.draftName}”: only adding and updating, so nothing that did arrive is
+                brought in twice. If the upload has expired, choose the file again. The draft is yours either way: abandon it from its
+                data source if nothing in it is needed.
               </p>
-              <ActionButton icon={<FileUp className="w-4 h-4" />} onClick={onChooseFileAgain}>Choose the file again</ActionButton>
+              <div className="flex flex-wrap items-center gap-2">
+                <ActionButton icon={<RefreshCw className="w-4 h-4" />} onClick={start}>Try again</ActionButton>
+                <ActionButton icon={<FileUp className="w-4 h-4" />} onClick={onChooseFileAgain}>Choose the file again</ActionButton>
+              </div>
             </>
           ) : (
             <ActionButton icon={<RefreshCw className="w-4 h-4" />} onClick={start}>Try again</ActionButton>
