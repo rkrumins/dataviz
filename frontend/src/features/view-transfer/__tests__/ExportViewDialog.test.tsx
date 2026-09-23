@@ -14,7 +14,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ViewVersionPage, ViewVersionSummary } from '@/services/viewVersionsApiService'
 
 vi.mock('@/services/viewTransferApiService', () => ({ exportViews: vi.fn() }))
-vi.mock('@/services/viewVersionsApiService', () => ({
+vi.mock('@/services/viewVersionsApiService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/viewVersionsApiService')>(),
   listViewVersions: vi.fn(),
   getViewVersionStatus: vi.fn(),
 }))

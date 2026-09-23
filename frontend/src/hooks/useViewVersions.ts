@@ -5,8 +5,10 @@
  * invalidated by anything that writes a view: saves here, restores, imports and exports (an
  * export with unsaved changes saves them as a version first).
  */
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
+  VIEW_VERSIONS_QUERY_KEY,
+  VIEW_VERSION_STATUS_QUERY_KEY,
   compareViewVersions,
   getViewVersionStatus,
   listViewVersions,
@@ -18,8 +20,7 @@ import {
 import { VIEW_ACTIVITY_QUERY_KEY } from './useViewActivity'
 import { VIEW_QUERY_KEY } from './useViewMetadata'
 
-export const VIEW_VERSIONS_QUERY_KEY = 'view-versions' as const
-export const VIEW_VERSION_STATUS_QUERY_KEY = 'view-version-status' as const
+export { VIEW_VERSIONS_QUERY_KEY, VIEW_VERSION_STATUS_QUERY_KEY }
 
 /** Refresh everything that shows a view's versions after a write to it. */
 export function invalidateViewVersions(queryClient: QueryClient, viewId: string): void {
@@ -45,6 +46,18 @@ export function useViewVersions(viewId: string | null | undefined, enabled = tru
     enabled: enabled && !!viewId,
     staleTime: 15_000,
     retry: 1,
+  })
+}
+
+/** The whole history, a page at a time (newest first), for the versions drawer. */
+export function useViewVersionHistory(viewId: string | null | undefined, enabled = true) {
+  return useInfiniteQuery({
+    queryKey: [VIEW_VERSIONS_QUERY_KEY, viewId, 'history'],
+    queryFn: ({ pageParam }) => listViewVersions(viewId!, { limit: 50, before: pageParam ?? undefined }),
+    initialPageParam: null as number | null,
+    getNextPageParam: (last: ViewVersionPage) => (last.hasMore ? last.nextBefore : undefined),
+    enabled: enabled && !!viewId,
+    staleTime: 15_000,
   })
 }
 

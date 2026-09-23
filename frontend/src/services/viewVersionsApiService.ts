@@ -88,6 +88,11 @@ export interface ViewVersionPage {
   portableId?: string | null
 }
 
+/** React Query keys for a view's versions. Here rather than beside the hooks so a service that
+ *  changes a view (a layout save) can mark them stale without importing hooks. */
+export const VIEW_VERSIONS_QUERY_KEY = 'view-versions' as const
+export const VIEW_VERSION_STATUS_QUERY_KEY = 'view-version-status' as const
+
 const base = (viewId: string) => `/api/v1/views/${encodeURIComponent(viewId)}/versions`
 
 export function getViewVersionStatus(viewId: string): Promise<ViewVersionStatus> {

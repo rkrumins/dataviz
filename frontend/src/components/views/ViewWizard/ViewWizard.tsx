@@ -1403,6 +1403,8 @@ function ViewWizardBody({
                     const layoutResult = await updateViewLayout(createdViewId, {
                         referenceLayout: normalizedLayout,
                         entityScope,
+                        // The view as built is its first version.
+                        checkpoint: { source: 'create' },
                     })
                     const savedView = viewToViewConfig(layoutResult)
                     useSchemaStore.getState().addOrUpdateView(savedView)
@@ -1486,6 +1488,9 @@ function ViewWizardBody({
                         const layoutResult = await updateViewLayout(viewId, {
                             referenceLayout: { ...priorSideFields, ...normalizedLayout },
                             entityScope,
+                            // A deliberate save is a version of the view; on a draft it waits
+                            // for the draft to be published.
+                            ...(branchId ? {} : { checkpoint: { source: 'wizard' as const } }),
                         }, branchId)
                         const savedView = viewToViewConfig(layoutResult)
                         useSchemaStore.getState().addOrUpdateView(savedView)
