@@ -8,7 +8,10 @@
  *     the file's definition untouched (display rules, unknown keys and all) with no origin copy;
  *   - a view that already exists here: the Target step is skipped, the update is reconciled
  *     against that view, and the import names the design it was reviewed against;
- *   - a view that changed since it was reviewed is sent back to the Match step to check again.
+ *   - a view that changed since it was reviewed is sent back to the Match step to check again;
+ *   - a file of several views: every view checked in one request, then imported one request per
+ *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
+ *     rest and is retried under the same request id; a view switched to a copy is checked again.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -22,6 +25,7 @@ const inspectMock = vi.fn()
 const reconcileMock = vi.fn()
 const importMock = vi.fn()
 const getViewMock = vi.fn()
+let requestIds = 0
 
 vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/viewTransferApiService')>()
@@ -30,7 +34,7 @@ vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
     inspectViewFile: (...args: unknown[]) => inspectMock(...args),
     reconcileViews: (...args: unknown[]) => reconcileMock(...args),
     importView: (...args: unknown[]) => importMock(...args),
-    newRequestId: () => 'req-test-0001',
+    newRequestId: () => `req-test-${String(++requestIds).padStart(4, '0')}`,
   }
 })
 vi.mock('@/services/viewApiService', async (importOriginal) => {
@@ -131,6 +135,16 @@ function reconciled(update: ReconcileResult['views'][0]['update'] = null): Recon
   }
 }
 
+const FAST_FORWARD = {
+  status: 'fast_forward' as const, base: { version: 3, hash: 'sha256:old' }, targetHead: { version: 3, hash: 'sha256:old' },
+  targetWorkingHash: 'sha256:old', mergeAvailable: false, strategy: 'replace' as const, conflicts: [],
+  diff: {
+    metadata: [], layers: { added: [], removed: [], changed: [], reordered: false },
+    assignments: { added: 1, removed: 0, moved: 0, modified: 0, samples: { added: [], removed: [], moved: [], modified: [] }, truncated: false },
+    settings: [], identical: false,
+  },
+}
+
 function imported(viewId: string): ImportViewResult {
   return {
     viewId,
@@ -162,6 +176,7 @@ async function next() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  requestIds = 0
 })
 
 describe('ViewWizard — Import journey', () => {
@@ -209,16 +224,7 @@ describe('ViewWizard — Import journey', () => {
       pv_1: [{ viewId: 'view_uat', name: 'Finance (UAT)', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1', headVersion: 3, canEdit: true, status: 'fast_forward' }],
     }))
     getViewMock.mockResolvedValue({ id: 'view_uat', name: 'Finance (UAT)', workspaceId: 'ws1', dataSourceId: 'ds1', viewType: 'reference', config: { icon: 'Layout' }, tags: [], visibility: 'workspace' })
-    const update = {
-      status: 'fast_forward' as const, base: { version: 3, hash: 'sha256:old' }, targetHead: { version: 3, hash: 'sha256:old' },
-      targetWorkingHash: 'sha256:old', mergeAvailable: false, strategy: 'replace' as const, conflicts: [],
-      diff: {
-        metadata: [], layers: { added: [], removed: [], changed: [], reordered: false },
-        assignments: { added: 1, removed: 0, moved: 0, modified: 0, samples: { added: [], removed: [], moved: [], modified: [] }, truncated: false },
-        settings: [], identical: false,
-      },
-    }
-    reconcileMock.mockResolvedValue(reconciled(update))
+    reconcileMock.mockResolvedValue(reconciled(FAST_FORWARD))
     importMock.mockResolvedValue(imported('view_uat'))
     renderImport()
 
@@ -261,5 +267,129 @@ describe('ViewWizard — Import journey', () => {
     fireEvent.click(screen.getByRole('button', { name: /^retry$/i }))
     expect(await screen.findByText('How it fits here')).toBeInTheDocument()
     await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+  })
+})
+
+// ── A file of several views ────────────────────────────────────────────────
+
+/** Two views from dev: "Finance lineage" is new here; "Sales pipeline" is already here as "Sales (UAT)". */
+function inspectedPair(): InspectResult {
+  const one = inspected({
+    pv_2: [{ viewId: 'view_uat', name: 'Sales (UAT)', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1', headVersion: 3, canEdit: true, status: 'fast_forward' }],
+  })
+  const finance = one.views[0]
+  return {
+    ...one,
+    views: [
+      finance,
+      { ...finance, index: 1, portableId: 'pv_2', sourceViewId: 'view_dev_2', metadata: { ...finance.metadata, name: 'Sales pipeline' } },
+    ],
+  }
+}
+
+/** Every view asked about comes back half-matched; an update also says how it relates. */
+function reconcileEach() {
+  reconcileMock.mockImplementation(async (views: Array<{ key: string; action: string }>) => ({
+    views: views.map(v => ({ ...reconciled().views[0], key: v.key, update: v.action === 'update' ? FAST_FORWARD : null })),
+    aggregate: reconciled().aggregate,
+  }))
+}
+
+async function throughToReview() {
+  expect(await screen.findByText('2 views from dev')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'All 2 views' })).toHaveAttribute('aria-pressed', 'true')
+  await next()                                            // → Targets
+  expect(await screen.findByText('Where should these views go?')).toBeInTheDocument()
+  expect(screen.getByLabelText('Where views from Lineage go')).toHaveValue('ws1|ds1')
+  await next()                                            // → Match
+  expect(await screen.findByText('How they fit here')).toBeInTheDocument()
+}
+
+describe('ViewWizard — importing every view of a file', () => {
+  beforeEach(() => {
+    inspectMock.mockResolvedValue(inspectedPair())
+    getViewMock.mockResolvedValue({
+      id: 'view_uat', name: 'Sales (UAT)', description: 'Pipeline, as UAT has it', workspaceId: 'ws1', dataSourceId: 'ds1',
+      viewType: 'reference', config: { icon: 'Workflow' }, tags: ['uat'], visibility: 'workspace',
+    })
+    reconcileEach()
+  })
+
+  it('checks them all at once, then imports each under one batch', async () => {
+    importMock.mockImplementation(async (req: { target: { viewId?: string } }) => imported(req.target.viewId ?? 'view_new'))
+    renderImport()
+    await throughToReview()
+
+    expect(reconcileMock).toHaveBeenCalledTimes(1)
+    expect(reconcileMock).toHaveBeenCalledWith([
+      expect.objectContaining({ key: '0', action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds1' } }),
+      expect.objectContaining({ key: '1', action: 'update', target: { viewId: 'view_uat' } }),
+    ])
+    await next()                                          // → Review
+    expect(await screen.findByLabelText('Name for Finance lineage')).toHaveValue('Finance lineage')
+    expect(screen.getByLabelText('Name for Sales pipeline')).toHaveValue('Sales (UAT)')
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
+    const [[created], [updated]] = importMock.mock.calls
+    expect(created).toMatchObject({
+      action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds1' },
+      metadata: { name: 'Finance lineage', description: 'What feeds revenue', visibility: 'private' },
+      origin: { portableId: 'pv_1', environment: 'dev' },
+    })
+    // An update keeps the view's own description, icon and tags, and is checked against the design reviewed.
+    expect(updated).toMatchObject({
+      action: 'update', target: { viewId: 'view_uat' }, expectedTargetHash: 'sha256:old',
+      metadata: { name: 'Sales (UAT)', description: 'Pipeline, as UAT has it', icon: 'Workflow', tags: ['uat'] },
+      origin: { portableId: 'pv_2' },
+    })
+    expect(updated.metadata.visibility).toBeUndefined()
+    expect(created.batchId).toBe(updated.batchId)
+    expect(created.requestId).not.toBe(updated.requestId)
+    expect(await screen.findAllByText(/integrity verified/)).toHaveLength(2)
+  })
+
+  it('carries on past a failure, and retries it under the same request id', async () => {
+    importMock
+      .mockRejectedValueOnce(new Error('The data source is offline'))
+      .mockImplementation(async () => imported('view_x'))
+    renderImport()
+    await throughToReview()
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+
+    expect(await screen.findByText('The data source is offline')).toBeInTheDocument()
+    expect(importMock).toHaveBeenCalledTimes(2)           // the second view went ahead
+    fireEvent.click(screen.getByRole('button', { name: /Retry 1 failed import/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(3))
+    const retried = importMock.mock.calls[2][0]
+    expect(retried.origin.portableId).toBe('pv_1')
+    expect(retried.requestId).toBe(importMock.mock.calls[0][0].requestId)
+    await waitFor(() => expect(screen.queryByText('The data source is offline')).not.toBeInTheDocument())
+  })
+
+  it('checks again a view switched to a separate copy, and leaves out a skipped one', async () => {
+    importMock.mockImplementation(async () => imported('view_copy'))
+    renderImport()
+    await throughToReview()
+
+    fireEvent.change(screen.getByLabelText('What to do with Sales pipeline'), { target: { value: 'copy' } })
+    await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+    expect(reconcileMock.mock.calls[1][0]).toEqual([
+      expect.objectContaining({ key: '1', action: 'copy', target: { workspaceId: 'ws1', dataSourceId: 'ds1' } }),
+    ])
+    fireEvent.change(screen.getByLabelText('What to do with Finance lineage'), { target: { value: 'skip' } })
+    await next()                                          // → Review
+    // A copy is a new view: it takes the file's name, and a visibility.
+    expect(await screen.findByLabelText('Name for Sales pipeline')).toHaveValue('Sales pipeline')
+    expect(screen.queryByLabelText('Name for Finance lineage')).not.toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: /Import 1 view/ }))
+
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0]).toMatchObject({
+      action: 'copy', target: { workspaceId: 'ws1', dataSourceId: 'ds1' },
+      metadata: { name: 'Sales pipeline', visibility: 'private' }, expectedTargetHash: null,
+    })
   })
 })

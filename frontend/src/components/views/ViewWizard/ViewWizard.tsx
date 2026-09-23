@@ -99,6 +99,7 @@ import { AssignmentStep } from './steps/AssignmentStep'
 import { ScopeStep, ScopeModeToggle } from './steps/ScopeStep'
 import { viewTypeLabel } from '@/lib/domainLabels'
 import { ImportSessionProvider, useImportSession, useImportSessionState } from './import/importSession'
+import { BatchImport } from './import/BatchImport'
 import { ImportStep } from './import/ImportStep'
 import { ReconcileStep } from './import/ReconcileStep'
 import { TargetSuggestions } from './import/TargetSuggestions'
@@ -276,6 +277,15 @@ function importStepDefs(opts: { needsTarget: boolean; buildable: boolean; withAs
         { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
     ]
 }
+
+/** A file of several views, imported together (import/BatchImport): where each source goes, how
+ *  they all match, and a review of each. */
+const BATCH_IMPORT_STEPS: StepDef[] = [
+    { id: 'file', label: 'File', icon: <FileUp className="w-4 h-4" /> },
+    { id: 'target', label: 'Targets', icon: <Database className="w-4 h-4" /> },
+    { id: 'reconcile', label: 'Match', icon: <ListChecks className="w-4 h-4" /> },
+    { id: 'preview', label: 'Review', icon: <Eye className="w-4 h-4" /> },
+]
 
 function importTitle(action: string | null): { title: string; submitLabel: string } {
     return action === 'update' || action === 'overwrite'
@@ -470,7 +480,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     // Import journey: its first steps (the file, then where a new view goes) come before any
     // schema is loaded, so they live here, above both phases, with the session they build.
-    const [importStep, setImportStep] = useState<'file' | 'target'>('file')
+    const [importStep, setImportStep] = useState<'file' | 'target' | 'batch'>('file')
     const importSession = useImportSessionState({ file: props.importFile, intoViewId: props.importIntoViewId })
     const isImport = scopeMode === 'import'
     const importAction = importSession.action
@@ -535,19 +545,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         if (mode === 'import') setImportStep('file')
     }, [])
 
-    // A new imported view starts where the file most likely belongs: the best suggestion, when
-    // the sample found at least half of the view's entities there. Once per file, so a person's
-    // own pick is never overridden.
+    // Which file and view the target was last suggested for (see confirmImportFile).
     const suggestedFor = useRef<string | null>(null)
-    const topSuggestion = importSession.suggestions[0]
-    useEffect(() => {
-        const key = importSession.view ? `${importSession.fileName}:${importSession.view.portableId}` : null
-        if (!isImport || importStep !== 'target' || !key || suggestedFor.current === key) return
-        suggestedFor.current = key
-        if (topSuggestion && (topSuggestion.sampleHitRate ?? 0) >= 0.5) {
-            selectScope(topSuggestion.workspaceId, topSuggestion.dataSourceId)
-        }
-    }, [isImport, importStep, importSession.view, importSession.fileName, topSuggestion, selectScope])
 
     const handleScopeConfirm = useCallback(() => {
         if (scopeMode === 'existing' || scopeMode === 'import') {
@@ -560,10 +559,23 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         }
     }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId])
 
-    /** Import: past the File step. A new view picks its target next; an update's target view
-     *  already fixes the scope. */
+    /** Import: past the File step. Every view of a file goes to the batch flow; a new view picks
+     *  its target next; an update's target view already fixes the scope. */
     const confirmImportFile = useCallback(() => {
+        if (importSession.batch) {
+            setImportStep('batch')
+            return
+        }
         if (importNeedsTarget) {
+            // A new view starts where the file most likely belongs: the best suggestion, when the
+            // sample found at least half of the view's entities there. Once per file and view, so
+            // a person's own pick is never overridden.
+            const key = `${importSession.fileName}:${importSession.view?.portableId}`
+            const top = importSession.suggestions[0]
+            if (suggestedFor.current !== key) {
+                suggestedFor.current = key
+                if (top && (top.sampleHitRate ?? 0) >= 0.5) selectScope(top.workspaceId, top.dataSourceId)
+            }
             setImportStep('target')
             return
         }
@@ -572,7 +584,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         setSelectedWsId(target.workspaceId)
         setSelectedDsId(target.dataSourceId ?? null)
         setScopeConfirmed(true)
-    }, [importNeedsTarget, importSession.targetView])
+    }, [importSession.batch, importSession.fileName, importSession.view, importSession.suggestions, importNeedsTarget, importSession.targetView, selectScope])
 
     const handleBackToScope = useCallback(() => {
         setScopeConfirmed(false)
@@ -604,6 +616,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     // ── Build step list for create mode (blank skips entities + assignment) ──
     const allSteps: StepDef[] = useMemo(() => {
         if (scopeMode === 'import') {
+            if (importSession.batch) return BATCH_IMPORT_STEPS
             return importStepDefs({
                 needsTarget: importNeedsTarget,
                 buildable: isBuildable(importViewType),
@@ -621,16 +634,22 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [scopeMode, importNeedsTarget, importViewType])
+    }, [scopeMode, importSession.batch, importNeedsTarget, importViewType])
 
     // ── Phase A (import): the file, then where a new view goes ──
     if (isImport && !scopeConfirmed) {
-        const { title, submitLabel } = importTitle(importAction)
-        const fileReady = !!importSession.view && !importSession.inspecting && !!importAction
-            && (importNeedsTarget || !!importSession.targetView)
+        const { title, submitLabel } = importSession.batch
+            ? { title: 'Import Views', submitLabel: 'Import Views' }
+            : importTitle(importAction)
+        const fileReady = importSession.batch
+            ? !!importSession.inspect && !importSession.inspecting
+            : !!importSession.view && !importSession.inspecting && !!importAction
+                && (importNeedsTarget || !!importSession.targetView)
         return (
             <ImportSessionProvider value={importSession}>
-                {importStep === 'file' ? (
+                {importStep === 'batch' ? (
+                    <BatchImport steps={BATCH_IMPORT_STEPS} onBackToFile={() => setImportStep('file')} onClose={props.onClose} />
+                ) : importStep === 'file' ? (
                     <WizardShell
                         title={title}
                         submitLabel={submitLabel}

@@ -35,6 +35,9 @@ export interface ImportSession {
   loadFile: (file: File) => Promise<void>
   clearFile: () => void
 
+  /** A file with several views: import them all together (the batch flow) rather than one. */
+  batch: boolean
+  setBatch: (batch: boolean) => void
   /** Which view of the file is being imported (a file can hold several). */
   viewIndex: number
   setViewIndex: (index: number) => void
@@ -99,12 +102,14 @@ function defaultChoice(
 
 export function useImportSessionState(opts: { file?: File | null; intoViewId?: string | null }): ImportSession {
   const intoViewId = opts.intoViewId ?? null
-  const [fileName, setFileName] = useState<string | null>(null)
-  const [fileSize, setFileSize] = useState(0)
+  // A file handed in by the opener (dropped on the Explorer) is being read from the first render.
+  const [fileName, setFileName] = useState<string | null>(() => opts.file?.name ?? null)
+  const [fileSize, setFileSize] = useState(() => opts.file?.size ?? 0)
   const [inspect, setInspect] = useState<InspectResult | null>(null)
-  const [inspecting, setInspecting] = useState(false)
+  const [inspecting, setInspecting] = useState(() => !!opts.file)
   const [inspectError, setInspectError] = useState<ImportSession['inspectError']>(null)
   const [viewIndex, setViewIndexState] = useState(0)
+  const [batch, setBatch] = useState(false)
   const [action, setAction] = useState<ImportAction | null>(null)
   const [targetView, setTargetView] = useState<ImportTargetView | null>(null)
   const [strategy, setStrategyState] = useState<UpdateStrategy>('replace')
@@ -148,19 +153,16 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     setDraft({})
   }, [intoViewId])
 
-  const loadFile = useCallback(async (file: File) => {
-    const seq = ++inspectSeq.current
-    setFileName(file.name)
-    setFileSize(file.size)
-    setInspecting(true)
-    setInspectError(null)
-    setInspect(null)
-    invalidateReconcile()
+  /** Ask the server what's in the file. State changes only once it answers, and only if no later
+   *  file was loaded meanwhile. */
+  const inspectFile = useCallback(async (file: File, seq: number) => {
     try {
       const result = await inspectViewFile(file)
       if (seq !== inspectSeq.current) return
       setInspect(result)
       setViewIndexState(0)
+      // Several views, and not opened to update one of them: importing them all is the likely aim.
+      setBatch(result.views.length > 1 && !intoViewId)
       await applyDefaults(result, 0)
     } catch (err) {
       if (seq !== inspectSeq.current) return
@@ -171,7 +173,18 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     } finally {
       if (seq === inspectSeq.current) setInspecting(false)
     }
-  }, [applyDefaults, invalidateReconcile])
+  }, [applyDefaults, intoViewId])
+
+  const loadFile = useCallback(async (file: File) => {
+    const seq = ++inspectSeq.current
+    setFileName(file.name)
+    setFileSize(file.size)
+    setInspecting(true)
+    setInspectError(null)
+    setInspect(null)
+    invalidateReconcile()
+    await inspectFile(file, seq)
+  }, [inspectFile, invalidateReconcile])
 
   const clearFile = useCallback(() => {
     inspectSeq.current += 1
@@ -238,20 +251,23 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     }
   }, [view, action, strategy, resolutions, draft])
 
-  // A file handed in by the opener (dropped on the Explorer) is read as soon as the journey opens.
-  const initialFile = opts.file ?? null
+  // The opener's file is read as soon as the journey opens (once: the session lives as long as
+  // the open wizard).
+  const initialFile = useRef(opts.file ?? null)
   useEffect(() => {
-    if (initialFile) void loadFile(initialFile)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialFile])
+    const file = initialFile.current
+    initialFile.current = null
+    if (file) void inspectFile(file, ++inspectSeq.current)
+  }, [inspectFile])
 
   return useMemo<ImportSession>(() => ({
     fileName, fileSize, inspect, inspecting, inspectError, loadFile, clearFile,
-    viewIndex, setViewIndex, view, matches, suggestions,
+    batch, setBatch, viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft, setDraft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
     intoViewId,
   }), [
+    batch,
     fileName, fileSize, inspect, inspecting, inspectError, loadFile, clearFile,
     viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft,

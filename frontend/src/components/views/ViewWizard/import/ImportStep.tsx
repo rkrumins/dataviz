@@ -68,7 +68,21 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
             </div>
           )}
 
-          {inspect && inspect.views.length > 1 && (
+          {inspect && inspect.views.length > 1 && !session.intoViewId && (
+            <div className="inline-flex rounded-xl border border-glass-border p-1 bg-black/[0.02] dark:bg-white/[0.02]" role="group" aria-label="How many views to import">
+              {([true, false] as const).map(all => (
+                <button key={String(all)} type="button" aria-pressed={session.batch === all} onClick={() => session.setBatch(all)}
+                  className={cn('px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors',
+                    session.batch === all ? 'bg-canvas-elevated text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
+                  {all ? `All ${inspect.views.length} views` : 'One of them'}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {inspect && inspect.views.length > 1 && session.batch && <CollectionSummary />}
+
+          {inspect && inspect.views.length > 1 && !session.batch && (
             <div>
               <p className="text-xs font-medium text-ink-secondary mb-2">
                 This file holds {inspect.views.length} views. Choose the one to import:
@@ -90,8 +104,8 @@ export function ImportStep({ modeToggle }: { modeToggle?: ReactNode }) {
             </div>
           )}
 
-          {view && inspect && <BundleSummaryCard view={view} bundle={inspect.bundle} />}
-          {view && <ActionChoice />}
+          {view && inspect && !session.batch && <BundleSummaryCard view={view} bundle={inspect.bundle} />}
+          {view && !session.batch && <ActionChoice />}
         </div>
       </div>
     </div>
@@ -127,6 +141,46 @@ function HowItWorks() {
         settings, name and history. <span className="font-semibold text-ink-secondary">Doesn’t:</span> the graph data,
         sharing, favourites and drafts.
       </div>
+    </div>
+  )
+}
+
+// ── A file of several views ─────────────────────────────────────────────────
+
+function CollectionSummary() {
+  const session = useImportSession()!
+  const inspect = session.inspect!
+  const environment = inspect.bundle.generator.environment
+  const exists = inspect.views.filter(v => (inspect.identityMatches[v.portableId] ?? []).some(m => m.canEdit)).length
+  return (
+    <div className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+      <div className="px-4 py-3 border-b border-glass-border/60">
+        <p className="text-sm font-bold text-ink">{inspect.views.length} views{environment ? ` from ${environment}` : ''}</p>
+        <p className="text-[11px] text-ink-muted mt-0.5">
+          {exists ? `${exists} already here and will be updated; ` : ''}
+          {inspect.views.length - exists} new. You choose where each source goes, check them all at once, then review each one.
+        </p>
+      </div>
+      <ul className="max-h-60 overflow-y-auto divide-y divide-glass-border/50">
+        {inspect.views.map(v => {
+          const match = (inspect.identityMatches[v.portableId] ?? []).find(m => m.canEdit)
+          const status = match ? UPDATE_STATUS_META[match.status] : null
+          return (
+            <li key={`${v.portableId}-${v.index}`} className="flex items-center gap-3 px-4 py-2">
+              <span className="text-xs font-medium text-ink truncate flex-1" title={v.metadata.name}>{v.metadata.name}</span>
+              <span className="text-[10px] text-ink-muted shrink-0">{(v.manifest.counts?.assignments ?? 0).toLocaleString()} placements</span>
+              {match && status ? (
+                <span className={cn('text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0', TONE_CHIP[status.tone])}
+                  title={`${match.name} in ${match.workspaceName ?? 'a workspace'}: ${status.detail}`}>
+                  Here{match.headVersion ? ` · v${match.headVersion}` : ''} · {status.label}
+                </span>
+              ) : (
+                <span className={cn('text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0', TONE_CHIP.indigo)}>New</span>
+              )}
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }
