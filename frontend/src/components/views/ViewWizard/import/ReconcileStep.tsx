@@ -4,20 +4,25 @@
  * Reconciles on arrival (the server looks up every entity the view places, once per data
  * source), shows the account, and lets the person decide what happens to whatever didn't match.
  * Their choices are projected on the score immediately; "Re-check" sends them to the server,
- * whose answer is authoritative and becomes the design the rest of the wizard edits.
+ * whose answer is authoritative and becomes the design the rest of the wizard edits. When the
+ * ontology here isn't the one the view was exported with, it says so.
  */
 import { useEffect, useMemo } from 'react'
 import { AlertTriangle, FastForward, Loader2, RefreshCw } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import type { TransferTarget } from '@/services/viewTransferApiService'
+import { hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { ReconciliationPanel } from '@/features/view-transfer/reconcile/ReconciliationPanel'
+import type { EntitySearchScope } from '@/features/view-transfer/reconcile/EntitySearchPicker'
 import { resolutionCount, sameResolutions } from '@/features/view-transfer/reconcile/resolutions'
 import { pluralize } from '@/features/view-transfer/format'
 import { useImportSession } from './importSession'
 
-export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
+export function ReconcileStep({ target, targetLabel, searchScope, onSkipToReview }: {
   target: TransferTarget
   targetLabel: string
+  /** The data source (and draft) the view goes into: where a remap searches. */
+  searchScope?: EntitySearchScope | null
   onSkipToReview?: () => void
 }) {
   const session = useImportSession()!
@@ -40,6 +45,8 @@ export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
   const pendingCount = resolutionCount(session.draft)
   const environment = inspect?.bundle.generator.environment
   const sourceLabel = `${environment ? `${environment} · ` : ''}${view?.metadata.name ?? 'The file'}`
+  // Both sides digest the ontology the same way (ContextEngine), so unequal means different.
+  const drifted = hasOntologyDrifted(view ? inspect?.bundle.sources[view.source]?.ontology.digest : null, schema?.ontologyDigest)
 
   if (!reconcile) {
     return (
@@ -91,6 +98,14 @@ export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
         )}
       </div>
 
+      {drifted && (
+        <p className="flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/[0.07] px-3 py-2 text-[11px] text-amber-800 dark:text-amber-200">
+          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+          The ontology here isn’t the one this view was built with{environment ? ` in ${environment}` : ''}. Its types are
+          checked against this one, and any this one lacks are listed below.
+        </p>
+      )}
+
       <ReconciliationPanel
         reconciled={reconcile}
         applied={session.resolutions}
@@ -102,6 +117,7 @@ export function ReconcileStep({ target, targetLabel, onSkipToReview }: {
         targetName={session.targetView?.name}
         availableTypes={availableTypes}
         exportedNames={view?.manifest.entities ?? {}}
+        searchScope={searchScope}
       />
 
       {/* A lookup that failed is worth another try: those entities are neither found nor missing. */}

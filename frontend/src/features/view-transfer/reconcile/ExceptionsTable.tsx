@@ -5,15 +5,17 @@
  *
  * Tabs by status, plus the decisions already made (dropped and remapped entities leave the
  * report once re-checked, so this is where they can be seen and taken back). Search, a layer
- * filter and bulk actions, because a real view can have thousands of these; past a hundred rows
- * the list virtualises.
+ * filter, select-all and bulk actions, because a real view can have thousands of these; past a
+ * hundred rows the list virtualises. Remapping searches the data source the view is going into.
  */
 import { useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import * as PopoverPrimitive from '@radix-ui/react-popover'
 import { ArrowRight, Search, Undo2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { BundleEntityInfo, ReconcileException, Resolutions } from '@/services/viewTransferApiService'
 import { decisionOf, withDecision, withDecisions, type EntityDecision } from './resolutions'
+import { EntitySearchPicker, type EntitySearchScope } from './EntitySearchPicker'
 
 type Tab = 'missing' | 'type_changed' | 'renamed' | 'unknown' | 'decided'
 
@@ -40,7 +42,7 @@ interface Row {
   layerId: string | null
 }
 
-export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, layerNames, exportedNames }: {
+export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, layerNames, exportedNames, searchScope }: {
   entities: ReconcileException[]
   truncated: boolean
   draft: Resolutions
@@ -50,6 +52,8 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
   layerNames: Record<string, string>
   /** The file's names for its entities (for decided rows, which the report no longer lists). */
   exportedNames: Record<string, BundleEntityInfo>
+  /** Where a remap searches for the entity to use instead; without it, a URN is pasted. */
+  searchScope?: EntitySearchScope | null
 }) {
   const decidedRows = useMemo<Row[]>(() => {
     const urns = new Set([...(applied.drop ?? []), ...Object.keys(applied.remap ?? {}),
@@ -87,7 +91,19 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
 
   const layersPresent = useMemo(() => [...new Set(entities.map(e => e.layerId).filter((l): l is string => !!l))], [entities])
   const visibleTabs = (Object.keys(TAB_LABEL) as Tab[]).filter(t => counts[t] > 0 || t === tab)
-  const selectedUrns = [...selected].filter(u => rows.some(r => r.urn === u))
+  const selectedUrns = useMemo(() => rows.filter(r => selected.has(r.urn)).map(r => r.urn), [rows, selected])
+  const allSelected = rows.length > 0 && selectedUrns.length === rows.length
+
+  const chooseTab = (t: Tab) => { setTab(t); setSelected(new Set()) }
+  // Arrow keys move between tabs, as a tab list should.
+  const onTabKey = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+    e.preventDefault()
+    const i = visibleTabs.indexOf(tab)
+    const nextTab = visibleTabs[(i + (e.key === 'ArrowRight' ? 1 : visibleTabs.length - 1)) % visibleTabs.length]
+    chooseTab(nextTab)
+    e.currentTarget.querySelector<HTMLElement>(`[data-tab="${nextTab}"]`)?.focus()
+  }
 
   if (entities.length === 0 && decidedRows.length === 0) {
     return (
@@ -99,9 +115,11 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
 
   return (
     <div className="rounded-xl border border-glass-border overflow-hidden">
-      <div className="flex items-center gap-1 px-2 pt-2 border-b border-glass-border overflow-x-auto" role="tablist">
+      <div className="flex items-center gap-1 px-2 pt-2 border-b border-glass-border overflow-x-auto" role="tablist"
+        aria-label="Entities by what was found" onKeyDown={onTabKey}>
         {visibleTabs.map(t => (
-          <button key={t} role="tab" aria-selected={tab === t} type="button" onClick={() => { setTab(t); setSelected(new Set()) }}
+          <button key={t} role="tab" aria-selected={tab === t} tabIndex={tab === t ? 0 : -1} data-tab={t} type="button"
+            onClick={() => chooseTab(t)}
             className={cn('px-3 py-1.5 rounded-t-lg text-xs font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors',
               tab === t ? 'border-indigo-500 text-ink' : 'border-transparent text-ink-muted hover:text-ink')}>
             {TAB_LABEL[t]} <span className="ml-1 tabular-nums text-ink-muted">{counts[t].toLocaleString()}</span>
@@ -110,6 +128,13 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
       </div>
 
       <div className="flex items-center gap-2 px-3 py-2 border-b border-glass-border bg-black/[0.01] dark:bg-white/[0.01]">
+        {tab !== 'decided' && rows.length > 0 && (
+          <input type="checkbox" checked={allSelected}
+            ref={el => { if (el) el.indeterminate = selectedUrns.length > 0 && !allSelected }}
+            onChange={() => setSelected(allSelected ? new Set() : new Set(rows.map(r => r.urn)))}
+            aria-label={allSelected ? 'Select none' : `Select all ${rows.length.toLocaleString()}`}
+            className="w-3.5 h-3.5 rounded accent-indigo-500 shrink-0" />
+        )}
         <div className="relative flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or URN"
@@ -139,7 +164,7 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
         )}
       </div>
 
-      <RowList rows={rows} draft={draft} layerNames={layerNames} selected={selected}
+      <RowList rows={rows} draft={draft} layerNames={layerNames} selected={selected} searchScope={searchScope}
         onToggle={(urn) => setSelected(prev => { const next = new Set(prev); if (next.has(urn)) next.delete(urn); else next.add(urn); return next })}
         onDecide={(urn, d) => setDecision([urn], d)} />
 
@@ -152,11 +177,12 @@ export function ExceptionsTable({ entities, truncated, draft, onDraft, applied, 
   )
 }
 
-function RowList({ rows, draft, layerNames, selected, onToggle, onDecide }: {
+function RowList({ rows, draft, layerNames, selected, searchScope, onToggle, onDecide }: {
   rows: Row[]
   draft: Resolutions
   layerNames: Record<string, string>
   selected: Set<string>
+  searchScope?: EntitySearchScope | null
   onToggle: (urn: string) => void
   onDecide: (urn: string, decision: EntityDecision) => void
 }) {
@@ -175,7 +201,7 @@ function RowList({ rows, draft, layerNames, selected, onToggle, onDecide }: {
 
   const render = (row: Row) => (
     <ExceptionRow key={row.urn} row={row} decision={decisionOf(draft, row.urn)} layerName={row.layerId ? layerNames[row.layerId] ?? row.layerId : null}
-      selected={selected.has(row.urn)} onToggle={() => onToggle(row.urn)} onDecide={d => onDecide(row.urn, d)} />
+      selected={selected.has(row.urn)} searchScope={searchScope} onToggle={() => onToggle(row.urn)} onDecide={d => onDecide(row.urn, d)} />
   )
 
   if (!virtual) {
@@ -195,16 +221,16 @@ function RowList({ rows, draft, layerNames, selected, onToggle, onDecide }: {
   )
 }
 
-function ExceptionRow({ row, decision, layerName, selected, onToggle, onDecide }: {
+function ExceptionRow({ row, decision, layerName, selected, searchScope, onToggle, onDecide }: {
   row: Row
   decision: EntityDecision
   layerName: string | null
   selected: boolean
+  searchScope?: EntitySearchScope | null
   onToggle: () => void
   onDecide: (decision: EntityDecision) => void
 }) {
   const [remapping, setRemapping] = useState(false)
-  const [remapTo, setRemapTo] = useState(decision.kind === 'remap' ? decision.urn : '')
   const name = row.exported?.name || row.urn.split(/[,:/]/).filter(Boolean).pop() || row.urn
 
   return (
@@ -236,28 +262,34 @@ function ExceptionRow({ row, decision, layerName, selected, onToggle, onDecide }
             className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5">
             <Undo2 className="w-3 h-3" /> {decision.kind === 'remap' ? `Undo remap` : decision.kind === 'drop' ? 'Keep instead' : 'Kept'}
           </button>
-        ) : remapping ? (
-          <form className="flex items-center gap-1" onSubmit={(e) => { e.preventDefault(); if (remapTo.trim()) { onDecide({ kind: 'remap', urn: remapTo.trim() }); setRemapping(false) } }}>
-            <input autoFocus value={remapTo} onChange={e => setRemapTo(e.target.value)} placeholder="URN of the entity here"
-              aria-label="Remap to URN"
-              className="w-44 px-2 py-1 text-[11px] font-mono rounded-lg border border-glass-border bg-transparent text-ink outline-none focus:border-indigo-500" />
-            <button type="submit" className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-indigo-500 text-white hover:bg-indigo-600">Use</button>
-            <button type="button" onClick={() => setRemapping(false)} className="px-1.5 py-1 text-[11px] text-ink-muted">Cancel</button>
-          </form>
         ) : (
-          <div className="inline-flex rounded-lg border border-glass-border p-0.5" role="group" aria-label={`What to do with ${name}`}>
-            {(['keep', 'drop', 'remap'] as const).map(kind => (
-              <button key={kind} type="button" aria-pressed={decision.kind === kind}
-                onClick={() => kind === 'remap' ? setRemapping(true) : onDecide({ kind })}
-                title={kind === 'remap' && decision.kind === 'remap' ? decision.urn : undefined}
-                className={cn('px-2 py-0.5 rounded-md text-[11px] font-semibold transition-colors capitalize',
-                  decision.kind === kind
-                    ? kind === 'drop' ? 'bg-rose-500 text-white' : kind === 'remap' ? 'bg-indigo-500 text-white' : 'bg-black/[0.07] dark:bg-white/[0.1] text-ink'
-                    : 'text-ink-muted hover:text-ink')}>
-                {kind === 'remap' && decision.kind === 'remap' ? 'Remapped' : kind}
-              </button>
-            ))}
-          </div>
+          <PopoverPrimitive.Root open={remapping} onOpenChange={setRemapping}>
+            <div className="inline-flex rounded-lg border border-glass-border p-0.5" role="group" aria-label={`What to do with ${name}`}>
+              {(['keep', 'drop', 'remap'] as const).map(kind => {
+                const button = (
+                  <button key={kind} type="button" aria-pressed={decision.kind === kind}
+                    onClick={kind === 'remap' ? undefined : () => onDecide({ kind })}
+                    title={kind === 'remap' && decision.kind === 'remap' ? decision.urn : undefined}
+                    className={cn('px-2 py-0.5 rounded-md text-[11px] font-semibold transition-colors capitalize',
+                      decision.kind === kind
+                        ? kind === 'drop' ? 'bg-rose-500 text-white' : kind === 'remap' ? 'bg-indigo-500 text-white' : 'bg-black/[0.07] dark:bg-white/[0.1] text-ink'
+                        : 'text-ink-muted hover:text-ink')}>
+                    {kind === 'remap' && decision.kind === 'remap' ? 'Remapped' : kind}
+                  </button>
+                )
+                return kind === 'remap' ? <PopoverPrimitive.Trigger key={kind} asChild>{button}</PopoverPrimitive.Trigger> : button
+              })}
+            </div>
+            <PopoverPrimitive.Portal>
+              <PopoverPrimitive.Content side="bottom" align="end" sideOffset={6}
+                className="z-[9999] w-96 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl shadow-black/30 p-3">
+                <EntitySearchPicker scope={searchScope} exported={row.exported}
+                  current={decision.kind === 'remap' ? decision.urn : undefined}
+                  onPick={(urn) => { onDecide({ kind: 'remap', urn }); setRemapping(false) }}
+                  onCancel={() => setRemapping(false)} />
+              </PopoverPrimitive.Content>
+            </PopoverPrimitive.Portal>
+          </PopoverPrimitive.Root>
         )}
       </div>
     </div>

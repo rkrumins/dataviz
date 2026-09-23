@@ -2,7 +2,7 @@
  * The full account of how a view from a file fits a data source here.
  *
  *   ┌ score ring ┬ verdict, one sentence, source → target ┐
- *   ├ category cards: entities · anchors · types · layers · display rules ┤
+ *   ├ category cards: entities · anchors · entity types · relationship types · layers · display rules ┤
  *   ├ update panel (updating a view that's here) ┤
  *   ├ types that don't exist here, each mappable ┤
  *   ├ layer health ┤
@@ -11,13 +11,14 @@
  * Presentation only: the reconcile itself, and when to re-run it, belong to the host (the
  * wizard's Match step, or one row of a multi-view import).
  */
-import { AlertTriangle, ArrowRight, Anchor, Ban, CheckCircle2, Info, Layers, Link2, Palette, Shapes } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Anchor, Ban, CheckCircle2, GitFork, Info, Layers, Link2, Palette, Shapes } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type {
   BundleEntityInfo, ReconciledView, ReconcileNotice, Resolutions, UpdateStrategy,
 } from '@/services/viewTransferApiService'
 import { percent, pluralize } from '../format'
 import { ExceptionsTable } from './ExceptionsTable'
+import type { EntitySearchScope } from './EntitySearchPicker'
 import { MatchScoreRing } from './MatchScoreRing'
 import { projectedRate, sameResolutions } from './resolutions'
 import { TypeMappingTable } from './TypeMappingTable'
@@ -31,7 +32,7 @@ const VERDICT_META = {
 
 export function ReconciliationPanel({
   reconciled, applied, draft, onDraft, onStrategy, sourceLabel, targetLabel, targetName,
-  availableTypes, exportedNames,
+  availableTypes, exportedNames, searchScope,
 }: {
   reconciled: ReconciledView
   applied: Resolutions
@@ -43,6 +44,8 @@ export function ReconciliationPanel({
   targetName?: string
   availableTypes: { entity: Array<{ id: string; name: string }>; relationship: Array<{ id: string; name: string }> }
   exportedNames: Record<string, BundleEntityInfo>
+  /** The data source the view is going into, where a remap searches for an entity. */
+  searchScope?: EntitySearchScope | null
 }) {
   const { report, update } = reconciled
   const s = report.summary
@@ -55,6 +58,7 @@ export function ReconciliationPanel({
   const layerNames = Object.fromEntries(report.layers.map(l => [l.id, l.name ?? l.id]))
   const anchors = s.byKind.anchor
   const missingTypes = report.types.entity.some(t => t.status === 'missing') || report.types.relationship.some(t => t.status === 'missing')
+  const typesUnchecked = report.notices.some(n => n.code === 'ontology_unavailable')
 
   return (
     <div className="space-y-5">
@@ -78,14 +82,14 @@ export function ReconciliationPanel({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2.5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5">
         <CategoryCard icon={<Link2 className="w-3.5 h-3.5" />} label="Entities" value={e.found} total={e.checked}
           note={e.missing ? `${e.missing.toLocaleString()} not found` : undefined} />
         <CategoryCard icon={<Anchor className="w-3.5 h-3.5" />} label="Anchors" value={anchors?.found ?? 0} total={anchors?.checked ?? 0} />
-        <CategoryCard icon={<Shapes className="w-3.5 h-3.5" />} label="Types"
-          value={(s.entityTypes.total - s.entityTypes.missing) + (s.relationshipTypes.total - s.relationshipTypes.missing)}
-          total={s.entityTypes.total + s.relationshipTypes.total}
-          unknown={report.notices.some(n => n.code === 'ontology_unavailable')} />
+        <CategoryCard icon={<Shapes className="w-3.5 h-3.5" />} label="Entity types"
+          value={s.entityTypes.total - s.entityTypes.missing} total={s.entityTypes.total} unknown={typesUnchecked} />
+        <CategoryCard icon={<GitFork className="w-3.5 h-3.5" />} label="Relationship types"
+          value={s.relationshipTypes.total - s.relationshipTypes.missing} total={s.relationshipTypes.total} unknown={typesUnchecked} />
         <CategoryCard icon={<Layers className="w-3.5 h-3.5" />} label="Healthy layers" value={s.layers.healthy} total={s.layers.total} />
         <CategoryCard icon={<Palette className="w-3.5 h-3.5" />} label="Display rules" value={s.displayRules} note="carried over" />
       </div>
@@ -144,7 +148,7 @@ export function ReconciliationPanel({
         <SectionTitle title="Entities to review"
           detail={`Kept by default: an entity that isn't here stays in the view, marked not found, and shows up if it appears later. ${percent(s.coverage, 0)} could be checked.`} />
         <ExceptionsTable entities={report.entities} truncated={report.entitiesTruncated} draft={draft} onDraft={onDraft}
-          applied={applied} layerNames={layerNames} exportedNames={exportedNames} />
+          applied={applied} layerNames={layerNames} exportedNames={exportedNames} searchScope={searchScope} />
       </section>
     </div>
   )

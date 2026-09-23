@@ -630,7 +630,8 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
                         targetLabel={e.action === 'update' && e.here ? `“${e.here.name}”` : labelOf(targets[e.view.source])}
                         targetName={e.here?.name}
                         availableTypes={{ entity: [], relationship: [] }}
-                        exportedNames={e.view.manifest.entities} />
+                        exportedNames={e.view.manifest.entities}
+                        searchScope={scopeFor(e, targets)} />
                       <button type="button" onClick={() => importOnItsOwn(e)}
                         className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
                         Import this view on its own, with every step of the wizard…

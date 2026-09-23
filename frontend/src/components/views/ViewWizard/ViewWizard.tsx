@@ -1923,6 +1923,7 @@ function ViewWizardBody({
                 <ReconcileStep
                     target={importTarget}
                     targetLabel={importTargetLabel}
+                    searchScope={{ workspaceId: resolvedWorkspaceId, dataSourceId: resolvedDataSourceId, branchId: importDataBranch }}
                     onSkipToReview={() => {
                         startTransition(() => {
                             setPreviousSteps(prev => [...prev, 'reconcile'])

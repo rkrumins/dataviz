@@ -11,6 +11,7 @@
  *   - a view that changed since it was reviewed is sent back to the Match step to check again;
  *   - overwriting another view is offered only for a view you can edit, asked when it is picked;
  *   - entities whose lookup failed can be looked up again, one view or many;
+ *   - the Match step says when the ontology here isn't the one the view was exported with;
  *   - a file of several views: every view checked in one request, then imported one request per
  *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
  *     rest and is retried under the same request id; a view switched to a copy is checked again, as
@@ -127,6 +128,7 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
 
 import { ViewTransferError } from '@/services/viewTransferApiService'
 import { PullRequestExistsError } from '@/services/versioningApiService'
+import { useSchemaStore } from '@/store/schema'
 import { ViewWizard } from '../ViewWizard'
 
 const DEFINITION = {
@@ -346,6 +348,27 @@ describe('ViewWizard — Import journey', () => {
     expect(await screen.findByText(/Overwriting/)).toHaveTextContent('Overwriting Editable view in UAT')
     expect(getViewMock.mock.calls.map(([id]) => id)).toEqual(['view_ro', 'view_rw'])
   })
+  it('says when the ontology here isn’t the one the view was built with', async () => {
+    const before = useSchemaStore.getState().schema
+    useSchemaStore.setState({ schema: {
+      id: 'uat', name: 'UAT', version: '1', entityTypes: [], relationshipTypes: [], views: [], defaultViewId: '',
+      globalVisuals: {}, ontologyDigest: 'digest-uat',
+    } as unknown as typeof before })
+    try {
+      const file = inspected()
+      file.bundle.sources.s1.ontology = { digest: 'digest-dev' }
+      inspectMock.mockResolvedValue(file)
+      reconcileMock.mockResolvedValue(reconciled())
+      renderImport()
+      await screen.findByText('Create a new view')
+      await next()                                          // → Target
+      await next()                                          // → Match
+      expect(await screen.findByText(/The ontology here isn’t the one this view was built with in dev/)).toBeInTheDocument()
+    } finally {
+      useSchemaStore.setState({ schema: before })
+    }
+  })
+
   it('looks again at entities whose lookup failed', async () => {
     inspectMock.mockResolvedValue(inspected())
     const failed = reconciled()

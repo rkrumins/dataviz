@@ -120,8 +120,10 @@ the file anywhere on the Explorer page.
 3. **Match.** Every entity the View places is looked up there, and you get a
    match percentage. Anything not found is **kept, marked "not found"** — it
    comes back to life if the entity appears later — or you can drop it, or remap
-   it to another entity. Types that don't exist there can be mapped to one that
-   does. If everything matched, **Skip to review**.
+   it to another entity: **Remap** searches the data source for it by name (or
+   takes a pasted URN). Types that don't exist there can be mapped to one that
+   does, and you're told if the data source's ontology isn't the one the View
+   was exported with. If everything matched, **Skip to review**.
 4. **Adjust and review.** Rename it, change its description or anything else in
    the usual wizard steps, then import. The import is saved as a version, with
    where it came from and how well it matched.
