@@ -21,6 +21,45 @@ Open a View you own (or have edit access to) and you can:
 
 ---
 
+## Versions of a View
+
+Every View keeps a history of its **design** — its layers, placements, rules and
+settings — as numbered versions: v1, v2, v3…
+
+A version is kept whenever something meaningful happens: saving in the View
+wizard, importing a file, restoring an earlier version, a draft's changes to the
+View going live, or exporting unsaved changes. Changes you make on the canvas
+between versions show as **unsaved changes since vN** until the next one.
+
+Open **Versions** in the View's header (it shows the current version, with a dot
+when there are unsaved changes) to:
+
+- **Save version** — keep the design as it is now, with a note on what changed.
+- **Compare** any two versions, or a version with the current design: which
+  layers were added, removed or changed, and how many placements moved.
+- **Restore** an earlier version. Your current design is saved as a version first,
+  so nothing is lost, and sharing is left as it is.
+- **Export** an earlier version to a file.
+
+> **Note:** *Versions of a View are not the graph's version control.* They record
+> the View's design only. Restoring one never changes the graph data, and graph
+> drafts, commits and publishing work as before — see
+> [Versioning & Change Control](/guide/versioning-change-control).
+
+---
+
+## Moving a View to another environment
+
+Built a View in dev and need it in UAT or production? **Export** it to a file
+(from the View's header, its menu in the Explorer, or several at once from the
+Explorer's selection bar) and **Import view** in the other environment. The
+import checks every entity the View places against the graph there and shows you
+what matched before anything is saved. Importing again later updates the same
+View as its next version. The whole journey is in
+[Import & Export](/guide/import-export#moving-views-between-environments).
+
+---
+
 ## Sharing and permissions
 
 Two mechanisms control who can reach a View:
@@ -98,6 +137,7 @@ See recommended cadence and conventions in [Ways of Working](/guide/ways-of-work
 | A teammate can't find your View | Visibility too narrow, or wrong workspace — widen visibility or share explicitly |
 | View opens empty | You're in the wrong workspace, or its data source changed — open **Workspaces** from the sidebar to confirm you're in the right one |
 | Can't edit a View | You have *viewer* access only — ask the owner for an *editor* grant |
+| No **Export** or **Import view** | Your administrator has turned it off (Admin → Features → Export views / Import views) |
 
 More in [Troubleshooting](/guide/troubleshooting).
 
@@ -107,4 +147,5 @@ More in [Troubleshooting](/guide/troubleshooting).
 
 - Shape what nodes *mean* across all Views → [The Semantic Layer](/guide/semantic-layer)
 - Understand roles, groups, and grants → [Users & Access](/guide/users-access)
+- Move Views between environments → [Import & Export](/guide/import-export#moving-views-between-environments)
 - Team conventions → [Ways of Working](/guide/ways-of-working)

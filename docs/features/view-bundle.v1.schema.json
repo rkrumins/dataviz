@@ -1,0 +1,598 @@
+{
+  "$defs": {
+    "BundleView": {
+      "properties": {
+        "definition": {
+          "additionalProperties": true,
+          "title": "Definition",
+          "type": "object"
+        },
+        "definitionHash": {
+          "maxLength": 128,
+          "title": "Definitionhash",
+          "type": "string"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/HistoryEntry"
+          },
+          "title": "History",
+          "type": "array"
+        },
+        "historyTruncated": {
+          "default": false,
+          "title": "Historytruncated",
+          "type": "boolean"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Manifest"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ViewMetadata"
+        },
+        "portableId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Portableid",
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 64,
+          "title": "Source",
+          "type": "string"
+        },
+        "sourceViewId": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sourceviewid"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "source",
+        "portableId",
+        "definitionHash",
+        "metadata",
+        "definition"
+      ],
+      "title": "BundleView",
+      "type": "object"
+    },
+    "DataSourceRef": {
+      "properties": {
+        "catalogSourceIdentifier": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Catalogsourceidentifier"
+        },
+        "graphName": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Graphname"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "identityProperty": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identityproperty"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "providerType": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Providertype"
+        }
+      },
+      "title": "DataSourceRef",
+      "type": "object"
+    },
+    "EntityInfo": {
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "qualifiedName": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qualifiedname"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Type"
+        }
+      },
+      "title": "EntityInfo",
+      "type": "object"
+    },
+    "Generator": {
+      "properties": {
+        "environment": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
+        },
+        "product": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Product"
+        }
+      },
+      "title": "Generator",
+      "type": "object"
+    },
+    "HistoryEntry": {
+      "properties": {
+        "createdAt": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Createdat"
+        },
+        "createdBy": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Createdby"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
+        },
+        "hash": {
+          "maxLength": 128,
+          "title": "Hash",
+          "type": "string"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "viewId": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewid"
+        }
+      },
+      "required": [
+        "hash"
+      ],
+      "title": "HistoryEntry",
+      "type": "object"
+    },
+    "Manifest": {
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Counts",
+          "type": "object"
+        },
+        "entities": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EntityInfo"
+          },
+          "title": "Entities",
+          "type": "object"
+        },
+        "entitiesResolved": {
+          "default": true,
+          "title": "Entitiesresolved",
+          "type": "boolean"
+        }
+      },
+      "title": "Manifest",
+      "type": "object"
+    },
+    "OntologyRef": {
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Digest"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "title": "OntologyRef",
+      "type": "object"
+    },
+    "Person": {
+      "properties": {
+        "displayName": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Displayname"
+        }
+      },
+      "title": "Person",
+      "type": "object"
+    },
+    "SourceDescriptor": {
+      "properties": {
+        "dataSource": {
+          "$ref": "#/$defs/DataSourceRef"
+        },
+        "ontology": {
+          "$ref": "#/$defs/OntologyRef"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceRef"
+        }
+      },
+      "title": "SourceDescriptor",
+      "type": "object"
+    },
+    "ViewMetadata": {
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 10000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon"
+        },
+        "name": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Tags",
+          "type": "array"
+        },
+        "viewType": {
+          "default": "graph",
+          "maxLength": 64,
+          "title": "Viewtype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ViewMetadata",
+      "type": "object"
+    },
+    "WorkspaceRef": {
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        }
+      },
+      "title": "WorkspaceRef",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One or more views exported from an environment, to import into another where the same data source is onboarded. Each view's definition is hashed (definitionHash); bundleHash covers the ordered (portableId, definitionHash) pairs. Keys this schema doesn't list are ignored by the importer. See docs/features/view-portability.md.",
+  "properties": {
+    "bundleHash": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Bundlehash"
+    },
+    "exportedAt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exportedat"
+    },
+    "exportedBy": {
+      "$ref": "#/$defs/Person"
+    },
+    "format": {
+      "const": "view-bundle",
+      "title": "Format"
+    },
+    "formatVersion": {
+      "const": 1,
+      "title": "Formatversion"
+    },
+    "generator": {
+      "$ref": "#/$defs/Generator"
+    },
+    "sources": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SourceDescriptor"
+      },
+      "title": "Sources",
+      "type": "object"
+    },
+    "views": {
+      "items": {
+        "$ref": "#/$defs/BundleView"
+      },
+      "title": "Views",
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "formatVersion",
+    "views"
+  ],
+  "title": "View Bundle v1",
+  "type": "object"
+}

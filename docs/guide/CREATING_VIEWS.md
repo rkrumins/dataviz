@@ -69,6 +69,12 @@ Pick how the View is laid out:
 Review the result, adjust if needed, and set the **visibility** (next section).
 Confirm to publish the View into the gallery.
 
+> **Tip:** *Already built it somewhere else?* If the View exists in another
+> environment where the same data source is onboarded, you don't have to build
+> it again. Choose **Import a view** on the wizard's first step, or **Import view**
+> in the Explorer, and bring in the file exported there. See
+> [Moving views between environments](/guide/import-export#moving-views-between-environments).
+
 ---
 
 ## Setting visibility
@@ -101,8 +107,9 @@ suggestions in [Ways of Working](/guide/ways-of-working).
 - Your View appears in the **gallery** and (for Team/Enterprise) becomes
   discoverable by others.
 - **Favourite** it (★) to pin it to your sidebar quick-access.
-- Iterate freely — open it, refine, and re-save. To hand it off or co-own it,
-  see [Managing Views](/guide/managing-views).
+- Iterate freely — open it, refine, and re-save. Every save in the wizard is kept
+  as a **version** of the View (v1, v2, …) that you can compare with or go back
+  to. To hand it off or co-own it, see [Managing Views](/guide/managing-views).
 
 ---
 

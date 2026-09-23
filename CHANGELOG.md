@@ -9,6 +9,121 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Views that travel between environments, and remember their versions
+
+### Added
+
+**A view can move to another environment.** Export any view, or any version of it, to a
+`.view.json` file, and import it wherever the same data source is onboarded: the View wizard has a
+new **Import a view** journey, the Explorer and each workspace's Views manager have **Import view**,
+and a file dropped anywhere on the Explorer opens it. The import suggests where the view belongs,
+measured on a sample of its own entities ("49 of 50 found here"), then looks up every entity the
+view places and shows the match percentage. Anything not found is kept and marked, and goes live
+if the entity appears later; you can also drop it, remap it to another entity, or map a missing
+type to one that exists. Then the usual wizard steps let you change anything before it writes.
+
+**Importing a view that is already here updates it.** Each view carries an identity that crosses
+environments and the hashes of its whole history. So a newer file of the same view becomes its next
+version, and the import says how the two stand: the file is newer, the view here has moved on, or
+both changed. **Replace** takes the file's design; **Merge** keeps what changed here, and the file
+wins where both changed the same thing. A file can also create a new view, import as a separate
+copy, or overwrite another view you can edit (its design is saved as a version first).
+
+**Round trips lose nothing, and prove it.** The server writes a view's design (everything but its
+ids, owners and label) in one canonical form and hashes it. The file carries that hash, and the
+import re-reads what it stored and says whether it is exactly what was sent. When this environment
+had to change something, such as custom node order where node sorting is off, the import says what
+and why. Export, import, export and import again gives byte-identical designs. Name, description,
+icon and tags travel beside the design, so renaming never breaks the view's identity, and settings
+this release doesn't know are carried through untouched.
+
+**Views have versions.** Every view keeps numbered, immutable versions of its design: v1, v2, …
+Saving in the wizard, importing, restoring, a draft going live and exporting unsaved changes each
+keep one, and **Save version** keeps one with a note. The view header's **Versions** opens the
+history: compare any two versions (or one with the current design), restore one (the current
+design is saved first, and sharing is left alone), or export it. Canvas autosaves show as
+"unsaved changes since vN" rather than a version each. A view that predates this gets its first
+version the first time it is needed.
+
+**A file of several views imports in one go.** Export several views from the Explorer's (or Views
+manager's) selection bar. On import, map each source to a data source, check every view at once,
+and review them in one table: create, update, copy or skip, name, visibility. Each view then
+imports as its own request under one batch, so one failure doesn't stop the rest, and **Retry
+failed** is safe to press.
+
+**An import can wait in a draft.** On a data source under version control, a new view or an update
+can go into a draft and go live when the draft is published or its review request merges. This is
+the default where you can open drafts. Until then a new view is private and appears in no list,
+count or search. The draft's Changes tab, its review request and the publish dialog show its
+views, and a draft that changes only views can now be published.
+
+**A view can travel with its data.** **View + data** in the export dialog packages the view with
+its data source's own export (the view's entities or the whole source, published or from your
+draft) as a `.view-package.zip`. Importing one brings the data into a new draft of the target
+(adding and updating only, never deleting), checks the view against that draft so the entities the
+data brought count as found, and puts the view in the same draft, so the two go live together.
+
+**Wherever a view is, so are these actions.** The view header has **Versions** and **Export**. A
+view's card menu in the Explorer has **Export…**, **Versions** and **Update from file…**. The
+canvas's **Import / Export** menu has a new **This view** section: export the view, export it with
+its data, or update it from a file.
+
+**Two admin switches**, Admin → Features → **Export views** (`viewExportEnabled`) and **Import
+views** (`viewImportEnabled`), on by default. Exporting a view with its data also needs **Export
+graph data**; importing one needs version control.
+
+The formats, rules and API are in `docs/features/view-portability.md`. The file format's JSON
+Schema is `docs/features/view-bundle.v1.schema.json`, rendered from the importer's own model.
+
+### Fixed
+
+**Saving a view from the wizard deleted its display rules**, and anything else its reference
+layout carried beyond layers and placements, because the layout write replaced the reference
+layout wholesale. The wizard now carries them through, as the canvas already did.
+
+**Publishing a draft dropped layout fields the layout merge didn't know about.** Any
+`referenceLayout` field beyond layers, placements, display rules and default sort was lost when a
+draft's layout went live. Such fields are now merged three ways like the rest.
+
+### Security
+
+**Views waiting in a draft stay private until it goes live.** Every query that lists, counts or
+facets views now goes through one live-view filter, and a structural test fails the build if a
+new query of the views table skips it. That includes the analytics, popularity, search-facet and
+workspace-count paths. Such a view can't have its visibility changed, or be put up for
+publication, until its draft goes live.
+
+**An uploaded file is untrusted input, and is treated as such.** View files are capped at 64 MB,
+200 views, 250,000 placements and 64 levels of nesting. Packages are capped at 100 MB, and their
+data at 2 GB decompressed however the archive describes itself. Every part is checked against the
+package's checksums, and a part changed after export is reported. An upload is kept for 24 hours,
+for the person who uploaded it only. Imports pass the same gates as building a view.
+
+### Upgrading
+
+Two migrations, both additive: `20260923_1000_view_versions` adds `views.portable_id` (stamped on
+existing views in batches) and the `view_versions` table, and widens the view-activity actions.
+`20260925_1000_view_draft_stage` adds `views.draft_branch_id` and the staged-import columns on
+`view_layout_overlays`. Existing views get no versions up front; each gets its first the first time
+it is needed.
+
+The transfer routes run under a new 120-second timeout tier (`HTTP_TIMEOUT_VIEW_TRANSFER_SECS`),
+below nginx's 180 s. Package uploads wait in the object store under `transfer-uploads/` and the
+versioning worker prunes them after a day. nginx's `client_max_body_size` (100 MB) already matches
+the package limit.
+
+### Known limitations
+
+- **Entity identifiers are not rewritten between environments.** A view matches where the
+  environments use the same URNs; anything else shows as not found and can be remapped by hand.
+- **Files are not signed.** The hashes prove a file wasn't changed after export, not who exported it.
+- **A package brings its data with one of its views**, because a draft belongs to one view. Import
+  the package's other views afterwards with **View only**.
+- **A failed package data import can't be retried in place**: choose the file again. The draft the
+  failed attempt opened is yours to abandon.
+
+---
+
 ## [Unreleased] — The cluster window, and the names a graph can hold
 
 ### Fixed

@@ -2,7 +2,8 @@
 
 *For Builders and Administrators.* Bring data in from a spreadsheet, or take a
 full backup out — both go through the same **draft-and-review** safety net as
-any other change, so a bad import can never silently corrupt your graph.
+any other change, so a bad import can never silently corrupt your graph. Views
+travel too: see [Moving views between environments](#moving-views-between-environments).
 
 > **Note:** *The one-sentence model* — Import stages changes on a draft for you
 > to review before anything publishes; Export gives you a complete,
@@ -70,6 +71,95 @@ backup, not just a report.
 An export can always be brought back in through Import later, so it doubles
 as a safety net before a big change and as a way to work with your data
 outside {brand}.
+
+---
+
+## Moving views between environments
+
+A View built in one environment can be brought into another where the same data
+source is onboarded — build it in dev, check it in UAT, promote it to
+production — without rebuilding it by hand.
+
+| File | Holds | Use it when |
+| --- | --- | --- |
+| **View file** (`.view.json`) | The View's design: layers, placements, rules, display rules, settings, name, and its version history | The data is already there — the usual case |
+| **View with its data** (`.view-package.zip`) | The design, plus the entities and relationships it shows (or the whole data source) | The data isn't there yet, or the View and its data should go live together |
+
+Neither carries sharing, favourites or who can see the View: those belong to the
+environment it lands in.
+
+### Exporting a View
+
+1. **Export** from the View's header, **Export…** on its card in the Explorer, or
+   select several in the Explorer (or a workspace's Views manager) and choose
+   **Export**. On the canvas, **Import / Export → This view** has the same actions.
+2. **Choose the version**: the current design, or an earlier one. Unsaved
+   changes are saved as a new version first, so the file always matches a
+   version you can find again.
+3. **Choose what goes in**: **View only**, or **View + data**. With data, choose
+   whose data — just this View's entities, or the whole data source — and
+   whether it's the published data or your draft. View + data needs version
+   control on the data source.
+4. **Download.** Every file carries a fingerprint of the design, so the
+   environment that imports it can tell whether it was changed on the way.
+
+### Importing a View
+
+Choose **Import view** in the Explorer or a workspace's Views manager, or drop
+the file anywhere on the Explorer page.
+
+1. **File.** See what's in it — the View, its version, where it came from, and
+   whether it's exactly what was exported — and choose what should happen:
+   - **Update** the View that's already here, if it came from this one before
+     (recommended when it did),
+   - **Create a new View**, or **import a separate copy**,
+   - or **overwrite** another View you can edit.
+2. **Target.** Pick the data source it goes into. {brand} suggests the one that
+   holds the same graph, measured on a sample of the View's own entities
+   ("49 of 50 found here").
+3. **Match.** Every entity the View places is looked up there, and you get a
+   match percentage. Anything not found is **kept, marked "not found"** — it
+   comes back to life if the entity appears later — or you can drop it, or remap
+   it to another entity. Types that don't exist there can be mapped to one that
+   does. If everything matched, **Skip to review**.
+4. **Adjust and review.** Rename it, change its description or anything else in
+   the usual wizard steps, then import. The import is saved as a version, with
+   where it came from and how well it matched.
+
+When the View is already here, the import says how the two stand — the file is
+newer, the View here has moved on, or both changed — and offers **Replace**
+(take the file's design) or **Merge** (keep your changes here, the file wins
+where both changed the same thing).
+
+A file of several Views imports them together: choose where each source goes,
+check them all at once, then review each one — create, update, copy, or skip.
+
+> **Tip:** On a data source under version control, an import can **wait in a
+> draft**: the new View, or the update, goes live when the draft is published or
+> its review request merges, and stays private until then. It's the default where
+> you can open drafts, and the draft's review shows the View beside any data
+> changes.
+
+### Importing a View with its data
+
+Drop a `.view-package.zip` in the same place. The journey is the same, with one
+more step:
+
+- **Data.** The package's data goes into a **new draft** of the data source you
+  chose — it only adds and updates, never deletes, and nothing is live yet. You
+  see how many entities are new, updated or unchanged, and anything that couldn't
+  be applied.
+- **Match** then checks the View against that draft, so the entities the data just
+  brought count as found, and the View goes into the **same draft**. Publish the
+  draft, or send it for review, and the View and its data go live together.
+
+Only a data source under version control can take the data. To bring in just the
+View — for example where the data is already there — choose **View only** on the
+File step. A package of several Views brings its data with one of them; import
+the others from the same file with **View only**.
+
+> **Note:** If **Export** or **Import view** is missing, your administrator has
+> turned it off (Admin → Features → **Export views** / **Import views**).
 
 ---
 
