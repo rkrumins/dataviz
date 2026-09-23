@@ -1613,6 +1613,38 @@ async def merge_preview(
         return await svc.preview_merge(graph_id=graph_id, branch_id=branch_id)
 
 
+@router.get("/graphs/{graph_id}/branches/{branch_id}/view-changes")
+async def branch_view_changes(
+    ws_id: str, graph_id: str, branch_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What this draft changes in views, beside its graph changes: the views it creates (imports
+    waiting to go live) and updates (imports staged in it, and layer edits). They go live when the
+    draft is published, so a draft with nothing else is still worth publishing. Views the caller
+    can't read are counted (``hidden``), never shown."""
+    from backend.app.api.v1.endpoints.views import _viewer_context
+    from backend.app.auth.dependencies import rbac_flag
+    from backend.app.db.models import ViewORM
+    from backend.app.services import draft_views, view_access
+
+    changes = [c for c in await draft_views.changes_on(session, branch_id) if c["workspaceId"] == ws_id]
+    visible = changes
+    if rbac_flag("RBAC_ENFORCE_VIEWS") and changes:
+        ctx = await _viewer_context(session, user, claims)
+        visible = []
+        for change in changes:
+            row = await session.get(ViewORM, change["viewId"])
+            if row is not None and await view_access.can_read_view(session, ctx, row):
+                visible.append(change)
+    names = await resolve_user_ids(session, {c["stagedBy"] for c in visible if c.get("stagedBy")})
+    for change in visible:
+        change["stagedByName"] = names.get(change.get("stagedBy") or "", (None, None))[0]
+    return {"branchId": branch_id, "views": visible, "hidden": len(changes) - len(visible)}
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=CommitResponse)
 async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,

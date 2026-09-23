@@ -26,6 +26,8 @@ ALLOWED = {
     "db/repositories/view_repo.py": 1,
     # Whether an identity is taken in a workspace: a staged view holds its identity.
     "services/view_transfer/importing.py": 1,
+    # What a draft changes in views, which includes the views waiting in it.
+    "services/draft_views.py": 2,
 }
 
 

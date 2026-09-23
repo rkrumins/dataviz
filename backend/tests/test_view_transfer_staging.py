@@ -11,7 +11,7 @@ draft does.
 """
 from __future__ import annotations
 
-from typing import Optional
+from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy import func, select
@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.db.models import ProviderORM, ViewORM, ViewVersionORM, WorkspaceDataSourceORM
 from backend.app.db.repositories import view_repo
+from backend.app.services import draft_views
 from backend.app.services.permission_service import PermissionClaims
 from backend.tests.test_view_transfer_import import (  # noqa: F401 — graph is a fixture
     _as, _assignments, _edit, _file, _import, _layout, _user, _view, _workspace, graph,
@@ -39,6 +40,15 @@ class _Versioning:
 
     async def get_graph_by_data_source(self, data_source_id):
         return self.graphs.get(data_source_id)
+
+    async def get_graph(self, graph_id):
+        return next((g for g in self.graphs.values() if g["graph_id"] == graph_id), None)
+
+    async def branch_statuses(self, branch_ids):
+        return {d["branch_id"]: d["status"] for d in self.drafts if d["branch_id"] in set(branch_ids)}
+
+    def finish(self, branch_id: str, status: str) -> None:
+        next(d for d in self.drafts if d["branch_id"] == branch_id)["status"] = status
 
     async def open_draft(self, *, graph_id, owner, name=None, originating_view_id=None, shared=False):
         branch_id = f"br_{len(self.drafts) + 1}"
@@ -269,3 +279,64 @@ async def test_staging_needs_version_control_and_the_right_to_open_drafts(test_c
     assert not versioning.drafts
     count = await db_session.scalar(select(func.count()).select_from(ViewORM).where(ViewORM.workspace_id == uat))
     assert count == 0
+
+
+# ── What a draft changes in views, and settling drafts left unsettled ───────
+
+
+async def test_a_draft_says_what_it_changes_in_views(test_client, db_session, graph, versioning):
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    ds = await _data_source(db_session, uat)
+    versioning.track(uat, ds)
+    source_id = await _view(test_client, dev)
+    first = await _file(test_client, source_id)
+    here = (await _import(test_client, first, {"workspaceId": uat, "dataSourceId": ds})).json()["viewId"]
+    await _edit(test_client, source_id, "urn:x")
+    second = await _file(test_client, source_id)
+    update_branch = (await _stage(test_client, second, {"viewId": here}, action="update")).json()["staged"]["branchId"]
+    create_branch = (await _stage(test_client, first, {"workspaceId": uat, "dataSourceId": ds}, action="copy",
+                                  name="Finance (copy)", visibility="workspace")).json()["staged"]["branchId"]
+
+    def url(branch):
+        return f"/api/v1/{uat}/versioning/graphs/g_{ds}/branches/{branch}/view-changes"
+
+    [update] = (await test_client.get(url(update_branch))).json()["views"]
+    assert (update["change"], update["viewId"], update["name"]) == ("update", here, "Finance lineage")
+    assert update["diff"]["assignments"]["added"] == 1 and update["matchRate"] is not None
+    assert update["origin"]["version"] == second["views"][0]["version"]
+    [created] = (await test_client.get(url(create_branch))).json()["views"]
+    assert (created["change"], created["name"], created["goesLiveAs"]) == ("create", "Finance (copy)", "workspace")
+    assert created["stats"]["assignments"] == 3
+
+    # Someone who can read the draft but not the view is told there's a change, not what it is.
+    reader = PermissionClaims(sid="s_reader", ws_perms={uat: ("workspace:datasource:read",)})
+    with _as(_user("usr_reader"), reader):
+        body = (await test_client.get(url(update_branch))).json()
+    assert body == {"branchId": update_branch, "views": [], "hidden": 1}
+
+
+async def test_drafts_left_unsettled_are_settled_later(test_client, db_session, graph, versioning, monkeypatch):
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    ds = await _data_source(db_session, uat)
+    versioning.track(uat, ds)
+    inspected = await _file(test_client, await _view(test_client, dev))
+    published = (await _stage(test_client, inspected, {"workspaceId": uat, "dataSourceId": ds},
+                              visibility="workspace")).json()
+    abandoned = (await _stage(test_client, inspected, {"workspaceId": uat, "dataSourceId": ds}, action="copy",
+                              name="Another")).json()
+    # The drafts were published and abandoned, but settling their views never ran.
+    versioning.finish(published["staged"]["branchId"], "merged")
+    versioning.finish(abandoned["staged"]["branchId"], "abandoned")
+
+    @asynccontextmanager
+    async def _session():
+        yield db_session
+
+    monkeypatch.setattr(draft_views, "get_async_session", _session)
+    assert await draft_views.settle(versioning) == {"promoted": 1, "discarded": 1}
+    await db_session.flush()
+    db_session.expunge_all()
+    live = await db_session.get(ViewORM, published["viewId"])
+    assert live.draft_branch_id is None and live.visibility == "workspace"
+    assert await db_session.get(ViewORM, abandoned["viewId"]) is None
+    assert await draft_views.settle(versioning) == {"promoted": 0, "discarded": 0}, "settled once"
