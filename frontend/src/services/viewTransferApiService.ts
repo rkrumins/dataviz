@@ -223,6 +223,8 @@ export interface ReconcileReport {
   entities: ReconcileException[]
   entitiesTruncated: boolean
   types: { entity: ReconcileTypeRow[]; relationship: ReconcileTypeRow[] }
+  /** Every type the target has, by label: what a missing type can be mapped to. */
+  availableTypes?: { entity: Array<{ id: string; name: string }>; relationship: Array<{ id: string; name: string }> }
   layers: ReconcileLayerRow[]
   notices: ReconcileNotice[]
 }

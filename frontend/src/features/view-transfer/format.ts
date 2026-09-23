@@ -44,6 +44,12 @@ export function percent(rate: number | null | undefined, digits = 1): string {
   return `${value.toFixed(digits)}%`
 }
 
+/** A match rate as telemetry records it: a band, never the number. */
+export function matchBucket(rate: number | null | undefined): string {
+  if (rate === null || rate === undefined) return 'unchecked'
+  return rate >= 0.95 ? '95+' : rate >= 0.8 ? '80-95' : rate >= 0.5 ? '50-80' : '<50'
+}
+
 export const VERSION_SOURCE_LABEL: Record<ViewVersionSource, string> = {
   baseline: 'History starts',
   create: 'Created',

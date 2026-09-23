@@ -119,7 +119,7 @@ import {
 } from './import/importForm'
 import { WizardEntitySeedContext, fallbackNameFromUrn, type EntityIdentity } from './useWizardEntityIndex'
 import { sameResolutions } from '@/features/view-transfer/reconcile/resolutions'
-import { percent } from '@/features/view-transfer/format'
+import { matchBucket, percent } from '@/features/view-transfer/format'
 
 // ============================================
 // Types
@@ -1318,12 +1318,11 @@ function ViewWizardBody({
                 void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, result.viewId] })
                 void queryClient.invalidateQueries({ queryKey: ['views'] })
                 void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })
-                const rate = result.report.summary.matchRate
                 recordEvent('view.import', {
                     action: session.action,
                     strategy: session.strategy,
                     staged: !!result.staged,
-                    match: rate === null ? 'unchecked' : rate >= 0.95 ? '95+' : rate >= 0.8 ? '80-95' : rate >= 0.5 ? '50-80' : '<50',
+                    match: matchBucket(result.report.summary.matchRate),
                 })
             }
             setStageStates(s => ({ ...s, import: 'done', publication: importWantsPublication ? 'active' : 'pending' }))

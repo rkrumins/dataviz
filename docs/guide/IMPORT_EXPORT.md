@@ -134,7 +134,9 @@ newer, the View here has moved on, or both changed — and offers **Replace**
 where both changed the same thing).
 
 A file of several Views imports them together: choose where each source goes,
-check them all at once, then review each one — create, update, copy, or skip.
+check them all at once, then review each one — create, update, copy, overwrite
+another View, or skip. A type that's missing where the Views land is mapped once
+for every View from that source.
 
 > **Tip:** On a data source under version control, an import can **wait in a
 > draft**: the new View, or the update, goes live when the draft is published or

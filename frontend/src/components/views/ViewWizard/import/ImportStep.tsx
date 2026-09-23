@@ -356,7 +356,7 @@ function ActionCard({ active, recommended, icon, title, detail, chip, onClick }:
   )
 }
 
-function OverwritePicker({ exclude, onPick }: { exclude: string[]; onPick: (target: ImportTargetView) => void }) {
+export function OverwritePicker({ exclude, onPick }: { exclude: string[]; onPick: (target: ImportTargetView) => void }) {
   const [search, setSearch] = useState('')
   const term = useDebouncedValue(search.trim(), 250)
   const { data, isFetching } = useQuery({

@@ -56,6 +56,12 @@ export function withTypeDecision(r: Resolutions, kind: TypeKind, id: string, tar
   return { ...r, [mapKey]: map, [dropKey]: drops }
 }
 
+/** Whether any type has been mapped or taken out. */
+export function hasTypeDecisions(r: Resolutions): boolean {
+  return Object.keys(r.typeMap ?? {}).length + (r.dropTypes?.length ?? 0)
+    + Object.keys(r.relTypeMap ?? {}).length + (r.dropRelTypes?.length ?? 0) > 0
+}
+
 /** How many decisions differ from "keep everything as it is". */
 export function resolutionCount(r: Resolutions): number {
   return (r.drop?.length ?? 0) + Object.keys(r.remap ?? {}).length

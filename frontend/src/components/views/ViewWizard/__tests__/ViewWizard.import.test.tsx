@@ -15,7 +15,9 @@
  *   - a file of several views: every view checked in one request, then imported one request per
  *     view under one batch id; an update keeps the view's own details; a failure doesn't stop the
  *     rest and is retried under the same request id; a view switched to a copy is checked again, as
- *     is one that changed here during the import; a view to update that can't be read says so;
+ *     is one that changed here during the import; a view to update that can't be read says so; a
+ *     type missing here is mapped once for every view from its source; a view can overwrite one
+ *     picked here, keeping that view's details;
  *   - on a version-controlled data source, an import waits in a draft by default (or goes live,
  *     if chosen), and the view then opens on that draft; the draft can be submitted for review
  *     from there (the view opens live once it's published), and a file's views all at once,
@@ -129,6 +131,7 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
 import { ViewTransferError } from '@/services/viewTransferApiService'
 import { PullRequestExistsError } from '@/services/versioningApiService'
 import { useSchemaStore } from '@/store/schema'
+import { recordEvent } from '@/services/telemetryService'
 import { ViewWizard } from '../ViewWizard'
 
 const DEFINITION = {
@@ -464,6 +467,67 @@ describe('ViewWizard — importing every view of a file', () => {
     expect(created.batchId).toBe(updated.batchId)
     expect(created.requestId).not.toBe(updated.requestId)
     expect(await screen.findAllByText(/integrity verified/)).toHaveLength(2)
+  })
+
+  it('maps a type that isn’t here once, for every view from that source', async () => {
+    const withMissingType = () => {
+      const r = reconciled().views[0]
+      return {
+        ...r,
+        report: {
+          ...r.report,
+          types: { entity: [...r.report.types.entity, { id: 'Table', status: 'missing' as const, suggestions: ['table'], layers: ['Sources'] }], relationship: [] },
+          availableTypes: { entity: [{ id: 'dataset', name: 'Dataset' }, { id: 'table', name: 'Table' }], relationship: [] },
+        },
+      }
+    }
+    reconcileMock.mockImplementation(async (views: Array<{ key: string; action: string }>) => ({
+      views: views.map(v => ({ ...withMissingType(), key: v.key, update: v.action === 'update' ? FAST_FORWARD : null })),
+      aggregate: reconciled().aggregate,
+    }))
+    renderImport()
+    await throughToReview()
+
+    expect(await screen.findByText('Types that don’t exist here')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Map Table'), { target: { value: 'table' } })
+    fireEvent.click(screen.getByRole('button', { name: /Re-check with these choices/ }))
+    await waitFor(() => expect(reconcileMock).toHaveBeenCalledTimes(2))
+    expect(reconcileMock.mock.calls[1][0].map((v: { resolutions: { typeMap?: object } }) => v.resolutions.typeMap))
+      .toEqual([{ Table: 'table' }, { Table: 'table' }])
+  })
+
+  it('overwrites a view picked here instead of creating one, keeping that view’s details', async () => {
+    listViewsMock.mockResolvedValue({ items: [
+      { id: 'view_hand', name: 'Finance (built by hand)', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1', viewType: 'reference' },
+    ] })
+    getViewMock.mockImplementation(async (id: string) => id === 'view_hand'
+      ? { id, name: 'Finance (built by hand)', description: 'Rebuilt in UAT', workspaceId: 'ws1', dataSourceId: 'ds1',
+        viewType: 'reference', config: { icon: 'Layout' }, tags: [], visibility: 'workspace', access: { canEdit: true } }
+      : { id, name: 'Sales (UAT)', description: 'Pipeline, as UAT has it', workspaceId: 'ws1', dataSourceId: 'ds1',
+        viewType: 'reference', config: { icon: 'Workflow' }, tags: ['uat'], visibility: 'workspace' })
+    importMock.mockImplementation(async (req: { target: { viewId?: string } }) => imported(req.target.viewId ?? 'view_new'))
+    renderImport()
+    await throughToReview()
+
+    fireEvent.change(screen.getByLabelText('What to do with Finance lineage'), { target: { value: 'overwrite' } })
+    fireEvent.click(await screen.findByText('Finance (built by hand)'))
+    await waitFor(() => expect(reconcileMock).toHaveBeenLastCalledWith([
+      expect.objectContaining({ key: '0', action: 'overwrite', target: { viewId: 'view_hand' } }),
+    ]))
+    expect(screen.getByText(/Overwrites “Finance \(built by hand\)”/)).toBeInTheDocument()
+
+    await next()                                          // → Review
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
+    const overwrite = importMock.mock.calls.map(([r]) => r).find(r => r.action === 'overwrite')
+    expect(overwrite).toMatchObject({
+      target: { viewId: 'view_hand' },
+      metadata: { name: 'Finance (built by hand)', description: 'Rebuilt in UAT', icon: 'Layout' },
+    })
+    expect(overwrite.metadata.visibility).toBeUndefined()
+    // One event per view, as a single import records it, and never a name.
+    expect(vi.mocked(recordEvent)).toHaveBeenCalledWith('view.import',
+      { action: 'overwrite', strategy: 'replace', staged: false, match: '50-80', batch: true })
   })
 
   it('carries on past a failure, and retries it under the same request id', async () => {

@@ -20,9 +20,11 @@ import { percent, pluralize } from '../format'
 import { ExceptionsTable } from './ExceptionsTable'
 import type { EntitySearchScope } from './EntitySearchPicker'
 import { MatchScoreRing } from './MatchScoreRing'
-import { projectedRate, sameResolutions } from './resolutions'
+import { hasTypeDecisions, projectedRate, sameResolutions, withTypeDecision } from './resolutions'
 import { TypeMappingTable } from './TypeMappingTable'
 import { UpdatePanel } from './UpdatePanel'
+
+const NO_TYPES = { entity: [], relationship: [] }
 
 const VERDICT_META = {
   ready: { label: 'Ready to import', icon: CheckCircle2, cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' },
@@ -32,7 +34,7 @@ const VERDICT_META = {
 
 export function ReconciliationPanel({
   reconciled, applied, draft, onDraft, onStrategy, sourceLabel, targetLabel, targetName,
-  availableTypes, exportedNames, searchScope,
+  exportedNames, searchScope,
 }: {
   reconciled: ReconciledView
   applied: Resolutions
@@ -42,7 +44,6 @@ export function ReconciliationPanel({
   sourceLabel: string
   targetLabel: string
   targetName?: string
-  availableTypes: { entity: Array<{ id: string; name: string }>; relationship: Array<{ id: string; name: string }> }
   exportedNames: Record<string, BundleEntityInfo>
   /** The data source the view is going into, where a remap searches for an entity. */
   searchScope?: EntitySearchScope | null
@@ -58,6 +59,7 @@ export function ReconciliationPanel({
   const layerNames = Object.fromEntries(report.layers.map(l => [l.id, l.name ?? l.id]))
   const anchors = s.byKind.anchor
   const missingTypes = report.types.entity.some(t => t.status === 'missing') || report.types.relationship.some(t => t.status === 'missing')
+    || hasTypeDecisions(draft)
   const typesUnchecked = report.notices.some(n => n.code === 'ontology_unavailable')
 
   return (
@@ -108,7 +110,8 @@ export function ReconciliationPanel({
         <section className="space-y-2">
           <SectionTitle title="Types that don't exist here" detail="Map each to a type this data source has, or take it out of the view." />
           <TypeMappingTable entityTypes={report.types.entity} relationshipTypes={report.types.relationship}
-            available={availableTypes} draft={draft} onDraft={onDraft} />
+            available={report.availableTypes ?? NO_TYPES} draft={draft}
+            onDecide={(kind, id, target) => onDraft(withTypeDecision(draft, kind, id, target))} />
         </section>
       )}
 

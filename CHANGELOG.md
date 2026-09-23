@@ -50,9 +50,10 @@ as it stands, and nothing is written for them.
 
 **A file of several views imports in one go.** Export several views from the Explorer's (or Views
 manager's) selection bar. On import, map each source to a data source, check every view at once,
-and review them in one table: create, update, copy or skip, name, visibility. Each view then
-imports as its own request under one batch, so one failure doesn't stop the rest, and **Retry
-failed** is safe to press.
+and review them in one table: create, update, copy, overwrite a view picked here, or skip; name;
+visibility. A type missing where the views land is mapped once for every view from that source.
+Each view then imports as its own request under one batch, so one failure doesn't stop the rest,
+and **Retry failed** is safe to press.
 
 **An import can wait in a draft.** On a data source under version control, a new view or an update
 can go into a draft and go live when the draft is published or its review request merges. This is

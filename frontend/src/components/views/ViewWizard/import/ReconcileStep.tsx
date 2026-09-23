@@ -7,7 +7,7 @@
  * whose answer is authoritative and becomes the design the rest of the wizard edits. When the
  * ontology here isn't the one the view was exported with, it says so.
  */
-import { useEffect, useMemo } from 'react'
+import { useEffect } from 'react'
 import { AlertTriangle, FastForward, Loader2, RefreshCw } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import type { TransferTarget } from '@/services/viewTransferApiService'
@@ -35,11 +35,6 @@ export function ReconcileStep({ target, targetLabel, searchScope, onSkipToReview
     if (!reconcile && !reconciling && !reconcileError) void session.runReconcile(target)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reconcile, reconciling, reconcileError, targetKey])
-
-  const availableTypes = useMemo(() => ({
-    entity: (schema?.entityTypes ?? []).map(t => ({ id: t.id, name: t.name ?? t.id })),
-    relationship: (schema?.relationshipTypes ?? []).map(t => ({ id: t.id, name: t.name ?? t.id })),
-  }), [schema])
 
   const dirty = !sameResolutions(session.resolutions, session.draft)
   const pendingCount = resolutionCount(session.draft)
@@ -115,7 +110,6 @@ export function ReconcileStep({ target, targetLabel, searchScope, onSkipToReview
         sourceLabel={sourceLabel}
         targetLabel={targetLabel}
         targetName={session.targetView?.name}
-        availableTypes={availableTypes}
         exportedNames={view?.manifest.entities ?? {}}
         searchScope={searchScope}
       />

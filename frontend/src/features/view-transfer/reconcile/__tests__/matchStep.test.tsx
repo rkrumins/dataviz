@@ -50,8 +50,7 @@ function renderPanel(onDraft = vi.fn(), searchScope: typeof SCOPE | null = SCOPE
   render(
     <QueryClientProvider client={client}>
       <ReconciliationPanel reconciled={RECONCILED} applied={{}} draft={{}} onDraft={onDraft}
-        sourceLabel="dev · Finance" targetLabel="UAT · Lineage" availableTypes={{ entity: [], relationship: [] }}
-        exportedNames={{}} searchScope={searchScope} />
+        sourceLabel="dev · Finance" targetLabel="UAT · Lineage" exportedNames={{}} searchScope={searchScope} />
     </QueryClientProvider>,
   )
   return onDraft

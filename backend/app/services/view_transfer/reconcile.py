@@ -143,6 +143,14 @@ def _type_report(referenced: Set[str], known: Optional[Dict[str, str]],
     return out
 
 
+def _type_options(known: Optional[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Every type here, by label: what a type the view uses and this data source lacks can be
+    mapped to. The same types the check above counts as present, so a mapping never lands on one
+    the next check would call missing."""
+    options = [{"id": tid, "name": name or tid} for tid, name in (known or {}).items()]
+    return sorted(options, key=lambda t: (t["name"].casefold(), t["id"]))
+
+
 def _has_ordering(definition: Any) -> int:
     """How many node-ordering settings the definition carries (what a disabled node-sorting
     switch would strip on write)."""
@@ -286,6 +294,7 @@ def reconcile_view(
         "entities": exceptions[:MAX_EXCEPTIONS],
         "entitiesTruncated": len(exceptions) > MAX_EXCEPTIONS,
         "types": {"entity": entity_types, "relationship": relationship_types},
+        "availableTypes": {"entity": _type_options(types.entity), "relationship": _type_options(types.relationship)},
         "layers": layer_rows,
         "notices": notices,
     }

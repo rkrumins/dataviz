@@ -8,7 +8,8 @@
  *            measured on a sample of that source's entities). Views already here update in place.
  *   Match    every view checked in one request (one identity lookup per data source); an
  *            aggregate score, and per view its score, verdict and what to do with it (update,
- *            copy, create, skip), with the full account a click away.
+ *            copy, create, overwrite another view, skip), with the full account a click away.
+ *            A type missing where views land is mapped once for all the views from that source.
  *   Review   per view: its name (duplicates flagged) and who sees it; and, where a data source is
  *            under version control, whether the views go live now or wait in drafts for review.
  *   Import   one request per view, each with its own request id (a retry is safe) and the batch
@@ -26,8 +27,8 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { getView, listViews, type View } from '@/services/viewApiService'
 import {
   ViewTransferError, importView, newRequestId, reconcileViews,
-  type ImportAction, type InspectedView, type InspectResult, type ReconciledView, type ReconcileVerdict,
-  type Resolutions, type TransferTarget, type UpdateStrategy,
+  type ImportAction, type InspectedView, type InspectResult, type ReconciledView, type ReconcileReport,
+  type ReconcileTypeRow, type ReconcileVerdict, type Resolutions, type TransferTarget, type UpdateStrategy,
 } from '@/services/viewTransferApiService'
 import { recordEvent } from '@/services/telemetryService'
 import { PullRequestExistsError, openMergeRequest } from '@/services/versioningApiService'
@@ -36,8 +37,11 @@ import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { MatchScoreRing } from '@/features/view-transfer/reconcile/MatchScoreRing'
 import { ReconciliationPanel } from '@/features/view-transfer/reconcile/ReconciliationPanel'
 import { sameResolutions, withDecisions } from '@/features/view-transfer/reconcile/resolutions'
-import { TONE_CHIP, percent, pluralize } from '@/features/view-transfer/format'
+import { TONE_CHIP, matchBucket, percent, pluralize } from '@/features/view-transfer/format'
+import { TypeMappingTable } from '@/features/view-transfer/reconcile/TypeMappingTable'
+import { withTypeDecision } from '@/features/view-transfer/reconcile/resolutions'
 import { useImportSession } from './importSession'
+import { OverwritePicker } from './ImportStep'
 import { StageChoice } from './StageChoice'
 import { useDraftStagingFor, type DraftStaging } from './useDraftStaging'
 
@@ -46,13 +50,17 @@ type Step = 'target' | 'reconcile' | 'preview'
 type Visibility = 'private' | 'workspace'
 type RunState = 'pending' | 'running' | 'done' | 'failed'
 type SourceTarget = { workspaceId: string; dataSourceId: string } | null
+/** A view here, with its scope. */
+type ViewHere = { viewId: string; name: string; workspaceId: string; dataSourceId: string | null }
 
 interface Entry {
   view: InspectedView
   action: ImportAction
   skipped: boolean
-  /** The view here it already is (an update), with its scope. */
-  here: { viewId: string; name: string; workspaceId: string; dataSourceId: string | null } | null
+  /** The view here it already is (an update). */
+  here: ViewHere | null
+  /** The view here it replaces, when it overwrites one. */
+  overwrite: ViewHere | null
   strategy: UpdateStrategy
   name: string
   visibility: Visibility
@@ -87,6 +95,7 @@ function initialEntries(inspect: InspectResult): Entry[] {
       action: match ? 'update' : 'create',
       skipped: false,
       here: match ? { viewId: match.viewId, name: match.name, workspaceId: match.workspaceId, dataSourceId: match.dataSourceId ?? null } : null,
+      overwrite: null,
       strategy: 'replace',
       name: match ? match.name : view.metadata.name,
       visibility: 'private',
@@ -110,16 +119,23 @@ function initialTargets(inspect: InspectResult): Record<string, SourceTarget> {
   return out
 }
 
-/** The data source an entry lands in: the one of the view it updates, or its source's target. */
+/** The view here an entry writes to: the one it is (an update), or the one it overwrites. */
+function viewHere(e: Entry): ViewHere | null {
+  return e.action === 'update' ? e.here : e.action === 'overwrite' ? e.overwrite : null
+}
+
+/** The data source an entry lands in: the one of the view it writes to, or its source's target. */
 function scopeFor(e: Entry, targets: Record<string, SourceTarget>): { workspaceId: string; dataSourceId: string | null } | null {
-  if (e.action === 'update' && e.here) return { workspaceId: e.here.workspaceId, dataSourceId: e.here.dataSourceId }
+  const v = viewHere(e)
+  if (v) return { workspaceId: v.workspaceId, dataSourceId: v.dataSourceId }
   const t = targets[e.view.source]
   return t ? { workspaceId: t.workspaceId, dataSourceId: t.dataSourceId } : null
 }
 
-/** Where an entry goes: the view it updates, or its source's data source here. */
+/** Where an entry goes: the view it writes to, or its source's data source here. */
 function targetFor(e: Entry, targets: Record<string, SourceTarget>): TransferTarget | null {
-  if (e.action === 'update' && e.here) return { viewId: e.here.viewId }
+  const v = viewHere(e)
+  if (v) return { viewId: v.viewId }
   const t = targets[e.view.source]
   return t ? { ...t } : null
 }
@@ -141,6 +157,8 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   const [checksInFlight, setChecksInFlight] = useState(0)
   const [reconcileError, setReconcileError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
+  /** The view whose overwrite target is being picked. */
+  const [picking, setPicking] = useState<number | null>(null)
   const [stageChoice, setStageChoice] = useState<boolean | null>(null)
   const [batchId] = useState(newRequestId)
   const environment = inspect.bundle.generator.environment
@@ -149,7 +167,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   const active = useMemo(() => entries.filter(e => !e.skipped), [entries])
   /** Sources a NEW view needs a target for (updates follow the view they update). */
   const neededSources = useMemo(
-    () => new Set(active.filter(e => e.action !== 'update').map(e => e.view.source)),
+    () => new Set(active.filter(e => !viewHere(e)).map(e => e.view.source)),
     [active],
   )
   const dataSources = useMemo(() => workspaces.flatMap(ws => (ws.dataSources ?? []).map(ds => ({
@@ -215,6 +233,10 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
       setEntry(e.view.index, { skipped: true })
       return
     }
+    if (choice === 'overwrite' && (e.action !== 'overwrite' || e.skipped || !e.overwrite)) {
+      setPicking(e.view.index)          // which view it replaces is picked first (overwriteWith)
+      return
+    }
     if (choice === e.action) {
       setEntry(e.view.index, { skipped: false })
       if (step === 'reconcile' && !e.reconciled) void check([{ ...e, skipped: false }])
@@ -225,6 +247,48 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
       action: choice, skipped: false,
       name: choice === 'update' && e.here ? e.here.name : e.view.metadata.name,
     })
+  }
+
+  const overwriteWith = (e: Entry, v: ViewHere) => {
+    setPicking(null)
+    setExpanded(null)
+    rework(e, { action: 'overwrite', overwrite: v, skipped: false, name: v.name })
+  }
+  /** Views here that another entry already writes to: one view can't take two designs. */
+  const takenBy = (e: Entry) => active.flatMap(x => {
+    const v = x.view.index === e.view.index ? null : viewHere(x)
+    return v ? [v.viewId] : []
+  })
+
+  // ── Types: a type missing where views land is mapped once, for every view from that source ──
+  const typeGroups = useMemo(() => {
+    type Group = {
+      key: string; source: string; scope: { workspaceId: string; dataSourceId: string | null }; entries: Entry[]
+      entity: Map<string, ReconcileTypeRow>; relationship: Map<string, ReconcileTypeRow>
+      available: ReconcileReport['availableTypes']
+    }
+    const groups = new Map<string, Group>()
+    for (const e of active) {
+      const report = e.reconciled?.report
+      const scope = scopeFor(e, targets)
+      if (!report || !scope) continue
+      const key = `${e.view.source}|${scope.workspaceId}|${scope.dataSourceId}`
+      const g: Group = groups.get(key) ?? { key, source: e.view.source, scope, entries: [], entity: new Map(), relationship: new Map(), available: report.availableTypes }
+      groups.set(key, g)
+      g.entries.push(e)
+      for (const kind of ['entity', 'relationship'] as const) {
+        for (const row of report.types[kind]) {
+          if (row.status !== 'missing') continue
+          const seen = g[kind].get(row.id)
+          g[kind].set(row.id, seen ? { ...seen, layers: [...new Set([...seen.layers, ...row.layers])] } : row)
+        }
+      }
+    }
+    return [...groups.values()]
+  }, [active, targets])
+  const decideTypeFor = (group: { entries: Entry[] }) => (kind: 'entity' | 'relationship', id: string, target: string | null | undefined) => {
+    const members = new Set(group.entries.map(e => e.view.index))
+    setEntries(prev => prev.map(e => (members.has(e.view.index) ? { ...e, draft: withTypeDecision(e.draft, kind, id, target) } : e)))
   }
 
   const dirty = active.some(e => !sameResolutions(e.resolutions, e.draft))
@@ -260,17 +324,17 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   }
 
   // ── Review: the current details of views being updated (an update keeps them) ──
-  const updating = active.filter(e => e.action === 'update' && e.here)
+  const updating = active.filter(e => viewHere(e))
   const currentViews = useQueries({
     queries: updating.map(e => ({
-      queryKey: [...VIEW_QUERY_KEY, e.here!.viewId],
-      queryFn: () => getView(e.here!.viewId),
+      queryKey: [...VIEW_QUERY_KEY, viewHere(e)!.viewId],
+      queryFn: () => getView(viewHere(e)!.viewId),
       enabled: step !== 'target',
       staleTime: 60_000,
     })),
   })
-  const current: Record<string, View | undefined> = Object.fromEntries(updating.map((e, i) => [e.here!.viewId, currentViews[i]?.data]))
-  const currentLoaded = updating.every(e => current[e.here!.viewId])
+  const current: Record<string, View | undefined> = Object.fromEntries(updating.map((e, i) => [viewHere(e)!.viewId, currentViews[i]?.data]))
+  const currentLoaded = updating.every(e => current[viewHere(e)!.viewId])
   /** Views being updated that couldn't be read here (deleted, or access lost since the check). */
   const unreadable = updating.filter((_, i) => currentViews[i]?.isError)
 
@@ -278,7 +342,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
   const namesInBatch = useMemo(() => {
     const counts = new Map<string, number>()
     for (const e of active) {
-      if (e.action === 'update') continue
+      if (viewHere(e)) continue
       const key = `${targets[e.view.source]?.workspaceId}|${e.name.trim().toLowerCase()}`
       counts.set(key, (counts.get(key) ?? 0) + 1)
     }
@@ -299,8 +363,8 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
     allowed: stageable.every(e => stagingOf(e)?.allowed),
     checking: active.some(e => stagingOf(e)?.checking),
   }
-  const stageKind = stageable.every(e => e.action === 'update') ? 'update'
-    : stageable.every(e => e.action !== 'update') ? 'new' : 'mixed'
+  const stageKind = stageable.every(e => viewHere(e)) ? 'update'
+    : stageable.every(e => !viewHere(e)) ? 'new' : 'mixed'
 
   // ── Import ──
   const importAll = async () => {
@@ -309,13 +373,14 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
     for (const e of queue) {
       setEntry(e.view.index, { run: { state: 'running' } })
       const r = e.reconciled!
-      const here = e.here ? current[e.here.viewId] : undefined
+      const writesTo = viewHere(e)
+      const here = writesTo ? current[writesTo.viewId] : undefined
       try {
         const result = await importView({
           action: e.action,
           strategy: e.strategy,
           target: targetFor(e, targets)!,
-          metadata: e.action === 'update'
+          metadata: writesTo
             ? {
               name: e.name.trim(),
               description: here?.description ?? null,
@@ -345,6 +410,10 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
           matchRate: result.report.summary.matchRate, verified: result.integrity.verified,
           branchId: result.staged?.branchId ?? null,
         } })
+        recordEvent('view.import', {
+          action: e.action, strategy: e.strategy, staged: !!result.staged,
+          match: matchBucket(result.report.summary.matchRate), batch: true,
+        })
       } catch (err) {
         // The view here changed after it was checked: its check is stale, and a retry with the old
         // one would only be refused again. It is checked again before the next attempt.
@@ -357,7 +426,6 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
     }
     void queryClient.invalidateQueries({ queryKey: ['views'] })
     void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })
-    recordEvent('view.import', { action: 'batch', views: queue.length, staged: queue.filter(staged).length })
     setPhase('done')
   }
 
@@ -482,7 +550,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
           <div className="rounded-2xl border border-glass-border divide-y divide-glass-border">
             {Object.entries(inspect.bundle.sources).map(([key, source]) => {
               const views = entries.filter(e => e.view.source === key)
-              const updatingHere = views.filter(e => e.action === 'update' && !e.skipped).length
+              const updatingHere = views.filter(e => viewHere(e) && !e.skipped).length
               const suggestions = inspect.targetSuggestions[key] ?? []
               const t = targets[key]
               const name = source.dataSource.label || source.dataSource.graphName || 'A data source'
@@ -569,6 +637,29 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
               {reconcileError && <p className="text-xs text-rose-500">{reconcileError}</p>}
             </div>
           </div>
+          {typeGroups.map(g => {
+            const entityRows = [...g.entity.values()]
+            const relationshipRows = [...g.relationship.values()]
+            const lead = g.entries[0]
+            if (!entityRows.length && !relationshipRows.length
+              && !Object.keys(lead.draft.typeMap ?? {}).length && !lead.draft.dropTypes?.length
+              && !Object.keys(lead.draft.relTypeMap ?? {}).length && !lead.draft.dropRelTypes?.length) return null
+            const source = inspect.bundle.sources[g.source]
+            return (
+              <section key={g.key} className="space-y-2">
+                <div>
+                  <h4 className="text-sm font-bold text-ink">Types that don’t exist here</h4>
+                  <p className="text-[11px] text-ink-muted mt-0.5">
+                    Used by the views from {source?.dataSource.label || source?.dataSource.graphName || 'this source'} going
+                    to {g.scope.dataSourceId ? labelOf({ workspaceId: g.scope.workspaceId, dataSourceId: g.scope.dataSourceId }) : 'this workspace'}
+                    {' '}({pluralize(g.entries.length, 'view')}). A choice here applies to all of them; a view’s own account can change it for that view.
+                  </p>
+                </div>
+                <TypeMappingTable entityTypes={entityRows} relationshipTypes={relationshipRows}
+                  available={g.available ?? { entity: [], relationship: [] }} draft={lead.draft} onDecide={decideTypeFor(g)} />
+              </section>
+            )
+          })}
           {blocked.length > 0 && (
             <p className="flex items-center gap-2 rounded-xl bg-rose-500/[0.07] border border-rose-500/20 px-3 py-2 text-[11px] text-rose-800 dark:text-rose-200">
               <AlertTriangle className="w-3.5 h-3.5" /> {pluralize(blocked.length, 'view')} can’t be imported where they’re going. Skip them, or choose another target.
@@ -591,7 +682,13 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
                     <div className="min-w-0 flex-1">
                       <p className="text-xs font-medium text-ink truncate">{e.view.metadata.name}</p>
                       <p className="text-[11px] text-ink-muted truncate">
-                        {e.action === 'update' && e.here ? `Updates “${e.here.name}”` : `New in ${labelOf(targets[e.view.source])}`}
+                        {e.action === 'overwrite' && e.overwrite ? (
+                          <>
+                            Overwrites “{e.overwrite.name}”{' '}
+                            <button type="button" onClick={() => setPicking(e.view.index)}
+                              className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Change</button>
+                          </>
+                        ) : e.action === 'update' && e.here ? `Updates “${e.here.name}”` : `New in ${labelOf(targets[e.view.source])}`}
                       </p>
                     </div>
                     <select value={e.skipped ? 'skip' : e.action} aria-label={`What to do with ${e.view.metadata.name}`}
@@ -603,6 +700,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
                           <option value="copy">Separate copy</option>
                         </>
                       ) : <option value="create">Create</option>}
+                      <option value="overwrite">{e.action === 'overwrite' ? 'Overwrite' : 'Overwrite another…'}</option>
                       <option value="skip">Skip</option>
                     </select>
                     <span className="w-40 flex items-center justify-end gap-2">
@@ -621,15 +719,28 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
                           )}
                     </span>
                   </div>
+                  {picking === e.view.index && (
+                    <div className="px-4 pb-3 space-y-1.5">
+                      <p className="text-[11px] text-ink-muted">
+                        Which view here does “{e.view.metadata.name}” replace? Its design is saved as a version first, and
+                        it keeps its sharing.
+                      </p>
+                      <OverwritePicker exclude={[...takenBy(e), ...(e.here ? [e.here.viewId] : [])]}
+                        onPick={(v) => overwriteWith(e, {
+                          viewId: v.viewId, name: v.name, workspaceId: v.workspaceId, dataSourceId: v.dataSourceId ?? null,
+                        })} />
+                      <button type="button" onClick={() => setPicking(null)}
+                        className="text-[11px] font-medium text-ink-muted hover:text-ink">Cancel</button>
+                    </div>
+                  )}
                   {open && (
                     <div className="px-4 pb-4 space-y-2">
                       <ReconciliationPanel reconciled={r!} applied={e.resolutions} draft={e.draft}
                         onDraft={(d) => setEntry(e.view.index, { draft: d })}
-                        onStrategy={e.action === 'update' ? (strategy) => rework(e, { strategy }) : undefined}
+                        onStrategy={viewHere(e) ? (strategy) => rework(e, { strategy }) : undefined}
                         sourceLabel={`${environment ?? 'The file'} · ${e.view.metadata.name}`}
-                        targetLabel={e.action === 'update' && e.here ? `“${e.here.name}”` : labelOf(targets[e.view.source])}
-                        targetName={e.here?.name}
-                        availableTypes={{ entity: [], relationship: [] }}
+                        targetLabel={viewHere(e) ? `“${viewHere(e)!.name}”` : labelOf(targets[e.view.source])}
+                        targetName={viewHere(e)?.name}
                         exportedNames={e.view.manifest.entities}
                         searchScope={scopeFor(e, targets)} />
                       <button type="button" onClick={() => importOnItsOwn(e)}
@@ -668,7 +779,7 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
             <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-300 dark:border-rose-800 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
               <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
               <span className="flex-1">
-                {unreadable.map(e => `“${e.here!.name}”`).join(', ')} can’t be read here any more, so {unreadable.length === 1 ? 'it' : 'they'} can’t
+                {unreadable.map(e => `“${viewHere(e)!.name}”`).join(', ')} can’t be read here any more, so {unreadable.length === 1 ? 'it' : 'they'} can’t
                 be updated. Go back to Match and skip {unreadable.length === 1 ? 'it' : 'them'}, or import {unreadable.length === 1 ? 'it as a separate copy' : 'them as separate copies'}.
               </span>
               <button type="button" onClick={() => currentViews.forEach(q => { if (q.isError) void q.refetch() })}
@@ -680,9 +791,10 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
           <div className="rounded-2xl border border-glass-border divide-y divide-glass-border">
             {active.map(e => (
               <ReviewRow key={e.view.index} entry={e}
-                workspaceId={e.action === 'update' ? e.here?.workspaceId ?? null : targets[e.view.source]?.workspaceId ?? null}
-                where={e.action === 'update' ? `Update · ${e.strategy === 'merge' ? 'merge' : 'replace'}` : `New in ${labelOf(targets[e.view.source])}`}
-                sharedInBatch={e.action !== 'update'
+                workspaceId={viewHere(e)?.workspaceId ?? targets[e.view.source]?.workspaceId ?? null}
+                where={e.action === 'update' ? `Update · ${e.strategy === 'merge' ? 'merge' : 'replace'}`
+                  : e.action === 'overwrite' ? `Overwrite “${e.overwrite?.name}”` : `New in ${labelOf(targets[e.view.source])}`}
+                sharedInBatch={!viewHere(e)
                   && (namesInBatch.get(`${targets[e.view.source]?.workspaceId}|${e.name.trim().toLowerCase()}`) ?? 0) > 1}
                 environment={environment}
                 onChange={(patch) => setEntry(e.view.index, patch)} />
@@ -703,7 +815,7 @@ function ReviewRow({ entry: e, workspaceId, where, sharedInBatch, environment, o
   environment?: string | null
   onChange: (patch: Partial<Entry>) => void
 }) {
-  const isNew = e.action !== 'update'
+  const isNew = !viewHere(e)
   const name = useDebouncedValue(e.name.trim(), 300)
   const { data } = useQuery({
     queryKey: ['import-name-check', workspaceId, name],

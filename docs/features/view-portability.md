@@ -188,7 +188,9 @@ URN the view references is looked up (one pass per target graph, whatever the nu
 | `unknown` | The lookup failed (the graph didn't answer). **Never counted as missing**; retry to check. |
 
 Every referenced entity and relationship type is marked present or missing, with suggestions (a
-case-insensitive match first, then the closest names).
+case-insensitive match first, then the closest names). The report also lists every type the target
+has (`availableTypes`, by label): the choices a missing type can be mapped to, and the same set the
+check counts as present.
 
 The **match rate** is matched ÷ checked. The **verdict** is:
 

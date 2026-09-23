@@ -84,6 +84,17 @@ def test_missing_types_are_listed_with_suggestions():
     assert report["summary"]["verdict"] == ATTENTION
 
 
+def test_every_type_here_is_offered_to_map_to_by_label():
+    report = reconcile_view(_definition(["urn:a"]), exported={}, lookup={"urn:a": {"name": "a", "type": "dataset"}},
+                            types=TYPES, policy=Policy())
+    assert report["availableTypes"] == {
+        "entity": [{"id": "dataset", "name": "Dataset"}, {"id": "Table", "name": "Table"}],
+        "relationship": [{"id": "PRODUCES", "name": "Produces"}],
+    }
+    unknown = reconcile_view(_definition(["urn:a"]), exported={}, lookup={}, types=TargetTypes(), policy=Policy())
+    assert unknown["availableTypes"] == {"entity": [], "relationship": []}
+
+
 def test_suggestions_find_close_ids_and_labels():
     known = {"dataset": "Dataset", "dashboard": "Dashboard", "jobRun": "Job run"}
     assert suggest_types("datasets", known)[0] == "dataset"

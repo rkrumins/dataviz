@@ -15,6 +15,8 @@ import {
   decisionOf, projectedRate, resolutionCount, sameResolutions, withDecision, withDecisions, withTypeDecision,
 } from '../resolutions'
 
+const TYPES = { entity: [{ id: 'table', name: 'Table' }, { id: 'dataset', name: 'Dataset' }], relationship: [] }
+
 function report(): ReconcileReport {
   const counts = { total: 4, matched: 2, renamed: 0, typeChanged: 0, missing: 2, unknown: 0, found: 2, checked: 4, matchRate: 0.5 }
   return {
@@ -36,6 +38,7 @@ function report(): ReconcileReport {
       ],
       relationship: [],
     },
+    availableTypes: TYPES,
     layers: [{ id: 'l1', name: 'Sources', ...counts, anchor: null, healthy: false }],
     notices: [],
   }
@@ -45,7 +48,6 @@ function reconciled(update: ReconciledView['update'] = null): ReconciledView {
   return { key: '0', effectiveDefinition: {}, effectiveHash: 'sha256:x', report: report(), update }
 }
 
-const TYPES = { entity: [{ id: 'table', name: 'Table' }, { id: 'dataset', name: 'Dataset' }], relationship: [] }
 
 describe('resolutions', () => {
   it('records and takes back an entity decision', () => {
@@ -99,7 +101,7 @@ describe('ReconciliationPanel', () => {
   it('turns clicks into the matching choices', () => {
     const onDraft = vi.fn()
     render(<ReconciliationPanel reconciled={reconciled()} applied={{}} draft={{}} onDraft={onDraft}
-      sourceLabel="dev · Finance" targetLabel="UAT · Lineage" availableTypes={TYPES} exportedNames={{}} />)
+      sourceLabel="dev · Finance" targetLabel="UAT · Lineage" exportedNames={{}} />)
 
     expect(screen.getByText('Worth a look')).toBeInTheDocument()
     expect(screen.getByRole('img', { name: '50.0% matched' })).toBeInTheDocument()
@@ -115,9 +117,22 @@ describe('ReconciliationPanel', () => {
     expect(onDraft).toHaveBeenLastCalledWith({ typeMap: { Table: 'table' }, dropTypes: [] })
   })
 
+  it('lists a type already mapped, once checked, so the choice can be taken back', () => {
+    const onDraft = vi.fn()
+    const r = reconciled()
+    // Checked with Table → table: the design no longer uses Table, so the report doesn't name it.
+    r.report.types.entity = [{ id: 'dataset', status: 'present', suggestions: [], layers: ['Sources'] }]
+    render(<ReconciliationPanel reconciled={r} applied={{ typeMap: { Table: 'table' } }} draft={{ typeMap: { Table: 'table' } }}
+      onDraft={onDraft} sourceLabel="dev" targetLabel="UAT" exportedNames={{}} />)
+    const select = screen.getByLabelText('Map Table')
+    expect(select).toHaveValue('table')
+    fireEvent.change(select, { target: { value: '__keep__' } })
+    expect(onDraft).toHaveBeenLastCalledWith({ typeMap: {}, dropTypes: [] })
+  })
+
   it('shows the projected score while choices wait to be checked', () => {
     render(<ReconciliationPanel reconciled={reconciled()} applied={{}} draft={{ drop: ['urn:gone1'] }} onDraft={vi.fn()}
-      sourceLabel="dev" targetLabel="UAT" availableTypes={TYPES} exportedNames={{}} />)
+      sourceLabel="dev" targetLabel="UAT" exportedNames={{}} />)
     expect(screen.getByRole('img', { name: '66.7% matched' })).toBeInTheDocument()
     expect(screen.getByText('after your choices')).toBeInTheDocument()
   })
@@ -134,7 +149,7 @@ describe('ReconciliationPanel', () => {
       },
     }
     render(<ReconciliationPanel reconciled={reconciled(update)} applied={{}} draft={{}} onDraft={vi.fn()} onStrategy={onStrategy}
-      sourceLabel="dev" targetLabel="“Finance”" targetName="Finance" availableTypes={TYPES} exportedNames={{}} />)
+      sourceLabel="dev" targetLabel="“Finance”" targetName="Finance" exportedNames={{}} />)
     expect(screen.getByText('No shared history')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Merge/ })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: /Replace/ }))
