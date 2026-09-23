@@ -24,6 +24,9 @@ export interface MoveAfter {
   edgeId: string | null
   edgeType: string | null
   containmentTypes: string[]
+  /** A move to the TOP level: the column it was dropped on. */
+  layerId?: string
+  layerName?: string
 }
 
 const edgeTypeOf = (e: LineageEdge): string =>

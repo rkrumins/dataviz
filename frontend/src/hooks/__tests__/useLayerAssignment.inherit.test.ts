@@ -149,7 +149,8 @@ describe('useLayerAssignment — inheritsChildren gate (canonical assignments)',
   const twoCols = () => [layer('A', 0, []), layer('B', 1, [])]
   const pc = () => ({ parentMap: new Map([['c', 'p']]), childMap: new Map([['p', ['c']]]) })
 
-  it("a child's own explicit entry to a DIFFERENT layer wins (splits into that column)", () => {
+  // USER RULING 2026-09-23: no split-outs — a child always renders under its parent, in its column.
+  it("a child's own entry to a DIFFERENT layer does not pull it out of its parent", () => {
     const { parentMap, childMap } = pc()
     const res = resolveCurated({
       nodes: [node('p', 'domain'), node('c', 'table')],
@@ -159,9 +160,9 @@ describe('useLayerAssignment — inheritsChildren gate (canonical assignments)',
       childMap,
     })
     expect(res.nodeLayerMap.get('p')).toBe('A')
-    expect(res.nodeLayerMap.get('c')).toBe('B') // explicit B wins over inherited A
-    expect(rootIds(res, 'B')).toContain('c')
-    expect(res.nodesByLayer.get('A')![0].children).toHaveLength(0) // pruned from p's subtree
+    expect(res.nodeLayerMap.get('c')).toBe('A') // follows its parent; the stale B pin is ignored
+    expect(rootIds(res, 'B')).toHaveLength(0)
+    expect(res.nodesByLayer.get('A')![0].children.map(n => n.id)).toEqual(['c'])
   })
 
   it('inheritsChildren:false lets the child take its OWN explicit assignment', () => {
@@ -195,7 +196,7 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
   const twoCols = () => [layer('A', 0, []), layer('B', 1, [])]
   const pc = () => ({ parentMap: new Map([['c', 'p']]), childMap: new Map([['p', ['c']]]) })
 
-  it('parent→A + child→B (the wizard gesture): the child is a visual ROOT of B, not hidden under A', () => {
+  it('parent→A + child→B: the child stays under its parent in A (no split-out)', () => {
     const { parentMap, childMap } = pc()
     const res = resolveCurated({
       nodes: [node('p', 'layer'), node('c', 'object')],
@@ -205,8 +206,8 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
       childMap,
     })
     expect(rootIds(res, 'A')).toEqual(['p'])
-    expect(rootIds(res, 'B')).toEqual(['c'])
-    expect(res.nodesByLayer.get('A')![0].children).toHaveLength(0)
+    expect(rootIds(res, 'B')).toHaveLength(0)
+    expect(res.nodesByLayer.get('A')![0].children.map(n => n.id)).toEqual(['c'])
     expect(res.unassignedNodes).toHaveLength(0)
   })
 
@@ -249,7 +250,7 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
     expect(res.unassignedNodes.map(n => n.id)).toEqual(['x'])
   })
 
-  it('a split child carries its entry-less subtree with it', () => {
+  it('a pinned child keeps its whole subtree under its parent', () => {
     const res = resolveCurated({
       nodes: [node('a', 'layer'), node('b', 'object'), node('d', 'attribute')],
       sortedLayers: twoCols(),
@@ -259,9 +260,9 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
       childMap: new Map([['a', ['b']], ['b', ['d']]]),
     })
     expect(rootIds(res, 'A')).toEqual(['a'])
-    expect(rootIds(res, 'B')).toEqual(['b'])
-    expect(res.nodesByLayer.get('B')![0].children.map(n => n.id)).toEqual(['d']) // d inherits b's B
-    expect(res.nodesByLayer.get('A')![0].children).toHaveLength(0)
+    expect(rootIds(res, 'B')).toHaveLength(0)
+    expect(res.nodeLayerMap.get('b')).toBe('A')
+    expect(res.nodeLayerMap.get('d')).toBe('A')
   })
 
   it('an assigned child renders in its column even when its LOADED parent has no assignment (curated)', () => {
@@ -281,7 +282,7 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
     expect(rootIds(res, 'B')).toEqual(['c'])
   })
 
-  it('a live session drag (instanceAssignments) on a child wins over inheritance', () => {
+  it('a session placement on a child does not pull it out of its parent', () => {
     const { parentMap, childMap } = pc()
     const res = resolveCurated({
       nodes: [node('p', 'layer'), node('c', 'object')],
@@ -291,7 +292,7 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
       childMap,
       instanceAssignments: new Map([['c', { layerId: 'B' }]]),
     })
-    expect(res.nodeLayerMap.get('c')).toBe('B')
-    expect(rootIds(res, 'B')).toEqual(['c'])
+    expect(res.nodeLayerMap.get('c')).toBe('A')
+    expect(rootIds(res, 'B')).toHaveLength(0)
   })
 })

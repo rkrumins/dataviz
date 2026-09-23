@@ -2883,6 +2883,63 @@ class GraphVersioningService:
         viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
         if viol:
             raise OntologyViolation(viol)
+        viol = await self._parentless_violations(
+            s, graph_id, branch_id, written, prior, kind_by_entity, ontology_rules)
+        if viol:
+            raise OntologyViolation(viol)
+
+    async def _parentless_violations(
+        self, s, graph_id: str, branch_id: str,
+        written: Mapping[str, Optional[dict]], prior: Mapping[str, Optional[dict]],
+        kind_by_entity: Mapping[str, str], rules: OntologyRules,
+    ) -> List[dict]:
+        """An entity whose type the ontology does not allow at the top level must sit inside a
+        parent. Judged only for what this write can leave parentless — a node it creates, and the
+        child of every containment link it deletes or re-points (an un-nest, a move to the top
+        level) — so legacy data that predates the rule stays editable."""
+        if not rules.root_entity_types:
+            return []
+        cset = set(rules.containment_edge_types) | {k for k, r in rules.edge_types.items() if r.is_containment}
+        if not cset:
+            return []
+
+        def _cont(v: Optional[Mapping]) -> bool:
+            return bool(v) and str(v.get("edgeType") or v.get("edge_type") or "").upper() in cset
+
+        candidates: set = set()
+        for eid, v in written.items():
+            kind = kind_by_entity.get(eid, "node")
+            if kind == "node" and v is not None and prior.get(eid) is None:
+                candidates.add(eid)
+            elif kind == "edge" and _cont(prior.get(eid)):
+                old_child = _edge_src_tgt(prior[eid])[1]
+                if v is None or _edge_src_tgt(v)[1] != old_child:
+                    candidates.add(old_child)
+        candidates = {c for c in candidates if c and written.get(c, True) is not None}
+        if not candidates:
+            return []
+        unknown = [c for c in candidates if c not in written]
+        values = dict(await self._current_values(s, graph_id, branch_id, unknown)) if unknown else {}
+        values.update({c: written[c] for c in candidates if c in written})
+        stored = await self._incident_live_edges(s, graph_id, branch_id, list(candidates))
+        has_parent: set = set()
+        for eid, v in stored.items():
+            if eid not in written and _cont(v) and _edge_src_tgt(v)[1] in candidates:
+                has_parent.add(_edge_src_tgt(v)[1])      # an untouched stored parent link
+        for eid, v in written.items():
+            if v is not None and kind_by_entity.get(eid) == "edge" and _cont(v):
+                has_parent.add(_edge_src_tgt(v)[1])      # a parent link this write keeps / adds
+        out: List[dict] = []
+        for c in sorted(candidates - has_parent):
+            v = values.get(c)
+            if not v or _is_edge_payload(v):
+                continue
+            et = v.get("entityType")
+            if not rules.is_root_type(et):
+                out.append({"entity_id": c, "kind": "node", "rule": "parent_required",
+                            "reason": f"A {et} can't be at the top level — it must sit inside a parent "
+                                      f"(top-level types: {', '.join(sorted(rules.root_entity_types))})."})
+        return out
 
     async def _validate_edge_integrity(
         self, s, graph_id: str, branch_id: str,

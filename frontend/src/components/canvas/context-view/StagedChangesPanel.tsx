@@ -678,7 +678,7 @@ function MoveDetail({ change }: { change: StagedChange }) {
   const nodes = useCanvasStore(s => s.nodes)
   const label = (id: string | null | undefined) =>
     id ? ((nodes.find(n => n.id === id)?.data?.label as string | undefined) ?? id) : null
-  const after = change.after as { parentId?: string | null; edgeType?: string | null }
+  const after = change.after as { parentId?: string | null; edgeType?: string | null; layerName?: string }
   const removed = ((change.before as { removedLinks?: Array<{ source: string }> } | undefined)?.removedLinks ?? [])
   const from = [...new Set(removed.map(e => label(e.source)))].filter(Boolean).join(', ')
   const cell = (title: string, value: string, hint?: string) => (
@@ -691,7 +691,9 @@ function MoveDetail({ change }: { change: StagedChange }) {
   return (
     <div className="mt-2.5 grid grid-cols-2 gap-2">
       {cell('From', from || 'Its current parent', from ? undefined : 'Replaced on save, wherever it is')}
-      {cell('To', label(after.parentId) ?? 'Top level', after.edgeType ? `as ${after.edgeType}` : undefined)}
+      {after.parentId
+        ? cell('To', label(after.parentId) ?? after.parentId, after.edgeType ? `as ${after.edgeType}` : undefined)
+        : cell('To', after.layerName ? `Top level of ${after.layerName}` : 'Top level', 'No parent')}
     </div>
   )
 }

@@ -5,6 +5,7 @@ Reported 2026-09-23: moving a node on the canvas left it under BOTH parents when
 not loaded its old parent link (only a loaded link was deleted), and the node showed twice.
 """
 import asyncio
+import dataclasses
 import os
 
 import pytest
@@ -19,6 +20,7 @@ RULES = OntologyRules(
                   "Node": EntityRule(can_contain=frozenset({"Node"}))},
     edge_types={"HAS": EdgeRule(is_containment=True)},
     containment_edge_types=frozenset({"HAS"}),
+    root_entity_types=frozenset({"Roots"}),        # only Roots may be at the top level
 )
 
 
@@ -61,8 +63,10 @@ async def _run() -> None:
     assert await _parents(svc, gid, d, "Y") == ["X"]            # its subtree moves with it
     assert await _parents(svc, gid, main, "X") == ["R1"]        # main untouched until publish
 
-    # To the top level: no parent at all.
-    await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_move("X", None, "m2")], **kw)
+    # To the top level: no parent at all (under an ontology that allows any type there — the
+    # restriction to its top-level types is tested below).
+    await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_move("X", None, "m2")],
+                        containment_edge_types=CSET, ontology_rules=dataclasses.replace(RULES, root_entity_types=frozenset()))
     assert await _parents(svc, gid, d, "X") == []
 
     # Created and moved in the same save: one parent, the last one asked for.
@@ -79,6 +83,21 @@ async def _run() -> None:
     # Under a parent the ontology forbids (a Node cannot contain a Roots): refused.
     with pytest.raises(OntologyViolation):
         await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_move("R2", "X", "m6")], **kw)
+
+    # The ontology's top-level types: a Node can't be left without a parent — not by a move to
+    # the top level, not by un-nesting it, not by creating it there. A Roots can.
+    with pytest.raises(OntologyViolation) as exc:
+        await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_move("X", None, "m7")], **kw)
+    assert exc.value.violations[0]["rule"] == "parent_required"
+    link = next(eid for eid, v in (await svc.materialize_state(graph_id=gid, branch_id=d))["edges"].items()
+                if v and v["targetEntityId"] == "X")
+    with pytest.raises(OntologyViolation):
+        await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice",
+                            ops=[{"op": "delete", "entity_kind": "edge", "entity_id": link, "payload": None}], **kw)
+    with pytest.raises(OntologyViolation):
+        await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_n("LONE")], **kw)
+    await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=[_n("R3", "Roots")], **kw)  # allowed
+    assert await _parents(svc, gid, d, "X") == ["R1"]           # nothing refused above was written
 
     # Published, main holds exactly the moved hierarchy.
     await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="moves", **kw)
