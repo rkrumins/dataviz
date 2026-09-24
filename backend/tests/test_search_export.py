@@ -119,6 +119,10 @@ class _Objects:
     async def open_stream(self, key, *, chunk_size=1 << 20):
         yield self.blobs[key]
 
+    async def stat(self, key):
+        return SimpleNamespace(key=key, size=len(self.blobs.get(key, b"")),
+                               exists=key in self.blobs)
+
     async def delete_prefix(self, prefix):
         self.swept.append(prefix)
 
@@ -325,11 +329,63 @@ class TestSessions:
         assert await open_export(provider, "no-such-session", scope_hash="h",
                                  objects=objects) is None
 
-    async def test_starting_an_export_sweeps_old_ones(self, monkeypatch):
+    async def test_an_exports_parts_are_left_to_the_stores_sweep(self, monkeypatch):
+        """The object store's own sweep takes every artifact past its TTL:
+        an export deletes nothing of its own."""
         monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
         objects = _Objects()
         await _follow(_Provider(_Graph(NODES)), objects)
-        assert objects.swept and all(p.startswith("search-exports/") for p in objects.swept)
+        assert objects.swept == []
+
+    async def test_an_export_is_kept_no_longer_than_its_parts(self, monkeypatch, memory_store):
+        """The store sweeps each part a day (``OBJECT_STORE_TTL_HOURS``)
+        after it was written, and every part is written after the export
+        began: its session is kept for at most three quarters of that from
+        its start, the rest left for a download under way."""
+        from backend.app.services.versioning import config
+        monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
+        ttls = []
+        save = memory_store.save
+
+        async def saved(session, token, ttl_s, **kw):
+            ttls.append(ttl_s)
+            return await save(session, token, ttl_s, **kw)
+
+        memory_store.save = saved
+        await _follow(_Provider(_Graph(NODES)), _Objects())
+        assert ttls and max(ttls) <= 0.75 * config.OBJECT_STORE_TTL_HOURS * 3600
+
+    async def test_past_that_it_is_not_served_and_asking_again_exports_afresh(self, monkeypatch):
+        from backend.app.services.versioning import config
+        plans = []
+
+        async def plan(provider, query, compiler, **kw):
+            plans.append(1)
+            return Plan(list(UNITS))
+
+        monkeypatch.setattr(export_mod, "make_plan", plan)
+        objects, provider = _Objects(), _Provider(_Graph(NODES))
+        out, _ = await _follow(provider, objects)
+        assert len(plans) == 1
+        monkeypatch.setattr(config, "OBJECT_STORE_TTL_HOURS", 0.0)
+        assert await open_export(provider, out["sessionId"], scope_hash="h",
+                                 objects=objects) is None
+        again = await execute_export_session(
+            provider, _query(), context=SearchRunContext(data_version="1", scope_hash="h"),
+            fmt="csv", columns=["owner", "size"], wait_ms=0, session_id=out["sessionId"],
+            objects=objects)
+        assert len(plans) == 2 and again["rows"] < out["rows"]
+
+    async def test_a_part_gone_is_no_file_rather_than_a_short_one(self, monkeypatch):
+        """A part swept, or written to a store this pod doesn't share, makes
+        the export gone — a 404 to export again — never a file that stops
+        short of its rows."""
+        monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
+        objects, provider = _Objects(), _Provider(_Graph(NODES))
+        out, _ = await _follow(provider, objects)
+        del objects.blobs[sorted(objects.blobs)[0]]
+        assert await open_export(provider, out["sessionId"], scope_hash="h",
+                                 objects=objects) is None
 
 
 # ---------------------------------------------------------------------------

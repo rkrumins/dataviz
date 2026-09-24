@@ -83,7 +83,9 @@ class DeepSearchSettings:
     # open of the Property Manager.
     catalog_reuse_seconds: int
     # How long a search export is kept for its download after its last
-    # request (``DEEP_SEARCH_EXPORT_TTL``); its parts are swept two days on.
+    # request (``DEEP_SEARCH_EXPORT_TTL``) — never past three quarters of
+    # ``OBJECT_STORE_TTL_HOURS`` from when it began, as the object store's
+    # sweep takes its parts that long after they were written.
     export_ttl_seconds: int
 
     @classmethod

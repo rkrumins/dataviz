@@ -15,6 +15,11 @@ as its wait allows, and the client follows it with the ``sessionId`` until
 it is complete — the same request-driven session a count is, so an export
 survives a restart of whichever process was writing it.
 
+The object store's own sweep deletes each part ``OBJECT_STORE_TTL_HOURS``
+after it was written, so an export is kept only until that sweep could
+reach its first part (``_keep_until``), and served only while every part is
+there: never a file that stops short.
+
 Values are written as the graph returns them: a 64-bit integer as its
 digits, a list or an object as its JSON. A property a node keeps in
 ``propertiesRaw`` is read from there, and a condition on one is answered as a
@@ -29,7 +34,7 @@ import io
 import json
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
 from backend.app.providers.falkordb_deep_search import _safe_property_name
@@ -51,10 +56,8 @@ from backend.app.services.deep_search import (
 from backend.common.models.search import SearchQuery, export_columns
 
 #: Where exports are kept in the object store: one folder per day an export
-#: began, so an old day is swept whole.
+#: began.
 _ROOT = "search-exports"
-#: How long an export is kept for its download.
-KEEP_DAYS = 2
 #: Rows a walk unit reads per statement (a walk's subtree can be far larger
 #: than a chunk); a range unit is one chunk already.
 _WALK_PAGE = 50_000
@@ -310,6 +313,10 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)
     session = await _find(store, session_id, query_id, None) or await store.load(sid)
+    if session is not None and time.time() >= _keep_until(session):
+        # Its first parts may be swept by now: export afresh.
+        await store.delete(session.sid)
+        session = None
     created = False
     manifest = None
     if session is None or session.status == FAILED:
@@ -324,17 +331,16 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         created = True
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         manifest = Manifest(fmt, cols, f"{_ROOT}/{day}/{sid}")
-        await _sweep(objects)
     else:
         manifest = (Manifest.from_json(await store.load_accumulator(session.sid))
                     or Manifest(fmt, cols, f"{_ROOT}/unknown/{session.sid}"))
+    ttl_s = max(1, min(settings.export_ttl_seconds, int(_keep_until(session) - time.time())))
     work = _ExportWork(session, ctx, run, objects, manifest)
     session = await _advance(session, created, store, work, deadline, settings,
-                             ttl_s=settings.export_ttl_seconds, unit_s=unit_s)
+                             ttl_s=ttl_s, unit_s=unit_s)
     if created and session.status == COMPLETE and not work.manifest.parts:
         # Nothing to scan (an empty scope): the manifest is all there is.
-        await store.save(session, None, settings.export_ttl_seconds,
-                         accumulator=work.manifest.to_json())
+        await store.save(session, None, ttl_s, accumulator=work.manifest.to_json())
     if session.status == FAILED:
         raise SearchFailed(f"export failed: {session.error}")
     return _answer(session, work.manifest)
@@ -366,12 +372,18 @@ async def open_export(provider, session_id: str, *, scope_hash: str, objects=Non
     store = store_for(provider)
     session = await store.load(session_id)
     if (session is None or session.status != COMPLETE or session.scope_hash != scope_hash
-            or not session.query_id.startswith("export:")):
+            or not session.query_id.startswith("export:")
+            or time.time() >= _keep_until(session)):
         return None
     manifest = Manifest.from_json(await store.load_accumulator(session.sid))
     if manifest is None:
         return None
     objects = objects or get_object_store()
+    # Served whole or not at all: a part gone (swept, or written to a store
+    # this pod doesn't share) is no export, never a file that stops short.
+    for key, rows in manifest.parts:
+        if rows and not (await objects.stat(key)).exists:
+            return None
 
     async def body() -> AsyncIterator[bytes]:
         yield header(manifest.fmt, manifest.columns)
@@ -383,10 +395,10 @@ async def open_export(provider, session_id: str, *, scope_hash: str, objects=Non
     return _answer(session, manifest), body()
 
 
-async def _sweep(objects) -> None:
-    """Remove the folders of exports begun more than ``KEEP_DAYS`` ago."""
-    today = datetime.now(timezone.utc).date()
-    for age in range(KEEP_DAYS + 1, KEEP_DAYS + 31):
-        day = (today - timedelta(days=age)).strftime("%Y%m%d")
-        with contextlib.suppress(Exception):
-            await objects.delete_prefix(f"{_ROOT}/{day}")
+def _keep_until(session: Session) -> float:
+    """When an export stops being served: before the object store's sweep
+    (``OBJECT_STORE_TTL_HOURS`` after a part was written) can reach its first
+    part — every part is written after the export began — with a quarter of
+    that left for a download already under way."""
+    from backend.app.services.versioning import config
+    return session.created + 0.75 * config.OBJECT_STORE_TTL_HOURS * 3600
