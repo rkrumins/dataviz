@@ -14,11 +14,13 @@
  */
 import { create } from 'zustand'
 
+import { getQueryClient } from '@/lib/queryClient'
 import { generateId } from '@/lib/utils'
 import {
     deleteViewQuery, deleteViewRule, getViewLibrary, orderViewRules, putViewQuery, putViewRule,
     type SavedViewQuery, type SavedViewQueryInput, type ViewLibrary,
 } from '@/services/viewLibraryService'
+import { VIEW_VERSION_STATUS_QUERY_KEY } from '@/services/viewVersionsApiService'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 
@@ -94,6 +96,9 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
         try {
             const answer = await enqueue(() => send(viewId, branchId))
             if (seq === writeSeq && isLoaded(viewId, branchId)) showRules(answer)
+            // Rules are part of the design a version saves: the header's version
+            // chip asks again whether there are unsaved changes.
+            void getQueryClient()?.invalidateQueries({ queryKey: [VIEW_VERSION_STATUS_QUERY_KEY, viewId] })
         } catch (err) {
             if (isLoaded(viewId, branchId)) void enqueue(() => get().reload())
             throw err

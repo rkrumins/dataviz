@@ -14,6 +14,8 @@ const api = vi.hoisted(() => ({
     deleteViewQuery: vi.fn(),
 }))
 vi.mock('@/services/viewLibraryService', () => api)
+const queries = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
+vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => queries }))
 
 import type { SavedViewQuery, ViewLibrary } from '@/services/viewLibraryService'
 import type { DisplayRuleConfig } from '@/types/schema'
@@ -179,6 +181,15 @@ describe('changing the rules', () => {
         await store().removeRule('a')
         expect(api.deleteViewRule).toHaveBeenCalledWith('v1', 'a', null)
         expect(shown()).toEqual(['b'])
+    })
+
+    it("tells the view's version chip that its design changed", async () => {
+        await open()
+        api.putViewRule.mockResolvedValueOnce([rule('a'), rule('n')])
+        queries.invalidateQueries.mockClear()
+        await store().saveRule(rule('n'))
+        // Rules are part of the design a version saves: the chip's "unsaved changes" dot.
+        expect(queries.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['view-version-status', 'v1'] })
     })
 
     it('writes a draft\'s rules to its branch', async () => {
