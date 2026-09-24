@@ -547,6 +547,11 @@ function PanelInner({
                                     countIsExact={countIsExact}
                                     deadlineExceeded={deadlineExceeded}
                                     candidateCount={candidateCount}
+                                    scanning={view.kind === 'results'
+                                        && view.result.status === 'running'}
+                                    progress={view.kind === 'results'
+                                        ? view.result.progress ?? null
+                                        : null}
                                     onFrame={canFrame
                                         ? () => onFrameMatches?.(frameTargetUrns)
                                         : undefined}

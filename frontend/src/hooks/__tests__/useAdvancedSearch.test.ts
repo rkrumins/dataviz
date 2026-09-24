@@ -25,7 +25,7 @@ import type {
 
 import { SEARCH_OPTIONS } from '@/components/canvas/search/searchOptions'
 
-import { useAdvancedSearch } from '../useAdvancedSearch'
+import { PROGRESS_WAIT_MS, useAdvancedSearch } from '../useAdvancedSearch'
 
 vi.mock('@/providers/GraphProviderContext', () => ({
     useGraphProvider: () => provider,
@@ -174,7 +174,7 @@ describe('useAdvancedSearch — exact ancestor counts from the aggregation', () 
 
 
 describe('useAdvancedSearch — the shared search options reach the wire', () => {
-    it('sends the shared shape verbatim', async () => {
+    it('sends the shared shape verbatim, asking for progressive answers', async () => {
         searchAdvanced.mockResolvedValue(page({ hits: [], aggregates: [[]] }))
 
         const { result } = renderHook(() => useAdvancedSearch('view-1'))
@@ -183,7 +183,7 @@ describe('useAdvancedSearch — the shared search options reach the wire', () =>
         })
 
         expect(searchAdvanced).toHaveBeenCalledWith(
-            expect.objectContaining({ options: SEARCH_OPTIONS }),
+            expect.objectContaining({ options: { ...SEARCH_OPTIONS, waitMs: PROGRESS_WAIT_MS } }),
             { signal: expect.any(AbortSignal) },
         )
         expect(SEARCH_OPTIONS).toEqual({
@@ -280,6 +280,90 @@ describe('useAdvancedSearch — a new run supersedes the one in flight', () => {
         expect(view.kind).toBe('results')
         expect(view.kind === 'results' && view.result.hits?.[0]?.node?.urn).toBe('hit-2')
         expect(useSearchStore.getState().matchUrnSet.has('hit-1')).toBe(false)
+    })
+})
+
+
+describe('useAdvancedSearch — a search still scanning the view', () => {
+    const running = (over: Partial<SearchResultPage>) => page({
+        status: 'running', sessionId: 's-1', countStatus: 'lowerBound',
+        progress: { scanned: 40, total: 100, matched: 1 }, ...over,
+    })
+
+    it('shows each answer as it lands and continues the same session', async () => {
+        const seen: string[][] = []
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockImplementationOnce(async () => {
+                seen.push([...useSearchStore.getState().matchUrnSet])
+                return page({ hits: [HIT, { ...HIT, node: { ...HIT.node, urn: 'hit-2' } }],
+                              status: 'complete', totalCount: 2, sessionId: 's-1' })
+            })
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+
+        // The first, provisional answer was already on the canvas while the
+        // follow-up was in flight.
+        expect(seen).toEqual([['hit-1']])
+        const follow = searchAdvanced.mock.calls[1][0]
+        expect(follow.options.sessionId).toBe('s-1')
+        expect(follow.options.waitMs).toBe(PROGRESS_WAIT_MS)
+        expect(follow.predicate).toEqual(searchAdvanced.mock.calls[0][0].predicate)
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.totalCount).toBe(2)
+        expect(result.current.runState?.status).toBe('done')
+        // The query the panel keeps (for later pages) carries no session.
+        expect(view.kind === 'results' && view.query.options?.sessionId).toBeFalsy()
+    })
+
+    it('stops at the last answer, marked unfinished, when follow-ups keep failing', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true })
+        try {
+            searchAdvanced
+                .mockResolvedValueOnce(running({ hits: [HIT] }))
+                .mockRejectedValue(new Error('429'))
+            const { result } = renderHook(() => useAdvancedSearch('view-1'))
+            await act(async () => {
+                await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+            })
+            const view = result.current.view
+            expect(view.kind).toBe('results')
+            expect(view.kind === 'results' && view.result.deadlineExceeded).toBe(true)
+            expect(view.kind === 'results' && view.result.truncated).toBe(true)
+            expect(view.kind === 'results' && view.result.hits?.length).toBe(1)
+            expect(searchAdvanced).toHaveBeenCalledTimes(4)   // 1 + three attempts
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('stops continuing a search a newer run replaced', async () => {
+        let answerFollowUp: (p: SearchResultPage) => void = () => {}
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockImplementationOnce(() => new Promise<SearchResultPage>((resolve) => {
+                answerFollowUp = resolve
+            }))
+            .mockResolvedValueOnce(page({ hits: [], status: 'complete', totalCount: 0 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        let first!: Promise<void>
+        await act(async () => {
+            first = result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, { results: 'hits' })
+        })
+        await act(async () => {
+            answerFollowUp(running({ hits: [HIT] }))
+            await first
+        })
+        expect(searchAdvanced).toHaveBeenCalledTimes(3)
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.hits).toEqual([])
     })
 })
 

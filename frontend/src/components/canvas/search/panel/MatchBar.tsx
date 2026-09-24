@@ -32,6 +32,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 
+import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
 import {
     useCanvasFilterMode,
@@ -55,6 +56,11 @@ export interface MatchBarProps {
     countIsExact?: boolean
     deadlineExceeded?: boolean
     candidateCount?: number | null
+    /** The search is still scanning the view: ``count`` is what it has
+     *  found so far, and ``progress`` how far through the view it is. The
+     *  matches shown are already the right ones, in their final order. */
+    scanning?: boolean
+    progress?: { scanned: number; total: number } | null
     /** Frame all matches on the canvas. Hidden when no matches or
      *  when running. */
     onFrame?: () => void
@@ -74,8 +80,8 @@ export interface MatchBarProps {
 
 export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
-    deadlineExceeded, candidateCount, onFrame, onShowFocusedOnCanvas,
-    onClear, viewId,
+    deadlineExceeded, candidateCount, scanning, progress, onFrame,
+    onShowFocusedOnCanvas, onClear, viewId,
 }) => {
     const orderedMatchUrns = useOrderedMatchUrns()
     const focusedMatchIndex = useFocusedMatchIndex()
@@ -114,8 +120,18 @@ export const MatchBar: FC<MatchBarProps> = ({
                 count={count}
                 elapsedMs={elapsedMs}
                 showPlus={showPlus}
+                scannedPercent={scanning && !isRunning && !isError
+                    ? scannedPercent(progress) : null}
                 onClear={onClear}
             />
+            {scanning && !isRunning && !isError && (
+                <ProgressBar
+                    value={scannedPercent(progress)}
+                    label="Scanning the view for matches"
+                    className="h-1 rounded-none"
+                    barClassName="rounded-none"
+                />
+            )}
             {hasMatches && !isRunning && !isError && (
                 <ToolbarStrip
                     stepperPosition={displayPosition ?? 0}
@@ -148,9 +164,15 @@ export const MatchBar: FC<MatchBarProps> = ({
 // in a predictable, premium location (top-right of the results pane,
 // like every modal in the system).
 // ---------------------------------------------------------------------------
+function scannedPercent(progress: { scanned: number; total: number } | null | undefined): number {
+    if (!progress || progress.total <= 0) return 0
+    return Math.min(99, Math.floor((progress.scanned / progress.total) * 100))
+}
+
+
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, onClear,
+    showPlus, scannedPercent: scanned, onClear,
 }: {
     isRunning: boolean
     isError: boolean
@@ -158,6 +180,8 @@ function SummaryStrip({
     count: number | null
     elapsedMs: number | null
     showPlus: boolean
+    /** Set while the search is still scanning; its progress. */
+    scannedPercent: number | null
     onClear?: () => void
 }) {
     return (
@@ -172,6 +196,7 @@ function SummaryStrip({
                 count={count}
                 elapsedMs={elapsedMs}
                 showPlus={showPlus}
+                scannedPercent={scanned}
             />
             {onClear && (
                 <button
@@ -292,7 +317,7 @@ function ToolbarStrip({
 
 
 function CountReadout({
-    isRunning, isError, errorMessage, count, elapsedMs, showPlus,
+    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent,
 }: {
     isRunning: boolean
     isError: boolean
@@ -300,11 +325,27 @@ function CountReadout({
     count: number | null
     elapsedMs: number | null
     showPlus: boolean
+    scannedPercent: number | null
 }) {
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
             {isRunning ? (
                 <span className="text-[12px] text-ink-muted">Searching…</span>
+            ) : scannedPercent !== null && count !== null ? (
+                <>
+                    {/* Still scanning: what has been found so far — a count
+                        that only grows — and how far through the view. */}
+                    <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
+                        {count.toLocaleString()}
+                    </span>
+                    <span className="text-[12px] text-ink-secondary leading-none">found</span>
+                    <span
+                        className="text-[10.5px] text-ink-muted tabular-nums leading-none"
+                        aria-live="polite"
+                    >
+                        · scanning {scannedPercent}%
+                    </span>
+                </>
             ) : isError ? (
                 <span
                     className="text-[12px] text-rose-600 dark:text-rose-300 truncate font-medium"

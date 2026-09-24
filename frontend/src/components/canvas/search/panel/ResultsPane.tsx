@@ -345,6 +345,9 @@ function ResultsContent({
     // The hit list is a page; the counts are not. Say so, rather than letting
     // the user read "1,000 matches" and assume that's all there is.
     const hitsArePartial = hits.length < totalMatches
+    // Still scanning: the count is what has been found so far, and the
+    // groups are not counted yet.
+    const scanning = result.status === 'running'
 
     return (
         <div className="flex flex-col">
@@ -377,7 +380,7 @@ function ResultsContent({
                             server truncated but still counted exactly has
                             nothing more than its total. */}
                         {result.truncated && totalCount === null ? '+' : ''}
-                        {totalMatches === 1 ? ' match' : ' matches'}
+                        {scanning ? ' found so far' : totalMatches === 1 ? ' match' : ' matches'}
                         {hasAggregates && (
                             <span className="text-ink-muted font-normal">
                                 {' · '}
@@ -386,7 +389,7 @@ function ResultsContent({
                             </span>
                         )}
                     </p>
-                    {(hitsArePartial || result.truncated) && (
+                    {(hitsArePartial || result.truncated) && !scanning && (
                         <p className="mt-1 text-[11px] leading-relaxed text-ink-muted/70">
                             Group counts are exact. The list below shows the first{' '}
                             {hits.length.toLocaleString()} — drill into a group or refine

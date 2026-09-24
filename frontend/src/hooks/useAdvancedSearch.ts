@@ -230,6 +230,53 @@ function collectAncestorCounts(
 
 
 // ---------------------------------------------------------------------------
+// Progressive search
+// ---------------------------------------------------------------------------
+
+/** How long the server may take before answering with what its scan has
+ *  found so far. It keeps scanning across the follow-up requests, each of
+ *  which waits as long again — so a large graph shows its first matches
+ *  within a second and its exact count when the scan ends. */
+export const PROGRESS_WAIT_MS = 800
+
+/** A follow-up that fails is retried this often, backing off, before the
+ *  search stops where it is. */
+const CONTINUE_ATTEMPTS = 3
+
+function progressive(query: SearchQuery): SearchQuery {
+    return { ...query, options: { ...(query.options ?? {}), waitMs: PROGRESS_WAIT_MS } }
+}
+
+/**
+ * The next answer of a running search: the same request, naming its
+ * session. A failure is retried; if it persists, the search stops at the
+ * last answer — marked as cut short, so the count reads as a floor and the
+ * panel says the search did not finish.
+ */
+async function continueSession(
+    provider: RemoteGraphProvider,
+    query: SearchQuery,
+    last: SearchResultPage,
+    signal: AbortSignal,
+): Promise<SearchResultPage> {
+    const next: SearchQuery = {
+        ...query, options: { ...(query.options ?? {}), sessionId: last.sessionId ?? undefined },
+    }
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await provider.searchAdvanced(next, { signal })
+        } catch (e) {
+            if (signal.aborted || attempt + 1 >= CONTINUE_ATTEMPTS) {
+                if (signal.aborted) throw e
+                return { ...last, status: undefined, truncated: true, deadlineExceeded: true }
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -450,12 +497,36 @@ export function useAdvancedSearch(
         setView({ kind: 'running', template, inputs, query, startedAt })
         if (runKey) setRunState({ hash: runKey, status: 'running' })
 
+        // Every page of a running search is shown as it lands: the hits are
+        // already in their final order, only more of them are still coming.
+        const show = (result: SearchResultPage) => {
+            setView({
+                kind: 'results', template, inputs, query, result,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
+            const ancestorPaths = collectAncestorPaths(result)
+            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
+            useSearchStore.getState().setResult({
+                viewId,
+                matchUrns: collectMatchUrns(result),
+                ancestorPaths,
+                ancestorCounts: collectAncestorCounts(query, result),
+                queryHash: JSON.stringify(query),
+            })
+        }
+
         try {
-            const result = await provider.searchAdvanced(
-                query, { signal: controller.signal })
+            let result = await provider.searchAdvanced(
+                progressive(query), { signal: controller.signal })
             // An aborted run has been superseded — the newer run owns
             // both the view and the run state, so touch neither.
             if (controller.signal.aborted) return
+            while (result.status === 'running' && result.sessionId) {
+                show(result)
+                result = await continueSession(
+                    provider, progressive(query), result, controller.signal)
+                if (controller.signal.aborted) return
+            }
             setView({
                 kind: 'results', template, inputs, query, result,
                 elapsedMs: Math.round(performance.now() - startedAt),
@@ -636,9 +707,16 @@ export function useAdvancedSearch(
                     results: 'hits',
                 },
             }
-            const nextPage = await provider.searchAdvanced(
+            let nextPage = await provider.searchAdvanced(
                 nextQuery, { signal: controller.signal })
             if (controller.signal.aborted) return
+            // A later page past what the search's session holds is a scan
+            // of its own; a large one may take more than one request.
+            while (nextPage.status === 'running' && nextPage.sessionId) {
+                nextPage = await continueSession(
+                    provider, nextQuery, nextPage, controller.signal)
+                if (controller.signal.aborted) return
+            }
             // Merge: append new hits, replace cursor (may now be null
             // signalling "no more pages"), keep aggregates from p1.
             //

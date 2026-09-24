@@ -111,3 +111,33 @@ describe('SearchMapPanel — the headline count', () => {
         expect(hero().textContent).toBe('0')
     })
 })
+
+
+describe('SearchMapPanel — a search still scanning the view', () => {
+    const scanning = {
+        status: 'running', countStatus: 'lowerBound', candidateCount: 1234,
+        progress: { scanned: 64, total: 100, matched: 1234 },
+    }
+
+    it('says what it has found so far, and how far through the view it is', () => {
+        renderPanel(scanning)
+
+        // Found so far is a number that only grows — never a floor with a plus.
+        expect(hero().textContent).toBe('1,234')
+        expect(screen.getByText('found')).toBeInTheDocument()
+        expect(screen.getByText('· scanning 64%')).toBeInTheDocument()
+        expect(screen.getByRole('progressbar', { name: 'Scanning the view for matches' }))
+            .toHaveAttribute('aria-valuenow', '64')
+        expect(listHeadline('1,234 found so far')).toBeInTheDocument()
+        // The groups are not counted yet, so nothing may claim they are.
+        expect(screen.queryByText(/Group counts are exact/)).not.toBeInTheDocument()
+    })
+
+    it('reads as a plain exact count once the scan is done', () => {
+        renderPanel({ ...scanning, status: 'complete', countStatus: 'exact', totalCount: 1300 })
+
+        expect(hero().textContent).toBe('1,300')
+        expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+        expect(listHeadline('1,300 matches')).toBeInTheDocument()
+    })
+})
