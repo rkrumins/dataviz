@@ -104,7 +104,30 @@ export interface UseEdgeProjectionOptions {
    * itself does not resolve.
    */
   ancestorChains?: ReadonlyMap<string, readonly string[]>
+  /**
+   * Member-level links from the lineage-bridges walk (useLineageBridges):
+   * which entities of this curated view reach which, and in how many raw
+   * lineage hops, through steps the view leaves out. Drawn by a FINAL pass,
+   * after projection and delegation, and only where no line already joins the
+   * pair — they never enter bundling or the type filters (a virtual hop has no
+   * relationship type of its own). `hops >= 2` draws as a virtual hop;
+   * `hops === 1` is a direct link the canvas holds no line for (a stale or
+   * missing roll-up) and draws as a roll-up.
+   */
+  bridgeLinks?: readonly BridgeLink[]
 }
+
+/** One member-level link from `POST /graph/lineage/bridges`. */
+export interface BridgeLink {
+  source: string
+  target: string
+  hops: number
+}
+
+const BRIDGE_LINE_PREFIX = 'bridge-'
+
+/** A line the virtual-hop pass drew: no edge in the store stands behind it. */
+export const isBridgeLineId = (id: string): boolean => id.startsWith(BRIDGE_LINE_PREFIX)
 
 // ============================================
 // Tree helpers for incremental ancestorMap updates
@@ -240,6 +263,7 @@ export function useEdgeProjection({
   nodeLayerIndexMap,
   hiddenEdgeTypes,
   ancestorChains,
+  bridgeLinks,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -933,9 +957,88 @@ export function useEdgeProjection({
     })
   }, [projectedEdges, delegationContext])
 
+  // ── Virtual hops ──
+  //
+  // The lineage-bridges walk answers at MEMBER grain: this entity of the view
+  // reaches that one through steps the view leaves out. Each link resolves to
+  // the rows it sits on (a member folded into a closed group lands on the
+  // group), and is drawn only where no line already runs that way — a real
+  // line is the better truth. Links between the same two rows merge (the
+  // shortest wins; both directions make one two-way line), and every link a
+  // line stands for rides along on `data.bridgeLinks` for whoever asks how.
+  const visibleLineageEdgesWithBridges = useMemo(() => {
+    const base = visibleLineageEdgesWithDelegation
+    if (!showLineageFlow || isTracing || !bridgeLinks || bridgeLinks.length === 0) return base
+
+    const resolve = (urn: string): string | undefined => {
+      const id = urnToIdMap.get(urn) ?? urn
+      if (displayMap.has(id)) return id
+      return ancestorMap.get(id) ?? ancestorMap.get(urn)
+    }
+    const joined = new Set<string>()
+    for (const e of base) {
+      joined.add(`${e.source}->${e.target}`)
+      if (e.isBidirectional) joined.add(`${e.target}->${e.source}`)
+    }
+
+    type Pair = { a: string; b: string; hops: number; forward: boolean; backward: boolean; links: BridgeLink[] }
+    const pairs = new Map<string, Pair>()
+    for (const link of bridgeLinks) {
+      const s = resolve(link.source)
+      const t = resolve(link.target)
+      if (!s || !t || s === t || joined.has(`${s}->${t}`)) continue
+      const [a, b] = s < t ? [s, t] : [t, s]
+      const key = `${a}->${b}`
+      let pair = pairs.get(key)
+      if (!pair) {
+        pair = { a, b, hops: link.hops, forward: false, backward: false, links: [] }
+        pairs.set(key, pair)
+      }
+      pair.hops = Math.min(pair.hops, link.hops)
+      if (s === a) pair.forward = true
+      else pair.backward = true
+      pair.links.push(link)
+    }
+    if (pairs.size === 0) return base
+
+    const extra: Array<Record<string, unknown>> = []
+    pairs.forEach(pair => {
+      const isBidirectional = pair.forward && pair.backward
+      const [source, target] = pair.backward && !pair.forward ? [pair.b, pair.a] : [pair.a, pair.b]
+      let isReverseFlow = false
+      if (!isBidirectional && nodeLayerIndexMap) {
+        const sLayer = nodeLayerIndexMap.get(source)
+        const tLayer = nodeLayerIndexMap.get(target)
+        isReverseFlow = typeof sLayer === 'number' && typeof tLayer === 'number' && tLayer < sLayer
+      }
+      const isVirtual = pair.hops >= 2
+      extra.push({
+        id: `${BRIDGE_LINE_PREFIX}${source}|${target}`,
+        source,
+        target,
+        isBundled: pair.links.length > 1,
+        isBrowseBundle: false,
+        // A direct link the canvas holds no line for stands for flows between
+        // what the two rows contain: that is what a roll-up is.
+        isGhost: !isVirtual,
+        edgeCount: pair.links.length,
+        types: [],
+        confidence: 1,
+        isAggregated: false,
+        isReverseFlow,
+        isDelegated: false,
+        isResidual: false,
+        isBidirectional,
+        bridgeHops: isVirtual ? pair.hops : undefined,
+        data: { edgeTypes: [], confidence: 1, edgeCount: pair.links.length, bundleSize: 1, bridgeLinks: pair.links },
+      })
+    })
+    return [...base, ...extra]
+  }, [visibleLineageEdgesWithDelegation, showLineageFlow, isTracing, bridgeLinks, urnToIdMap, displayMap, ancestorMap, nodeLayerIndexMap])
+
   return {
     lineageEdges,
-    visibleLineageEdges: visibleLineageEdgesWithDelegation,
+    visibleLineageEdges: visibleLineageEdgesWithBridges,
     unresolvedEdgeCount: projection.unresolvedCount,
     hiddenInsideCollapsedCount: projection.hiddenInsideCount,
     // Legacy alias — same value; kept for existing consumers.

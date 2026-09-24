@@ -11,6 +11,9 @@
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
+ *  - "N virtual hops" — on a view that stitches lineage through the
+ *    entities it leaves out (a subset view): stitching, done (a list of
+ *    the hops), incomplete, or failed. See VirtualHopsChip.
  *
  * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
  * the end of the layer strip (LineageGuide).
@@ -35,6 +38,8 @@ import { Unlink, Layers, ListPlus, Focus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { VirtualHopsChip } from '@/features/view-subset/components/VirtualHopsChip'
+import { virtualHopsChipVisible, type VirtualHopsSummary } from '@/features/view-subset/model/virtualHops'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
@@ -65,6 +70,7 @@ export function CanvasStatusChips({
   onLoadMoreRoots,
   selectedExternal,
   onPreviewExternal,
+  virtualHops,
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -97,6 +103,8 @@ export function CanvasStatusChips({
   selectedExternal?: { in: number; out: number } | null
   /** Feature-flagged: fetch + show the out-of-view partners in the Lens. */
   onPreviewExternal?: () => void
+  /** The board's virtual hops, on a view that stitches them. */
+  virtualHops?: VirtualHopsSummary
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
 
@@ -106,8 +114,9 @@ export function CanvasStatusChips({
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
+  const showHops = virtualHopsChipVisible(virtualHops)
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal && !showHops) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -129,6 +138,8 @@ export function CanvasStatusChips({
       }}
       data-canvas-interactive
     >
+      {showHops && <VirtualHopsChip summary={virtualHops!} chipClassName={CHIP_CLASS} />}
+
       {showExternal && (
         <InfoTooltip
           side="right"

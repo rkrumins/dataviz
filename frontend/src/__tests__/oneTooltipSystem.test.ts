@@ -51,6 +51,7 @@ const SCOPE = [
   'components/canvas/context-view/header',
   'components/canvas/property-manager/PropertyManagerButton.tsx',
   'features/versioning/components',
+  'features/view-subset/components',
 ]
 
 /**

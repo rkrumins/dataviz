@@ -651,6 +651,100 @@ export interface LensClosureExtras {
     grain?: 'fine' | 'coarse' | null
 }
 
+// ============================================
+// Lineage bridges — virtual hops between the members of a view
+// ============================================
+
+/** One member of the set being bridged — in practice a curated view's
+ *  assignment. A member that inherits its children owns everything beneath
+ *  it no deeper member claims; one that does not owns only itself, and what
+ *  sits beneath it belongs to nobody — exactly as it drops out of the view. */
+export interface LineageBridgeMember {
+    urn: URN
+    /** default true */
+    inheritsChildren?: boolean
+}
+
+/** `POST /graph/lineage/bridges` — which members reach which other members
+ *  through lineage the member set does not hold. `origins` narrows the side
+ *  the question is asked from; `direction` says which way they look. Every
+ *  returned link is oriented by data flow. */
+export interface LineageBridgesRequest {
+    members: LineageBridgeMember[]
+    origins?: URN[]
+    direction?: 'downstream' | 'upstream'
+    /** 1..20, default 10 */
+    maxHops?: number
+    maxNodes?: number
+    lineageEdgeTypes?: string[] | null
+}
+
+/** `source` reaches `target` in `hops` raw lineage edges through nodes no
+ *  member owns. `hops === 1` is a direct link; anything longer is a VIRTUAL
+ *  HOP — drawn "via hops − 1 steps". */
+export interface LineageBridgeLink {
+    source: URN
+    target: URN
+    hops: number
+}
+
+/** A member whose links may be missing on one side, and why. A member not
+ *  named has every link it has within `maxHops`. */
+export interface LineageBridgeIncomplete {
+    urn: URN
+    side: 'downstream' | 'upstream'
+    reason: 'budget' | 'hub' | 'failed' | 'seed_cap'
+}
+
+export interface LineageBridgesResult {
+    links: LineageBridgeLink[]
+    incomplete: LineageBridgeIncomplete[]
+    /** Both ends were still growing when `maxHops` ran out: longer
+     *  connections may exist. */
+    depthLimited: boolean
+    truncated: boolean
+    truncationReason?: string | null
+    stats?: {
+        seeds: number
+        interiorNodes: number
+        edgesRead: number
+        forwardDepth: number
+        backwardDepth: number
+        elapsedMs: number
+    }
+}
+
+/** `POST /graph/lineage/bridges/path` — the hidden steps behind ONE link,
+ *  walked with the same member set the link was drawn with. */
+export interface LineageBridgePathRequest {
+    members: LineageBridgeMember[]
+    source: URN
+    target: URN
+    maxHops?: number
+    maxNodes?: number
+    lineageEdgeTypes?: string[] | null
+}
+
+/** Every shortest path from `source` to `target` through unowned nodes, as a
+ *  small graph. `hiddenUrns` are the steps the view does not show (nearest
+ *  the source first); `endpointUrns` the lineage-bearing nodes inside the two
+ *  members where the paths start and end. `nodes` hydrates all of them plus
+ *  their containment ancestors; `ancestorChains` (parent first) lets a reader
+ *  group the steps at whatever grain it shows. `hops` is null when the two
+ *  are not connected within `maxHops`. */
+export interface LineageBridgePathResult {
+    source: URN
+    target: URN
+    hops: number | null
+    hiddenUrns: URN[]
+    endpointUrns: URN[]
+    nodes: GraphNode[]
+    edges: GraphEdge[]
+    ancestorChains: Record<string, string[]>
+    truncated: boolean
+    truncationReason?: string | null
+}
+
 /**
  * Options for trace/lineage operations
  */
@@ -971,6 +1065,22 @@ export interface GraphDataProvider {
          *  lens closes or re-anchors mid-walk. */
         opts?: { signal?: AbortSignal },
     ): Promise<TraceV2Result & LensClosureExtras>
+
+    /**
+     * Virtual hops — which members of a set reach which other members through
+     * lineage the set does not hold, and in how many hops. Optional
+     * capability; the server answers 403 while subset views are switched off.
+     */
+    getLineageBridges?(
+        request: LineageBridgesRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<LineageBridgesResult>
+
+    /** The hidden steps behind one virtual hop. */
+    getLineageBridgePath?(
+        request: LineageBridgePathRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<LineageBridgePathResult>
 
     /**
      * Drill into an AGGREGATED edge: return finer-level nodes + edges

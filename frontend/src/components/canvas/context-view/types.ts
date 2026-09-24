@@ -148,4 +148,11 @@ export type ComputedEdge = {
    * (markerStart + markerEnd) to communicate two-way flow.
    */
   isBidirectional?: boolean
+  /**
+   * Set on a VIRTUAL HOP: a line between two entities of the view whose
+   * lineage runs through steps the view leaves out (see useLineageBridges).
+   * The value is the shortest such path in raw lineage edges, so the line
+   * reads "via bridgeHops − 1 steps". Absent on every other line.
+   */
+  bridgeHops?: number
 }

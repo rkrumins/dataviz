@@ -32,6 +32,10 @@ import type {
     TraceClosureRequest,
     TraceClosureFrontierNode,
     LensClosureExtras,
+    LineageBridgesRequest,
+    LineageBridgesResult,
+    LineageBridgePathRequest,
+    LineageBridgePathResult,
     ExpandAggregatedRequest,
     ExpandAggregatedBatchRequest,
     LayerAssignmentRequest,
@@ -877,6 +881,52 @@ export class RemoteGraphProvider implements GraphDataProvider {
             seedTruncated: raw.seedTruncated ?? false,
             seedCursor: (raw as { seedCursor?: string | null }).seedCursor ?? null,
             grain: (raw as { grain?: 'fine' | 'coarse' | null }).grain ?? null,
+        }
+    }
+
+    /**
+     * Virtual hops — POST /lineage/bridges. A two-sided walk over RAW lineage
+     * between every member at once; cached server-side per graph generation,
+     * so a view re-opening asks for the same member set and gets a hit.
+     */
+    async getLineageBridges(
+        request: LineageBridgesRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<LineageBridgesResult> {
+        const raw = await this.fetch<LineageBridgesResult>('/lineage/bridges', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
+        return {
+            ...raw,
+            links: raw.links ?? [],
+            incomplete: raw.incomplete ?? [],
+            depthLimited: raw.depthLimited ?? false,
+            truncated: raw.truncated ?? false,
+        }
+    }
+
+    /** The hidden steps behind one virtual hop — POST /lineage/bridges/path. */
+    async getLineageBridgePath(
+        request: LineageBridgePathRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<LineageBridgePathResult> {
+        const raw = await this.fetch<LineageBridgePathResult>('/lineage/bridges/path', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
+        return {
+            ...raw,
+            hiddenUrns: raw.hiddenUrns ?? [],
+            endpointUrns: raw.endpointUrns ?? [],
+            nodes: raw.nodes ?? [],
+            edges: raw.edges ?? [],
+            ancestorChains: raw.ancestorChains ?? {},
+            truncated: raw.truncated ?? false,
         }
     }
 

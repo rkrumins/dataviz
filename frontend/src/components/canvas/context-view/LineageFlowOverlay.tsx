@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
 import { sameRow, sameRows } from './rowEquality'
-import { edgeDashArray } from './edgeDash'
+import { edgeDashArray, VIRTUAL_HOP_COLOR, VIRTUAL_HOP_DASH } from './edgeDash'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
 import { routeLine } from './lineRoute'
 import { bySignificance, lineDash, nextRenderTier, type RenderTier } from './lineDensity'
@@ -40,7 +40,7 @@ import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
 import { OffCanvasStub } from './OffCanvasStub'
 import { unitNoun } from './connections/connectionUnits'
-import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
+import { isBridgeLineId, type OffCanvasLineage } from '@/hooks/useEdgeProjection'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -113,6 +113,7 @@ export function LineageFlowOverlay({
   offCanvasLineage,
   onBringInOffCanvas,
   layerNames,
+  onBridgeClick,
 }: {
   nodes: any[],
   edges: any[],
@@ -169,6 +170,10 @@ export function LineageFlowOverlay({
   onBringInOffCanvas?: (nodeId: string, side: 'in' | 'out') => void,
   /** Layer display names by id — a portal chip names where lineage goes. */
   layerNames?: ReadonlyMap<string, string>,
+  /** A click on a VIRTUAL-HOP line (id `bridge-…`): the canvas shows the
+   *  hidden steps behind it, at the click point. Absent, the click opens the
+   *  edge panel like any line. */
+  onBridgeClick?: (edgeId: string, point: { x: number; y: number }) => void,
 }) {
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
@@ -555,8 +560,15 @@ export function LineageFlowOverlay({
           const maxY = Math.max(sy, ty)
 
           const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
-          const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
-          const dashArray = edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
+          // A virtual hop has no relationship type of its own: it wears the
+          // explore accent and a stitch, whatever the ontology draws with.
+          const bridgeHops: number | undefined = typeof edge.bridgeHops === 'number' ? edge.bridgeHops : undefined
+          const typeColor = bridgeHops !== undefined
+            ? VIRTUAL_HOP_COLOR
+            : resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
+          const dashArray = bridgeHops !== undefined
+            ? VIRTUAL_HOP_DASH
+            : edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
 
           let color = typeColor
           let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
@@ -651,6 +663,7 @@ export function LineageFlowOverlay({
             isReverseFlow: !!edge.isReverseFlow,
             isBrowseBundle: !!(edge as any).isBrowseBundle,
             isBidirectional: !!(edge as any).isBidirectional,
+            ...(bridgeHops !== undefined ? { bridgeHops } : {}),
           })
         }
         return
@@ -1572,9 +1585,14 @@ export function LineageFlowOverlay({
   }, [])
   const handleHitClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     e.stopPropagation()
+    // A virtual hop is no edge in the store: the canvas explains it instead.
+    if (onBridgeClick && isBridgeLineId(edgeId)) {
+      onBridgeClick(edgeId, { x: e.clientX, y: e.clientY })
+      return
+    }
     selectEdge(edgeId)
     if (!isEdgePanelOpen) toggleEdgePanel()
-  }, [selectEdge, isEdgePanelOpen, toggleEdgePanel])
+  }, [selectEdge, isEdgePanelOpen, toggleEdgePanel, onBridgeClick])
   const handleHitDoubleClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     if (!onEdgeDoubleClick) return
     e.stopPropagation()
@@ -2010,6 +2028,7 @@ export function LineageFlowOverlay({
         || targetEl?.getAttribute('data-label') || edge.target
       const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
       const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
+      const isBridgeLine = isBridgeLineId(edge.id)
 
       // Position above-right of the cursor; flip below if near top, left if near right edge.
       const margin = 18
@@ -2041,8 +2060,13 @@ export function LineageFlowOverlay({
                 className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase"
                 style={{ background: `${edge.color}22`, color: edge.color, border: `1px solid ${edge.color}44` }}
               >
-                {typeLabel}
+                {isBridgeLine ? (edge.bridgeHops !== undefined ? 'Virtual hop' : 'Connected') : typeLabel}
               </span>
+              {edge.bridgeHops !== undefined && (
+                <span className="text-[10px] text-white/60 tabular-nums">
+                  via {hiddenSteps(edge.bridgeHops)} hidden step{hiddenSteps(edge.bridgeHops) === 1 ? '' : 's'}
+                </span>
+              )}
               {edge.edgeCount > 1 && (
                 <span className="text-[10px] text-white/50 tabular-nums">
                   ×{edge.edgeCount.toLocaleString()} bundled
@@ -2079,7 +2103,15 @@ export function LineageFlowOverlay({
               </div>
             </div>
 
-            {confPct !== null && (
+            {isBridgeLine && (
+              <p className="text-[11px] text-white/70 mt-2.5 pt-2 border-t border-white/[0.06] leading-snug">
+                {edge.bridgeHops !== undefined
+                  ? 'Connected through lineage this view leaves out.'
+                  : 'Lineage runs directly between what these two hold.'}
+              </p>
+            )}
+
+            {!isBridgeLine && confPct !== null && (
               <div className="flex items-center gap-1.5 mt-2.5 pt-2 border-t border-white/[0.06]">
                 <span className="text-[9px] uppercase tracking-wider text-white/40">Confidence</span>
                 <div className="flex-1 h-1 rounded-full bg-white/10 overflow-hidden">
@@ -2089,7 +2121,9 @@ export function LineageFlowOverlay({
               </div>
             )}
 
-            <p className="text-[9px] text-white/30 mt-2 italic">Click to open details · Double-click to drill in</p>
+            <p className="text-[9px] text-white/30 mt-2 italic">
+              {isBridgeLine ? 'Click to see how' : 'Click to open details · Double-click to drill in'}
+            </p>
           </div>
         </div>,
         document.body,
@@ -2252,7 +2286,11 @@ const EdgeLine = React.memo(function EdgeLine({
         className="pointer-events-none"
       />
 
-      {showCount && (
+      {edge.bridgeHops !== undefined && (
+        <VirtualHopChip x={(sx + tx) / 2} y={(sy + ty) / 2} hops={edge.bridgeHops} emphasised={isHighlighted || isHovered} />
+      )}
+
+      {showCount && edge.bridgeHops === undefined && (
         <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
           <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
           <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">
@@ -2288,6 +2326,47 @@ const EdgeLine = React.memo(function EdgeLine({
   && a.showCount === b.showCount
   && sameRow(a.edge, b.edge),
 )
+
+/** The steps a virtual hop leaves out: every raw edge but the last lands on a
+ *  hidden node. */
+function hiddenSteps(hops: number): number {
+  return Math.max(1, hops - 1)
+}
+
+/**
+ * The midpoint chip every virtual hop carries — always, not only when looked
+ * at: the stitch alone says "not a plain line", the chip says how much is
+ * hidden. Text as well as colour, so it reads without the accent.
+ */
+function VirtualHopChip({ x, y, hops, emphasised }: { x: number; y: number; hops: number; emphasised: boolean }) {
+  const steps = hiddenSteps(hops)
+  const label = `via ${steps}`
+  const width = 14 + label.length * 5
+  return (
+    <g
+      data-virtual-hop-chip={steps}
+      transform={`translate(${x}, ${y})`}
+      className="pointer-events-none"
+      aria-hidden="true"
+    >
+      <rect
+        x={-width / 2} y={-7} width={width} height={14} rx={7}
+        style={{ fill: 'var(--nx-bg-elevated)' }}
+        stroke={VIRTUAL_HOP_COLOR}
+        strokeWidth={emphasised ? 1.4 : 1}
+        strokeDasharray={VIRTUAL_HOP_DASH}
+        opacity={emphasised ? 1 : 0.92}
+      />
+      <circle cx={-width / 2 + 6} cy={0} r={1.6} fill={VIRTUAL_HOP_COLOR} />
+      <text
+        x={3} y={3.2} textAnchor="middle" fontSize="8.5px" fontWeight={700}
+        fill={VIRTUAL_HOP_COLOR}
+      >
+        {label}
+      </text>
+    </g>
+  )
+}
 
 const HIT_DENSITY_LIMIT = 1200
 

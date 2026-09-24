@@ -219,6 +219,21 @@ export interface ViewContentConfig {
   // Membership scope — decoupled from placement. Absent on legacy views
   // (derived by deriveEntityScope from whether any layer assignments exist).
   entityScope?: 'all' | 'curated';
+
+  /**
+   * How a curated view joins two of its entities whose lineage runs through
+   * entities it does not hold. 'bridged' draws a VIRTUAL HOP over the hidden
+   * steps, computed live from the graph; 'direct' (and absent — every view made
+   * before subsets) draws only lines between entities the view holds. Set at
+   * birth on a subset view (POST /views/{id}/subsets).
+   */
+  connectivity?: ViewConnectivityConfig;
+}
+
+export interface ViewConnectivityConfig {
+  mode: 'bridged' | 'direct';
+  /** The longest virtual hop drawn, in raw lineage edges (1..20, default 10). */
+  maxHops?: number;
 }
 
 export interface ViewLayoutConfig {

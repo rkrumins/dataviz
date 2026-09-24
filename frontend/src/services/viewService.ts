@@ -77,6 +77,9 @@ function buildViewConfig(
     // scope on a plain metadata save — a leak when the layout write is going to
     // the overlay rather than the base. Absent on create (no base).
     const baseEntityScope = (base?.content as { entityScope?: unknown } | undefined)?.entityScope
+    // The same for a subset's virtual hops: nothing this builder is handed
+    // mentions them, so a metadata save would switch them off.
+    const baseConnectivity = (base?.content as { connectivity?: unknown } | undefined)?.connectivity
     return {
         icon: request.icon ?? 'Layout',
         content: {
@@ -86,6 +89,7 @@ function buildViewConfig(
             maxDepth: 10,
             rootEntityTypes: ['domain'],
             ...(baseEntityScope !== undefined ? { entityScope: baseEntityScope } : {}),
+            ...(baseConnectivity !== undefined ? { connectivity: baseConnectivity } : {}),
         },
         layout: {
             type: request.layoutType,

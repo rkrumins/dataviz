@@ -116,7 +116,11 @@ import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
-import { useEdgeProjection } from '@/hooks/useEdgeProjection'
+import { isBridgeLineId, useEdgeProjection, type BridgeLink } from '@/hooks/useEdgeProjection'
+import { useLineageBridges } from '@/features/view-subset/hooks/useLineageBridges'
+import { BridgePathPopover, type BridgePathTarget } from '@/features/view-subset/components/BridgePathPopover'
+import { DEFAULT_MAX_HOPS } from '@/features/view-subset/model/limits'
+import type { VirtualHopsSummary } from '@/features/view-subset/model/virtualHops'
 import { useHighlightState } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
@@ -4304,6 +4308,28 @@ export function ContextViewCanvas({
   // trades detail for coverage). Browse only, as the projection below.
   const lineageRollup = useFeature('canvasLineageRollupEnabled')
   const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge)
+
+  // VIRTUAL HOPS. A view that stitches its lineage (a subset view) joins two
+  // of its entities through the steps it leaves out, as the graph has them
+  // NOW: one walk for every member at once, filed under the member set and
+  // the graph's generation, never frozen into the view. Browse only — a trace
+  // draws its own wires — and only where the view asks for it.
+  const viewSubsetsEnabled = useFeature('viewSubsetsEnabled')
+  const viewConnectivity = activeView?.content?.connectivity
+  const bridgeMaxHops = viewConnectivity?.maxHops ?? DEFAULT_MAX_HOPS
+  const bridgeMembers = useMemo(
+    () => Object.entries(activeReferenceLayout.assignments)
+      .map(([urn, entry]) => ({ urn, inheritsChildren: entry.inheritsChildren !== false })),
+    [activeReferenceLayout.assignments],
+  )
+  const bridgeGeneration = `${mainHeadSeq}:${aggregatedCacheVersion}`
+  const bridges = useLineageBridges({
+    enabled: viewSubsetsEnabled && showLineageFlow && !overlay.active
+      && activeEntityScope === 'curated' && viewConnectivity?.mode === 'bridged',
+    members: bridgeMembers,
+    maxHops: bridgeMaxHops,
+    generation: bridgeGeneration,
+  })
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -4328,6 +4354,7 @@ export function ContextViewCanvas({
     // Chains already fetched stay cached, so switching the flag off must
     // also stop them being USED.
     ancestorChains: lineageRollup ? ancestorChains : undefined,
+    bridgeLinks: bridges.links,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -4432,7 +4459,9 @@ export function ContextViewCanvas({
   const visibleLineageEdgesRef = useRef(visibleLineageEdges)
   visibleLineageEdgesRef.current = visibleLineageEdges
   useEffect(() => {
-    setVisibleEdges(visibleLineageEdgesRef.current as LineageEdge[])
+    // A virtual hop is no relationship: panels reading the mirror (the
+    // drawer's neighbours) must not list its far end as a direct partner.
+    setVisibleEdges(visibleLineageEdgesRef.current.filter(e => !isBridgeLineId(e.id)) as LineageEdge[])
     // No cleanup-reset: avoids a second store write per cycle. Stale data
     // on unmount gets overwritten by the next canvas mount; the consumer
     // (LineageNeighbors) falls back to raw `edges` when empty.
@@ -4630,8 +4659,10 @@ export function ContextViewCanvas({
 
   // The panel reads the SAME array the overlay is handed, so "in view"
   // means post-budget and the drawn set is a subset of the model.
+  // Virtual hops are not relationships of any type, so the model — counts
+  // of relationships by type — leaves them out (VirtualHopsChip names them).
   const connectionModel = useMemo(
-    () => buildConnectionModel(effectiveLineageEdges),
+    () => buildConnectionModel(effectiveLineageEdges.filter(e => !isBridgeLineId(e.id))),
     [effectiveLineageEdges]
   )
 
@@ -4792,6 +4823,46 @@ export function ContextViewCanvas({
   // Path-trail jump: move the cursor to hop i without dropping the trail.
   const lensJumpTo = useCallback((index: number) => setLensHistory(h => lensJump(h, index)), [])
   const lensClose = useCallback(() => setLensHistory(EMPTY_LENS_HISTORY), [])
+  // A virtual hop's route, walked in the Lens: the source first, each hidden
+  // step one Forward away, the target at the end.
+  const walkBridgeInLens = useCallback((trail: string[]) => {
+    if (trail.length === 0) return
+    setLensFullWalk(false)
+    setLensHistory({ entries: trail, cursor: 0 })
+  }, [setLensFullWalk])
+
+  // The virtual hop a reader asked "how?" of — by clicking its line, or from
+  // the status chip's list (the keyboard route) — anchored where they asked.
+  const [bridgeTarget, setBridgeTarget] = useState<BridgePathTarget | null>(null)
+  const openBridgeLine = useCallback((lineId: string, point: { x: number; y: number }) => {
+    const line = visibleLineageEdges.find((e: { id: string }) => e.id === lineId)
+    const links = (line?.data?.bridgeLinks ?? []) as BridgeLink[]
+    if (links.length > 0) setBridgeTarget({ lineId, links, point })
+  }, [visibleLineageEdges])
+  const closeBridgeLine = useCallback(() => setBridgeTarget(null), [])
+  const bridgeLabelOf = useCallback((urn: string): string | undefined => {
+    const label = nodeMap.get(urnToIdMap.get(urn) ?? urn)?.data?.label
+    return label ? String(label) : undefined
+  }, [nodeMap, urnToIdMap])
+  const virtualHopsSummary = useMemo<VirtualHopsSummary | undefined>(() => {
+    if (bridges.status === 'idle' || overlay.active) return undefined
+    const rowName = (id: string) => displayMap.get(id)?.name ?? bridgeLabelOf(id) ?? id
+    const lines = visibleLineageEdges
+      .filter((e: { id: string; bridgeHops?: number }) => isBridgeLineId(e.id) && typeof e.bridgeHops === 'number')
+      .map((e: { id: string; source: string; target: string; bridgeHops: number }) => ({
+        lineId: e.id, sourceLabel: rowName(e.source), targetLabel: rowName(e.target), hops: e.bridgeHops,
+      }))
+    return {
+      status: bridges.status,
+      isFetching: bridges.isFetching,
+      lines,
+      incompleteNames: [...new Set(bridges.incomplete.map(i => i.urn))].map(urn => bridgeLabelOf(urn) ?? urn),
+      retryable: bridges.incomplete.some(i => i.reason === 'failed'),
+      maxHops: bridgeMaxHops,
+      onOpenLine: openBridgeLine,
+      onRetry: bridges.refetch,
+    }
+  }, [bridges.status, bridges.isFetching, bridges.incomplete, bridges.refetch, overlay.active, visibleLineageEdges, displayMap, bridgeLabelOf, bridgeMaxHops, openBridgeLine])
   // The lens reads ONE thing: the accumulated walk model for whichever
   // focal it is on. Server-lazy — one closure fetch on open, then a
   // further hop per ⊕ — cached per focal for the whole lens session, so
@@ -5787,6 +5858,19 @@ export function ContextViewCanvas({
             const target = selectedNodeId ?? document.documentElement.dataset.hoveredNode ?? drawerNodeId
             if (target) openLens(target)
           }}
+          virtualHops={virtualHopsSummary}
+        />
+
+        {/* The steps behind a virtual hop — portaled, anchored to the ask. */}
+        <BridgePathPopover
+          target={overlay.active ? null : bridgeTarget}
+          members={bridgeMembers}
+          maxHops={bridgeMaxHops}
+          generation={bridgeGeneration}
+          labelOf={bridgeLabelOf}
+          onClose={closeBridgeLine}
+          onWalkInLens={walkBridgeInLens}
+          onRefreshLines={bridges.refetch}
         />
 
         {/* Frame pill — selection has off-screen neighbors; offer to frame
@@ -6046,6 +6130,7 @@ export function ContextViewCanvas({
               // (revealOnCanvas), so the click is safe to offer throughout.
               onBringInOffCanvas={(nodeId, side) => { void bringInOffCanvas(nodeId, side) }}
               layerNames={layerNameById}
+              onBridgeClick={openBridgeLine}
             />
           )}
 

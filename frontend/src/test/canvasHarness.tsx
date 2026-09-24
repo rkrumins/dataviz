@@ -49,7 +49,11 @@ import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
-import type { GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
+import type {
+  GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras,
+  LineageBridgeLink, LineageBridgesRequest,
+} from '@/providers/GraphDataProvider'
+import type { ViewConnectivityConfig } from '@/types/schema'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -96,6 +100,8 @@ export interface TraceCanvasHarness {
    *  `settle()` (which barely advances the clock) will read an empty list —
    *  wait past the debounce first. */
   aggregatedGranularities(): Array<string | null>
+  /** Every virtual-hop request the canvas made (`bridges` option only). */
+  bridgeRequests(): LineageBridgesRequest[]
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -323,6 +329,9 @@ function stubProvider(
    *  about the completeness of the wires it drew, and that decision has no
    *  other observable. */
   aggregatedExtra?: Record<string, unknown>,
+  /** The virtual hops the graph answers with; absent, the provider offers
+   *  no walk at all, as a server from before subsets. */
+  bridges?: { links: LineageBridgeLink[]; requests: LineageBridgesRequest[] },
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -341,6 +350,12 @@ function stubProvider(
   ]))
   return {
     scopeKey: 'harness',
+    ...(bridges ? {
+      getLineageBridges: async (request: LineageBridgesRequest) => {
+        bridges.requests.push(request)
+        return { links: bridges.links, incomplete: [], depthLimited: false, truncated: false }
+      },
+    } : {}),
     traceClosure: async (req?: { grain?: string }) => {
       calls.traceClosure += 1
       // THE COARSE LEG (Part G) answers at once with the estate's cells —
@@ -474,6 +489,7 @@ function seedView(
   estate: TraceEstate,
   entityTypes: readonly unknown[] = [],
   dataSourceId?: string,
+  connectivity?: ViewConnectivityConfig,
 ): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
@@ -488,6 +504,7 @@ function seedView(
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
           defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
+          ...(connectivity ? { connectivity } : {}),
         },
         layout: {
           type: 'reference',
@@ -525,6 +542,9 @@ export async function renderCanvasWithTrace(
     /** Give the seeded view a data source, arming the canvas hooks that are
      *  inert without one. Absent by default. */
     dataSourceId?: string
+    /** A subset view: its connectivity, and the virtual hops the graph
+     *  answers with. Switches `viewSubsetsEnabled` on. */
+    bridges?: { connectivity: ViewConnectivityConfig; links: LineageBridgeLink[] }
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -551,12 +571,12 @@ export async function renderCanvasWithTrace(
     currentBranchId: opts.draft ? 'harness-branch' : null,
   } as never)
   useFeaturesStore.setState({
-    values: { ...useFeaturesStore.getState().values, editModeEnabled: !!opts.draft },
+    values: { ...useFeaturesStore.getState().values, editModeEnabled: !!opts.draft, viewSubsetsEnabled: !!opts.bridges },
   } as never)
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate, opts.entityTypes, opts.dataSourceId)
+  seedView(estate, opts.entityTypes, opts.dataSourceId, opts.bridges?.connectivity)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
@@ -593,6 +613,7 @@ export async function renderCanvasWithTrace(
     : undefined
 
   const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null> }
+  const bridgeRequests: LineageBridgesRequest[] = []
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -601,7 +622,10 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra),
+          provider: stubProvider(
+            estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra,
+            opts.bridges ? { links: opts.bridges.links, requests: bridgeRequests } : undefined,
+          ),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
@@ -881,6 +905,7 @@ export async function renderCanvasWithTrace(
     },
     providerCalls: () => providerCalls.traceClosure,
     aggregatedGranularities: () => [...providerCalls.aggregated],
+    bridgeRequests: () => [...bridgeRequests],
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })
