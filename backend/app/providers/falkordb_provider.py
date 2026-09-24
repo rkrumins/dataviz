@@ -1530,6 +1530,10 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     # rewrite its own previous work without ever touching a node that carried a
     # native urn / displayName. Provider-owned bookkeeping, not user data.
     "urnSource", "nameSource",
+    # The versioning projector's content fingerprint, SET on every node it writes
+    # (``n.gvHash``) so its in-place reconcile can tell what changed. Bookkeeping:
+    # unreserved, it read back as a user property on every projected node.
+    "gvHash",
 })
 
 
