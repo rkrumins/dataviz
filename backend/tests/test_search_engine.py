@@ -8,7 +8,9 @@ That the Cypher means what these assume is the live suite's job
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import re
+import time
 from types import SimpleNamespace
 
 import fakeredis.aioredis
@@ -33,7 +35,7 @@ from backend.app.providers.falkordb_search.session import (
     RedisSessionStore,
     Session,
 )
-from backend.app.services.deep_search import CompileError, SearchRunContext
+from backend.app.services.deep_search import CompileError, SearchFailed, SearchRunContext
 from backend.common.adapters.circuit import ProviderBusy
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import SearchQuery
@@ -553,7 +555,7 @@ def scan(monkeypatch):
         monkeypatch.setattr(engine_mod, "make_plan", s.plan)
         monkeypatch.setattr(engine_mod, "_run_unit", s.run)
         monkeypatch.setattr(engine_mod, "_is_pressure",
-                            lambda exc: "timed out" in str(exc))
+                            lambda exc: isinstance(exc, TimeoutError) or "timed out" in str(exc))
         return s
     return install
 
@@ -823,6 +825,131 @@ class TestLeaseHandover:
                                           get_deep_search_settings())
         assert work.ran == ["C", "D"]
         assert (after.status, after.count, after.scanned) == ("complete", 30, 4)
+
+
+class TestUnitBudget:
+    """A client follows a search with short waits (the canvas asks for 0.8 s).
+    A unit that takes longer must still finish: given up when the request's
+    wait ends, it would be put back whole and started again by the next
+    request, and the next — never counted, never split, the search running
+    forever. So a unit a request starts runs until it is done or its own
+    budget is spent, and over budget it is split as a timed-out unit is."""
+
+    @pytest.fixture
+    def budget(self, monkeypatch):
+        """Settings whose unit budget is ``ms``, and little grace, so that a
+        unit given up for the request's sake shows at once."""
+        from backend.app.services.deep_search import get_deep_search_settings
+
+        def install(ms=15_000):
+            settings = dataclasses.replace(get_deep_search_settings(), chunk_timeout_ms=ms)
+            monkeypatch.setattr(engine_mod, "get_deep_search_settings", lambda: settings)
+            monkeypatch.setattr(engine_mod, "_GRACE_S", 0.05)
+            return settings
+        return install
+
+    async def test_a_unit_slower_than_the_wait_finishes_in_the_request_that_started_it(
+            self, scan, budget):
+        budget()
+        s = scan({"A": _rows("a", 2), "B": _rows("b", 3)}, delay=0.3)
+        page = await _search(_Provider(), wait_ms=0)
+        assert page.status == "complete" and page.total_count == 5
+        assert len(s.runs) == 2, "each unit ran once"
+
+    async def test_a_unit_over_its_budget_is_split_and_every_match_counted_once(
+            self, scan, budget, monkeypatch, fresh_memory_store):
+        budget(ms=200)
+        scan({})
+        nodes = [[f"n{i:02d}", f"urn:n{i:02d}"] for i in range(16)]
+        runs = []
+
+        async def plan(provider, query, compiler, **kw):
+            return Plan([Unit("range", "A", 0, 16, size=16)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            runs.append((unit.lo, unit.hi))
+            if unit.hi - unit.lo > 4:
+                await asyncio.sleep(5)          # too wide: runs past its budget
+            mine = nodes[unit.lo:unit.hi]
+            return len(mine), mine[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        provider = _Provider()
+        page = await _search(provider, wait_ms=0)
+        for _ in range(10):
+            if page.status == "complete":
+                break
+            page = await _search(provider, wait_ms=0, session_id=page.session_id)
+        assert page.status == "complete" and page.total_count == 16
+        assert [h.node.urn for h in page.hits] == [n[1] for n in nodes[:5]]
+        assert sorted(r for r in runs if r[1] - r[0] <= 4) == [(0, 4), (4, 8), (8, 12), (12, 16)]
+        # Every request committed inside its lease: the session kept is the answer.
+        kept = await fresh_memory_store.load(page.session_id)
+        assert (kept.status, kept.count) == ("complete", 16)
+
+    async def test_a_unit_over_its_budget_that_cannot_be_cut_fails_the_search(
+            self, scan, budget, monkeypatch):
+        """A subtree under one root can't be split: over its budget it fails
+        the search, rather than being started by every request forever."""
+        budget(ms=200)
+        scan({})
+
+        async def plan(provider, query, compiler, **kw):
+            return Plan([Unit("walk", roots=[7], size=3)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            await asyncio.sleep(5)
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        with pytest.raises(SearchFailed):
+            await _search(_Provider(), wait_ms=0)
+
+    async def test_a_long_wait_is_cut_to_leave_room_for_the_last_units_budget(
+            self, scan, budget, monkeypatch):
+        """However long a request asks to wait, it stops starting units in
+        time for the last one's budget to end inside the request timeout."""
+        budget(ms=200)
+        monkeypatch.setattr(engine_mod, "_REQUEST_S", 0.6, raising=False)
+        scan({f"L{i:02d}": _rows(f"n{i:02d}_", 1) for i in range(20)}, delay=0.1)
+        started = time.monotonic()
+        page = await _search(_Provider(), softDeadlineMs=120_000)
+        assert time.monotonic() - started < 0.6
+        assert page.status == "running" and page.deadline_exceeded
+
+    async def test_the_lease_outlasts_the_last_units_budget(self, fresh_memory_store, budget):
+        """A request holds its session until the last unit it started has
+        spent its budget: past that, another request could take the unit on
+        and this one's commit would be refused, its work lost."""
+        settings = budget()
+        store, leases = fresh_memory_store, []
+        take = store.lease
+
+        async def lease(sid, ttl_ms):
+            leases.append(ttl_ms)
+            return await take(sid, ttl_ms)
+
+        store.lease = lease
+        session = Session("s1", "q", "1", None, 0, [Unit("range", "A", size=1)], [], 1)
+        await store.save(session, None, 60)
+
+        class _Work:
+            async def begin(self, store):
+                pass
+
+            async def unit(self, unit, timeout_s):
+                return 1
+
+            def fold(self, unit, result):
+                pass
+
+            def commit(self):
+                return {}
+
+        await engine_mod._advance(session, False, store, _Work(), time.monotonic() + 2,
+                                  settings, unit_s=30)
+        assert leases and leases[0] >= (2 + 30) * 1000
 
 
 class TestAncestorTally:

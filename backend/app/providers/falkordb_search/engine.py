@@ -9,8 +9,9 @@ search that returns hits:
    page before;
 3. run the units still pending, two at a time, each under its own fleet
    slot, until this request's wait is spent (``waitMs`` for a progressive
-   client, ``softDeadlineMs`` otherwise); a unit that runs out of time is
-   split in half and retried;
+   client, ``softDeadlineMs`` otherwise, cut to fit the request timeout); a
+   unit started runs to its end or to the end of its budget, and one that
+   runs out of time is split in half and retried;
 4. answer with the first rows found so far — already in their final order,
    because every unit returns its best rows and the merge keeps the best of
    all — hydrated into hits exactly as the capped engine hydrated its page.
@@ -96,9 +97,15 @@ logger = logging.getLogger(__name__)
 #: ``ancestor`` facet tallies it during the scan.)
 ENGINE_VERSION = "3"
 
-#: How long past its wait a request lets its in-flight units finish before
-#: giving them up (they are retried by the next request).
+#: Slack past the last unit's budget before a request stops waiting for it
+#: (the budget ends a unit first), and in the request's lease.
 _GRACE_S = 3.0
+
+#: The longest a request runs: inside the browser's 45 s and the 60 s timeout
+#: of ``/graph/`` routes. A unit a request starts is never given up for the
+#: request's sake — only by its own budget (``unit_budget``) — so the wait a
+#: request may spend starting units is cut to leave room for the last one's.
+_REQUEST_S = 40.0
 
 #: The least time a page's hits get to learn where they sit (their ancestor
 #: paths) — a progressive wait may have been spent on the scan by then.
@@ -115,8 +122,8 @@ async def execute_session_search(
     started = time.monotonic()
     options = query.options
     progressive = options.wait_ms is not None
-    budget_s = (options.wait_ms if progressive else options.soft_deadline_ms) / 1000.0
-    deadline = started + budget_s
+    wait_s = (options.wait_ms if progressive else options.soft_deadline_ms) / 1000.0
+    deadline = request_deadline(started, wait_s, unit_budget(settings))
     admit = context.admit
 
     async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
@@ -209,8 +216,9 @@ async def execute_count_session(
     settings = get_deep_search_settings()
     started = time.monotonic()
     options = query.options
-    deadline = started + (options.wait_ms if options.wait_ms is not None
-                          else options.soft_deadline_ms) / 1000.0
+    deadline = request_deadline(started, (options.wait_ms if options.wait_ms is not None
+                                          else options.soft_deadline_ms) / 1000.0,
+                                unit_budget(settings))
     admit = context.admit
 
     async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
@@ -323,20 +331,36 @@ class _SearchWork:
         return {"tallies": self.tally or None}
 
 
+def unit_budget(settings, passes: int = 1) -> float:
+    """How long one unit may run: ``passes`` statements' timeout (a unit that
+    reads in several passes gets more), within what a request can hold."""
+    return min(passes * settings.chunk_timeout_ms / 1000.0, _REQUEST_S - 2 * _GRACE_S)
+
+
+def request_deadline(started: float, wait_s: float, unit_s: float) -> float:
+    """When a request stops starting units: after the wait it asked for, cut
+    so that the last unit it starts still ends inside ``_REQUEST_S``."""
+    return started + max(0.0, min(wait_s, _REQUEST_S - unit_s - 2 * _GRACE_S))
+
+
 async def _advance(session: Session, created: bool, store: SessionStore, work,
-                   deadline: float, settings, ttl_s: Optional[int] = None) -> Session:
+                   deadline: float, settings, ttl_s: Optional[int] = None,
+                   unit_s: Optional[float] = None) -> Session:
     """This request's share of the scan: under the session's lease, run
-    what is pending until ``deadline`` — each unit by ``work`` — and commit
-    it; or, when another request holds the lease, answer with its next
-    commit."""
+    what is pending until ``deadline`` — each unit by ``work``, within
+    ``unit_s`` (``unit_budget``) — and commit it; or, when another request
+    holds the lease, answer with its next commit."""
     ttl_s = ttl_s or settings.session_ttl_seconds
+    unit_s = unit_s or unit_budget(settings)
     if session.status != RUNNING:
         if created:
             # Nothing to run (an empty scope): keep the answer all the same.
             await store.save(session, None, ttl_s)
         return session
     budget_s = max(0.0, deadline - time.monotonic())
-    lease_ms = int((budget_s + _GRACE_S + settings.chunk_timeout_ms / 1000.0) * 1000)
+    # Held until the last unit this request starts has spent its budget, and
+    # the commit after it.
+    lease_ms = int((budget_s + unit_s + 2 * _GRACE_S) * 1000)
     token = await store.lease(session.sid, lease_ms)
     if token is None:
         return await wait_for_commit(store, session.sid, session, deadline) or session
@@ -348,7 +372,7 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
         session.adopt(latest)
     await work.begin(store)
     try:
-        await _hop(session, work, deadline, settings)
+        await _hop(session, work, deadline, settings, unit_s)
     finally:
         if session.status == FAILED:
             await store.delete(session.sid)
@@ -428,28 +452,38 @@ def _containment(provider) -> Tuple[str, ...]:
 # The scan
 # ---------------------------------------------------------------------------
 
-async def _hop(session: Session, work, deadline: float, settings) -> None:
+async def _hop(session: Session, work, deadline: float, settings, unit_s: float) -> None:
     """Run pending units until ``deadline``, ``chunk_concurrency`` at a time,
-    each by ``work``, folding each into the session as it lands."""
+    each by ``work``, folding each into the session as it lands.
+
+    A unit started runs until it is done or has spent its budget
+    (``unit_s``) — never given up because the request's wait is over: put
+    back whole, it would be started again by the next request, and the next,
+    and a unit slower than a client's wait would never finish. Over budget it
+    is split, as a unit the graph timed out is."""
     timeout_s = settings.chunk_timeout_ms / 1000.0
     in_flight: Dict["asyncio.Task[Any]", Unit] = {}
     busy = False
-    started = 0
+    first_wave = True
+    last_start = 0.0
     try:
         while session.status == RUNNING:
-            # Past the deadline nothing new starts — except a request's first
-            # wave, so a client polling with no wait still moves the scan on.
+            # Past the deadline nothing new starts — except the request's
+            # first wave, so a client polling with no wait still moves the
+            # scan on. Only that first wave: a unit started later would run
+            # past the lease, which covers one unit's budget past the deadline.
             while (session.pending and not busy
                    and len(in_flight) < settings.chunk_concurrency
-                   and (time.monotonic() < deadline
-                        or started < settings.chunk_concurrency)):
+                   and (first_wave or time.monotonic() < deadline)):
                 unit = session.pending.pop(0)
-                task = asyncio.ensure_future(work.unit(unit, timeout_s))
+                task = asyncio.ensure_future(
+                    asyncio.wait_for(work.unit(unit, timeout_s), unit_s))
                 in_flight[task] = unit
-                started += 1
+                last_start = time.monotonic()
+            first_wave = False
             if not in_flight:
                 break
-            wait = max(0.0, deadline + _GRACE_S - time.monotonic())
+            wait = max(0.0, max(deadline, last_start + unit_s) + _GRACE_S - time.monotonic())
             done, _ = await asyncio.wait(in_flight, timeout=wait,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:

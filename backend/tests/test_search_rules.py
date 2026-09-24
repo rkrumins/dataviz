@@ -142,6 +142,25 @@ class TestService:
         assert {k: v.status for k, v in out.counts.items()} == {
             "x": "running", "y": "running", "z": "running"}
 
+    async def test_a_long_wait_moves_counts_on_for_a_few_seconds_at_most(self):
+        """A count's last unit may run its whole budget past the wait, so a
+        request moves counts on for a few seconds at most, however long it
+        asks to wait — and still ends inside the request timeout."""
+        waits = []
+
+        class _Counts:
+            async def deep_search_count(self, query, *, context, advance=True):
+                if advance:
+                    waits.append(query.options.wait_ms)
+                return {"count": 0, "status": "running", "sessionId": None,
+                        "progress": None}
+
+        request = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "waitMs": 60_000,
+            "items": [{"id": "x", "predicate": {"kind": "text", "value": "x"}}]})
+        await _service(_Counts()).counts(request)
+        assert waits and waits[0] <= 5_000
+
     async def test_a_rule_the_engine_cannot_count_says_why(self):
         from backend.app.services.deep_search import CompileError
 

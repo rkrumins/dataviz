@@ -416,11 +416,15 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
         _advance,
         _containment,
         _find,
+        request_deadline,
         session_id as session_id_of,
+        unit_budget,
     )
 
     settings = get_deep_search_settings()
-    deadline = time.monotonic() + wait_ms / 1000.0
+    # A unit reads in more than one pass: two statements' budget.
+    unit_s = unit_budget(settings, passes=2)
+    deadline = request_deadline(time.monotonic(), wait_ms / 1000.0, unit_s)
     store = store_for(provider)
     name = f"catalog:{context.scope_hash}"
 
@@ -466,7 +470,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
     )
     work = _CatalogWork(session, ctx, run, _skipped_keys())
     session = await _advance(session, created, store, work, deadline, settings,
-                             ttl_s=settings.catalog_ttl_seconds)
+                             ttl_s=settings.catalog_ttl_seconds, unit_s=unit_s)
     if session.status == FAILED:
         raise SearchFailed(f"catalog failed: {session.error}")
     if session.status == COMPLETE:

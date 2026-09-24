@@ -9,6 +9,8 @@ to a real graph (``tests/integration/test_search_engine_live.py``).
 """
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -27,7 +29,7 @@ from backend.app.providers.falkordb_search.catalog import (
 from backend.app.providers.falkordb_search.plan import Plan, Unit
 from backend.app.providers.falkordb_search.session import MemorySessionStore
 from backend.app.services.advanced_search_service import AdvancedSearchService
-from backend.app.services.deep_search import SearchRunContext
+from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
 from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.search import SearchCatalogRequest, SearchScope
 
@@ -294,6 +296,25 @@ class TestSessions:
         assert out["properties"][0]["key"] == "owner"     # most carried first
         assert out["tags"] == [{"tag": "pii", "count": 4}, {"tag": "gold", "count": 2}]
         assert out["tagged"] == 4
+
+    async def test_a_unit_has_two_statements_budget(self, monkeypatch):
+        """A unit reads in passes — its counts, a probe, then the values of
+        the keys the probe keeps — so it gets two statements' budget before
+        it is split."""
+        settings = dataclasses.replace(get_deep_search_settings(), chunk_timeout_ms=200)
+        monkeypatch.setattr(catalog_mod, "get_deep_search_settings", lambda: settings)
+        monkeypatch.setattr(catalog_mod, "make_plan", _plan(UNITS))
+        graph = _Graph(ENTITIES)
+        read = graph.run
+
+        async def slow(cypher, params, timeout_s):
+            await asyncio.sleep(0.1)
+            return await read(cypher, params, timeout_s)
+
+        graph.run = slow
+        out, _ = await _follow(_Provider(graph),
+                               SearchRunContext(data_version="1", scope_hash="h"))
+        assert out["entities"] == 10
 
     async def test_a_key_unique_per_entity_is_not_counted_value_by_value(self, monkeypatch):
         graph = _Graph({"T": [{"urn": f"t{i}", "id": f"id{i}", "tier": "gold"}

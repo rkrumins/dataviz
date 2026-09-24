@@ -77,6 +77,11 @@ from backend.common.search_semantics import SemanticsError, resolve_predicate
 
 logger = logging.getLogger(__name__)
 
+#: The longest a counts request moves its counts on, whatever wait it asks
+#: for: the last count's unit may run its whole budget past it, and the
+#: request must still end inside the request timeout.
+_COUNTS_WAIT_S = 5.0
+
 
 # Predicate-tree caps now live in DeepSearchSettings (env-overridable).
 # These module-level names are kept as a back-compat surface for tests
@@ -586,7 +591,7 @@ class AdvancedSearchService:
                 item.id: SearchRuleCount(count=0, status="complete") for item in request.items})
         op = self._provider_op("deep_search_count")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
-        deadline = started + request.wait_ms / 1000.0
+        deadline = started + min(request.wait_ms / 1000.0, _COUNTS_WAIT_S)
 
         def query_of(item: SearchRuleItem, wait_ms: int, session: Optional[str]) -> SearchQuery:
             return SearchQuery(predicate=item.predicate, scope=scope,

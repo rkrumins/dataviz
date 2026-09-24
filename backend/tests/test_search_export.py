@@ -12,7 +12,9 @@ through a signed, personal, expiring link.
 """
 from __future__ import annotations
 
+import asyncio
 import csv
+import dataclasses
 import io
 import json
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from backend.app.api.v1.endpoints import graph as graph_mod
+from backend.app.providers.falkordb_search import engine as engine_mod
 from backend.app.providers.falkordb_search import export as export_mod
 from backend.app.providers.falkordb_search.export import (
     Manifest,
@@ -254,6 +257,47 @@ class TestSessions:
         assert all(objects.blobs[k] == v for k, v in written.items())
         _, after = await _download(provider, objects, out["sessionId"])
         assert after == before
+
+    async def test_a_unit_slower_than_the_wait_is_written_once(self, monkeypatch):
+        """The dialog follows an export with 2 s waits. A unit that takes
+        longer finishes in the request that started it — given up at the
+        wait, every request would start it again and none would finish."""
+        monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
+        monkeypatch.setattr(engine_mod, "_GRACE_S", 0.05)
+        graph = _Graph(NODES)
+        read = graph.run
+
+        async def slow(cypher, params, timeout_s):
+            if "RETURN ID(n)" in cypher:
+                await asyncio.sleep(0.2)
+            return await read(cypher, params, timeout_s)
+
+        graph.run = slow
+        objects, provider = _Objects(), _Provider(graph)
+        out, _ = await _follow(provider, objects)
+        assert out["rows"] == 10
+        assert len(objects.blobs) == len(UNITS), "each unit written once"
+
+    async def test_a_unit_has_two_statements_budget(self, monkeypatch):
+        """A unit reads, encodes and writes — a walk a page at a time — so it
+        gets two statements' budget. A walk under one root can't be split:
+        with one statement's, this one would fail the export."""
+        from backend.app.services.deep_search import get_deep_search_settings
+        settings = dataclasses.replace(get_deep_search_settings(), chunk_timeout_ms=200)
+        monkeypatch.setattr(export_mod, "get_deep_search_settings", lambda: settings)
+        monkeypatch.setattr(export_mod, "make_plan",
+                            _plan([Unit("walk", None, roots=[1], size=6)]))
+        graph = _Graph(NODES)
+
+        async def run(cypher, params, timeout_s):
+            if "$_after" in cypher:
+                await asyncio.sleep(0.3)
+            return await _Graph.run(graph, cypher.replace("MATCH (_w)", "MATCH (n:`Dataset`)"),
+                                    params, timeout_s)
+
+        graph.run = run
+        out, _ = await _follow(_Provider(graph), _Objects())
+        assert out["rows"] == 6
 
     async def test_a_walk_is_written_a_page_at_a_time(self, monkeypatch):
         monkeypatch.setattr(export_mod, "make_plan",

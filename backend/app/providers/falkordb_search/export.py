@@ -273,13 +273,18 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         _compiler_for,
         _containment,
         _find,
+        request_deadline,
         session_id as session_id_of,
+        unit_budget,
         within_hops,
     )
     from backend.app.services.storage.object_store import get_object_store
 
     settings = get_deep_search_settings()
-    deadline = time.monotonic() + wait_ms / 1000.0
+    # A unit reads, encodes and writes — a walk a page at a time: two
+    # statements' budget.
+    unit_s = unit_budget(settings, passes=2)
+    deadline = request_deadline(time.monotonic(), wait_ms / 1000.0, unit_s)
     store = store_for(provider)
     objects = objects or get_object_store()
     admit = context.admit
@@ -325,7 +330,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
                     or Manifest(fmt, cols, f"{_ROOT}/unknown/{session.sid}"))
     work = _ExportWork(session, ctx, run, objects, manifest)
     session = await _advance(session, created, store, work, deadline, settings,
-                             ttl_s=settings.export_ttl_seconds)
+                             ttl_s=settings.export_ttl_seconds, unit_s=unit_s)
     if created and session.status == COMPLETE and not work.manifest.parts:
         # Nothing to scan (an empty scope): the manifest is all there is.
         await store.save(session, None, settings.export_ttl_seconds,
