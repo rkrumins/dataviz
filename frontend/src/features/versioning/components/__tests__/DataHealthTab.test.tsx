@@ -50,11 +50,27 @@ beforeEach(() => {
 })
 
 describe('DataHealthTab', () => {
-  it('shows the in-sync hero and both version numbers for a fresh watermark', () => {
+  it('shows the in-sync hero, saved in the system of record and in sync in the graph', () => {
     watermark = { committed: 12, projected: 12, fresh: true, status: 'idle' }
     renderTab()
     expect(screen.getByText('Everything is in sync')).toBeInTheDocument()
-    expect(screen.getAllByText('#12')).toHaveLength(2)
+    expect(screen.getByText('Saved · published version #12')).toBeInTheDocument()
+    expect(screen.getByText('In sync · version #12')).toBeInTheDocument()
+  })
+
+  it('says how far the graph is behind the system of record, and when it is catching up or failed', () => {
+    watermark = { committed: 15, projected: 12, fresh: false, status: 'idle' }
+    const { unmount } = renderTab()
+    expect(screen.getByText('Saved · published version #15')).toBeInTheDocument()
+    expect(screen.getByText('3 versions behind')).toBeInTheDocument()
+    unmount()
+    watermark = { committed: 13, projected: 12, fresh: false, status: 'projecting' }
+    const second = renderTab()
+    expect(screen.getByText('Catching up · 1 version behind')).toBeInTheDocument()
+    second.unmount()
+    watermark = { committed: 13, projected: 12, fresh: false, status: 'idle', lastError: 'boom' }
+    renderTab()
+    expect(screen.getByText('Out of sync · 1 version behind')).toBeInTheDocument()
   })
 
   it('surfaces a recorded failure as "Attention needed" with the reason behind a disclosure', () => {

@@ -1,8 +1,10 @@
 /**
  * DataHealthTab — the manager-only "Data health" surface in the versioning slide-over.
  *
- * Business-plain throughout: the source of truth (Postgres) and the fast read layer (FalkorDB)
- * are never named by their technology outside the "Technical details" disclosures. Three calm
+ * Business-plain throughout. The one place the two stores are named is the hero's sync rows —
+ * "System of record" (Postgres, where every published change is saved first) and "Graph"
+ * (FalkorDB, the fast read layer projected from it) — because "is it saved, and has the graph
+ * caught up?" is the question after every publish. Three calm
  * cards: (1) a status hero deriving ONE plain-language state from the full watermark (in sync /
  * catching up / rebuilding with live progress / attention needed with the recorded reason),
  * (2) an on-demand sync check with a drift breakdown, and (3) a confirmed rebuild that always
@@ -47,6 +49,61 @@ function heroState(wm: Watermark | undefined): HeroState {
   if (wm.status === 'projecting') return 'catchingUp'
   if (wm.fresh) return 'inSync'
   return wm.lastError ? 'failed' : 'behind'
+}
+
+/**
+ * After a publish, two questions: is it SAVED (the system of record takes the commit before the
+ * publish returns, so a published version is always there), and has the GRAPH caught up to it
+ * (the fast read layer is projected afterwards — in sync, catching up, N versions behind, or its
+ * last refresh failed). One row each, same shape, so they read as a pair.
+ */
+function SyncRows({ wm, state, progressPct }: { wm: Watermark | undefined; state: HeroState; progressPct: number | null }) {
+  const committed = wm?.committed ?? 0
+  const behind = wm ? Math.max(0, wm.committed - wm.projected) : 0
+  const versions = (n: number) => plural(n, 'version', 'versions')
+  const graph: { tone: 'ok' | 'busy' | 'warn' | 'bad' | 'idle'; text: string } =
+    state === 'loading' ? { tone: 'idle', text: 'Checking…' }
+    : state === 'inSync' ? { tone: 'ok', text: committed > 0 ? `In sync · version #${wm!.projected}` : 'In sync' }
+    : state === 'catchingUp' ? { tone: 'busy', text: behind > 0 ? `Catching up · ${versions(behind)} behind` : 'Catching up…' }
+    : state === 'rebuilding' ? { tone: 'busy', text: progressPct !== null ? `Rebuilding · ${progressPct}%` : 'Rebuilding…' }
+    : state === 'behind' ? { tone: 'warn', text: `${versions(behind)} behind` }
+    : { tone: 'bad', text: behind > 0 ? `Out of sync · ${versions(behind)} behind` : 'Out of sync' }
+  const updated = wm?.lastProjectedAt && state === 'inSync' ? ` · updated ${relativeTime(wm.lastProjectedAt)}` : ''
+  return (
+    <dl className="mt-3 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-[12px]" aria-label="Sync status">
+      <SyncRow
+        label="System of record"
+        tech="Postgres"
+        tone={wm ? (committed > 0 ? 'ok' : 'idle') : 'idle'}
+        text={!wm ? 'Checking…' : committed > 0 ? `Saved · published version #${committed}` : 'Nothing published yet'}
+      />
+      <SyncRow label="Graph" tech="FalkorDB" tone={graph.tone} text={graph.text + updated} />
+    </dl>
+  )
+}
+
+function SyncRow({ label, tech, tone, text }: {
+  label: string; tech: string; tone: 'ok' | 'busy' | 'warn' | 'bad' | 'idle'; text: string
+}) {
+  return (
+    <>
+      <dt className="text-ink-muted whitespace-nowrap">
+        {label} <span className="text-[10.5px] text-ink-muted/60">{tech}</span>
+      </dt>
+      <dd className={cn(
+        'flex items-center gap-1.5 min-w-0 font-medium',
+        tone === 'ok' && 'text-emerald-700 dark:text-emerald-400',
+        tone === 'warn' && 'text-amber-700 dark:text-amber-400',
+        tone === 'bad' && 'text-red-600 dark:text-red-400',
+        (tone === 'busy' || tone === 'idle') && 'text-ink-muted',
+      )}>
+        {tone === 'ok' && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden />}
+        {(tone === 'warn' || tone === 'bad') && <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden />}
+        {tone === 'busy' && <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" aria-hidden />}
+        <span className="truncate">{text}</span>
+      </dd>
+    </>
+  )
 }
 
 export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string }) {
@@ -222,11 +279,7 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
               <ProgressBar value={progressPct} label="Rebuilding the fast read layer" className="mt-2.5" />
             )}
 
-            <p className="mt-2 text-[11px] text-ink-muted/70">
-              Published version <span className="font-semibold text-ink-muted">#{wm?.committed ?? '—'}</span>
-              {' · '}
-              Fast read layer at <span className="font-semibold text-ink-muted">#{wm?.projected ?? '—'}</span>
-            </p>
+            <SyncRows wm={wm} state={state} progressPct={progressPct} />
 
             {state === 'failed' && (
               <>

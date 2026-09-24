@@ -101,6 +101,9 @@ export interface ComprehensionToolsProps {
   isDraft: boolean
 }
 
+/** Trace and the Focus Lens walk the published graph, drafts included (see ContextViewCanvas). */
+const DRAFT_WALK_NOTE = 'Shows the published graph. New items and links in this draft appear once it’s published.'
+
 export function ComprehensionTools({
   showLineageFlow,
   onToggleLineageFlow,
@@ -266,7 +269,7 @@ export function ComprehensionTools({
           label={lensAllowed
             ? 'Walk this entity’s connections one hop at a time'
             : 'Select a single entity to focus its connections'}
-          detail={lensAllowed ? 'Opens the Lineage Lens over the canvas' : undefined}
+          detail={lensAllowed ? (isDraft ? DRAFT_WALK_NOTE : 'Opens the Lineage Lens over the canvas') : undefined}
         >
         <button
           onClick={lensAllowed ? onOpenLens : undefined}
@@ -340,6 +343,7 @@ export function ComprehensionTools({
                   ? 'Pick up a trace you ran earlier in this view'
                   : 'Select an entity to trace its lineage'
             }
+            detail={canTrace && isDraft ? DRAFT_WALK_NOTE : undefined}
           >
           <button
             data-tour="canvas-trace"

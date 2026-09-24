@@ -5,7 +5,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { ResolutionMap, StageOp } from '@/services/versioningApiService'
+import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
@@ -112,6 +112,29 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
   })
 }
 
+/** When main last advanced here (publish / merge / rollback), per graph. Right after that the
+ *  projection has not started yet — the watermark reads idle-and-behind for a moment — and the
+ *  status-gated poll below would stop on exactly that reading and never see it catch up. So for a
+ *  short window after main moves, behind-and-idle keeps polling too. */
+const mainAdvancedAt = new Map<string, number>()
+const CATCH_UP_WINDOW_MS = 60_000
+function expectCatchUp(wsId?: string, graphId?: string | null) {
+  if (wsId && graphId) mainAdvancedAt.set(`${wsId}:${graphId}`, Date.now())
+}
+
+/** How often to re-read the watermark (false = stop): while forced; while catching up or
+ *  rebuilding; and, for a short window after main advanced, while merely behind — until the
+ *  projection has had its chance to start. A recorded failure ends that window early. */
+export function watermarkPollInterval(
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
+): number | false {
+  if (force) return 3_000
+  if (!d || d.fresh !== false) return false
+  const active = d.status === 'projecting' || d.status === 'rebuilding'
+  const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
+  return active || (justAdvanced && !d.lastError) ? 3_000 : false
+}
+
 /** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
  *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
  *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
@@ -127,12 +150,7 @@ export function useProjectionWatermark(
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => {
-      if (force) return 3_000
-      const d = q.state.data
-      const active = d?.status === 'projecting' || d?.status === 'rebuilding'
-      return d && d.fresh === false && active ? 3_000 : false
-    },
+    refetchInterval: (q) => watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now()),
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })
@@ -520,6 +538,7 @@ export function usePublishBranch(wsId: string, graphId: string) {
       invalidatePrScopes(qc, wsId, graphId)
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
       // the FalkorDB cache catches up, and force live graph reads to refetch.
+      expectCatchUp(wsId, graphId)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
       bumpMainEpoch()
       // Rollups changed with main. Refetch now, and once more after the post-commit
@@ -543,6 +562,7 @@ function invalidateAfterMainAdvance(
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'restorePreview'] })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+  expectCatchUp(wsId, graphId)
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
   bumpMainEpoch()
   invalidateAggregatedEdges()
@@ -681,6 +701,7 @@ export function useMergeMergeRequest(wsId: string) {
       // no other draft showed as behind for up to five minutes: they looked mergeable and then 409'd.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
+      expectCatchUp(wsId, v.graphId)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved
       // Rollups changed with main (see usePublishBranch): refetch now + after the projection nudge.

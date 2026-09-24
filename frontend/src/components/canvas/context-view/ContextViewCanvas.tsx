@@ -269,7 +269,7 @@ import {
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
@@ -2831,6 +2831,15 @@ export function ContextViewCanvas({
   const layerNameOf = useCallback((layout: NormalizedReferenceLayout, layerId: string) =>
     layout.layers.find((l) => l.id === layerId)?.name ?? 'layer', [])
 
+  // A group operation that would put two same-named groups side by side is refused (the shared ops
+  // return their input); say which name, and where, so the user knows what to rename.
+  const refuseNameClash = useCallback((layout: NormalizedReferenceLayout, layerId: string, parentId: string | null, name: string) => {
+    const where = parentId
+      ? `in “${layerOps.listGroups(layout.layers, layerId).find(g => g.id === parentId)?.path ?? 'that group'}”`
+      : `at the top of ${layerNameOf(layout, layerId)}`
+    notifyLayoutSave('error', `There's already a group called “${name.trim()}” ${where}. Rename one of them first.`)
+  }, [layerNameOf, notifyLayoutSave])
+
   // Open a group and every group above it, so what just landed in it is on screen.
   const revealGroup = useCallback((layers: NormalizedReferenceLayout['layers'], layerId: string, groupId: string) => {
     const chain: string[] = []
@@ -2849,19 +2858,25 @@ export function ContextViewCanvas({
     const before = currentLayout()
     const id = `grp-${Date.now().toString(36)}`
     const after = { ...before, layers: layerOps.addGroup(before.layers, layerId, { id, name: trimmed, type: 'group' }, parentGroupId) }
+    if (after.layers === before.layers) { refuseNameClash(before, layerId, parentGroupId ?? null, trimmed); return }
     persistReferenceLayout(after)
     if (parentGroupId) revealGroup(after.layers, layerId, parentGroupId)
     stageLayerChange(`group:${id}`, before, after, 'add', `Added group “${trimmed}” in ${layerNameOf(before, layerId)}`)
-  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup])
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup, refuseNameClash])
 
   const renameGroupInLayer = useCallback((layerId: string, groupId: string, name: string) => {
     const trimmed = name.trim()
     const before = currentLayout()
     const after = { ...before, layers: layerOps.renameGroup(before.layers, layerId, groupId, trimmed) }
-    if (!trimmed || JSON.stringify(after.layers) === JSON.stringify(before.layers)) return
+    if (!trimmed) return
+    if (after.layers === before.layers) {
+      refuseNameClash(before, layerId, layerOps.parentGroupOf(before.layers, layerId, groupId) ?? null, trimmed)
+      return
+    }
+    if (JSON.stringify(after.layers) === JSON.stringify(before.layers)) return
     persistReferenceLayout(after)
     stageLayerChange(`group:${groupId}`, before, after, 'rename', `Renamed group to “${trimmed}”`)
-  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, refuseNameClash])
 
   const deleteGroupInLayer = useCallback((layerId: string, groupId: string, groupName: string) => {
     const before = currentLayout()
@@ -2879,7 +2894,13 @@ export function ContextViewCanvas({
   const moveGroupInLayer = useCallback((fromLayerId: string, groupId: string, toLayerId: string, newParentId: string | null) => {
     const before = currentLayout()
     const after = layerOps.moveGroupToLayer(before, fromLayerId, groupId, toLayerId, newParentId)
-    if (after === before) return
+    if (after === before) {
+      const moving = layerOps.listGroups(before.layers, fromLayerId).find(g => g.id === groupId)
+      if (moving && layerOps.groupNameClash(before.layers, toLayerId, newParentId, [moving.name], [groupId])) {
+        refuseNameClash(before, toLayerId, newParentId, moving.name)
+      }
+      return
+    }
     // A member dragged to a column earlier in this session carries that column in the session
     // record, which outranks the layout — it would stay behind. The layout is the truth now.
     for (const [urn, entry] of Object.entries(after.assignments)) {
@@ -2893,7 +2914,20 @@ export function ContextViewCanvas({
       : across ? `to ${layerNameOf(before, toLayerId)}` : `to the top of ${layerNameOf(before, toLayerId)}`
     persistReferenceLayout(after)
     stageLayerChange(`group:${groupId}`, before, after, 'move', `Moved group “${name}” ${target}`)
-  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup])
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup, refuseNameClash])
+
+  // Review & Save words a placement from where its group is NOW: the group may have been renamed,
+  // or moved (with its members) to another layer, since the placement was staged.
+  const describeStagedChange = useCallback((c: StagedChange): string | undefined => {
+    if (c.type !== 'assign_layer') return undefined
+    const after = c.after as { logicalNodeId?: string; entityName?: string } | undefined
+    if (!after?.logicalNodeId || !after.entityName) return undefined
+    for (const l of sortedLayers) {
+      const g = layerOps.listGroups([l], l.id).find(x => x.id === after.logicalNodeId)
+      if (g) return `Place '${after.entityName}' in group “${g.path}” (${l.name})`
+    }
+    return undefined
+  }, [sortedLayers])
 
   // Where a group can move: every layer, with the groups in it.
   const groupDestinations = useMemo(() => sortedLayers.map((l) => ({
@@ -2903,6 +2937,8 @@ export function ContextViewCanvas({
   // Move everything in one group (its entities and sub-groups) into another; the emptied group stays.
   const moveGroupContentsInLayer = useCallback((layerId: string, fromId: string, toId: string) => {
     const before = currentLayout()
+    const clash = layerOps.groupNameClash(before.layers, layerId, toId, layerOps.childGroupNames(before.layers, layerId, fromId))
+    if (clash) { refuseNameClash(before, layerId, toId, clash); return }
     const layers = layerOps.moveGroupContents(before.layers, layerId, fromId, toId)
     const after = assignmentOps.reassignGroupMembers({ ...before, layers }, [fromId], toId)
     if (after.layers === before.layers && after.assignments === before.assignments) return
@@ -2910,19 +2946,21 @@ export function ContextViewCanvas({
     persistReferenceLayout(after)
     stageLayerChange(`group:${fromId}`, before, after, 'move',
       `Moved the contents of “${names.find(g => g.id === fromId)?.name}” into “${names.find(g => g.id === toId)?.path}”`)
-  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, refuseNameClash])
 
   // Ungroup (dismantle): the group goes; its sub-groups and entities move up one level — into its
   // parent group, or back to the layer.
   const ungroupInLayer = useCallback((layerId: string, groupId: string, groupName: string) => {
     const before = currentLayout()
     const parent = layerOps.parentGroupOf(before.layers, layerId, groupId) ?? null
+    const clash = layerOps.groupNameClash(before.layers, layerId, parent, layerOps.childGroupNames(before.layers, layerId, groupId), [groupId])
+    if (clash) { refuseNameClash(before, layerId, parent, clash); return }
     const after = assignmentOps.reassignGroupMembers(
       { ...before, layers: layerOps.ungroup(before.layers, layerId, groupId) }, [groupId], parent)
     persistReferenceLayout(after)
     const where = parent ? `“${layerOps.listGroups(before.layers, layerId).find(g => g.id === parent)?.name}”` : layerNameOf(before, layerId)
     stageLayerChange(`group:${groupId}`, before, after, 'delete', `Ungrouped “${groupName}” — its contents moved up to ${where}`)
-  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf])
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, refuseNameClash])
 
   // Drop an entity onto a group: PLACE it there (view only; its place in the data is unchanged).
   const placeInGroup = useCallback((entityId: string, layerId: string, groupId: string, groupName: string) => {
@@ -2942,7 +2980,7 @@ export function ContextViewCanvas({
         targetId: key,
         targetUrn: key,
         before: { layerId: before.assignments[key]?.layerId },
-        after: { layerId, logicalNodeId: groupId },
+        after: { layerId, logicalNodeId: groupId, entityName: name },
         summary: `Place '${name}' in group “${groupName}” (${layerNameOf(before, layerId)})`,
         discard: () => persistReferenceLayout(before),
         reapply: () => persistReferenceLayout(after),
@@ -4841,6 +4879,18 @@ export function ContextViewCanvas({
     [lensMembers, lensFocal],
   )
   const lensWalk = useLensWalk(lensSeeds, provider, lensInitialDepth, lensFullWalk)
+  // Trace and the Focus Lens walk the PUBLISHED graph, even in a draft: the server applies this
+  // draft's saved deletions to the result, but it cannot walk links that only the draft has, so new
+  // entities and new links (and anything reached only through them) are missing until the draft is
+  // published — and unsaved edits never reach the server at all. Said once per draft, when a walk
+  // first opens there, so a missing new entity doesn't read as lost data.
+  const walkScopeNotedRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!effectiveBranchId || !(traceActive || lensFocal)) return
+    if (walkScopeNotedRef.current.has(effectiveBranchId)) return
+    walkScopeNotedRef.current.add(effectiveBranchId)
+    notify('info', `${traceActive ? 'Trace' : 'The Focus Lens'} shows the published graph. New items and links in this draft appear here once it's published.`)
+  }, [effectiveBranchId, traceActive, lensFocal, notify])
   // The rest of a restored exploration — applied once, inside the lens,
   // to the same focal the depth override above targets.
   const lensWalkSeed = useMemo<LensWalkSeed | null>(() => {
@@ -5575,7 +5625,7 @@ export function ContextViewCanvas({
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
              or the pending-changes badge. Single source of truth for reviewing
              and confirming a batch of staged edits before they hit the backend. */}
-        <StagedChangesPanel onConfirm={async () => {
+        <StagedChangesPanel describe={describeStagedChange} onConfirm={async () => {
           if (!scopeWsId) return
           // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
           // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
