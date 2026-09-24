@@ -32,11 +32,11 @@ is renumbered 0..n-1 on the final list. A final referential-integrity pass
 drops any surviving assignment whose ``layerId`` is no longer a merged layer.
 
 ``merge_scope_3way`` (scalar ``entityScope``), ``merge_display_rules_3way``
-(the opaque, ordered ``displayRules`` array) and ``merge_default_sort_3way``
-(the scalar ``defaultNodeSortMode``) apply the same draft-wins rule to
-the referenceLayout's non-keyed side-fields and are kept separate so callers
-compose them with ``merge_layout_3way`` — which, merging only the keyed
-``layers``/``assignments`` collections, would otherwise drop them.
+(the ``displayRules`` list, keyed by rule id as layers are) and
+``merge_default_sort_3way`` (the scalar ``defaultNodeSortMode``) apply the
+same draft-wins rule to the referenceLayout's side-fields and are kept
+separate so callers compose them with ``merge_layout_3way`` — which, merging
+only the ``layers``/``assignments`` collections, would otherwise drop them.
 
 Because layers and assignments merge as WHOLE values per key, the node-ordering
 fields riding on them — ``layer.nodeSortMode`` and ``assignment.orderKey`` —
@@ -119,13 +119,13 @@ def _layers_by_id(layers: list) -> dict:
     return out
 
 
-def _merge_layers(f_layers: list, p_layers: list, d_layers: list) -> list:
-    """3-way merge the layer set (keyed by id), then order the survivors by the
-    draft's array order, appending published-only layers, and renumber
-    ``order`` 0..n-1."""
-    f_by_id = _layers_by_id(f_layers)
-    p_by_id = _layers_by_id(p_layers)
-    d_by_id = _layers_by_id(d_layers)
+def _merge_keyed(f_items: list, p_items: list, d_items: list) -> list:
+    """3-way merge a list of entries keyed by id — each id by ``_pick`` — and
+    order the survivors by the draft's array order, appending published-only
+    entries."""
+    f_by_id = _layers_by_id(f_items)
+    p_by_id = _layers_by_id(p_items)
+    d_by_id = _layers_by_id(d_items)
 
     merged: dict = {}
     for lid in set(f_by_id) | set(p_by_id) | set(d_by_id):
@@ -145,14 +145,21 @@ def _merge_layers(f_layers: list, p_layers: list, d_layers: list) -> list:
                 ordered.append(merged[lid])
                 emitted.add(lid)
 
-    _emit_in_order(d_layers)  # draft array order first
-    _emit_in_order(p_layers)  # then published-only survivors, appended
+    _emit_in_order(d_items)  # draft array order first
+    _emit_in_order(p_items)  # then published-only survivors, appended
     # Safety net: any survivor unreachable via draft/published order (should be
     # empty for canonical inputs) — sorted for determinism.
     for lid in sorted((k for k in merged if k not in emitted), key=repr):
         ordered.append(merged[lid])
         emitted.add(lid)
+    return ordered
 
+
+def _merge_layers(f_layers: list, p_layers: list, d_layers: list) -> list:
+    """3-way merge the layer set (keyed by id), then order the survivors by the
+    draft's array order, appending published-only layers, and renumber
+    ``order`` 0..n-1."""
+    ordered = _merge_keyed(f_layers, p_layers, d_layers)
     for index, layer in enumerate(ordered):
         if isinstance(layer, dict):
             layer["order"] = index
@@ -260,19 +267,31 @@ def merge_default_sort_3way(fork_base: dict, published: dict, draft: dict) -> st
     return p
 
 
+def _keyed_rules(rules: list | None) -> bool:
+    return all(isinstance(r, dict) and r.get("id") is not None for r in rules or [])
+
+
 def merge_display_rules_3way(fork_base: dict, published: dict, draft: dict) -> list | None:
-    """3-way merge a ``referenceLayout``'s ``displayRules`` — an opaque, ordered
-    array of rule objects treated as ONE value — with the same draft-wins rule
-    as ``merge_scope_3way``: the draft's array when the draft changed it vs the
-    fork-point base, else the (possibly since-fork moved) published array.
+    """3-way merge a ``referenceLayout``'s ``displayRules``, keyed by rule id
+    as layers are: each rule is the draft's when the draft added, edited or
+    removed it since the fork, else published's — so a rule published added
+    or edited since the fork survives a draft that edited a different one.
+    Rules keep the draft's order; rules only published has are appended. A
+    rule without an id can't be told apart from its edits, so when any side
+    has one the array merges as one value, draft-wins as ``merge_scope_3way``.
 
     Kept separate from ``merge_layout_3way`` (which returns only the merged
     ``layers``/``assignments``) so the caller re-attaches the result and the
-    promote never wipes displayRules. Returns the winning array, or ``None`` when
+    promote never wipes displayRules. Returns the merged array, or ``None`` when
     it resolves to absent (the caller then writes no ``displayRules`` key)."""
     f = _display_rules_of(fork_base)
     p = _display_rules_of(published)
     d = _display_rules_of(draft)
-    if d != f:
+    if d == f:
+        return p
+    if not (_keyed_rules(f) and _keyed_rules(p) and _keyed_rules(d)):
         return d
-    return p
+    merged = _merge_keyed(f or [], p or [], d or [])
+    if not merged and d is None:
+        return None
+    return merged

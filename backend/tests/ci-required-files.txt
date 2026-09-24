@@ -65,6 +65,7 @@ tests/test_insights_asset_endpoints.py
 tests/test_job_list_overlay.py
 tests/test_job_reaping.py
 tests/test_label_cache_warmup.py
+tests/test_layout_promote.py
 tests/test_loadtest_manifests.py
 tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
@@ -100,3 +101,4 @@ tests/test_typed_compiler.py
 tests/test_typed_patch_merge.py
 tests/test_versioning_read_only_queries.py
 tests/test_view_layout_rules_preserved.py
+tests/test_view_library.py
