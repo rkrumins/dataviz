@@ -45,6 +45,9 @@ export interface SelectionBarProps {
   /** Link the selection to other entities in one go. Only in a draft being
    *  edited — absent, the action is not offered. */
   onLink?: () => void
+  /** Start a subset view from the selection (the Subset Studio, seeded with
+   *  it). Absent where subsets are not offered. */
+  onSaveAsSubset?: () => void
 }
 
 export function SelectionBar({
@@ -55,6 +58,7 @@ export function SelectionBar({
   onTrace,
   onOpenLens,
   onLink,
+  onSaveAsSubset,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
@@ -161,6 +165,22 @@ export function SelectionBar({
               >
                 <LucideIcons.Link2 className="w-3.5 h-3.5" strokeWidth={2.2} />
                 Link…
+              </button>
+            )}
+            {onSaveAsSubset && (
+              <button
+                type="button"
+                onClick={onSaveAsSubset}
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                  'hover:border-accent-explore/50 hover:text-accent-explore',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-explore/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.ScissorsLineDashed className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Keep as a subset…
               </button>
             )}
             <button

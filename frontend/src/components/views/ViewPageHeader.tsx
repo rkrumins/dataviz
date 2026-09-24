@@ -85,6 +85,10 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ViewReviewsButton } from '@/features/versioning/components/ViewReviewsButton'
 import { ViewPrIndicator } from '@/features/versioning/components/ViewPrIndicator'
+import { SubsetEntryButton } from '@/features/view-subset/components/SubsetEntryButton'
+import { SubsetProvenance } from '@/features/view-subset/components/SubsetProvenance'
+import { SubsetFamily } from '@/features/view-subset/components/SubsetFamily'
+import { useFeature } from '@/store/features'
 import { useViewPrCounts } from '@/features/versioning/hooks/useVersioning'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -246,6 +250,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     const { data: prCounts } = useViewPrCounts(view?.workspaceId, view?.id)
     const hasOpenReviews = ((prCounts?.fromView ?? 0) + (prCounts?.onDataSource ?? 0)) > 0
     const actionButtonClass = hasOpenReviews ? ACTION_BUTTON : ACTION_BUTTON_ROOMY
+    const subsetsEnabled = useFeature('viewSubsetsEnabled')
 
     if (!view) return null
 
@@ -458,6 +463,19 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             </span>
                         </HoverTip>
 
+                        {/* Where a subset came from — named only for a reader
+                            who can open it (the server withholds it otherwise). */}
+                        {view.derivedFrom && (
+                            <>
+                                <Dot />
+                                <SubsetProvenance
+                                    derivedFrom={view.derivedFrom}
+                                    itemClassName={IDENTITY_ITEM}
+                                    linkClassName={IDENTITY_LINK}
+                                />
+                            </>
+                        )}
+
                         {/* How much of the model this view shows — next to the
                             KIND of view, which is the fact it qualifies. */}
                         {entityTypeCount > 0 && (
@@ -630,6 +648,14 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         </button>
                     </HoverTip>
 
+                    {subsetsEnabled && access?.canCreateSubset && view.viewType === 'reference' && (
+                        <SubsetEntryButton
+                            viewId={view.id}
+                            maxHops={view.config?.content?.connectivity?.maxHops}
+                            className={actionButtonClass}
+                        />
+                    )}
+
                     {/* Came up from CanvasVersioningBar, which held it and the
                         branch switcher and nothing else. A read-only session
                         gets no versioning chrome at all (CanvasRouter mounts
@@ -755,7 +781,10 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             className="p-5"
                         >
                             {details === 'about' || !canEditDetails ? (
-                                <ViewBuiltOn view={view} />
+                                <>
+                                    <ViewBuiltOn view={view} />
+                                    {subsetsEnabled && <SubsetFamily view={view} />}
+                                </>
                             ) : (
                                 <EditDetailsPanel
                                     view={view}

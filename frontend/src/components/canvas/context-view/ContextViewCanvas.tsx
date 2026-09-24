@@ -47,7 +47,7 @@ import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
-import type { TraceV2Result } from '@/providers/GraphDataProvider'
+import { sortLayerRules, type GraphNode, type TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
@@ -121,6 +121,18 @@ import { useLineageBridges } from '@/features/view-subset/hooks/useLineageBridge
 import { BridgePathPopover, type BridgePathTarget } from '@/features/view-subset/components/BridgePathPopover'
 import { DEFAULT_MAX_HOPS } from '@/features/view-subset/model/limits'
 import type { VirtualHopsSummary } from '@/features/view-subset/model/virtualHops'
+import { useSubsetCanvas } from '@/features/view-subset/canvas/useSubsetCanvas'
+import { SubsetMarks } from '@/features/view-subset/canvas/SubsetMarks'
+import { SubsetStudioPanel } from '@/features/view-subset/components/SubsetStudioPanel'
+import { SubsetCreateWizard } from '@/features/view-subset/components/SubsetCreateWizard'
+import { useSubsetDeepLink } from '@/features/view-subset/hooks/useSubsetDeepLink'
+import { GrowReviewSheet } from '@/features/view-subset/components/studio/GrowReviewSheet'
+import { useSubsetGrow, type SourceMember } from '@/features/view-subset/hooks/useSubsetGrow'
+import { useSubsetStudioStore, type SubsetPick } from '@/features/view-subset/model/studioStore'
+import { GROW_REVIEW_ABOVE } from '@/features/view-subset/model/limits'
+import type { GrowDepth, GrowDirection } from '@/features/view-subset/model/grow'
+import { placeOutside } from '@/features/view-subset/model/placement'
+import type { BridgeStep } from '@/features/view-subset/model/bridgePath'
 import { useHighlightState } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
@@ -176,6 +188,7 @@ const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
 /** "Nothing hidden" for the edge projection while the OVERLAY draws: a
  *  trace's hidden types are its own, ephemeral set — never browse's. */
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set<string>()
+const EMPTY_PICK_MARKS: ReadonlyMap<string, SubsetPick> = new Map()
 
 /**
  * ONE ontology lookup for the Flows panel's rows, the overlay's colour
@@ -1874,7 +1887,7 @@ export function ContextViewCanvas({
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes } = useLayerAssignment({
+  const { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -1882,6 +1895,14 @@ export function ContextViewCanvas({
     entityScope: activeEntityScope,
     defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
     sortOverrides,
+  })
+
+  // THE SUBSET STUDIO, when it is open on this view: clicks pick rather than
+  // select, the picks stay lit while the rest dims. Never a store write.
+  const subset = useSubsetCanvas({
+    viewId: activeView?.id,
+    displayMap, nodeLayerMap, nodeGroupMap, childMap, parentMap, urnToIdMap,
+    assignments: activeReferenceLayout.assignments,
   })
 
   // An entity PLACED in one column while its parent sits in another (view arrangement only — the
@@ -4324,12 +4345,193 @@ export function ContextViewCanvas({
   )
   const bridgeGeneration = `${mainHeadSeq}:${aggregatedCacheVersion}`
   const bridges = useLineageBridges({
-    enabled: viewSubsetsEnabled && showLineageFlow && !overlay.active
+    enabled: viewSubsetsEnabled && showLineageFlow && !overlay.active && !subset.active
       && activeEntityScope === 'curated' && viewConnectivity?.mode === 'bridged',
     members: bridgeMembers,
     maxHops: bridgeMaxHops,
     generation: bridgeGeneration,
   })
+
+  // THE STUDIO'S PREVIEW: the same stitching, over the picks, once they
+  // settle — the subset's own virtual hops, drawn on the source canvas.
+  const studioMaxHops = useSubsetStudioStore((s) => s.maxHops)
+  const studioPreview = useLineageBridges({
+    enabled: viewSubsetsEnabled && subset.active && showLineageFlow && !overlay.active
+      && subset.previewMembers.length >= 2,
+    members: subset.previewMembers,
+    maxHops: studioMaxHops,
+    generation: bridgeGeneration,
+  })
+  const boardBridges = subset.active ? studioPreview : bridges
+  const boardBridgeMembers = subset.active ? subset.previewMembers : bridgeMembers
+  const boardMaxHops = subset.active ? studioMaxHops : bridgeMaxHops
+
+  // What the source view holds, as the studio reads it: its top-level rows
+  // per layer (what "Add all in a layer" adds) and, for Grow, its members —
+  // every assignment of a curated view, loaded or not.
+  const studioLayerCandidates = useMemo(() => {
+    const out = new Map<string, SubsetPick[]>()
+    if (!subset.active) return out
+    nodesByLayer.forEach((roots, layerId) => {
+      const picks: SubsetPick[] = []
+      const walk = (n: HierarchyNode, group?: string) => {
+        if (n.isLogical) {
+          const id = n.logicalConfig?.id ?? n.id.replace(/^logical:/, '')
+          n.children.forEach(c => walk(c, id))
+          return
+        }
+        const urn = n.urn || n.id
+        const own = activeReferenceLayout.assignments[urn]
+        picks.push({
+          urn, layerId, logicalNodeId: own?.logicalNodeId ?? group,
+          inheritsChildren: own ? own.inheritsChildren !== false : true,
+          origin: 'picked', label: n.name || urn,
+          entityType: typeof n.data?.type === 'string' ? n.data.type : undefined,
+        })
+      }
+      roots.forEach(r => walk(r))
+      out.set(layerId, picks)
+    })
+    return out
+  }, [subset.active, nodesByLayer, activeReferenceLayout.assignments])
+  const studioSourceMembers = useMemo(() => {
+    const out = new Map<string, SourceMember>()
+    if (!subset.active) return out
+    studioLayerCandidates.forEach(picks => picks.forEach(p => out.set(p.urn, {
+      urn: p.urn, layerId: p.layerId, logicalNodeId: p.logicalNodeId,
+      inheritsChildren: p.inheritsChildren, label: p.label, entityType: p.entityType,
+    })))
+    if (activeEntityScope === 'curated') {
+      for (const [urn, entry] of Object.entries(activeReferenceLayout.assignments)) {
+        if (out.has(urn)) continue
+        const row = displayMap.get(urnToIdMap.get(urn) ?? urn)
+        out.set(urn, {
+          urn, layerId: entry.layerId, logicalNodeId: entry.logicalNodeId,
+          inheritsChildren: entry.inheritsChildren !== false,
+          label: row?.name || urn.split(/[:/.]/).filter(Boolean).pop() || urn,
+          entityType: typeof row?.data?.type === 'string' ? row.data.type : undefined,
+        })
+      }
+    }
+    return out
+  }, [subset.active, studioLayerCandidates, activeEntityScope, activeReferenceLayout.assignments, displayMap, urnToIdMap])
+  const studioSourceMemberList = useMemo(
+    () => [...studioSourceMembers.values()].map(m => ({ urn: m.urn, inheritsChildren: m.inheritsChildren })),
+    [studioSourceMembers],
+  )
+  // How the source view's own members connect — read once as the studio
+  // opens, so growing within the view is instant.
+  const sourceGraph = useLineageBridges({
+    enabled: viewSubsetsEnabled && subset.active,
+    members: studioSourceMemberList,
+    maxHops: studioMaxHops,
+    generation: bridgeGeneration,
+  })
+  const studioLayerOrder = useMemo(() => sortedLayers.map(l => l.id), [sortedLayers])
+  const { grow: growSubset } = useSubsetGrow({
+    sourceMembers: studioSourceMembers,
+    sourceLinks: sourceGraph.links,
+    maxHops: studioMaxHops,
+    layerOrder: studioLayerOrder,
+    layerRules,
+  })
+  const [growing, setGrowing] = useState(false)
+  const [growReview, setGrowReview] = useState<{ title: string; additions: SubsetPick[] } | null>(null)
+  const runGrow = useCallback(async (direction: GrowDirection, depth: GrowDepth) => {
+    const notify = useNotificationStore.getState().add
+    const title = `Grow ${direction}${depth === 'all' ? ' all the way' : ' one step'}`
+    setGrowing(true)
+    try {
+      const outcome = await growSubset(direction, depth)
+      if (outcome.additions.length === 0) {
+        notify({
+          type: 'info',
+          message: direction === 'upstream'
+            ? 'Nothing more feeds your picks within reach.'
+            : 'Your picks feed nothing more within reach.',
+        })
+      } else if (outcome.additions.length > GROW_REVIEW_ABOVE) {
+        setGrowReview({ title, additions: outcome.additions })
+      } else {
+        const added = useSubsetStudioStore.getState().add(outcome.additions, title)
+        notify({
+          type: 'success',
+          message: `Added ${added.toLocaleString()} from ${direction}.`,
+          action: { label: 'Undo', onClick: () => useSubsetStudioStore.getState().undo() },
+        })
+      }
+      if (outcome.partial) {
+        notify({ type: 'warning', message: 'Part of the lineage could not be read in time, so this grow may have missed some.' })
+      }
+    } finally {
+      setGrowing(false)
+    }
+  }, [growSubset])
+  const studioReachBeyond = useSubsetStudioStore((s) => s.reachBeyond)
+  const growBlockedReason = !subset.active ? undefined
+    : sourceGraph.status === 'loading' ? 'Reading how the entities of this view connect…'
+      : sourceGraph.status === 'error' ? 'Couldn’t read how the entities of this view connect. Close the studio and open it again to retry.'
+        : (sourceGraph.status === 'disabled' || sourceGraph.status === 'oversized') && !studioReachBeyond
+          ? 'Growing within this view isn’t available here — switch on Reach beyond this view.'
+          : undefined
+
+  // Opening the studio starts from a quiet board: no selection, no trace,
+  // and lineage showing — its whole preview is lineage.
+  useEffect(() => {
+    if (!subset.active) return
+    useCanvasStore.getState().clearSelection()
+    if (traceActive) exitCanvasTrace()
+    setShowLineageFlow(true)
+    // Only as the studio opens — not every time the trace or the toggle moves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subset.active])
+  // A subset is made from the PUBLISHED view: a draft opening closes the
+  // studio (the picks are kept for when the reader comes back).
+  useEffect(() => {
+    if (!subset.active || !isDraft) return
+    useSubsetStudioStore.getState().close()
+    useNotificationStore.getState().add({
+      type: 'info',
+      message: 'The subset studio works on the published view, so it closed as the draft opened. Your picks are kept.',
+    })
+  }, [subset.active, isDraft])
+  // Leaving the view leaves the studio (picks kept for a return).
+  const studioViewId = activeView?.id
+  useEffect(() => {
+    const store = useSubsetStudioStore.getState()
+    if (store.sourceViewId && store.sourceViewId !== studioViewId) store.close()
+  }, [studioViewId])
+  useEffect(() => () => {
+    if (useSubsetStudioStore.getState().sourceViewId) useSubsetStudioStore.getState().close()
+  }, [])
+
+  // Where a subset can be STARTED from this canvas: subsets on, the server's
+  // word that this reader may carve one out of this view, and the published
+  // view on screen (a subset is made from it).
+  const subsetsOffered = viewSubsetsEnabled && viewCaps.canCreateSubset && !isDraft && !traceActive
+  const pickSubsetRows = subset.pickRows
+  const startSubset = useCallback((rowIds: readonly string[]) => {
+    const viewId = activeView?.id
+    if (!viewId) return
+    const store = useSubsetStudioStore.getState()
+    if (store.sourceViewId !== viewId) store.open(viewId, { maxHops: viewConnectivity?.maxHops })
+    if (rowIds.length > 0) pickSubsetRows(rowIds)
+  }, [activeView?.id, viewConnectivity?.maxHops, pickSubsetRows])
+  useSubsetDeepLink(activeView?.id, subsetsOffered, viewConnectivity?.maxHops)
+  const [subsetWizardOpen, setSubsetWizardOpen] = useState(false)
+  const openSubsetWizard = useCallback(() => setSubsetWizardOpen(true), [])
+  const subsetMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!subsetsOffered || subset.active || !target || target.type !== 'node') return []
+    const id = target.id
+    return [{
+      id: 'subset-start',
+      label: 'Start a subset from here',
+      icon: 'ScissorsLineDashed',
+      onClick: () => { startSubset([id]); interactions.closeContextMenu() },
+    }]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, subsetsOffered, subset.active, startSubset])
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -4354,7 +4556,7 @@ export function ContextViewCanvas({
     // Chains already fetched stay cached, so switching the flag off must
     // also stop them being USED.
     ancestorChains: lineageRollup ? ancestorChains : undefined,
-    bridgeLinks: bridges.links,
+    bridgeLinks: boardBridges.links,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -4845,7 +5047,7 @@ export function ContextViewCanvas({
     return label ? String(label) : undefined
   }, [nodeMap, urnToIdMap])
   const virtualHopsSummary = useMemo<VirtualHopsSummary | undefined>(() => {
-    if (bridges.status === 'idle' || overlay.active) return undefined
+    if (boardBridges.status === 'idle' || overlay.active) return undefined
     const rowName = (id: string) => displayMap.get(id)?.name ?? bridgeLabelOf(id) ?? id
     const lines = visibleLineageEdges
       .filter((e: { id: string; bridgeHops?: number }) => isBridgeLineId(e.id) && typeof e.bridgeHops === 'number')
@@ -4853,16 +5055,77 @@ export function ContextViewCanvas({
         lineId: e.id, sourceLabel: rowName(e.source), targetLabel: rowName(e.target), hops: e.bridgeHops,
       }))
     return {
-      status: bridges.status,
-      isFetching: bridges.isFetching,
+      status: boardBridges.status,
+      isFetching: boardBridges.isFetching,
       lines,
-      incompleteNames: [...new Set(bridges.incomplete.map(i => i.urn))].map(urn => bridgeLabelOf(urn) ?? urn),
-      retryable: bridges.incomplete.some(i => i.reason === 'failed'),
-      maxHops: bridgeMaxHops,
+      incompleteNames: [...new Set(boardBridges.incomplete.map(i => i.urn))].map(urn => bridgeLabelOf(urn) ?? urn),
+      retryable: boardBridges.incomplete.some(i => i.reason === 'failed'),
+      maxHops: boardMaxHops,
       onOpenLine: openBridgeLine,
-      onRetry: bridges.refetch,
+      onRetry: boardBridges.refetch,
     }
-  }, [bridges.status, bridges.isFetching, bridges.incomplete, bridges.refetch, overlay.active, visibleLineageEdges, displayMap, bridgeLabelOf, bridgeMaxHops, openBridgeLine])
+  }, [boardBridges.status, boardBridges.isFetching, boardBridges.incomplete, boardBridges.refetch, overlay.active, visibleLineageEdges, displayMap, bridgeLabelOf, boardMaxHops, openBridgeLine])
+
+  // The studio's own ways into a hop's steps: its Connect list, and bringing
+  // the steps into the subset from the hop's popover.
+  const openStudioHop = useCallback((link: BridgeLink, point: { x: number; y: number }) => {
+    setBridgeTarget({ lineId: `studio:${link.source}|${link.target}`, links: [link], point })
+  }, [])
+  const studioSortedRules = useMemo(() => sortLayerRules([...layerRules]), [layerRules])
+  const includeBridgeSteps = useCallback((steps: BridgeStep[], nodes: GraphNode[], link: BridgeLink) => {
+    const store = useSubsetStudioStore.getState()
+    const fromLayer = store.picks[link.source]?.layerId ?? studioLayerOrder[0] ?? ''
+    const byUrn = new Map(nodes.map(n => [n.urn, n]))
+    const additions: SubsetPick[] = steps.map(step => {
+      const member = studioSourceMembers.get(step.urn)
+      if (member) return { ...member, origin: 'path' }
+      const rowLayer = nodeLayerMap.get(urnToIdMap.get(step.urn) ?? step.urn)
+      const node = byUrn.get(step.urn)
+      const layerId = rowLayer
+        ?? (node ? placeOutside(node, studioSortedRules, studioLayerOrder, fromLayer, 'downstream').layerId : fromLayer)
+      return { urn: step.urn, layerId, inheritsChildren: true, origin: 'path', label: step.name, entityType: step.entityType || undefined }
+    })
+    const from = store.picks[link.source]?.label ?? link.source
+    const to = store.picks[link.target]?.label ?? link.target
+    const added = store.add(additions, `Include the steps from ${from} to ${to}`)
+    if (added > 0) {
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: `Added ${added.toLocaleString()} ${added === 1 ? 'step' : 'steps'} between ${from} and ${to}.`,
+        action: { label: 'Undo', onClick: () => useSubsetStudioStore.getState().undo() },
+      })
+    }
+  }, [studioSourceMembers, nodeLayerMap, urnToIdMap, studioSortedRules, studioLayerOrder])
+  const locateStudioPick = useCallback((urn: string) => {
+    scrollHitIntoView(urnToIdMap.get(urn) ?? urn)
+  }, [scrollHitIntoView, urnToIdMap])
+  const studioPicks = useSubsetStudioStore((s) => s.picks)
+  const studioCount = useSubsetStudioStore((s) => s.order.length)
+  const studioLayers = useMemo(
+    () => sortedLayers.map(l => ({ id: l.id, name: l.name, color: l.color })),
+    [sortedLayers],
+  )
+  // Picks that hold something beneath them — the Shape step's "with contents".
+  const studioContainerUrns = useMemo(() => {
+    const out = new Set<string>()
+    if (!subset.active) return out
+    for (const urn of Object.keys(studioPicks)) {
+      const row = urnToIdMap.get(urn) ?? urn
+      const count = displayMap.get(row)?.data?.childCount
+      if ((typeof count === 'number' && count > 0) || (childMap.get(row)?.length ?? 0) > 0) out.add(urn)
+    }
+    return out
+  }, [subset.active, studioPicks, urnToIdMap, displayMap, childMap])
+  // While the studio is open, the board's lit lines are the subset's own:
+  // those between rows it holds, and its virtual hops.
+  const studioLineHighlight = useMemo(() => {
+    if (!subset.active || subset.coveredRowIds.size === 0) return null
+    const ids = new Set<string>()
+    for (const e of visibleLineageEdges as Array<{ id: string; source: string; target: string }>) {
+      if (isBridgeLineId(e.id) || (subset.coveredRowIds.has(e.source) && subset.coveredRowIds.has(e.target))) ids.add(e.id)
+    }
+    return ids
+  }, [subset.active, subset.coveredRowIds, visibleLineageEdges])
   // The lens reads ONE thing: the accumulated walk model for whichever
   // focal it is on. Server-lazy — one closure fetch on open, then a
   // further hop per ⊕ — cached per focal for the whole lens session, so
@@ -5163,9 +5426,12 @@ export function ContextViewCanvas({
 
   // The HOVER highlight (lighter, deferring to this one) is the overlay's,
   // applied to the DOM — see hoverSpotlight.ts.
-  const isHighlightActive = isClickHighlightActive
-  const mergedHighlightNodes = highlightState.nodes
-  const mergedHighlightEdges = highlightState.edges
+  // In the Subset Studio the board's highlight IS the subset: what it holds
+  // stays lit and the rest dims — cards and lines alike.
+  const studioHighlightOn = subset.active && subset.coveredRowIds.size > 0
+  const isHighlightActive = isClickHighlightActive || studioHighlightOn
+  const mergedHighlightNodes = studioHighlightOn ? subset.coveredRowIds as Set<string> : highlightState.nodes
+  const mergedHighlightEdges = studioHighlightOn && studioLineHighlight ? studioLineHighlight : highlightState.edges
 
   // The Connections panel's highlight is a deliberate gesture on the panel,
   // so while it is active it wins over hover/click — on the OVERLAY only.
@@ -5328,6 +5594,11 @@ export function ContextViewCanvas({
       />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
+        subsetMode={subset.active ? {
+          count: studioCount,
+          onCancel: () => useSubsetStudioStore.getState().requestCancel(),
+          onSave: viewCaps.canCreateSubset ? openSubsetWizard : undefined,
+        } : undefined}
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
         showEdgeDirection={showEdgeDirection}
@@ -5735,6 +6006,7 @@ export function ContextViewCanvas({
             onTrace={() => startCanvasTrace(selectedNodeIds)}
             onOpenLens={() => openLensForSelection(selectedNodeIds)}
             onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
+            onSaveAsSubset={subsetsOffered ? () => startSubset(selectedNodeIds) : undefined}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being
@@ -5864,14 +6136,28 @@ export function ContextViewCanvas({
         {/* The steps behind a virtual hop — portaled, anchored to the ask. */}
         <BridgePathPopover
           target={overlay.active ? null : bridgeTarget}
-          members={bridgeMembers}
-          maxHops={bridgeMaxHops}
+          members={boardBridgeMembers}
+          maxHops={boardMaxHops}
           generation={bridgeGeneration}
-          labelOf={bridgeLabelOf}
+          labelOf={(urn) => bridgeLabelOf(urn) ?? studioPicks[urn]?.label}
           onClose={closeBridgeLine}
           onWalkInLens={walkBridgeInLens}
-          onRefreshLines={bridges.refetch}
+          onRefreshLines={boardBridges.refetch}
+          onIncludeSteps={subset.active ? includeBridgeSteps : undefined}
         />
+        <SubsetMarks picksByRow={subset.active ? subset.picksByRow : EMPTY_PICK_MARKS} />
+        {growReview && (
+          <GrowReviewSheet
+            title={growReview.title}
+            additions={growReview.additions}
+            layers={studioLayers}
+            onConfirm={(chosen) => {
+              useSubsetStudioStore.getState().add(chosen, growReview.title)
+              setGrowReview(null)
+            }}
+            onCancel={() => setGrowReview(null)}
+          />
+        )}
 
         {/* Frame pill — selection has off-screen neighbors; offer to frame
             them (never auto-scroll) or open the lens. */}
@@ -6241,8 +6527,8 @@ export function ContextViewCanvas({
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedForRender}
                 searchResults={advancedMatchUrns}
-                onSelect={bulkLinkPickingOnCanvas ? handleRowSelect : selectNode}
-                onSelectRange={setSelection}
+                onSelect={subset.active ? subset.pickRow : bulkLinkPickingOnCanvas ? handleRowSelect : selectNode}
+                onSelectRange={subset.active ? subset.pickRows : setSelection}
                 selectedNodeIds={selectedNodeIdSet}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
@@ -6433,6 +6719,37 @@ export function ContextViewCanvas({
           persistently mounted and internally AnimatePresence-gated on
           `open`, so it lives OUTSIDE the exit-managed block above —
           nesting a second presence context there can strand its exit. */}
+      {/* The Subset Studio — a right rail beside the source canvas, the same
+          flex-sibling shape as the Property Manager (and, like it, mounted
+          outside the exit-managed block above). */}
+      <SubsetStudioPanel
+        open={subset.active}
+        sourceName={activeView?.name ?? 'this view'}
+        layers={studioLayers}
+        layerCandidates={studioLayerCandidates}
+        containerUrns={studioContainerUrns}
+        preview={studioPreview}
+        onGrow={(direction, depth) => { void runGrow(direction, depth) }}
+        growing={growing}
+        growBlockedReason={growBlockedReason}
+        onOpenHop={openStudioHop}
+        onLocate={locateStudioPick}
+        onSave={viewCaps.canCreateSubset ? openSubsetWizard : undefined}
+      />
+      {subsetWizardOpen && activeView && (
+        <SubsetCreateWizard
+          source={{
+            id: activeView.id,
+            name: activeView.name,
+            workspaceId: activeView.workspaceId,
+            workspaceName: activeView.workspaceName,
+            dataSourceId: activeView.dataSourceId,
+          }}
+          layers={studioLayers}
+          preview={studioPreview}
+          onClose={() => setSubsetWizardOpen(false)}
+        />
+      )}
       <PropertyManagerDrawer
         viewId={activeView?.id ?? ''}
         open={propertyManagerOpen}
@@ -6482,7 +6799,7 @@ export function ContextViewCanvas({
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
-        customActions={reorderMenuActions}
+        customActions={subsetMenuActions.length > 0 ? [...reorderMenuActions, ...subsetMenuActions] : reorderMenuActions}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}

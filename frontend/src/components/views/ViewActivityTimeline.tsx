@@ -63,6 +63,12 @@ function diffLines(e: ViewActivityEntry): string[] {
     if (ch.pinned) lines.push((fromTo('pinned').to ? 'Pinned' : 'Unpinned') + ' the view')
     if (ch.content) lines.push('Content updated (filters / layout)')
     if (ch.role && ch.subjectType) lines.push(`As ${String(ch.role)}`)
+    // Made by carving a subset out of another view. The source is not named
+    // here — the header names it, and only to a reader who can open it.
+    if (ch.derivedFrom) {
+        const kept = Number(ch.members)
+        lines.push(`Made as a subset of another view${kept > 0 ? ` · ${kept.toLocaleString()} kept` : ''}`)
+    }
     return lines
 }
 

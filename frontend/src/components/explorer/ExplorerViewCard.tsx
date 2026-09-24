@@ -7,7 +7,7 @@
  *
  * Actions (open, favourite, share) float top-right on hover.
  */
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Heart,
   ExternalLink,
@@ -16,6 +16,7 @@ import {
   Check,
   RotateCcw,
   Trash2,
+  ScissorsLineDashed,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
@@ -226,6 +227,7 @@ export function ExplorerViewCard({
   providerInfo,
   hideWorkspaceInScope,
 }: ExplorerViewCardProps) {
+  const navigate = useNavigate()
   // Density-derived classes. Compact noticeably reduces vertical rhythm
   // (padding, section margins, suppressed mini preview) so a dense grid
   // actually looks dense. Spacious does the inverse.
@@ -404,6 +406,8 @@ export function ExplorerViewCard({
             visibility={view.visibility}
             workspaceId={view.workspaceId}
             dataSourceId={view.dataSourceId}
+            viewType={view.viewType}
+            onMakeSubset={() => navigate(`/views/${view.id}?subset=1`)}
             onVisibilityChange={onVisibilityChange}
             onEdit={onEdit}
             onEditLayout={onEditLayout}
@@ -468,6 +472,14 @@ export function ExplorerViewCard({
               <VisIcon className="h-2.5 w-2.5" />
               {vis.label}
             </span>
+            {/* Carved out of another view: says so, so a reader looking for
+                the whole picture knows this is not it. */}
+            {view.derivedFromViewId && (
+              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-accent-explore/30 bg-accent-explore/10 text-accent-explore">
+                <ScissorsLineDashed className="h-2.5 w-2.5 shrink-0" aria-hidden />
+                Subset
+              </span>
+            )}
             {healthInfo && (
               <span
                 className={cn(

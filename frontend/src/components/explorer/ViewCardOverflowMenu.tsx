@@ -4,13 +4,15 @@
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
 import {
-  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2,
+  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, ScissorsLineDashed,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
 } from '@/lib/viewVisibility'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { useBrand } from '@/store/branding'
+import { usePermission } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
@@ -24,6 +26,10 @@ interface ViewCardOverflowMenuProps {
    *  publish directly, a restricted source does not. */
   workspaceId?: string
   dataSourceId?: string
+  /** Context Views ('reference') can have a subset carved out of them. */
+  viewType?: string
+  /** Open the view with the Subset Studio started. */
+  onMakeSubset?: () => void
   onEdit?: () => void
   /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
   onEditLayout?: () => void
@@ -39,6 +45,8 @@ export function ViewCardOverflowMenu({
   visibility,
   workspaceId,
   dataSourceId,
+  viewType,
+  onMakeSubset,
   onEdit,
   onEditLayout,
   editDisabled,
@@ -53,6 +61,11 @@ export function ViewCardOverflowMenu({
   const { appName } = useBrand()
   const [activityOpen, setActivityOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  // A list payload carries no access envelope, so this offers on the
+  // permission; the canvas asks the server's own answer before it opens.
+  const subsetsEnabled = useFeature('viewSubsetsEnabled')
+  const canCreateViews = usePermission('workspace:view:create', workspaceId)
+  const offerSubset = !!onMakeSubset && subsetsEnabled && canCreateViews && viewType === 'reference'
 
   // Close on click outside
   useEffect(() => {
@@ -168,6 +181,16 @@ export function ViewCardOverflowMenu({
                 >
                   <Settings2 className="w-3.5 h-3.5" />
                   Edit layout &amp; scope
+                </button>
+              )}
+              {offerSubset && (
+                <button
+                  onClick={() => { setIsOpen(false); onMakeSubset?.() }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <ScissorsLineDashed className="w-3.5 h-3.5" />
+                  Make a subset…
                 </button>
               )}
               <button

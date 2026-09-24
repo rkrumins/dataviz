@@ -34,7 +34,18 @@ describe('envelope wins', () => {
             canChangeVisibility: false,
             canPublish: false,
             readOnlyData: true,
+            canCreateSubset: false,
         })
+    })
+
+    it('offers subsets only where the envelope says so', () => {
+        const base: ViewAccess = {
+            canEdit: false, canManageGrants: false, canChangeVisibility: false, canPublish: false,
+            accessVia: 'workspace', dataAccess: 'full',
+        }
+        expect(deriveViewCapabilities({ ...base, canCreateSubset: true }, LEGACY_NONE).canCreateSubset).toBe(true)
+        expect(deriveViewCapabilities(base, LEGACY_NONE).canCreateSubset).toBe(false)
+        expect(deriveViewCapabilities(null, { ...LEGACY_NONE, isCreator: true }).canCreateSubset).toBe(false)
     })
 
     it('full data access is never read-only', () => {

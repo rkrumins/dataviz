@@ -36,6 +36,7 @@ import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
+import { SubsetHeaderActions, type SubsetModeProps } from '@/features/view-subset/components/SubsetHeaderActions'
 
 export interface ContextViewHeaderProps {
   // Lineage flow
@@ -145,6 +146,10 @@ export interface ContextViewHeaderProps {
   onResetCanvasDisplaySettings: () => void
   /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
   onFitToWidth?: () => void
+
+  /** The Subset Studio is open on this canvas: a focused mode whose own
+   *  actions replace the right-hand cluster until it closes. */
+  subsetMode?: SubsetModeProps
 }
 
 export function ContextViewHeader({
@@ -200,6 +205,7 @@ export function ContextViewHeader({
   onToggleSubtleCanvasTreeLines,
   onResetCanvasDisplaySettings,
   onFitToWidth,
+  subsetMode,
 }: ContextViewHeaderProps) {
   // Shared comprehension cluster — identical in both modes (see
   // header/ViewerActions.tsx for the rationale).
@@ -262,6 +268,21 @@ export function ContextViewHeader({
       {/* Draft-mode signal — a thin amber strip along the top edge, in the
           same amber family as the CanvasVersioningBar's draft tint. No
           "EDITING" pill and no draft name here: the bar above shows both. */}
+      {/* Subset-studio signal — the same thin strip, in the explore accent. */}
+      <AnimatePresence>
+        {subsetMode && (
+          <motion.div
+            key="subset-edge"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            aria-hidden
+            className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-accent-explore/50 via-accent-explore to-accent-explore/50 pointer-events-none"
+          />
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {isDraft && (
           <motion.div
@@ -329,7 +350,18 @@ export function ContextViewHeader({
             both modes; only the tail changes (Edit ↔ authoring cluster).
             Fast tween cross-fade — deliberately calm, no spring. */}
         <AnimatePresence mode="wait" initial={false}>
-          {isDraft ? (
+          {subsetMode ? (
+            <motion.div
+              key="subset-actions"
+              className="flex items-center gap-3"
+              initial={{ opacity: 0, y: 3 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -3 }}
+              transition={{ duration: 0.16, ease: 'easeOut' }}
+            >
+              <SubsetHeaderActions {...subsetMode} />
+            </motion.div>
+          ) : isDraft ? (
             <motion.div
               key="editor-actions"
               className="flex items-center gap-3"

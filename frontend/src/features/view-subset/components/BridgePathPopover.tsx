@@ -12,12 +12,12 @@
  * Portaled (Radix) and anchored to the click point, so no card or column can
  * clip it; Escape and a click outside close it; focus moves into it and back.
  */
-import { useId, useMemo, useState, type ReactNode } from 'react'
+import { useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { AlertTriangle, ArrowRight, Loader2, RefreshCw, Route, Waypoints, X } from 'lucide-react'
+import { AlertTriangle, ArrowRight, ListPlus, Loader2, RefreshCw, Route, Waypoints, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import type { LineageBridgeLink, LineageBridgeMember } from '@/providers/GraphDataProvider'
+import type { GraphNode, LineageBridgeLink, LineageBridgeMember } from '@/providers/GraphDataProvider'
 
 import { useBridgePath } from '../hooks/useBridgePath'
 import { buildBridgePathModel, hiddenStepsLabel, type BridgeStep } from '../model/bridgePath'
@@ -45,6 +45,9 @@ export interface BridgePathPopoverProps {
   onWalkInLens?: (trail: string[]) => void
   /** Re-ask for every line, when this one turns out to be out of date. */
   onRefreshLines?: () => void
+  /** The Subset Studio: bring the hidden steps into the subset, so the hop
+   *  becomes direct lineage. Absent outside the studio. */
+  onIncludeSteps?: (steps: BridgeStep[], nodes: GraphNode[], link: LineageBridgeLink) => void
 }
 
 function tail(urn: string): string {
@@ -62,6 +65,7 @@ function measurableAt(x: number, y: number) {
 
 export function BridgePathPopover({ target, onClose, ...rest }: BridgePathPopoverProps) {
   const titleId = useId()
+  const contentRef = useRef<HTMLDivElement>(null)
   const x = target?.point.x ?? 0
   const y = target?.point.y ?? 0
   // A new object per point: Radix re-anchors when the ref's value changes.
@@ -73,13 +77,19 @@ export function BridgePathPopover({ target, onClose, ...rest }: BridgePathPopove
       <PopoverPrimitive.Portal>
         {target && (
           <PopoverPrimitive.Content
+            ref={contentRef}
             side="bottom"
             align="center"
             sideOffset={12}
             collisionPadding={12}
             aria-labelledby={titleId}
+            tabIndex={-1}
+            // Focus lands on the card itself, not its first control: a
+            // keyboard reader is inside it, and a pointer reader is not shown
+            // a focus ring on Close they never reached for.
+            onOpenAutoFocus={(e) => { e.preventDefault(); contentRef.current?.focus() }}
             className={cn(
-              'z-[9999] w-[22rem] max-w-[calc(100vw-24px)] rounded-xl border border-glass-border bg-canvas-elevated',
+              'z-[9999] w-[22rem] max-w-[calc(100vw-24px)] rounded-xl border border-black/[0.08] dark:border-white/[0.08] bg-canvas-elevated',
               'shadow-xl shadow-black/40 outline-none',
               'animate-in fade-in zoom-in-95 duration-150 motion-reduce:animate-none',
             )}
@@ -102,6 +112,7 @@ function BridgePathBody({
   labelOf,
   onWalkInLens,
   onRefreshLines,
+  onIncludeSteps,
 }: Omit<BridgePathPopoverProps, 'onClose' | 'target'> & { target: BridgePathTarget; titleId: string }) {
   const links = useMemo(
     () => [...target.links].sort((a, b) => a.hops - b.hops || a.source.localeCompare(b.source) || a.target.localeCompare(b.target)),
@@ -122,7 +133,7 @@ function BridgePathBody({
 
   return (
     <div className="flex flex-col">
-      <header className="px-4 pt-3.5 pb-3 border-b border-glass-border">
+      <header className="px-4 pt-3.5 pb-3 border-b border-black/[0.08] dark:border-white/[0.08]">
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-accent-explore/10 text-accent-explore text-[10px] font-bold uppercase tracking-wider">
             <Waypoints className="w-3 h-3" aria-hidden="true" />
@@ -235,18 +246,32 @@ function BridgePathBody({
         )}
       </div>
 
-      {onWalkInLens && model && model.hops !== null && (
-        <footer className="px-3 py-2.5 border-t border-glass-border flex items-center justify-end">
-          <PopoverPrimitive.Close asChild>
-            <button
-              type="button"
-              onClick={() => onWalkInLens(model.trail)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-semibold text-accent-explore bg-accent-explore/10 hover:bg-accent-explore/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-explore/40 transition-colors"
-            >
-              <Route className="w-3.5 h-3.5" aria-hidden="true" />
-              Walk it in the Lens
-            </button>
-          </PopoverPrimitive.Close>
+      {(onWalkInLens || onIncludeSteps) && model && model.hops !== null && (
+        <footer className="px-3 py-2.5 border-t border-black/[0.08] dark:border-white/[0.08] flex items-center justify-end gap-2">
+          {onIncludeSteps && model.levels.length > 0 && (
+            <PopoverPrimitive.Close asChild>
+              <button
+                type="button"
+                onClick={() => onIncludeSteps(model.levels.flat(), path.result?.nodes ?? [], link)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-explore/40 transition-colors"
+              >
+                <ListPlus className="w-3.5 h-3.5" aria-hidden="true" />
+                Include these steps
+              </button>
+            </PopoverPrimitive.Close>
+          )}
+          {onWalkInLens && (
+            <PopoverPrimitive.Close asChild>
+              <button
+                type="button"
+                onClick={() => onWalkInLens(model.trail)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-semibold text-accent-explore bg-accent-explore/10 hover:bg-accent-explore/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-explore/40 transition-colors"
+              >
+                <Route className="w-3.5 h-3.5" aria-hidden="true" />
+                Walk it in the Lens
+              </button>
+            </PopoverPrimitive.Close>
+          )}
         </footer>
       )}
     </div>

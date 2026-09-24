@@ -123,7 +123,7 @@ export function VirtualHopsChip({
           align="end"
           sideOffset={6}
           collisionPadding={12}
-          className="z-[9999] w-80 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl shadow-black/40 p-2 animate-in fade-in zoom-in-95 duration-150 motion-reduce:animate-none"
+          className="z-[9999] w-80 rounded-lg border border-black/[0.08] dark:border-white/[0.08] bg-canvas-elevated shadow-xl shadow-black/40 p-2 animate-in fade-in zoom-in-95 duration-150 motion-reduce:animate-none"
           data-canvas-interactive
         >
           <div className="px-1.5 pb-2">

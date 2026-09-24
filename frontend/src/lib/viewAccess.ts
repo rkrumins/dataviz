@@ -28,6 +28,9 @@ export interface ViewCapabilities {
     /** The data plane is read-only for this caller — hide every edit
      *  affordance (draft mode, layout saves, versioning chrome). */
     readOnlyData: boolean
+    /** May carve a subset view out of this one. Only the server's envelope
+     *  can say — a backend without it offers no subsets. */
+    canCreateSubset: boolean
 }
 
 export function deriveViewCapabilities(
@@ -41,6 +44,7 @@ export function deriveViewCapabilities(
             canChangeVisibility: access.canChangeVisibility,
             canPublish: access.canPublish,
             readOnlyData: access.dataAccess === 'readonly',
+            canCreateSubset: access.canCreateSubset === true,
         }
     }
     return {
@@ -49,5 +53,6 @@ export function deriveViewCapabilities(
         canChangeVisibility: legacy.canAdminPerm || legacy.isCreator,
         canPublish: legacy.canPublishPerm,
         readOnlyData: false,
+        canCreateSubset: false,
     }
 }

@@ -47,6 +47,17 @@ export interface ViewAccess {
     /** What the DATA plane accepts: 'full' = graph mutations allowed;
      *  'readonly' = view-capability reach (expand/trace/search only). */
     dataAccess: 'full' | 'readonly'
+    /** May carve a subset view out of this one: a Context View, and the
+     *  caller may create views in its workspace. Absent on older backends. */
+    canCreateSubset?: boolean
+}
+
+/** Where a subset view came from. The name is withheld (null) when the
+ *  caller cannot open the source — a subset must not disclose it. */
+export interface ViewDerivedFrom {
+    id: string
+    name?: string | null
+    accessible: boolean
 }
 
 /**
@@ -154,6 +165,11 @@ export interface View {
     health?: ViewHealth | null
     /** A pending ask to publish this view to everyone. Null when none. */
     publishRequest?: ViewPublishRequest | null
+    /** The view this one was carved from (a subset view); null otherwise.
+     *  On every payload. */
+    derivedFromViewId?: string | null
+    /** The same, resolved for the reader. Single-view read only. */
+    derivedFrom?: ViewDerivedFrom | null
 }
 
 export interface ViewCreateRequest {
@@ -217,6 +233,9 @@ export interface ViewListParams {
     deletedOnly?: boolean
     /** Return only views that need attention (stale, broken, or inactive). */
     attentionOnly?: boolean
+    /** Only the subsets carved from this view (scoped to what the caller
+     *  may read, like every list). */
+    derivedFrom?: string
     /**
      * Server-side category. `shared-with-me` = views shared with the
      * caller through an explicit grant (direct or via group), excluding
@@ -362,6 +381,7 @@ export async function listViews(
     if (params?.deletedOnly) sp.set('deletedOnly', 'true')
     if (params?.attentionOnly) sp.set('attentionOnly', 'true')
     if (params?.category) sp.set('category', params.category)
+    if (params?.derivedFrom) sp.set('derivedFrom', params.derivedFrom)
     if (params?.include) params.include.forEach(v => sp.append('include', v))
     if (params?.popularLimit != null) sp.set('popularLimit', String(params.popularLimit))
     const qs = sp.toString()
@@ -433,6 +453,36 @@ export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalo
 /** Create a new view (workspaceId required) */
 export async function createView(data: ViewCreateRequest): Promise<View> {
     return apiFetch<View>('/api/v1/views/', {
+        method: 'POST',
+        body: JSON.stringify(data),
+    })
+}
+
+/** One entity a subset holds, and where it sits. */
+export interface ViewSubsetMember {
+    urn: string
+    layerId: string
+    logicalNodeId?: string
+    /** default true */
+    inheritsChildren?: boolean
+}
+
+export interface ViewSubsetCreateRequest {
+    name: string
+    description?: string
+    tags?: string[]
+    visibility?: string
+    members: ViewSubsetMember[]
+    connectivity: { mode: 'bridged' | 'direct'; maxHops?: number }
+}
+
+/**
+ * Carve a subset out of a Context View — `POST /views/{id}/subsets`. One
+ * server-side write builds the new view from the source's layers and the
+ * members given, records where it came from, and returns it.
+ */
+export async function createSubsetView(sourceViewId: string, data: ViewSubsetCreateRequest): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${encodeURIComponent(sourceViewId)}/subsets`, {
         method: 'POST',
         body: JSON.stringify(data),
     })
