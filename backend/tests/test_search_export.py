@@ -17,6 +17,7 @@ import csv
 import dataclasses
 import io
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +37,7 @@ from backend.app.providers.falkordb_search.export import (
 from backend.app.providers.falkordb_search.plan import Plan, Unit
 from backend.app.providers.falkordb_search.session import MemorySessionStore
 from backend.app.services.advanced_search_service import AdvancedSearchService
-from backend.app.services.deep_search import SearchRunContext
+from backend.app.services.deep_search import CompileError, SearchRunContext
 from backend.app.services.search_downloads import mint_download_token, read_download_token
 from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.search import (
@@ -87,10 +88,10 @@ class TestRows:
             "urn", "displayName", "entityType", "qualifiedName", "owner"]
 
     def test_the_manifest_round_trips(self):
-        m = Manifest("csv", ["urn"], "f", [["f/a.part", 3]])
+        m = Manifest("csv", ["urn"], "f", [["f/a.part", 3]], size=42)
         again = Manifest.from_json(m.to_json())
-        assert (again.fmt, again.columns, again.folder, again.parts) == ("csv", ["urn"], "f",
-                                                                         [["f/a.part", 3]])
+        assert (again.fmt, again.columns, again.folder, again.parts, again.size) == (
+            "csv", ["urn"], "f", [["f/a.part", 3]], 42)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,8 @@ class _Objects:
 
     async def delete_prefix(self, prefix):
         self.swept.append(prefix)
+        self.blobs = {k: v for k, v in self.blobs.items()
+                      if not k.startswith(prefix.rstrip("/") + "/")}
 
 
 COLUMNS = ["urn", "displayName", "entityType", "qualifiedName", "owner", "size"]
@@ -256,7 +259,7 @@ class TestSessions:
                 where="true", params={}, sort=None, containment=("CONTAINS",), max_depth=12),
             provider.graph.run, objects,
             Manifest("csv", COLUMNS, next(iter(written)).rsplit("/", 1)[0]))
-        rows, key = await work.unit(UNITS[0], 1.0)
+        rows, key, _ = await work.unit(UNITS[0], 1.0)
         assert rows == 3 and key not in written
         assert all(objects.blobs[k] == v for k, v in written.items())
         _, after = await _download(provider, objects, out["sessionId"])
@@ -375,6 +378,36 @@ class TestSessions:
             fmt="csv", columns=["owner", "size"], wait_ms=0, session_id=out["sessionId"],
             objects=objects)
         assert len(plans) == 2 and again["rows"] < out["rows"]
+
+    async def test_an_export_past_the_most_one_may_hold_is_refused_and_given_back(
+            self, monkeypatch, memory_store):
+        """Parts are written to the store before any download, so the
+        platform's export limit (``GRAPH_EXPORT_MAX_BYTES``) is held while
+        they are written: past it, the export stops, says why, and its parts
+        go."""
+        from backend.app.services.versioning.import_export import stream
+        monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
+        monkeypatch.setattr(stream, "MAX_BYTES", 100)
+        objects = _Objects()
+        with pytest.raises(CompileError, match="narrow the search"):
+            await _follow(_Provider(_Graph(NODES)), objects)
+        assert memory_store._sessions == {} and objects.blobs == {}
+
+    async def test_rows_are_encoded_off_the_event_loop(self, monkeypatch):
+        """A wide export encodes a lot of text: in a worker thread, so the
+        pod's other requests aren't held up behind it."""
+        monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))
+        monkeypatch.setattr(export_mod, "_ENCODE_BATCH", 2)     # full batches and the rest
+        threads = []
+        encode = export_mod.encode_rows
+
+        def encoded(*args):
+            threads.append(threading.get_ident())
+            return encode(*args)
+
+        monkeypatch.setattr(export_mod, "encode_rows", encoded)
+        await _follow(_Provider(_Graph(NODES)), _Objects())
+        assert threads and threading.get_ident() not in threads
 
     async def test_a_part_gone_is_no_file_rather_than_a_short_one(self, monkeypatch):
         """A part swept, or written to a store this pod doesn't share, makes

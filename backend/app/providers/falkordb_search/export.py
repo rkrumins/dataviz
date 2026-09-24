@@ -27,6 +27,7 @@ search answers it.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import csv
 import hashlib
@@ -154,23 +155,24 @@ def header(fmt: str, columns: Sequence[str]) -> bytes:
 
 class Manifest:
     """The export's committed parts, in commit order, with its format and
-    columns and the folder its parts are in."""
+    columns, the folder its parts are in and how many bytes they hold."""
 
     def __init__(self, fmt: str, columns: List[str], folder: str,
-                 parts: Optional[List[List[Any]]] = None) -> None:
+                 parts: Optional[List[List[Any]]] = None, size: int = 0) -> None:
         self.fmt, self.columns, self.folder = fmt, columns, folder
         self.parts: List[List[Any]] = parts or []          # [[key, rows], …]
+        self.size = size
 
     @classmethod
     def from_json(cls, text: Optional[str]) -> Optional["Manifest"]:
         if not text:
             return None
         d = json.loads(text)
-        return cls(d["format"], d["columns"], d["folder"], d.get("parts"))
+        return cls(d["format"], d["columns"], d["folder"], d.get("parts"), d.get("size", 0))
 
     def to_json(self) -> str:
         return json.dumps({"format": self.fmt, "columns": self.columns,
-                           "folder": self.folder, "parts": self.parts})
+                           "folder": self.folder, "parts": self.parts, "size": self.size})
 
 
 def _part_key(folder: str, unit: Unit) -> str:
@@ -195,7 +197,7 @@ class _ExportWork:
         if latest is not None:
             self.manifest = latest
 
-    async def unit(self, unit: Unit, timeout_s: float) -> Tuple[int, str]:
+    async def unit(self, unit: Unit, timeout_s: float) -> Tuple[int, str, int]:
         from backend.app.providers.falkordb_search.engine import unit_context
 
         ctx = await unit_context(unit, self.ctx, self.run, timeout_s)
@@ -206,25 +208,28 @@ class _ExportWork:
             # Streamed as read: a walk's subtree is written a page at a time.
             nonlocal written
             batch: List[Dict[str, Any]] = []
+            # Encoded in a worker thread: a wide batch is a lot of text, and
+            # the pod's other requests share this event loop.
             async for row in _unit_rows(unit, ctx, self.session.clamps, columns,
                                         self.run, timeout_s):
                 batch.append(_record(row, columns))
                 if len(batch) >= _ENCODE_BATCH:
                     written += len(batch)
-                    yield encode_rows(batch, fmt, columns)
+                    yield await asyncio.to_thread(encode_rows, batch, fmt, columns)
                     batch = []
             if batch:
                 written += len(batch)
-                yield encode_rows(batch, fmt, columns)
+                yield await asyncio.to_thread(encode_rows, batch, fmt, columns)
 
         key = _part_key(self.manifest.folder, unit)
-        await self.objects.put_stream(key, chunks())
-        return written, key
+        stat = await self.objects.put_stream(key, chunks())
+        return written, key, stat.size
 
-    def fold(self, unit: Unit, result: Tuple[int, str]) -> None:
-        rows, key = result
+    def fold(self, unit: Unit, result: Tuple[int, str, int]) -> None:
+        rows, key, size = result
         self.session.count += rows
         self.manifest.parts.append([key, rows])
+        self.manifest.size += size
 
     def commit(self) -> Dict[str, Any]:
         return {"accumulator": self.manifest.to_json()}
@@ -343,6 +348,14 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         await store.save(session, None, ttl_s, accumulator=work.manifest.to_json())
     if session.status == FAILED:
         raise SearchFailed(f"export failed: {session.error}")
+    # The platform's export limit, held as the parts are written: they sit in
+    # the store before any download, where a limit on the download can't help.
+    from backend.app.services.versioning.import_export.stream import MAX_BYTES
+    if work.manifest.size > MAX_BYTES:
+        await store.delete(session.sid)
+        await objects.delete_prefix(work.manifest.folder)
+        raise CompileError(f"This export passed {MAX_BYTES:,} bytes — narrow the search or "
+                           "pick fewer columns.")
     return _answer(session, work.manifest)
 
 
