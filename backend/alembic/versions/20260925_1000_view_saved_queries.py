@@ -30,7 +30,7 @@ def upgrade() -> None:
         "view_saved_queries",
         sa.Column("id", sa.Text(), nullable=False),
         sa.Column("view_id", sa.Text(), nullable=False),
-        sa.Column("position", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("position", sa.Integer(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("predicate", sa.Text(), nullable=False),
