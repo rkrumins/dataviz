@@ -623,9 +623,14 @@ class AdvancedSearchService:
             session = answers[item.id]["sessionId"] or request.sessions.get(item.id)
             try:
                 answers[item.id] = await op(query_of(item, wait_ms, session), context=context)
-            except (CompileError, SearchFailed) as exc:
-                # One rule's failure is its own: the others count on.
+            except CompileError as exc:
+                # One rule's failure is its own: the others count on. A rule
+                # the engine can't count says why, in the user's terms.
                 errors[item.id] = str(exc)
+            except SearchFailed:
+                # What the graph said stays in the log, not on the page.
+                logger.warning("rule %s could not be counted", item.id, exc_info=True)
+                errors[item.id] = "The graph could not finish counting this rule. Try again later."
 
         counts = {}
         for item in request.items:

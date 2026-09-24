@@ -782,7 +782,10 @@ class TestFacets:
         page = await _search(_Provider(), results="both", aggregations=[{"by": "entityType"}])
         # The failed facet keeps its place (empty), so the others stay aligned.
         assert page.aggregates == [[]] and len(page.hits) == 3
-        assert any("too slow" in n for n in page.scope_diagnostics.notes)
+        notes = page.scope_diagnostics.notes
+        assert any("facets could not be computed" in n for n in notes)
+        # What the graph said stays in the server's log.
+        assert not any("too slow" in n for n in notes)
 
 
 class TestLeaseHandover:

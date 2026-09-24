@@ -671,7 +671,8 @@ async def _facet_models(query: SearchQuery, session: Session, store: SessionStor
     if capped and facets is None:
         return None, notes
     if isinstance(facets, dict):
-        notes.append(f"facets could not be computed: {facets.get('error')}")
+        # Why is in the server's log (``_compute_facets``), not on the page.
+        notes.append("facets could not be computed")
         facets = [[] for _ in capped]
     if len(capped) < len(specs) and session.status != COMPLETE:
         return None, notes

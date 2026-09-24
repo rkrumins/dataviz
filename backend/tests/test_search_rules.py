@@ -194,7 +194,8 @@ class TestService:
                       for n in ("broken", "fine")]})
         out = await _service(_Counts()).counts(request)
         assert out.counts["broken"].status == "complete"
-        assert out.counts["broken"].error == "count failed: the graph refused a read"
+        # What the graph said stays in the server's log; the page says it plainly.
+        assert out.counts["broken"].error and "refused" not in out.counts["broken"].error
         assert out.counts["fine"].count == 7 and out.counts["fine"].error is None
 
     async def test_container_counts_are_read_for_the_resolved_view_only(self):
