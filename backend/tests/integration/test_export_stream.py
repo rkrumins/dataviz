@@ -16,7 +16,8 @@ from sqlalchemy import func, select
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.import_export import stream
-from backend.app.services.versioning.import_export.export_worker import column_order, records_from_state
+from backend.app.services.versioning.import_export.export_worker import records_from_state
+from backend.app.services.versioning.import_export.rowmodel import column_order
 from backend.app.services.versioning.import_export.formats import get_adapter
 from backend.app.services.versioning.import_export.rowmodel import normalize
 from backend.app.services.versioning.import_export.snapshot import open_snapshot

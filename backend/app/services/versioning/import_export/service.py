@@ -24,11 +24,10 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..models import BranchORM, ImportRowORM, JobORM
 from ..service import GraphVersioningService
-from .export_worker import (
-    ExportWorker, column_order, example_template_records, records_from_state,
-)
+from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
 from .import_worker import ImportWorker
+from .rowmodel import column_order
 
 logger = logging.getLogger(__name__)
 

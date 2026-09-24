@@ -23,9 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Set
 
-from .export_worker import column_order
 from .formats import get_adapter
-from .rowmodel import denormalize_edge, denormalize_node
+from .rowmodel import column_order, denormalize_edge, denormalize_node
 from .snapshot import Snapshot, Winner
 from .xlsx_adapter import EXCEL_MAX_ROWS, sheet_columns
 
@@ -205,12 +204,20 @@ async def columns_of(pages: AsyncIterator[List[Dict[str, Any]]], extra_props: It
     return Columns(columns=columns, sheets=sheets, counts=counts)
 
 
-def check_excel(counts: Dict[str, int]) -> None:
+def excel_overflow(counts: Dict[str, int]) -> Optional[str]:
+    """Why an Excel workbook can't hold ``counts`` (per kind), or ``None``."""
     for kind, sheet in (("node", "Nodes"), ("edge", "Edges")):
         if counts.get(kind, 0) > EXCEL_MAX_ROWS:
-            raise ExcelRowLimit(
-                f"This export has {counts[kind]:,} {kind}s, more than the {EXCEL_MAX_ROWS:,} rows an Excel "
-                f"sheet holds ({sheet}). Export it as CSV or NDJSON, or export a view or a selection.")
+            return (f"This export has {counts[kind]:,} {kind}s, more than the {EXCEL_MAX_ROWS:,} rows "
+                    f"an Excel sheet holds ({sheet}). Export it as CSV or NDJSON, or export a view or "
+                    "a selection.")
+    return None
+
+
+def check_excel(counts: Dict[str, int]) -> None:
+    reason = excel_overflow(counts)
+    if reason:
+        raise ExcelRowLimit(reason)
 
 
 #: Opens a csv/tsv export: flushes the response at once (the columns take a pass to find), and tells

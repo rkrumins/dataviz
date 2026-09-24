@@ -19,15 +19,9 @@ from typing import Any, Dict, List, Optional
 from .. import db
 from ..merkle import content_hash
 from ..models import JobORM
+from . import stream
 from .import_worker import heartbeat
 from .rowmodel import denormalize_edge, denormalize_node
-
-_NODE_COL_ORDER = ["entity_id", "urn", "entityType", "displayName", "qualifiedName",
-                   "description", "sourceSystem", "layerAssignment", "tags", "baseVersion"]
-_EDGE_COL_ORDER = ["entity_id", "edgeType", "sourceQualifiedName", "targetQualifiedName",
-                   "sourceUrn", "targetUrn",
-                   "source_entity_id", "target_entity_id", "confidence", "baseVersion"]
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -50,38 +44,6 @@ def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[D
         for eid, p in edges.items()
     ]
     return node_records + edge_records
-
-
-def column_order(records: List[Dict[str, Any]], schema_props: Optional[Dict[str, List[str]]] = None) -> List[str]:
-    """Deterministic, EDIT-READY column order (csv/tsv/xlsx; ndjson ignores).
-
-    Property management is TABULAR — **every property is its own ``prop.<name>`` column**, like a
-    spreadsheet/Airtable grid, so 10–50 properties are 10–50 columns you edit in place (never a
-    bulky JSON blob). The property columns are the union of: what entities actually have + what the
-    ontology defines for the types present (``schema_props`` = ``{"node": [...], "edge": [...]}``),
-    so a defined-but-empty property is still a column to fill. ``properties_json`` is demoted to a
-    pure OVERFLOW column for genuinely nested/complex values — emitted only when a record needs it.
-    The full editable node core (description/tags/layer/…) is always present; edge columns only when
-    the export has edges."""
-    has_edge = any(r.get("kind") == "edge" for r in records)
-    schema_props = schema_props or {}
-    cols: List[str] = ["kind"] + list(_NODE_COL_ORDER)
-    if has_edge:
-        cols += [c for c in _EDGE_COL_ORDER if c not in cols]
-    prop_cols = {k for r in records for k in r if k.startswith("prop.")}
-    prop_cols |= {f"prop.{n}" for n in (schema_props.get("node") or [])}
-    if has_edge:
-        prop_cols |= {f"prop.{n}" for n in (schema_props.get("edge") or [])}
-    cols += sorted(prop_cols)
-    if any("properties_json" in r for r in records):    # overflow only — nested values, when present
-        cols.append("properties_json")
-    cols.append("_op")
-    seen, out = set(), []                                # dedup, preserve order
-    for c in cols:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
 
 
 def example_template_records() -> List[Dict[str, Any]]:
@@ -117,7 +79,6 @@ class ExportWorker:
         self._select_types = options.get("types") or []
 
     async def run(self, job_id: str) -> Dict[str, int]:
-        from . import stream                       # stream builds on this module's column order
         from .snapshot import open_snapshot
 
         async with db.graphver_session() as s:

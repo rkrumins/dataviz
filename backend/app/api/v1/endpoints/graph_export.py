@@ -46,11 +46,7 @@ def excel_limit(fmt: str, counts: dict) -> Optional[str]:
     """Why an xlsx export can't hold these counts, or ``None``."""
     if fmt != "xlsx" or counts.get("nodes") is None:
         return None
-    try:
-        stream.check_excel({"node": counts["nodes"], "edge": counts["edges"]})
-    except stream.ExcelRowLimit as exc:
-        return str(exc)
-    return None
+    return stream.excel_overflow({"node": counts["nodes"], "edge": counts["edges"]})
 
 
 async def take_turn() -> int:
@@ -69,10 +65,9 @@ async def xlsx_columns(pages, fmt: str, props=()) -> Optional[stream.Columns]:
     if fmt != "xlsx":
         return None
     columns = await stream.columns_of(pages, props)
-    try:
-        stream.check_excel(columns.counts)
-    except stream.ExcelRowLimit as exc:
-        raise HTTPException(status_code=422, detail={"code": "EXCEL_ROW_LIMIT", "message": str(exc)})
+    reason = stream.excel_overflow(columns.counts)
+    if reason:
+        raise HTTPException(status_code=422, detail={"code": "EXCEL_ROW_LIMIT", "message": reason})
     return columns
 
 

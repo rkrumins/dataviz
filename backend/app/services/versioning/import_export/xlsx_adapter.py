@@ -143,7 +143,7 @@ _NS = ('xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
 _XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
 # Characters XML 1.0 can't carry (C0 controls other than tab, newline and carriage return). They
 # are dropped from cells: openpyxl, which reads the file back on import, refuses them too.
-_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_ILLEGAL = re.compile("[%s]" % "".join(map(chr, [*range(0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0xFFFE, 0xFFFF])))
 # Cell styles, indexes into styles.xml's cellXfs: plain, header, locked header, title.
 _PLAIN, _HEADER, _LOCKED_HEADER, _TITLE = 0, 1, 2, 3
 
