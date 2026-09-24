@@ -406,6 +406,151 @@ class TraceDelta(TraceResultV2):
     to a structural delta (addNodes/addEdges/removeNodes/removeEdges)."""
 
 
+# ============================================
+# Lineage bridges (virtual hops between the members of a view)
+# ============================================
+
+#: Members one bridges request may name. A curated view larger than this is
+#: not bridged at all — the canvas says so — rather than bridged partially.
+LINEAGE_BRIDGES_MAX_MEMBERS = 2000
+#: The longest virtual hop a request may ask for, in raw lineage edges.
+LINEAGE_BRIDGES_MAX_HOPS = 20
+
+
+class LineageBridgeMember(BaseModel):
+    """One member of the set being bridged — a view's assignment, in effect.
+
+    ``inheritsChildren`` carries the view's own rule: a member that inherits
+    its children owns everything beneath it that no deeper member claims; one
+    that does not owns only itself, and blocks — what sits beneath it belongs
+    to nobody, exactly as it drops out of the view."""
+    urn: str = Field(min_length=1)
+    inherits_children: bool = Field(True, alias="inheritsChildren")
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgesRequest(BaseModel):
+    """Which members reach which other members through lineage the set does
+    not contain — see ``backend/common/providers/lineage_bridges.py`` for the
+    exact definition.
+
+    ``origins`` narrows the side the question is asked FROM (default: every
+    member). ``direction`` says which way the origins look: ``downstream``
+    answers "what do the origins feed", ``upstream`` "what feeds the
+    origins". Either way every returned link is oriented by data flow.
+    """
+    members: List[LineageBridgeMember] = Field(min_length=1, max_length=LINEAGE_BRIDGES_MAX_MEMBERS)
+    origins: Optional[List[str]] = Field(None, max_length=LINEAGE_BRIDGES_MAX_MEMBERS)
+    direction: Literal["downstream", "upstream"] = "downstream"
+    max_hops: int = Field(10, alias="maxHops", ge=1, le=LINEAGE_BRIDGES_MAX_HOPS)
+    # Interior (unowned) nodes the walk may discover; the engine clamps it.
+    max_nodes: Optional[int] = Field(None, alias="maxNodes", ge=100, le=50_000)
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgeLink(BaseModel):
+    """``source`` reaches ``target`` in ``hops`` raw lineage edges, through
+    nodes neither of them nor any other member owns. ``hops == 1`` is a
+    direct link; anything longer is a virtual hop."""
+    source: str
+    target: str
+    hops: int
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgeIncomplete(BaseModel):
+    """A member whose links may be missing on one side, and why. A member not
+    named here has every link it has within ``maxHops``.
+
+    ``reason``: ``budget`` — the node or row budget stopped the walk;
+    ``hub`` — a node with more lineage than a walk may read sits on the way;
+    ``failed`` — a read failed or the deadline passed; ``seed_cap`` — the
+    member's contents were too large to enumerate."""
+    urn: str
+    side: Literal["downstream", "upstream"]
+    reason: Literal["budget", "hub", "failed", "seed_cap"]
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgesStats(BaseModel):
+    seeds: int = 0
+    interior_nodes: int = Field(0, alias="interiorNodes")
+    edges_read: int = Field(0, alias="edgesRead")
+    forward_depth: int = Field(0, alias="forwardDepth")
+    backward_depth: int = Field(0, alias="backwardDepth")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgesResult(BaseModel):
+    """Every link among the members, plus an honest account of what the
+    budget could not finish. ``truncated``/``truncationReason`` follow the
+    closure's contract (and the response cache reads them): a FAILURE reason
+    (``timeout``, ``seed_failed``, ``expand_failed``, ``chains_failed``)
+    outranks a CAP (``max_nodes``, ``degree_cap``), and only a cap is a pure
+    function of (graph, request). ``depthLimited`` says both ends were still
+    growing when ``maxHops`` ran out — longer connections may exist."""
+    links: List[LineageBridgeLink] = Field(default_factory=list)
+    incomplete: List[LineageBridgeIncomplete] = Field(default_factory=list)
+    depth_limited: bool = Field(False, alias="depthLimited")
+    truncated: bool = False
+    truncation_reason: Optional[str] = Field(None, alias="truncationReason")
+    stats: LineageBridgesStats = Field(default_factory=LineageBridgesStats)
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgePathRequest(BaseModel):
+    """How ``source`` reaches ``target`` — the hidden steps behind one link,
+    walked with the same member set so the steps are exactly the ones the
+    link was drawn over."""
+    members: List[LineageBridgeMember] = Field(min_length=1, max_length=LINEAGE_BRIDGES_MAX_MEMBERS)
+    source: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    max_hops: int = Field(10, alias="maxHops", ge=1, le=LINEAGE_BRIDGES_MAX_HOPS)
+    max_nodes: Optional[int] = Field(None, alias="maxNodes", ge=100, le=50_000)
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+class LineageBridgePathResult(BaseModel):
+    """Every SHORTEST path from ``source`` to ``target`` through unowned
+    nodes, as a small graph: ``hiddenUrns`` are the steps the view does not
+    show (at most a few hundred, nearest the source first), ``endpointUrns``
+    the lineage-bearing nodes inside the two members where the paths start
+    and end, ``edges`` the raw lineage edges on those paths. ``nodes`` hydrate
+    all of them plus their containment ancestors, and ``ancestorChains``
+    (parent first) lets a reader group the steps at whatever grain it shows.
+    ``hops`` is None when no path exists within ``maxHops``."""
+    source: str
+    target: str
+    hops: Optional[int] = None
+    hidden_urns: List[str] = Field(default_factory=list, alias="hiddenUrns")
+    endpoint_urns: List[str] = Field(default_factory=list, alias="endpointUrns")
+    nodes: List[GraphNode] = Field(default_factory=list)
+    edges: List[GraphEdge] = Field(default_factory=list)
+    ancestor_chains: Dict[str, List[str]] = Field(default_factory=dict, alias="ancestorChains")
+    truncated: bool = False
+    truncation_reason: Optional[str] = Field(None, alias="truncationReason")
+
+    class Config:
+        populate_by_name = True
+
+
 class ContainmentResult(BaseModel):
     parent: Optional[GraphNode]
     children: List[GraphNode]

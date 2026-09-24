@@ -278,6 +278,12 @@ TRACE_TIMEOUT_SECS: float = float(os.getenv("TRACE_TIMEOUT_SECS", "60"))
 # (floor 5s). With engine == middleware the truncated-200 raced the 504
 # and usually lost — the whole point of graceful truncation defeated.
 TRACE_ENGINE_HEADROOM_SECS: float = float(os.getenv("TRACE_ENGINE_HEADROOM_SECS", "10"))
+# Lineage bridges (a curated view's virtual hops, a subset's "grow"). Its own
+# budget rather than the trace's: a view opening waits on this answer, and a
+# walk that cannot finish in this time reports what it could not reach rather
+# than holding the canvas. Well under the graph tier, so the truncated-200
+# always beats the middleware 504.
+LINEAGE_BRIDGES_TIMEOUT_SECS: float = float(os.getenv("LINEAGE_BRIDGES_TIMEOUT_SECS", "25"))
 
 # ── Ontology introspection ──────────────────────────────────────────
 # Outer timeout for the aggregate get_ontology_metadata() call (which

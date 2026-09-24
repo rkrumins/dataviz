@@ -6357,6 +6357,56 @@ class FalkorDBProvider(GraphDataProvider):
             self, sample_per_label=sample_per_label,
         )
 
+    async def lineage_bridges(
+        self,
+        *,
+        members,
+        origins,
+        direction: str,
+        max_hops: int,
+        max_nodes: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        timeout_ms: int,
+    ):
+        """Which members reach which through lineage the set does not hold —
+        the virtual hops of a curated view. The algorithm is provider-neutral
+        (``backend/common/providers/lineage_bridges.py``); this supplies it the
+        closure walk's own index-seeking reads (``falkordb_bridges.py``).
+        Lazy imports, like ``deep_search``, to keep the load order acyclic."""
+        from backend.common.providers.lineage_bridges import run_lineage_bridges
+        from .falkordb_bridges import FalkorBridgeCallbacks
+        await self._ensure_connected()
+        return await run_lineage_bridges(
+            FalkorBridgeCallbacks(self, lineage_edge_types, containment_edge_types),
+            members=members, origins=origins, direction=direction,
+            max_hops=max_hops, max_nodes=max_nodes,
+            deadline=time.monotonic() + timeout_ms / 1000.0,
+        )
+
+    async def lineage_bridge_path(
+        self,
+        *,
+        members,
+        source: str,
+        target: str,
+        max_hops: int,
+        max_nodes: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        timeout_ms: int,
+    ):
+        """The hidden steps behind one virtual hop. See ``lineage_bridges``."""
+        from backend.common.providers.lineage_bridges import run_bridge_path
+        from .falkordb_bridges import FalkorBridgeCallbacks
+        await self._ensure_connected()
+        return await run_bridge_path(
+            FalkorBridgeCallbacks(self, lineage_edge_types, containment_edge_types),
+            members=members, source=source, target=target,
+            max_hops=max_hops, max_nodes=max_nodes,
+            deadline=time.monotonic() + timeout_ms / 1000.0,
+        )
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 

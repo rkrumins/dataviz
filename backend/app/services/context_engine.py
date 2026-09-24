@@ -14,11 +14,16 @@ from ..models.graph import (
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
     TraceClosureRequest, TraceClosureResult,
+    LineageBridgesRequest, LineageBridgesResult,
+    LineageBridgePathRequest, LineageBridgePathResult,
 )
+from backend.common.providers.lineage_bridges import run_bridge_path, run_lineage_bridges
+from backend.common.providers.lineage_bridges_generic import GenericBridgeCallbacks
 
 from ..providers.base import GraphDataProvider
 from ..config.resilience import (
     FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
+    LINEAGE_BRIDGES_TIMEOUT_SECS,
     TRACE_ENGINE_HEADROOM_SECS,
     TRACE_TIMEOUT_SECS,
 )
@@ -63,6 +68,42 @@ def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
         t for t in edge_types
         if t and str(t).upper() not in SYNTHETIC_LINEAGE_EDGE_TYPES
     ]
+
+
+def _walk_lineage_types(requested: Optional[List[str]], resolved: Any) -> List[str]:
+    """The relationship types a RAW lineage walk follows: what the caller asked
+    for, or the resolved ontology's lineage types, minus the synthetic ones.
+
+    SYNTHETIC EDGES ARE NOT LINEAGE. See SYNTHETIC_LINEAGE_EDGE_TYPES: a
+    source's resolved ontology routinely LISTS ``AGGREGATED`` among its
+    lineage types, but those relationships are the aggregation worker's own
+    materialised rollups, not anything a data source said. Walking them counts
+    one real flow once per coarser grain above it, which is what put "5 in /
+    4 out" on a column with two real neighbours. Filtered from BOTH the
+    resolved default and anything a caller asked for, at this one seam.
+
+    The nothing-left case (REPORTED LIVE 2026-08-19): a source whose ONLY
+    lineage vocabulary IS the synthetic type — the canvas editor's
+    non-drawable guard was case-broken, so manual/blank models carry authored
+    flow written as :AGGREGATED and nothing else. Filtering would leave an
+    EMPTY list and a walk guaranteed to find nothing. The double-count the
+    filter prevents needs a REAL flow under the rollup; this source has none —
+    walk the only lineage truth it has.
+    """
+    declared_types = requested or list(resolved.lineage_edge_types or [])
+    edge_types = _real_lineage_types(declared_types)
+    if not edge_types and declared_types:
+        edge_types = [t for t in declared_types if t]
+    return edge_types
+
+
+def _bridge_members(members: Iterable[Any]) -> Dict[str, bool]:
+    """``urn -> inheritsChildren`` for a bridges request, first occurrence
+    winning (a view's assignment map cannot hold one urn twice)."""
+    out: Dict[str, bool] = {}
+    for member in members:
+        out.setdefault(member.urn, bool(member.inherits_children))
+    return out
 
 
 class ContextEngine:
@@ -1363,34 +1404,12 @@ class ContextEngine:
         same per-(provider, graph) trace semaphore + engine deadline.
         """
         resolved = await self._resolve_ontology()
-        # SYNTHETIC EDGES ARE NOT LINEAGE. See SYNTHETIC_LINEAGE_EDGE_TYPES:
-        # a source's resolved ontology routinely LISTS ``AGGREGATED`` among
-        # its lineage types, but those relationships are the aggregation
-        # worker's own materialised rollups, not anything a data source
-        # said. Walking them counts one real flow once per coarser grain
-        # above it, which is what put "5 in / 4 out" on a column with two
-        # real neighbours — and it contradicts this closure's whole design,
-        # which is regime-independent precisely because it depends on NO
-        # ``:AGGREGATED`` cells.
-        #
-        # Filtered from BOTH the resolved default and anything a caller
-        # asked for, at this one seam: the provider hands the same list to
-        # its BFS, its cursor page AND its degree probe, so the counts the
-        # frontier reports stay consistent with the edges that shipped.
-        declared_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
-        edge_types = _real_lineage_types(declared_types)
-        if not edge_types and declared_types:
-            # The nothing-left case (REPORTED LIVE 2026-08-19): a source
-            # whose ONLY lineage vocabulary IS the synthetic type — the
-            # canvas editor's non-drawable guard was case-broken, so
-            # manual/blank models carry authored flow written as
-            # :AGGREGATED and nothing else. Filtering here handed the
-            # provider an EMPTY list and the walk was guaranteed to find
-            # nothing (canvas showed the flow, lens showed a bare focus).
-            # The double-count the filter prevents needs a REAL flow under
-            # the rollup; this source has none — walk the only lineage
-            # truth it has.
-            edge_types = [t for t in declared_types if t]
+        # Synthetic rollups stripped (see _walk_lineage_types): this closure
+        # is regime-independent precisely because it depends on NO
+        # ``:AGGREGATED`` cells. The provider hands the same list to its BFS,
+        # its cursor page AND its degree probe, so the counts the frontier
+        # reports stay consistent with the edges that shipped.
+        edge_types = _walk_lineage_types(req.lineage_edge_types, resolved)
         containment_types = list(resolved.containment_edge_types or [])
         max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES_HARD)
 
@@ -1435,6 +1454,73 @@ class ContextEngine:
         if getattr(req, "grain", None) is not None:
             result.grain = "fine"
         return result
+
+    async def lineage_bridges(self, req: LineageBridgesRequest) -> LineageBridgesResult:
+        """Which members reach which through lineage the member set does not
+        hold — the virtual hops of a curated view, and the "grow" of a subset.
+
+        Same shape as ``trace_closure``: RAW lineage only (synthetic rollups
+        stripped — a bridge is a leaf-grain path, and chained rollups invent
+        paths), behind the same per-(provider, graph) trace semaphore, with
+        its own budget below the HTTP tier. FalkorDB answers with its tuned
+        reads; any other reader — a draft overlay included, which is what makes
+        a draft's new hop visible — through the generic ``get_edges`` adapter.
+        """
+        resolved = await self._resolve_ontology()
+        edge_types = _walk_lineage_types(req.lineage_edge_types, resolved)
+        if not edge_types:
+            return LineageBridgesResult()
+        containment_types = list(resolved.containment_edge_types or [])
+        members = _bridge_members(req.members)
+        max_nodes = min(
+            req.max_nodes or ContextEngine.LINEAGE_BRIDGES_MAX_NODES,
+            ContextEngine.LINEAGE_BRIDGES_MAX_NODES_HARD,
+        )
+        async with self._trace_semaphore():
+            fn = getattr(self.provider, "lineage_bridges", None)
+            if fn is not None:
+                return await fn(
+                    members=members, origins=req.origins, direction=req.direction,
+                    max_hops=req.max_hops, max_nodes=max_nodes,
+                    lineage_edge_types=edge_types, containment_edge_types=containment_types,
+                    timeout_ms=ContextEngine.LINEAGE_BRIDGES_TIMEOUT_MS,
+                )
+            return await run_lineage_bridges(
+                GenericBridgeCallbacks(self.provider, edge_types, containment_types),
+                members=members, origins=req.origins, direction=req.direction,
+                max_hops=req.max_hops, max_nodes=max_nodes,
+                deadline=time.monotonic() + ContextEngine.LINEAGE_BRIDGES_TIMEOUT_MS / 1000.0,
+            )
+
+    async def lineage_bridge_path(self, req: LineageBridgePathRequest) -> LineageBridgePathResult:
+        """The hidden steps behind one link — every shortest path from
+        ``source`` to ``target`` through nodes no member owns. See
+        ``lineage_bridges``."""
+        resolved = await self._resolve_ontology()
+        edge_types = _walk_lineage_types(req.lineage_edge_types, resolved)
+        if not edge_types:
+            return LineageBridgePathResult(source=req.source, target=req.target)
+        containment_types = list(resolved.containment_edge_types or [])
+        members = _bridge_members(req.members)
+        max_nodes = min(
+            req.max_nodes or ContextEngine.LINEAGE_BRIDGES_MAX_NODES,
+            ContextEngine.LINEAGE_BRIDGES_MAX_NODES_HARD,
+        )
+        async with self._trace_semaphore():
+            fn = getattr(self.provider, "lineage_bridge_path", None)
+            if fn is not None:
+                return await fn(
+                    members=members, source=req.source, target=req.target,
+                    max_hops=req.max_hops, max_nodes=max_nodes,
+                    lineage_edge_types=edge_types, containment_edge_types=containment_types,
+                    timeout_ms=ContextEngine.LINEAGE_BRIDGES_TIMEOUT_MS,
+                )
+            return await run_bridge_path(
+                GenericBridgeCallbacks(self.provider, edge_types, containment_types),
+                members=members, source=req.source, target=req.target,
+                max_hops=req.max_hops, max_nodes=max_nodes,
+                deadline=time.monotonic() + ContextEngine.LINEAGE_BRIDGES_TIMEOUT_MS / 1000.0,
+            )
 
     # ------------------------------------------------------------------ #
     # Trace v2 wrappers — skeleton-first contract                          #
@@ -1694,6 +1780,12 @@ class ContextEngine:
     TRACE_TIMEOUT_MS: int = int(
         max(5.0, TRACE_TIMEOUT_SECS - TRACE_ENGINE_HEADROOM_SECS) * 1000
     )
+    # Lineage bridges (virtual hops): interior nodes one request may discover
+    # — the rows it may read are a fixed multiple — and its own budget, well
+    # under the graph tier, because a view opening waits on it.
+    LINEAGE_BRIDGES_MAX_NODES: int = int(_os.getenv("LINEAGE_BRIDGES_MAX_NODES", "20000"))
+    LINEAGE_BRIDGES_MAX_NODES_HARD: int = int(_os.getenv("LINEAGE_BRIDGES_MAX_NODES_HARD", "50000"))
+    LINEAGE_BRIDGES_TIMEOUT_MS: int = int(max(2.0, LINEAGE_BRIDGES_TIMEOUT_SECS) * 1000)
     del _os
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:

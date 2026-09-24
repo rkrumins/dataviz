@@ -22,7 +22,14 @@ from backend.app.models.graph import (
     ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
-from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
+from backend.common.models.graph import (
+    LineageBridgePathRequest,
+    LineageBridgePathResult,
+    LineageBridgesRequest,
+    LineageBridgesResult,
+    TraceClosureRequest,
+    TraceClosureResult,
+)
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.providers.falkordb_provider import (
     _FAILOVER_RETRY_AFTER_S,
@@ -42,6 +49,8 @@ from backend.app.services.graph_cache import (
     ENDPOINT_CANVAS_EXPAND,
     ENDPOINT_CHILDREN,
     ENDPOINT_EDGES_BETWEEN,
+    ENDPOINT_LINEAGE_BRIDGE_PATH,
+    ENDPOINT_LINEAGE_BRIDGES,
     ENDPOINT_NODES_DEGREE,
     ENDPOINT_NODES_QUERY,
     ENDPOINT_TOP_LEVEL,
@@ -89,6 +98,7 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 require_trace = require_feature("traceEnabled")        # POST /trace*
 require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
+require_view_subsets = require_feature("viewSubsetsEnabled")  # POST /lineage/bridges*
 
 
 # ------------------------------------------------------------------ #
@@ -811,6 +821,8 @@ def _compute_budget(endpoint: str) -> float:
             5.0,
             resilience.TRACE_TIMEOUT_SECS - resilience.TRACE_ENGINE_HEADROOM_SECS,
         )
+    if endpoint in (ENDPOINT_LINEAGE_BRIDGES, ENDPOINT_LINEAGE_BRIDGE_PATH):
+        return resilience.LINEAGE_BRIDGES_TIMEOUT_SECS
     if endpoint == ENDPOINT_CHILDREN:
         return resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
     if endpoint == ENDPOINT_TOP_LEVEL:
@@ -1186,6 +1198,119 @@ async def trace_closure(
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail={"code": "trace_closure_unsupported", "message": str(exc)})
+
+
+def _sorted_members(members) -> list:
+    """The member list deduplicated (first occurrence wins, as the engine
+    reads it) and sorted by urn: a member set is a SET, and sorting is what
+    makes two opens of one view share a cache entry."""
+    seen: Dict[str, Any] = {}
+    for member in members:
+        seen.setdefault(member.urn, member)
+    return [seen[urn] for urn in sorted(seen)]
+
+
+@router.post(
+    "/lineage/bridges", response_model=LineageBridgesResult, response_model_by_alias=True,
+    dependencies=[Depends(require_view_subsets)],
+)
+async def lineage_bridges(
+    response: Response,
+    request: LineageBridgesRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> LineageBridgesResult:
+    """Which members reach which other members through lineage the member set
+    does not hold — the VIRTUAL HOPS a curated view draws where it leaves the
+    steps between two of its entities out ("A ⇢ C, via 1 step").
+
+    ``hops`` is the length of the shortest raw-lineage path whose interior
+    belongs to no member; a path stops at the first member it reaches, so
+    picking A, C and F out of A→B→C→D→E→F yields A⇢C and C⇢F, never A⇢F.
+    ``origins`` + ``direction`` narrow the question to "what do these feed" /
+    "what feeds these" (a subset's grow). Every link is oriented by data flow.
+
+    Honest under budget: a member whose links the walk could not finish is
+    named in ``incomplete`` with the side and the reason; one not named has
+    every link it has within ``maxHops``. Response-cached (generation-bump
+    invalidated, so the hops follow the graph), slot-bounded and fair-shared
+    like the other walks.
+    """
+    members = _sorted_members(request.members)
+    member_urns = {m.urn for m in members}
+    origins = None
+    if request.origins is not None:
+        strangers = sorted(set(request.origins) - member_urns)
+        if strangers:
+            raise HTTPException(status_code=422, detail=f"origins must be members: {strangers[:5]}")
+        origins = sorted(set(request.origins))
+    request = request.model_copy(update={"members": members, "origins": origins})
+
+    await _enforce_fair_share(engine, ENDPOINT_LINEAGE_BRIDGES)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def compute() -> LineageBridgesResult:
+        return await engine.lineage_bridges(request)
+
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return await _bounded_compute(engine, compute)()
+        return await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_LINEAGE_BRIDGES,
+            params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+            compute=_bounded_compute(engine, compute),
+            model_cls=LineageBridgesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_LINEAGE_BRIDGES),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail={"code": "lineage_bridges_unsupported", "message": str(exc)})
+
+
+@router.post(
+    "/lineage/bridges/path", response_model=LineageBridgePathResult, response_model_by_alias=True,
+    dependencies=[Depends(require_view_subsets)],
+)
+async def lineage_bridge_path(
+    response: Response,
+    request: LineageBridgePathRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> LineageBridgePathResult:
+    """The hidden steps behind one virtual hop: every SHORTEST path from
+    ``source`` to ``target`` through nodes no member owns, walked with the
+    same member set the hop was drawn with, hydrated with the containment
+    ancestors a reader needs to name each step. ``hops`` is None when the two
+    are not connected within ``maxHops``."""
+    members = _sorted_members(request.members)
+    member_urns = {m.urn for m in members}
+    if request.source not in member_urns or request.target not in member_urns:
+        raise HTTPException(status_code=422, detail="source and target must both be members")
+    if request.source == request.target:
+        raise HTTPException(status_code=422, detail="source and target must differ")
+    request = request.model_copy(update={"members": members})
+
+    await _enforce_fair_share(engine, ENDPOINT_LINEAGE_BRIDGE_PATH)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def compute() -> LineageBridgePathResult:
+        return await engine.lineage_bridge_path(request)
+
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return await _bounded_compute(engine, compute)()
+        return await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_LINEAGE_BRIDGE_PATH,
+            params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+            compute=_bounded_compute(engine, compute),
+            model_cls=LineageBridgePathResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_LINEAGE_BRIDGE_PATH),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail={"code": "lineage_bridges_unsupported", "message": str(exc)})
 
 
 @router.post("/trace/expand", response_model=TraceResult, response_model_by_alias=True, dependencies=[Depends(require_trace)])

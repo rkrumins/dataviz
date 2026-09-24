@@ -523,6 +523,22 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "them in on a click",
         ),
     ),
+    "viewSubsetsEnabled": FeatureWiring(
+        key="viewSubsetsEnabled",
+        posture="capability",
+        # Preview while it is being built: subset views and the virtual hops
+        # that keep a subset's lineage connected. Ships OFF until the whole
+        # flow — studio, creation, provenance — is in.
+        stage="experimental",
+        server_gates=(
+            "POST /graph/lineage/bridges — virtual hops between the entities of a curated view",
+            "POST /graph/lineage/bridges/path — the hidden steps behind one virtual hop",
+        ),
+        still_allowed=(
+            "Every view opens and draws its direct lines exactly as before",
+            "Tracing lineage, and bringing in what a row's lineage reaches outside the view",
+        ),
+    ),
 }
 
 

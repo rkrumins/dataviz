@@ -70,6 +70,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "canvasLineageRollupEnabled":
         "Rolling lineage up to entities that are not loaded is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "viewSubsetsEnabled":
+        "Subset views and their virtual hops are turned off for this deployment. "
+        "An administrator can enable them under Admin → Features.",
     "editModeEnabled":
         "Editing is turned off for this deployment, so views are read-only. "
         "An administrator can enable it under Admin → Features.",
@@ -788,6 +791,33 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "run; switch off where exact lines matter more."
         ),
         "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "viewSubsetsEnabled",
+        "name": "Subset views with virtual hops",
+        "description": (
+            "Carve a smaller view out of a Context View for a narrower audience — pick the "
+            "entities that matter on the canvas, grow them with their upstream or downstream, and "
+            "save. Where the subset leaves out the steps between two of its entities, the canvas "
+            "keeps them connected with a virtual hop computed live from the graph."
+        ),
+        "impact_when_off": (
+            "No subset views and no virtual hops: every view draws only the lines between entities "
+            "it holds. Views already made as subsets keep opening. This is a preview; it ships off "
+            "until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Virtual hops walk raw lineage between a view's entities each time the graph changes, "
+            "cached until the next change. On a struggling provider, turning this off removes that "
+            "walk without taking any view away."
+        ),
+        "sort_order": 3,
         "deprecated": False,
     },
 ]

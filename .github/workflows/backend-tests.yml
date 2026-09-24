@@ -118,7 +118,8 @@ jobs:
           FALKORDB_HOST: localhost
           FALKORDB_PORT: "6379"
         run: |
-          python -m pytest tests/integration/test_aggregation_pipeline_live.py -q
+          python -m pytest tests/integration/test_aggregation_pipeline_live.py \
+            tests/integration/test_lineage_bridges_live.py -q
 
   full-suite:
     name: Full backend suite (informational)

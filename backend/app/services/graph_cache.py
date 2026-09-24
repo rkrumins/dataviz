@@ -182,6 +182,9 @@ _DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_T
 # fresh on edits.
 _DEFAULT_CANVAS_BOOTSTRAP_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 _DEFAULT_CANVAS_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_EXPAND_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
+# Lineage bridges: a view re-opening asks for exactly the same member set, and
+# the answer only changes when the graph does — which bumps the generation.
+_DEFAULT_LINEAGE_BRIDGES_TTL = _clamped_int_env("GRAPH_CACHE_LINEAGE_BRIDGES_TTL_S", 3600, lo=_TTL_LO, hi=_TTL_HI)
 # Short TTL for DEGRADED results — an answer the provider gave up part way
 # through, which a retry may well improve on. Absorbs the herd asking for it
 # again without committing to caching a partial answer for long. Floor of
@@ -265,6 +268,11 @@ ENDPOINT_CANVAS_EXPAND = "canvas-expand"
 ENDPOINT_EDGES_BETWEEN = "edges-between"
 ENDPOINT_NODES_QUERY = "nodes-query"
 ENDPOINT_NODES_DEGREE = "nodes-degree"
+# Lineage bridges — a curated view's virtual hops and one hop's hidden steps.
+# RAW lineage only, so deliberately NOT in _ROLLUP_ENDPOINTS: a rollup rebuild
+# changes nothing these answer; any real write bumps the content generation.
+ENDPOINT_LINEAGE_BRIDGES = "lineage-bridges"
+ENDPOINT_LINEAGE_BRIDGE_PATH = "lineage-bridge-path"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -279,6 +287,8 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_EDGES_BETWEEN: _flag("GRAPH_CACHE_ENABLED_EDGES_BETWEEN", default=True),
     ENDPOINT_NODES_QUERY: _flag("GRAPH_CACHE_ENABLED_NODES_QUERY", default=True),
     ENDPOINT_NODES_DEGREE: _flag("GRAPH_CACHE_ENABLED_NODES_DEGREE", default=True),
+    ENDPOINT_LINEAGE_BRIDGES: _flag("GRAPH_CACHE_ENABLED_LINEAGE_BRIDGES", default=True),
+    ENDPOINT_LINEAGE_BRIDGE_PATH: _flag("GRAPH_CACHE_ENABLED_LINEAGE_BRIDGE_PATH", default=True),
 }
 
 #: The endpoints whose answer is read out of the ``:AGGREGATED`` rollup layer,
@@ -1502,6 +1512,8 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_CANVAS_BOOTSTRAP_TTL
     if endpoint == ENDPOINT_CANVAS_EXPAND:
         return _DEFAULT_CANVAS_EXPAND_TTL
+    if endpoint in (ENDPOINT_LINEAGE_BRIDGES, ENDPOINT_LINEAGE_BRIDGE_PATH):
+        return _DEFAULT_LINEAGE_BRIDGES_TTL
     if endpoint in (ENDPOINT_EDGES_BETWEEN, ENDPOINT_NODES_QUERY):
         # Hydration reads — same gen-bump invalidation, same freshness as
         # children; a canvas re-open repeats the identical URN set.

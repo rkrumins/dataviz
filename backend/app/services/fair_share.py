@@ -49,6 +49,8 @@ ENDPOINT_AGGREGATED = "aggregated"
 ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
 ENDPOINT_CANVAS_EXPAND = "canvas-expand"
 ENDPOINT_TRACE_CLOSURE = "trace-closure"
+ENDPOINT_LINEAGE_BRIDGES = "lineage-bridges"
+ENDPOINT_LINEAGE_BRIDGE_PATH = "lineage-bridge-path"
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,13 @@ _CONFIGS: dict[str, BucketConfig] = {
     # rate-limited at all (see `take`), so the closure endpoint's own
     # enforcement call did nothing until it was listed here.
     ENDPOINT_TRACE_CLOSURE: _load_config("TRACE_CLOSURE", 10.0, 20),
+    # A view's virtual hops are one request per open (and per edit in a
+    # draft); the subset studio's preview is debounced and cached per member
+    # set. Each is a two-sided walk over every member at once — heavier than a
+    # closure step — so the budget is tighter. One hop's hidden steps are a
+    # click, and cheaper.
+    ENDPOINT_LINEAGE_BRIDGES: _load_config("LINEAGE_BRIDGES", 2.0, 6),
+    ENDPOINT_LINEAGE_BRIDGE_PATH: _load_config("LINEAGE_BRIDGE_PATH", 5.0, 10),
 }
 
 
