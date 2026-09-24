@@ -27,7 +27,7 @@ import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy import select, func, delete, update, or_, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -733,7 +733,9 @@ class GraphVersioningService:
                     containment_edge_types=containment_edge_types or [],
                     ontology_rules=ontology_rules,
                     strict=graph is not None and graph.ontology_enforcement == "strict",
-                    known=head_state)
+                    known=head_state,
+                    edited={c.entity_id for c in changes if c.op == "update"}
+                    - {c.entity_id for c in changes if c.op == "create"})
 
             commit_seq = await self._next_seq(s, graph_id, branch_id)
             commit = CommitORM(
@@ -2869,6 +2871,7 @@ class GraphVersioningService:
         kind_by_entity: Mapping[str, str], *,
         containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
         strict: bool, known: Optional[Mapping[str, Optional[dict]]] = None,
+        edited: Collection[str] = (),
     ) -> None:
         """The ONE gate every write path shares (canvas save, checkpoint, publish): it judges the
         state being WRITTEN (``written``: entity → new value, ``None`` = delete) against what it
@@ -2889,7 +2892,7 @@ class GraphVersioningService:
         live = {eid: v for eid, v in written.items() if v is not None}
 
         untyped = _untyped_creations(
-            {eid: v for eid, v in live.items() if prior.get(eid) is None}, kind_by_entity)
+            {eid: v for eid, v in live.items() if prior.get(eid) is None}, kind_by_entity, edited)
         if untyped:
             raise OntologyViolation(untyped)
 
@@ -5268,7 +5271,8 @@ class GraphVersioningService:
                 s, graph_id, bid, new_vals, cur_vals, kind_by_entity,
                 containment_edge_types=containment_edge_types or [],
                 ontology_rules=ontology_rules,
-                strict=graph.ontology_enforcement == "strict")
+                strict=graph.ontology_enforcement == "strict",
+                edited=update_ids)
 
             ontology = Ontology.from_spec(graph.ontology_spec)   # write-through ontology gate
             if ontology is not None and graph.ontology_enforcement == "strict":
@@ -5974,6 +5978,7 @@ def _redefines(before: Optional[dict], after: Mapping, kind: str) -> bool:
 
 def _untyped_creations(
     created: Mapping[str, Optional[dict]], kind_by_entity: Mapping[str, str],
+    edited: Collection[str] = (),
 ) -> List[dict]:
     """Violations for entities about to be CREATED without a type (a node's ``entityType``, an
     edge's ``edgeType``). Every reader needs one, so this holds in every enforcement mode — one
@@ -5984,11 +5989,21 @@ def _untyped_creations(
         if v is None:
             continue
         kind = kind_by_entity.get(eid, "node")
-        if kind == "node" and not v.get("entityType"):
-            out.append({"entity_id": eid, "kind": kind, "rule": "missing_entity_type",
-                        "reason": "A node needs an entity type from the ontology."})
-        elif kind == "edge" and not (v.get("edgeType") or v.get("edge_type")):
-            out.append({"entity_id": eid, "kind": kind, "rule": "missing_edge_type",
+        name = v.get("displayName") or eid
+        typed = v.get("entityType") if kind == "node" else (v.get("edgeType") or v.get("edge_type"))
+        if typed:
+            continue
+        if eid in edited:
+            # An EDIT of something this branch does not have — never a creation the user meant.
+            out.append({"entity_id": eid, "kind": kind, "rule": "entity_not_found", "name": name,
+                        "reason": f"'{name}' isn't on this draft — the change edits "
+                                  f"{'an entity' if kind == 'node' else 'a relationship'} that does not "
+                                  "exist here (it may have been deleted). Refresh the view and try again."})
+        elif kind == "node":
+            out.append({"entity_id": eid, "kind": kind, "rule": "missing_entity_type", "name": name,
+                        "reason": f"'{name}' has no entity type. Choose a type from the ontology."})
+        else:
+            out.append({"entity_id": eid, "kind": kind, "rule": "missing_edge_type", "name": name,
                         "reason": "A relationship needs a relationship type from the ontology."})
     return out
 

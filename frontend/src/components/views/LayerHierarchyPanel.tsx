@@ -15,7 +15,7 @@
  * - Collapse/expand per node
  */
 
-import { useState, useCallback, useEffect, useMemo, useRef, type RefObject } from 'react'
+import { useContext, useState, useCallback, useEffect, useMemo, useRef, type RefObject } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import {
@@ -29,12 +29,18 @@ import {
     FolderOpen,
     Layers,
     FolderPlus,
+    FolderInput,
+    ArrowRightLeft,
+    Ungroup,
     Box,
     Eraser,
     Loader2,
     X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { PlacedTag } from '@/components/ui/PlacedTag'
+import { PlacementPathsContext } from './placementPathsContext'
+import { groupSubtreeIds, listGroups } from '@/components/canvas/context-view/layerMutations'
 import type {
     ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry,
     LayerNodeSortMode, LayerNodeSortAlgo,
@@ -273,6 +279,7 @@ function AssignedEntityItem({
     // entity index) — NOT the canvas store, which is empty inside the wizard
     // and used to make every assigned row render as a raw URN fragment.
     const identity = entityIndex.resolve(entityId)
+    const dataPath = useContext(PlacementPathsContext).get(entityId)
     const isNodeLoading = entityIndex.isLoading(entityId)
     const childrenIds = entityIndex.childrenOf(entityId)
 
@@ -406,7 +413,8 @@ function AssignedEntityItem({
                 >
                     {icon}
                 </div>
-                <div className="flex-1 min-w-0 flex items-center gap-1">
+                <div className="flex-1 min-w-0 flex flex-col">
+                <div className="min-w-0 flex items-center gap-1">
                     {isResolving ? (
                         <span className="h-2.5 w-24 rounded bg-slate-200 dark:bg-slate-700 animate-pulse" />
                     ) : (
@@ -427,6 +435,23 @@ function AssignedEntityItem({
                             {childCount}
                         </span>
                     )}
+                </div>
+                {/* Where it sits in the DATA — the same "Placed · Part of …" the canvas shows. An
+                    explicitly assigned entity that has a parent is a view placement; the data keeps
+                    it inside that parent. */}
+                {!inherited && dataPath && dataPath.length > 0 && (
+                    <span
+                        className="mt-0.5 flex items-center gap-1 min-w-0"
+                        title={`Placed here for this view only — the data source is unchanged. In the data, ${name} is part of ${dataPath.map(a => a.displayName).join(' › ')}.`}
+                    >
+                        <PlacedTag />
+                        <span className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                            Part of {(dataPath.length > 3
+                                ? [dataPath[0].displayName, '…', ...dataPath.slice(-2).map(a => a.displayName)]
+                                : dataPath.map(a => a.displayName)).join(' › ')}
+                        </span>
+                    </span>
+                )}
                 </div>
                 {rulePlaced && (
                     <span
@@ -511,6 +536,11 @@ function LogicalNodeItem({
     const [isRenaming, setIsRenaming] = useState(false)
     const [showAddChild, setShowAddChild] = useState(false)
     const [isDragOver, setIsDragOver] = useState(false)
+    // The same group actions the canvas offers (one set of operations — see useLogicalNodes).
+    const [groupMode, setGroupMode] = useState<null | 'move' | 'contents' | 'confirmDelete'>(null)
+    const layerGroups = [{ id: layerId, logicalNodes: logicalNodes.nodesForLayer(layerId) }] as unknown as ViewLayerConfig[]
+    const ownSubtree = new Set(groupSubtreeIds(layerGroups, layerId, node.id))
+    const moveTargets = listGroups(layerGroups, layerId).filter(g => !ownSubtree.has(g.id))
 
     const isActive = activeTarget?.layerId === layerId && activeTarget?.nodeId === node.id
     const isCollapsed = node.collapsed ?? false
@@ -520,7 +550,7 @@ function LogicalNodeItem({
     const hasChildren = !!(node.children && node.children.length > 0) || assignedCount > 0
 
     // Build the display label for this node's path
-    const pathLabel = `${layerName} → ${logicalNodes.nodePathLabel(layerId, node.id)}`
+    const pathLabel = `${layerName} › ${logicalNodes.nodePathLabel(layerId, node.id)}`
 
     // ── Drop zone handlers ────────────────────────────────────────────────────
 
@@ -650,14 +680,87 @@ function LogicalNodeItem({
                         <Pencil className="w-3 h-3" />
                     </button>
                     <button
-                        onClick={e => { e.stopPropagation(); logicalNodes.deleteNode(layerId, node.id) }}
+                        onClick={e => { e.stopPropagation(); setGroupMode('move') }}
+                        className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                        title={`Move group ${node.name} into another group or layer`}
+                        aria-label={`Move group ${node.name}`}
+                    >
+                        <FolderInput className="w-3 h-3" />
+                    </button>
+                    <button
+                        onClick={e => { e.stopPropagation(); setGroupMode('contents') }}
+                        className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                        title={`Move everything in ${node.name} into another group`}
+                        aria-label={`Move the contents of ${node.name}`}
+                    >
+                        <ArrowRightLeft className="w-3 h-3" />
+                    </button>
+                    <button
+                        onClick={e => { e.stopPropagation(); logicalNodes.ungroupNode(layerId, node.id) }}
+                        className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                        title={`Ungroup ${node.name} — its contents move up a level`}
+                        aria-label={`Ungroup ${node.name}`}
+                    >
+                        <Ungroup className="w-3 h-3" />
+                    </button>
+                    <button
+                        onClick={e => { e.stopPropagation(); setGroupMode('confirmDelete') }}
                         className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500"
-                        title="Delete group"
+                        title={`Delete group ${node.name}`}
+                        aria-label={`Delete group ${node.name}`}
                     >
                         <Trash2 className="w-3 h-3" />
                     </button>
                 </div>
             </motion.div>
+
+            {/* Move group / move contents / delete — inline, as on the canvas */}
+            {groupMode && (
+                <div style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }} className="px-2 py-1" onClick={e => e.stopPropagation()}>
+                    {groupMode === 'confirmDelete' ? (
+                        <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 bg-red-50 dark:bg-red-900/20 text-xs text-slate-600 dark:text-slate-300">
+                            <span className="flex-1">Delete “{node.name}”? Its entities stay in this layer, ungrouped.</span>
+                            <button onClick={() => { logicalNodes.deleteNode(layerId, node.id); setGroupMode(null) }}
+                                className="px-2 py-0.5 rounded-md bg-red-500/15 text-red-600 dark:text-red-400 font-semibold hover:bg-red-500/25">Delete</button>
+                            <button onClick={() => setGroupMode(null)}
+                                className="px-2 py-0.5 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700">Keep</button>
+                        </div>
+                    ) : (
+                        <select
+                            autoFocus
+                            defaultValue=""
+                            aria-label={groupMode === 'move' ? `Move group ${node.name} into` : `Move everything in ${node.name} into`}
+                            onBlur={() => setGroupMode(null)}
+                            onKeyDown={e => { if (e.key === 'Escape') setGroupMode(null) }}
+                            onChange={e => {
+                                const v = e.target.value
+                                if (groupMode === 'move' && v) {
+                                    const [toLayerId, parent] = JSON.parse(v) as [string, string | null]
+                                    logicalNodes.moveNodeToLayer(layerId, node.id, toLayerId, parent ?? undefined)
+                                } else if (v) logicalNodes.moveContents(layerId, node.id, v)
+                                setGroupMode(null)
+                            }}
+                            className="w-full px-2 py-1 rounded-lg text-xs bg-white dark:bg-slate-800 border border-violet-300 dark:border-violet-500/50 text-slate-700 dark:text-slate-200 outline-none"
+                        >
+                            <option value="" disabled>{groupMode === 'move' ? `Move “${node.name}” into…` : `Move everything in “${node.name}” into…`}</option>
+                            {groupMode === 'move' ? (
+                                <>
+                                    <optgroup label={`In ${layerName}`}>
+                                        <option value={JSON.stringify([layerId, null])}>Top level of {layerName}</option>
+                                        {moveTargets.map(g => <option key={g.id} value={JSON.stringify([layerId, g.id])}>{g.path}</option>)}
+                                    </optgroup>
+                                    {logicalNodes.layerChoices().filter(l => l.layerId !== layerId).map(l => (
+                                        <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                                            <option value={JSON.stringify([l.layerId, null])}>Top level of {l.layerName}</option>
+                                            {l.groups.map(g => <option key={g.id} value={JSON.stringify([l.layerId, g.id])}>{l.layerName} › {g.path}</option>)}
+                                        </optgroup>
+                                    ))}
+                                </>
+                            ) : moveTargets.map(g => <option key={g.id} value={g.id}>{g.path}</option>)}
+                        </select>
+                    )}
+                </div>
+            )}
 
             {/* Add child inline input */}
             <AnimatePresence>
