@@ -199,4 +199,3 @@ describe('ExportMatchesDialog', () => {
             "You can't export matches from this view.")
     })
 })
-
