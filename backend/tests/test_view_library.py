@@ -63,7 +63,8 @@ async def test_rules_are_added_replaced_in_place_and_removed(test_client: AsyncC
     assert edited.status_code == 200
     assert [(r["id"], r["name"]) for r in edited.json()] == [("r1", "PII data"), ("r2", "Owned")]
 
-    assert (await test_client.delete(f"{base}/r2")).status_code == 200
+    removed = await test_client.delete(f"{base}/r2")
+    assert removed.status_code == 200
     library = await _library(test_client, view_id)
     assert _names(library["displayRules"]) == ["PII data"]
     assert library["canEdit"] is True
@@ -197,7 +198,8 @@ async def test_saved_queries_are_kept_named_ordered_and_removed(test_client: Asy
 
     ordered = await test_client.put(base, json={"ids": ["q2", "q1"]})
     assert _names(ordered.json()) == ["Columns", "Every table"]
-    assert (await test_client.delete(f"{base}/q2")).status_code == 204
+    removed = await test_client.delete(f"{base}/q2")
+    assert removed.status_code == 204
     assert _names((await _library(test_client, view_id))["savedQueries"]) == ["Every table"]
 
 

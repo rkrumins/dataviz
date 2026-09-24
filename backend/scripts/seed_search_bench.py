@@ -99,7 +99,7 @@ def seed(host: str, port: int, graph_name: str, total: int, seed_value: int,
     try:
         g.delete()
     except Exception:
-        pass
+        pass        # no such graph yet: nothing to clear
     owner_pool = owners(owner_count)
     counts = {
         "Domain": max(1, total // 20_000),

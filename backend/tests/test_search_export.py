@@ -42,9 +42,7 @@ from backend.app.services.search_downloads import mint_download_token, read_down
 from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.search import (
     SearchExportRequest,
-    SearchOptions,
     SearchQuery,
-    SearchScope,
     export_columns,
 )
 

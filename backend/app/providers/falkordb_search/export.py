@@ -101,7 +101,7 @@ def _record(row: Sequence[Any], columns: Sequence[str]) -> Dict[str, Any]:
         try:
             record["tags"] = json.loads(record["tags"])
         except ValueError:
-            pass
+            pass        # not a JSON list: exported as the text it is
     return record
 
 

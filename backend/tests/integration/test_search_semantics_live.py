@@ -17,6 +17,7 @@ Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
 """
 from __future__ import annotations
 
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -144,7 +145,7 @@ def test_values_round_trip(graph):
     parity check below would compare two different graphs."""
     got = dict(graph.query("MATCH (n:T) RETURN n.id, n.p").result_set)
     for i, v in enumerate(_stored_values()):
-        if isinstance(v, float) and v != v:  # pragma: no cover - no NaN seeded
+        if isinstance(v, float) and math.isnan(v):  # pragma: no cover - no NaN seeded
             continue
         assert got[i] == v, (i, v, got[i])
 
