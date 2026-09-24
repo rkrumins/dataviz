@@ -1231,6 +1231,41 @@ class SearchCountsResult(_Base):
     elapsed_ms: int = Field(0, alias="elapsedMs")
 
 
+# ---------------------------------------------------------------------------
+# Containers: how many matches each one holds
+# ---------------------------------------------------------------------------
+
+SEARCH_ANCESTOR_URNS_MAX = 2000
+
+
+class SearchAncestorCountsRequest(_Base):
+    """``POST /search/ancestor-counts``: how many of a search's matches each
+    of these containers holds, below it at any depth — from the session the
+    search returned. The search's ``ancestor`` facet lists the fullest
+    containers; this answers for any container, e.g. the ones on screen."""
+    scope: SearchScope
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=64)
+    urns: List[str] = Field(max_length=SEARCH_ANCESTOR_URNS_MAX)
+
+
+class SearchAncestorCount(_Base):
+    count: int = Field(description="Matches below this container, at any depth.")
+    type_counts: Dict[str, int] = Field(
+        default_factory=dict, alias="typeCounts",
+        description="The same matches by entity type.")
+    display_name: str = Field("", alias="displayName")
+    entity_type: str = Field("", alias="entityType")
+
+
+class SearchAncestorCountsResult(_Base):
+    counts: Dict[str, SearchAncestorCount] = Field(
+        default_factory=dict, description="Every requested urn → its count (0: none).")
+    status: Literal["complete", "running", "expired"] = Field(
+        description="``complete``: exact. ``running``: the search is still "
+                    "scanning; counts so far. ``expired``: the session is "
+                    "gone — run the search again.")
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1255,6 +1290,10 @@ class SearchApiContract(_Base):
         None, alias="searchMembershipResult")
     search_counts_request: Optional[SearchCountsRequest] = Field(None, alias="searchCountsRequest")
     search_counts_result: Optional[SearchCountsResult] = Field(None, alias="searchCountsResult")
+    search_ancestor_counts_request: Optional[SearchAncestorCountsRequest] = Field(
+        None, alias="searchAncestorCountsRequest")
+    search_ancestor_counts_result: Optional[SearchAncestorCountsResult] = Field(
+        None, alias="searchAncestorCountsResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

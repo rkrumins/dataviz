@@ -203,9 +203,9 @@ const READ_ONLY_POST_PATHS = [
   /^\/edges\/query$/,
   /^\/edges\/between$/,
   /^\/edges\/aggregated$/,
-  // membership and counts only read: a replayed counts request just picks
-  // its sessions up where they have got to.
-  /^\/search(\/advanced|\/explain|\/membership|\/counts)?$/,
+  // membership and the counts only read: a replayed counts request just
+  // picks its sessions up where they have got to.
+  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts)?$/,
   /^\/trace(\/v2|\/closure|\/expand|\/expand-batch)?$/,
   /^\/assignments\/compute$/,
 ]

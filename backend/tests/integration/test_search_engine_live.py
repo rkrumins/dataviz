@@ -417,3 +417,54 @@ async def test_a_rule_count_is_exact_across_requests(provider, rule, scope_name)
             break
     assert answer["status"] == "complete"
     assert answer["count"] == want
+
+
+@pytest.mark.parametrize("scope_name", ["data-source", "domain", "containers"])
+@pytest.mark.parametrize("predicate", ["name", "owner-in", "not-pii"])
+async def test_the_ancestor_facet_is_the_tally_of_every_match(provider, predicate, scope_name):
+    """Tallied a unit at a time across requests, the ``ancestor`` facet is
+    one direct statement's answer: every containment ancestor of every
+    in-scope match, with its count per entity type. Any one container's
+    count, read from the session, is the same."""
+    from pydantic import TypeAdapter
+
+    from backend.app.providers.falkordb_search.engine import (
+        execute_session_search,
+        read_ancestor_counts,
+    )
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.common.models.search import Predicate, SearchOptions, SearchQuery
+
+    scope = _scopes()[scope_name]
+    pred = TypeAdapter(Predicate).validate_python(PREDICATES[predicate])
+    options = SearchOptions.model_validate({
+        "results": "both", "pageSize": 10, "waitMs": 0,
+        "aggregations": [{"by": "ancestor", "maxBuckets": 20000}]})
+    context = SearchRunContext(data_version="1", scope_hash=f"anc-{scope_name}")
+    session, page = None, None
+    for _ in range(200):
+        q = SearchQuery(predicate=pred, scope=scope,
+                        options=options.model_copy(update={"session_id": session}))
+        page = await execute_session_search(provider, q, context=context)
+        session = page.session_id
+        if page.status == "complete":
+            break
+    assert page.status == "complete"
+    got = {b.ancestor_urn: (b.match_count, b.type_counts) for b in page.aggregates[0]}
+
+    matching = await _in_scope_matching(provider, scope, pred)
+    rows = (await provider._ro_query(
+        "MATCH (n) WHERE n.urn IN $_m MATCH (c)-[:CONTAINS*1..12]->(n) "
+        "WITH c, labels(n)[0] AS et, count(DISTINCT n) AS k RETURN c.urn, et, k",
+        params={"_m": sorted(matching)}, timeout=60)).result_set
+    want: dict = {}
+    for urn, et, k in rows:
+        total, types = want.get(urn, (0, {}))
+        want[urn] = (total + k, {**types, et: types.get(et, 0) + k})
+    assert want and got == want
+
+    sample = sorted(want)[:5] + ["urn:container:none"]
+    read = await read_ancestor_counts(provider, session, sample, scope_hash=context.scope_hash)
+    assert read["status"] == "complete"
+    assert {u: c["count"] for u, c in read["counts"].items()} == {
+        u: want.get(u, (0, {}))[0] for u in sample}

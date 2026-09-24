@@ -1360,6 +1360,94 @@
       "title": "SearchAggregateBucket",
       "type": "object"
     },
+    "SearchAncestorCount": {
+      "properties": {
+        "count": {
+          "description": "Matches below this container, at any depth.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "displayName": {
+          "default": "",
+          "title": "Displayname",
+          "type": "string"
+        },
+        "entityType": {
+          "default": "",
+          "title": "Entitytype",
+          "type": "string"
+        },
+        "typeCounts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "The same matches by entity type.",
+          "title": "Typecounts",
+          "type": "object"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "title": "SearchAncestorCount",
+      "type": "object"
+    },
+    "SearchAncestorCountsRequest": {
+      "description": "``POST /search/ancestor-counts``: how many of a search's matches each\nof these containers holds, below it at any depth \u2014 from the session the\nsearch returned. The search's ``ancestor`` facet lists the fullest\ncontainers; this answers for any container, e.g. the ones on screen.",
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessionId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "urns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "title": "Urns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scope",
+        "sessionId",
+        "urns"
+      ],
+      "title": "SearchAncestorCountsRequest",
+      "type": "object"
+    },
+    "SearchAncestorCountsResult": {
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SearchAncestorCount"
+          },
+          "description": "Every requested urn \u2192 its count (0: none).",
+          "title": "Counts",
+          "type": "object"
+        },
+        "status": {
+          "description": "``complete``: exact. ``running``: the search is still scanning; counts so far. ``expired``: the session is gone \u2014 run the search again.",
+          "enum": [
+            "complete",
+            "running",
+            "expired"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "SearchAncestorCountsResult",
+      "type": "object"
+    },
     "SearchCountsRequest": {
       "description": "``POST /search/counts``: how many entities in the view match each\nrule \u2014 exactly, however many. A count over a large view takes more than\none request: send the same request again with the returned ``sessions``\nuntil every count is complete.",
       "properties": {
@@ -2829,6 +2917,28 @@
       "anyOf": [
         {
           "$ref": "#/$defs/ScopeDiagnostics"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchAncestorCountsRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchAncestorCountsRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchAncestorCountsResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchAncestorCountsResult"
         },
         {
           "type": "null"

@@ -229,6 +229,46 @@ function collectAncestorCounts(
 }
 
 
+/** The server's default ``maxBuckets`` for a facet that names none. */
+const DEFAULT_MAX_BUCKETS = 50
+
+/** The server reads at most this many containers a request. */
+const ANCESTOR_URNS_PER_REQUEST = 2000
+
+/** Let a burst of loads (an expand-all) settle before asking. */
+const CONTAINER_COUNTS_DEBOUNCE_MS = 150
+
+/**
+ * Where a finished search's ``ancestor`` facet is, when it came back full:
+ * it lists only the ``maxBuckets`` fullest containers, so a container on
+ * the canvas holding fewer matches is missing from it — its exact count
+ * is read from the search's session instead. -1 when there is nothing to
+ * read: no such facet, a facet that already lists every container holding
+ * a match, or a search that did not finish.
+ */
+function fullAncestorFacet(query: SearchQuery, result: SearchResultPage): number {
+    if (result.status !== 'complete' || !result.sessionId) return -1
+    const specs = query.options?.aggregations ?? []
+    const i = specs.findIndex(isAncestorFacet)
+    const facet = i >= 0 ? result.aggregates?.[i] : undefined
+    if (!facet) return -1
+    return facet.length >= (specs[i].maxBuckets ?? DEFAULT_MAX_BUCKETS) ? i : -1
+}
+
+/** The containers the canvas has loaded — nodes with children, expanded
+ *  or not. */
+function loadedContainerUrns(): string[] {
+    const urns = new Set<string>()
+    for (const n of useCanvasStore.getState().nodes) {
+        const d = n.data
+        const children = d?.childCount || d?._collapsedChildCount || d?.childIds?.length || 0
+        const urn = d?.urn ?? n.id
+        if (children > 0 && urn) urns.add(urn)
+    }
+    return [...urns]
+}
+
+
 // ---------------------------------------------------------------------------
 // Progressive search
 // ---------------------------------------------------------------------------
@@ -393,6 +433,91 @@ export function useAdvancedSearch(
         abortRef.current?.abort()
         if (clearOnUnmountRef.current) useSearchStore.getState().clear()
     }, [])
+
+    // Exact badges for every loaded container, not only the fullest ones
+    // the ``ancestor`` facet lists: once a search has finished with a full
+    // facet, the containers it left out are read from the search's session
+    // — each once, and later-loaded ones as they arrive — and added to the
+    // facet, so every publish (and every later page) carries them.
+    const containersAsked = useRef<{ sessionId: string; urns: Set<string> } | null>(null)
+    useEffect(() => {
+        if (view.kind !== 'results' || !(provider instanceof RemoteGraphProvider)) return
+        const { query, result } = view
+        const index = fullAncestorFacet(query, result)
+        const sessionId = result.sessionId
+        if (index < 0 || !sessionId) return
+        if (containersAsked.current?.sessionId !== sessionId) {
+            containersAsked.current = { sessionId, urns: new Set() }
+        }
+        const asked = containersAsked.current.urns
+        // The scope the search resolved (its hash binds the session);
+        // the visible-URN list plays no part in it and can be long.
+        const scope: SearchScope = { ...query.scope, visibleUrns: undefined }
+        const controller = new AbortController()
+        let timer: ReturnType<typeof setTimeout> | undefined
+
+        const fill = async () => {
+            const facet = result.aggregates?.[index] ?? []
+            const listed = new Set(facet.map((b) => b.ancestorUrn))
+            const pending = loadedContainerUrns().filter((u) => !listed.has(u) && !asked.has(u))
+            const found: SearchAggregateBucket[] = []
+            for (let i = 0; i < pending.length; i += ANCESTOR_URNS_PER_REQUEST) {
+                const batch = pending.slice(i, i + ANCESTOR_URNS_PER_REQUEST)
+                try {
+                    const answer = await provider.searchAncestorCounts(
+                        { scope, sessionId, urns: batch }, { signal: controller.signal })
+                    if (controller.signal.aborted) return
+                    for (const urn of batch) asked.add(urn)
+                    // Expired: the session is gone and nothing more can be read.
+                    if (answer.status !== 'complete') break
+                    for (const [urn, c] of Object.entries(answer.counts)) {
+                        if (c.count <= 0) continue
+                        found.push({
+                            ancestorUrn: urn,
+                            ancestorDisplayName: c.displayName ?? '',
+                            ancestorEntityType: c.entityType ?? '',
+                            ancestorDepthFromScopeRoot: 0,
+                            matchCount: c.count,
+                            typeCounts: c.typeCounts,
+                            sampleHits: [],
+                        })
+                    }
+                } catch (err) {
+                    if (controller.signal.aborted) return
+                    // Non-fatal: those containers keep the page's rollup.
+                    console.warn('[advancedSearch] container counts failed', err)
+                    break
+                }
+            }
+            if (found.length === 0) return
+            const augmented: SearchResultPage = {
+                ...result,
+                aggregates: result.aggregates?.map((f, i) => (i === index ? [...f, ...found] : f)),
+            }
+            setView((v) => (v.kind === 'results' && v.result === result
+                ? { ...v, result: augmented } : v))
+            useSearchStore.getState().setResult({
+                viewId,
+                matchUrns: collectMatchUrns(augmented),
+                ancestorPaths: collectAncestorPaths(augmented),
+                ancestorCounts: collectAncestorCounts(query, augmented),
+                queryHash: JSON.stringify(query),
+            })
+        }
+        const ask = () => {
+            clearTimeout(timer)
+            timer = setTimeout(() => void fill(), CONTAINER_COUNTS_DEBOUNCE_MS)
+        }
+        ask()
+        const unsubscribe = useCanvasStore.subscribe((s, prev) => {
+            if (s.nodes !== prev.nodes) ask()
+        })
+        return () => {
+            unsubscribe()
+            clearTimeout(timer)
+            controller.abort()
+        }
+    }, [view, provider, viewId])
 
     const selectTemplate = useCallback((templateId: string) => {
         const t = findTemplate(templateId)

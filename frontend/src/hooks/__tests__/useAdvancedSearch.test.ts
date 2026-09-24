@@ -11,7 +11,7 @@
  * (the hook drops them from the follow-up query), so the counts have to
  * be recomputed from the MERGED result, which retains page 1's.
  */
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -33,6 +33,7 @@ vi.mock('@/providers/GraphProviderContext', () => ({
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
 const searchAdvanced = vi.fn()
+const searchAncestorCounts = vi.fn()
 // `instanceof RemoteGraphProvider` gates every run, so the stub has to
 // carry the real prototype — the hook refuses to talk to anything else.
 let provider: RemoteGraphProvider
@@ -88,13 +89,14 @@ function scopeOf(callIndex: number): Record<string, unknown> {
 
 beforeEach(() => {
     searchAdvanced.mockReset()
+    searchAncestorCounts.mockReset()
     useSearchStore.getState().clear()
     // `clear()` deliberately keeps the user's scope mode, so reset it here.
     useSearchStore.getState().setScopeMode('view')
     useCanvasStore.setState({ nodes: [], edges: [] })
     provider = Object.assign(
         Object.create(RemoteGraphProvider.prototype),
-        { searchAdvanced },
+        { searchAdvanced, searchAncestorCounts },
     ) as RemoteGraphProvider
 })
 
@@ -169,6 +171,129 @@ describe('useAdvancedSearch — exact ancestor counts from the aggregation', () 
         // The facet is 'parent', not 'ancestor', so the bucket's 42 is
         // ignored and the store falls back to the page-derived rollup.
         expect(useSearchStore.getState().ancestorMatchCounts.get('A')).toBe(1)
+    })
+})
+
+
+describe('useAdvancedSearch — exact counts for every loaded container', () => {
+    // A facet of at most one bucket: A (42) is listed, B is left out.
+    const OPTIONS = {
+        ...SEARCH_OPTIONS,
+        aggregations: [{ by: 'ancestor' as const, maxBuckets: 1, sampleHitsPerBucket: 0 }],
+    }
+
+    function container(urn: string): LineageNode {
+        return { ...canvasNode(urn), data: { label: urn, urn, type: 'table', childCount: 3 } }
+    }
+
+    function finished(over: Partial<SearchResultPage> = {}): SearchResultPage {
+        return page({
+            hits: [HIT], aggregates: [[BUCKET]], status: 'complete', sessionId: 'sid-1', ...over,
+        })
+    }
+
+    function counts(entries: Record<string, number>) {
+        return {
+            status: 'complete',
+            counts: Object.fromEntries(Object.entries(entries).map(([urn, count]) => [urn, {
+                count, typeCounts: { column: count }, displayName: urn, entityType: 'table',
+            }])),
+        }
+    }
+
+    it('reads the containers a full facet left out from the search session', async () => {
+        useCanvasStore.setState({ nodes: [container('A'), container('B'), canvasNode('leaf')] })
+        searchAdvanced.mockResolvedValue(finished())
+        searchAncestorCounts.mockResolvedValue(counts({ B: 7 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, OPTIONS)
+        })
+
+        await waitFor(() => expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBe(7))
+        const [body] = searchAncestorCounts.mock.calls[0]
+        // Only the containers the facet did not list — never a leaf.
+        expect(body.urns).toEqual(['B'])
+        expect(body.sessionId).toBe('sid-1')
+        expect(body.scope.viewId).toBe('view-1')
+        expect(useSearchStore.getState().ancestorMatchCounts.get('A')).toBe(42)
+        expect(useSearchStore.getState().ancestorMatchTypeBreakdowns.get('B')?.get('column')).toBe(7)
+    })
+
+    it('does not ask when the facet already lists every container holding a match', async () => {
+        useCanvasStore.setState({ nodes: [container('A'), container('B')] })
+        searchAdvanced.mockResolvedValue(finished())
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, {
+                ...OPTIONS, aggregations: [{ by: 'ancestor', maxBuckets: 5 }],
+            })
+        })
+        await new Promise((r) => setTimeout(r, 250))
+        expect(searchAncestorCounts).not.toHaveBeenCalled()
+    })
+
+    it('asks about containers that load later, each once', async () => {
+        useCanvasStore.setState({ nodes: [container('A'), container('B')] })
+        searchAdvanced.mockResolvedValue(finished())
+        searchAncestorCounts.mockImplementation(async (body: { urns: string[] }) =>
+            counts(Object.fromEntries(body.urns.map((u) => [u, 3]))))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, OPTIONS)
+        })
+        await waitFor(() => expect(searchAncestorCounts).toHaveBeenCalledTimes(1))
+
+        act(() => {
+            useCanvasStore.setState({ nodes: [container('A'), container('B'), container('C')] })
+        })
+        await waitFor(() => expect(searchAncestorCounts).toHaveBeenCalledTimes(2))
+        expect(searchAncestorCounts.mock.calls[1][0].urns).toEqual(['C'])
+        await waitFor(() => expect(useSearchStore.getState().ancestorMatchCounts.get('C')).toBe(3))
+
+        act(() => {
+            useCanvasStore.setState({ nodes: [container('A'), container('B'), container('C')] })
+        })
+        await new Promise((r) => setTimeout(r, 250))
+        expect(searchAncestorCounts).toHaveBeenCalledTimes(2)
+    })
+
+    it('keeps the counts it read after loadMore', async () => {
+        useCanvasStore.setState({ nodes: [container('A'), container('B')] })
+        searchAdvanced.mockResolvedValueOnce(finished({ cursor: 'cursor-1' }))
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [] }))
+        searchAncestorCounts.mockResolvedValue(counts({ B: 7 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, OPTIONS)
+        })
+        await waitFor(() => expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBe(7))
+        await act(async () => {
+            await result.current.loadMore()
+        })
+        expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBe(7)
+    })
+
+    it('stops asking once the session has expired', async () => {
+        useCanvasStore.setState({ nodes: [container('A'), container('B')] })
+        searchAdvanced.mockResolvedValue(finished())
+        searchAncestorCounts.mockResolvedValue({ status: 'expired', counts: {} })
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, OPTIONS)
+        })
+        await waitFor(() => expect(searchAncestorCounts).toHaveBeenCalledTimes(1))
+        act(() => {
+            useCanvasStore.setState({ nodes: [container('A'), container('B')] })
+        })
+        await new Promise((r) => setTimeout(r, 250))
+        expect(searchAncestorCounts).toHaveBeenCalledTimes(1)
+        expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBeUndefined()
     })
 })
 

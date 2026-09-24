@@ -27,6 +27,7 @@ from backend.app.services.deep_search import SearchRunContext
 from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.search import (
     Predicate,
+    SearchAncestorCountsRequest,
     SearchCountsRequest,
     SearchMembershipRequest,
     SearchScope,
@@ -176,6 +177,28 @@ class TestService:
         assert out.counts["broken"].status == "complete"
         assert out.counts["broken"].error == "count failed: the graph refused a read"
         assert out.counts["fine"].count == 7 and out.counts["fine"].error is None
+
+    async def test_container_counts_are_read_for_the_resolved_view_only(self):
+        seen = {}
+
+        class _Sessions:
+            async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+                seen.update(sid=session_id, urns=urns, scope_hash=context.scope_hash)
+                return {"status": "complete", "counts": {
+                    u: {"count": 2, "typeCounts": {"Dataset": 2}} for u in urns}}
+
+        request = SearchAncestorCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "sessionId": "sid-1", "urns": ["a", "a", "", "b"]})
+        out = await _service(_Sessions()).ancestor_counts(request)
+        # The session must be this view's: the scope the search resolved.
+        assert seen == {"sid": "sid-1", "urns": ["a", "b"], "scope_hash": "h1"}
+        assert out.status == "complete" and out.counts["b"].type_counts == {"Dataset": 2}
+
+    async def test_container_counts_need_a_session_engine(self):
+        request = SearchAncestorCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "sessionId": "sid-1", "urns": ["a"]})
+        with pytest.raises(NotImplementedError):
+            await _service(StubDeepSearchProvider()).ancestor_counts(request)
 
     async def test_a_provider_without_rules_is_a_501(self):
         request = SearchCountsRequest.model_validate({
@@ -353,6 +376,17 @@ class TestRoutes:
             body=self._body(), request=_request(), ws_id="ws",
             engine=SimpleNamespace(provider=None), session=None)
         assert seen["context"] == SearchRunContext(data_version="7.g", admit="admit")
+
+    @pytest.mark.parametrize("scope_mode", ["data_source", "visible"])
+    async def test_container_counts_stay_inside_a_share_links_view(self, scope_mode):
+        body = SearchAncestorCountsRequest.model_validate({
+            "scope": {"viewId": "view-1", "scopeMode": scope_mode},
+            "sessionId": "s", "urns": ["u"]})
+        with pytest.raises(HTTPException) as exc:
+            await graph_mod.search_ancestor_counts(
+                body=body, request=_request("view-1"), ws_id="ws",
+                engine=SimpleNamespace(provider=None), session=None)
+        assert exc.value.status_code == 403
 
     async def test_counts_need_a_workspace(self):
         body = SearchCountsRequest.model_validate({

@@ -1,9 +1,10 @@
 /**
- * The two display-rule reads: which on-screen entities match which rules
- * (``searchMembership``) and each rule's exact total in the view
- * (``searchCounts``). Pins the route, the body as sent, the forwarded
- * AbortSignal, and the counts call's raised timeout (a count answer waits
- * on the server for up to ``waitMs``).
+ * The reads that answer for what is on screen: which entities match which
+ * display rules (``searchMembership``), each rule's exact total in the view
+ * (``searchCounts``), and how many of a search's matches each container
+ * holds (``searchAncestorCounts``). Pins the route, the body as sent, the
+ * forwarded AbortSignal, and the counts call's raised timeout (a count
+ * answer waits on the server for up to ``waitMs``).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -82,5 +83,22 @@ describe('RemoteGraphProvider display-rule reads', () => {
     expect(JSON.parse(String(init?.body))).toEqual(body)
     expect(init?.signal).toBe(controller.signal)
     expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_ADVANCED_MS)
+  })
+
+  it('searchAncestorCounts POSTs the session and containers to /search/ancestor-counts', async () => {
+    mockFetch.mockResolvedValue(okJson({
+      status: 'complete', counts: { c1: { count: 3, typeCounts: { column: 3 } } },
+    }))
+    const provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
+    const controller = new AbortController()
+    const body = { scope: { viewId: 'v1', scopeMode: 'view' as const }, sessionId: 'sid', urns: ['c1'] }
+
+    const answer = await provider.searchAncestorCounts(body, { signal: controller.signal })
+
+    expect(answer.counts.c1.count).toBe(3)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(String(url)).toContain('/graph/search/ancestor-counts')
+    expect(JSON.parse(String(init?.body))).toEqual(body)
+    expect(init?.signal).toBe(controller.signal)
   })
 })

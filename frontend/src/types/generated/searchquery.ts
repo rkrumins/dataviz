@@ -37,6 +37,43 @@ export type Lineageedgetypes = string[]
  * Human-readable diagnostic notes — e.g. 'view has no rootUrns configured; search ran unclamped'.
  */
 export type Notes = string[]
+/**
+ * Optional. Must be ⊆ view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.
+ */
+export type Entitytypes = string[] | null
+export type Layerassignment = string | null
+/**
+ * Clamped to min(client, view.maxDepth) by the resolver.
+ */
+export type Maxdepth = number | null
+/**
+ * Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side. Capped at DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The cap exists to bound the Cypher IN-list size + containment expansion fanout on multi-domain views with many top-level containers.
+ */
+export type Rooturns = string[] | null
+/**
+ * visible: filter to URNs in scope.visible_urns (fast in-view search). view: view's authorised roots + containment expansion (default for server-direct callers). data_source: entire data source — power-user override.
+ */
+export type Scopemode = 'visible' | 'view' | 'data_source'
+/**
+ * Required. The view the search is bound to (security context + telemetry). Scope behaviour depends on ``scope_mode``.
+ */
+export type Viewid = string
+/**
+ * URNs currently rendered in the canvas. Required when scope_mode='visible'. Ignored in other modes. Capped at DEEP_SEARCH_VISIBLE_URNS_CAP entries (default 20000).
+ */
+export type Visibleurns = string[] | null
+export type Sessionid = string
+export type Urns = string[]
+/**
+ * Matches below this container, at any depth.
+ */
+export type Count = number
+export type Displayname = string
+export type Entitytype = string
+/**
+ * ``complete``: exact. ``running``: the search is still scanning; counts so far. ``expired``: the session is gone — run the search again.
+ */
+export type Status = 'complete' | 'running' | 'expired'
 export type Id = string
 export type Predicate =
     | TextPredicate
@@ -102,8 +139,8 @@ export type Keymatch = 'exact' | 'prefix' | 'contains'
 export type Kind3 = 'hasProperty'
 export type Negate = boolean
 export type Kind4 = 'descendantOf'
-export type Maxdepth = number | null
-export type Urns = string[]
+export type Maxdepth1 = number | null
+export type Urns1 = string[]
 export type Direction = 'out' | 'in' | 'both'
 /**
  * Default edge-class when ``edge_types`` is omitted. Mirrors DegreePredicate / PathPredicate.
@@ -148,12 +185,12 @@ export type Op3 = 'and' | 'or' | 'not'
 export type Edgetypes = string[] | null
 export type Hops = number
 export type Kind8 = 'withinHops'
-export type Urns1 = string[]
+export type Urns2 = string[]
 export type Kind9 = 'entityType'
 export type Op4 = 'in' | 'notIn'
 export type Values1 = string[]
 export type Kind10 = 'layer'
-export type Layerassignment = string
+export type Layerassignment1 = string
 export type Direction1 = 'in' | 'out' | 'both'
 export type Edgeclass1 = 'lineage' | 'containment' | 'any'
 /**
@@ -232,36 +269,11 @@ export type Children1 = (
 export type Kind19 = 'group'
 export type Op6 = 'and' | 'or' | 'not'
 export type Items = SearchRuleItem[]
-/**
- * Optional. Must be ⊆ view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.
- */
-export type Entitytypes = string[] | null
-export type Layerassignment1 = string | null
-/**
- * Clamped to min(client, view.maxDepth) by the resolver.
- */
-export type Maxdepth1 = number | null
-/**
- * Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side. Capped at DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The cap exists to bound the Cypher IN-list size + containment expansion fanout on multi-domain views with many top-level containers.
- */
-export type Rooturns = string[] | null
-/**
- * visible: filter to URNs in scope.visible_urns (fast in-view search). view: view's authorised roots + containment expansion (default for server-direct callers). data_source: entire data source — power-user override.
- */
-export type Scopemode = 'visible' | 'view' | 'data_source'
-/**
- * Required. The view the search is bound to (security context + telemetry). Scope behaviour depends on ``scope_mode``.
- */
-export type Viewid = string
-/**
- * URNs currently rendered in the canvas. Required when scope_mode='visible'. Ignored in other modes. Capped at DEEP_SEARCH_VISIBLE_URNS_CAP entries (default 20000).
- */
-export type Visibleurns = string[] | null
 export type Waitms = number
 /**
  * Matches found so far — exact once complete.
  */
-export type Count = number
+export type Count1 = number
 export type Error = string | null
 /**
  * Matches found so far — exact for the parts scanned.
@@ -275,8 +287,8 @@ export type Scanned = number
  * Nodes in every part the search scans.
  */
 export type Total = number
-export type Sessionid = string | null
-export type Status = 'running' | 'complete'
+export type Sessionid1 = string | null
+export type Status1 = 'running' | 'complete'
 export type Dataversion = string | null
 export type Elapsedms = number
 /**
@@ -358,7 +370,7 @@ export type Resolvedscope = {
     [k: string]: unknown
 } | null
 export type Items1 = SearchRuleItem[]
-export type Urns2 = string[]
+export type Urns3 = string[]
 export type Dataversion1 = string | null
 export type Elapsedms2 = number
 export type $Schemaversion = '1'
@@ -406,7 +418,7 @@ export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
 /**
  * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
  */
-export type Sessionid1 = string | null
+export type Sessionid2 = string | null
 /**
  * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
  */
@@ -449,8 +461,8 @@ export type Matchcount = number
  * Root → parent (excluding the hit itself). Populated when options.include_ancestor_path is true.
  */
 export type Ancestorpath = AncestorRef[] | null
-export type Displayname = string
-export type Entitytype = string
+export type Displayname1 = string
+export type Entitytype1 = string
 export type Urn = string
 export type Field = string
 /**
@@ -463,8 +475,8 @@ export type Highlights1 = SearchHighlight[]
 export type Matchedpredicates = number[]
 export type Childcount = number | null
 export type Description = string | null
-export type Displayname1 = string
-export type Entitytype1 = string
+export type Displayname2 = string
+export type Entitytype2 = string
 export type Lastsyncedat = string | null
 export type Layerassignment2 = string | null
 export type Qualifiedname = string | null
@@ -481,7 +493,7 @@ export type Subbuckets = SearchAggregateBucket[] | null
 /**
  * Per-entity-type breakdown of ``match_count`` — e.g. ``{'Column': 12, 'Table': 3}``. Populated by by='ancestor'; None for the kinds that don't compute one.
  */
-export type Typecounts = {
+export type Typecounts1 = {
     [k: string]: number
 } | null
 export type Cachehit = boolean
@@ -527,7 +539,7 @@ export type Notes2 = string[]
 /**
  * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
  */
-export type Sessionid2 = string | null
+export type Sessionid3 = string | null
 /**
  * The graph changed after this session started; run the search again for an answer on the current data.
  */
@@ -535,7 +547,7 @@ export type Stale = boolean
 /**
  * ``running``: the scan is not finished — the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.
  */
-export type Status1 = ('running' | 'complete') | null
+export type Status2 = ('running' | 'complete') | null
 /**
  * Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).
  */
@@ -554,7 +566,7 @@ export type Key4 = string
  * A type had more distinct values than listed.
  */
 export type Truncated1 = boolean
-export type Count1 = number
+export type Count2 = number
 export type Values2 = SearchValueSuggestion[]
 
 /**
@@ -572,6 +584,8 @@ export type Values2 = SearchValueSuggestion[]
  */
 export interface SearchApiContract {
     scopeDiagnostics?: ScopeDiagnostics | null
+    searchAncestorCountsRequest?: SearchAncestorCountsRequest | null
+    searchAncestorCountsResult?: SearchAncestorCountsResult | null
     searchCountsRequest?: SearchCountsRequest | null
     searchCountsResult?: SearchCountsResult | null
     searchDiscoverResult?: SearchDiscoverResult | null
@@ -602,6 +616,73 @@ export interface ScopeDiagnostics {
     effectiveRootUrns?: Effectiverooturns
     lineageEdgeTypes?: Lineageedgetypes
     notes?: Notes
+}
+/**
+ * ``POST /search/ancestor-counts``: how many of a search's matches each
+ * of these containers holds, below it at any depth — from the session the
+ * search returned. The search's ``ancestor`` facet lists the fullest
+ * containers; this answers for any container, e.g. the ones on screen.
+ */
+export interface SearchAncestorCountsRequest {
+    scope: SearchScope
+    sessionId: Sessionid
+    urns: Urns
+}
+/**
+ * Bounds the search.
+ *
+ * ``view_id`` is **required** — every search must be bound to a view
+ * (for security + telemetry), but the *scope* of the search is now
+ * controlled by ``scope_mode``:
+ *
+ *   * ``visible`` (default UI mode): only the URNs the user can
+ *     actually see right now on the canvas (passed in
+ *     ``visible_urns``). This is the "fast feedback" mode that
+ *     matches the user's mental model of "search what's in front of
+ *     me." Falls back to ``view`` mode when ``visible_urns`` is
+ *     empty.
+ *
+ *   * ``view``: classic behaviour — the view's authorised roots,
+ *     expanded via containment, then narrowed by client hints.
+ *
+ *   * ``data_source``: power-user override. Searches the entire data
+ *     source (no view containment clamp). Results may include URNs
+ *     that are not in this view; the FE surfaces a disclaimer.
+ *
+ * ``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``
+ * are **narrowing hints** that always apply (regardless of mode).
+ * The resolver intersects them with the view's authorised scope.
+ */
+export interface SearchScope {
+    entityTypes?: Entitytypes
+    layerAssignment?: Layerassignment
+    maxDepth?: Maxdepth
+    rootUrns?: Rooturns
+    scopeMode?: Scopemode
+    viewId: Viewid
+    visibleUrns?: Visibleurns
+}
+export interface SearchAncestorCountsResult {
+    counts?: Counts
+    status: Status
+}
+/**
+ * Every requested urn → its count (0: none).
+ */
+export interface Counts {
+    [k: string]: SearchAncestorCount
+}
+export interface SearchAncestorCount {
+    count: Count
+    displayName?: Displayname
+    entityType?: Entitytype
+    typeCounts?: Typecounts
+}
+/**
+ * The same matches by entity type.
+ */
+export interface Typecounts {
+    [k: string]: number
 }
 /**
  * ``POST /search/counts``: how many entities in the view match each
@@ -699,8 +780,8 @@ export interface HasPropertyPredicate {
  */
 export interface DescendantOfPredicate {
     kind?: Kind4
-    maxDepth?: Maxdepth
-    urns: Urns
+    maxDepth?: Maxdepth1
+    urns: Urns1
 }
 /**
  * Match nodes within N relationship hops of any anchor URN.
@@ -717,7 +798,7 @@ export interface WithinHopsPredicate {
     edgeTypes?: Edgetypes
     hops: Hops
     kind?: Kind8
-    urns: Urns1
+    urns: Urns2
 }
 /**
  * Typed comparison against a single edge property.
@@ -773,7 +854,7 @@ export interface EntityTypePredicate {
  */
 export interface LayerPredicate {
     kind?: Kind10
-    layerAssignment: Layerassignment
+    layerAssignment: Layerassignment1
 }
 /**
  * Match nodes by their edge degree.
@@ -889,59 +970,25 @@ export interface GroupPredicate {
     op?: Op6
 }
 /**
- * Bounds the search.
- *
- * ``view_id`` is **required** — every search must be bound to a view
- * (for security + telemetry), but the *scope* of the search is now
- * controlled by ``scope_mode``:
- *
- *   * ``visible`` (default UI mode): only the URNs the user can
- *     actually see right now on the canvas (passed in
- *     ``visible_urns``). This is the "fast feedback" mode that
- *     matches the user's mental model of "search what's in front of
- *     me." Falls back to ``view`` mode when ``visible_urns`` is
- *     empty.
- *
- *   * ``view``: classic behaviour — the view's authorised roots,
- *     expanded via containment, then narrowed by client hints.
- *
- *   * ``data_source``: power-user override. Searches the entire data
- *     source (no view containment clamp). Results may include URNs
- *     that are not in this view; the FE surfaces a disclaimer.
- *
- * ``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``
- * are **narrowing hints** that always apply (regardless of mode).
- * The resolver intersects them with the view's authorised scope.
- */
-export interface SearchScope {
-    entityTypes?: Entitytypes
-    layerAssignment?: Layerassignment1
-    maxDepth?: Maxdepth1
-    rootUrns?: Rooturns
-    scopeMode?: Scopemode
-    viewId: Viewid
-    visibleUrns?: Visibleurns
-}
-/**
  * Rule id → the session a previous answer returned.
  */
 export interface Sessions {
     [k: string]: string
 }
 export interface SearchCountsResult {
-    counts?: Counts
+    counts?: Counts1
     dataVersion?: Dataversion
     elapsedMs?: Elapsedms
 }
-export interface Counts {
+export interface Counts1 {
     [k: string]: SearchRuleCount
 }
 export interface SearchRuleCount {
-    count: Count
+    count: Count1
     error?: Error
     progress?: SearchProgress | null
-    sessionId?: Sessionid
-    status: Status
+    sessionId?: Sessionid1
+    status: Status1
 }
 /**
  * How far a running search has got. Node counts are the scan's
@@ -1035,7 +1082,7 @@ export interface Params {
 export interface SearchMembershipRequest {
     items: Items1
     scope: SearchScope
-    urns: Urns2
+    urns: Urns3
 }
 export interface SearchMembershipResult {
     dataVersion?: Dataversion1
@@ -1087,7 +1134,7 @@ export interface SearchOptions {
     includeAncestorPath?: Includeancestorpath
     pageSize?: Pagesize
     results?: Results
-    sessionId?: Sessionid1
+    sessionId?: Sessionid2
     softDeadlineMs?: Softdeadlinems
     sort?: Sort
     sortDir?: Sortdir
@@ -1136,9 +1183,9 @@ export interface SearchResultPage {
      * Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain.
      */
     scopeDiagnostics?: ScopeDiagnostics | null
-    sessionId?: Sessionid2
+    sessionId?: Sessionid3
     stale?: Stale
-    status?: Status1
+    status?: Status2
     totalCount?: Totalcount
     truncated?: Truncated
 }
@@ -1153,7 +1200,7 @@ export interface SearchAggregateBucket {
     matchCount: Matchcount
     sampleHits?: Samplehits
     subBuckets?: Subbuckets
-    typeCounts?: Typecounts
+    typeCounts?: Typecounts1
 }
 /**
  * One matched node, optionally with provenance.
@@ -1174,8 +1221,8 @@ export interface SearchHit {
  * breadcrumb without re-fetching the node.
  */
 export interface AncestorRef {
-    displayName: Displayname
-    entityType: Entitytype
+    displayName: Displayname1
+    entityType: Entitytype1
     urn: Urn
 }
 /**
@@ -1190,8 +1237,8 @@ export interface SearchHighlight {
 export interface GraphNode {
     childCount?: Childcount
     description?: Description
-    displayName: Displayname1
-    entityType: Entitytype1
+    displayName: Displayname2
+    entityType: Entitytype2
     lastSyncedAt?: Lastsyncedat
     layerAssignment?: Layerassignment2
     properties?: Properties
@@ -1265,6 +1312,6 @@ export interface SearchValuesResult {
  * ``value`` keeps its stored kind — a 19-digit id is that integer.
  */
 export interface SearchValueSuggestion {
-    count?: Count1
+    count?: Count2
     value?: unknown
 }

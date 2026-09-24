@@ -31,6 +31,7 @@ from backend.app.providers.falkordb_provider import (
     CursorMismatchError,
 )
 from backend.common.models.search import (
+    SearchAncestorCountsRequest,
     SearchCountsRequest,
     SearchMembershipRequest,
     SearchQuery,
@@ -2048,6 +2049,29 @@ async def search_counts(
         ))
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/ancestor-counts", response_model_by_alias=True)
+async def search_ancestor_counts(
+    body: SearchAncestorCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many of a search's matches each of these containers (at most
+    2,000 urns) holds, below it at any depth — read from the session the
+    search returned (``sessionId``), so any container on screen gets its
+    exact count, not only the fullest ones the ``ancestor`` facet lists.
+    The session must be this view's; ``expired`` when it is gone.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.ancestor_counts(body)
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
 

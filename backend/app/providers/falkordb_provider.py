@@ -6383,6 +6383,13 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0)
 
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        """How many of a search's matches each container holds, from the
+        session's tally. See ``falkordb_search/engine.py``."""
+        from .falkordb_search.engine import read_ancestor_counts
+        await self._ensure_connected()
+        return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
         avoid the circular load order)."""

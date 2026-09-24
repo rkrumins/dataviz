@@ -128,6 +128,9 @@ class Context:
     max_depth: int
     visible: Optional[List[str]] = None
     within_hops: str = ""
+    # A first page's units also tally their matches' containment ancestors
+    # (the search asked for the ``ancestor`` facet: the canvas's badges).
+    tally: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +414,20 @@ def count_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     """This unit's exact count, and nothing else — a rule's total."""
     head, params = match_statement(unit, ctx, clamps)
     return f"{head} RETURN count(n)", params
+
+
+def tally_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
+                    ) -> Tuple[str, Dict[str, Any]]:
+    """Every containment ancestor of this unit's matches, with how many of
+    them it holds per entity type — the canvas's "N matches inside" badges,
+    one unit at a time instead of one statement over every match.
+    ``count(DISTINCT n)``: a match reached down two paths counts once; the
+    units partition the scope, so the sums across units are exact."""
+    head, params = match_statement(unit, ctx, clamps)
+    rel = _rel(ctx.containment)
+    return (f"{head} WITH n MATCH (_c)-[:{rel}*1..{int(ctx.max_depth)}]->(n) "
+            "WITH _c, labels(n)[0] AS _et, count(DISTINCT n) AS _k "
+            "RETURN _c.urn, _c.displayName, labels(_c)[0], _et, _k", params)
 
 
 def after_statement(unit: Unit, ctx: Context, clamps: List[List[int]], k: int,

@@ -29,7 +29,7 @@ const HIT = {
     ancestorPath: [],
 }
 
-function resultsView(result: Record<string, unknown>): PanelView {
+function resultsView(result: Record<string, unknown>, options?: Record<string, unknown>): PanelView {
     return {
         kind: 'results',
         template: {},
@@ -39,6 +39,7 @@ function resultsView(result: Record<string, unknown>): PanelView {
         query: {
             predicate: { kind: 'text', target: 'any', value: 'orders', match: 'substring' },
             scope: { viewId: 'view-1' },
+            ...(options ? { options } : {}),
         },
         result: {
             truncated: false, deadlineExceeded: false, cacheHit: false,
@@ -48,7 +49,7 @@ function resultsView(result: Record<string, unknown>): PanelView {
     } as unknown as PanelView
 }
 
-function renderPanel(result: Record<string, unknown>) {
+function renderPanel(result: Record<string, unknown>, options?: Record<string, unknown>) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     render(
         <ProviderOverride value={{
@@ -60,7 +61,7 @@ function renderPanel(result: Record<string, unknown>) {
                 open
                 onClose={vi.fn()}
                 viewId="view-1"
-                session={stubAdvanced({ view: resultsView(result) })}
+                session={stubAdvanced({ view: resultsView(result, options) })}
             />
         </ProviderOverride>,
     )
@@ -139,5 +140,29 @@ describe('SearchMapPanel — a search still scanning the view', () => {
         expect(hero().textContent).toBe('1,300')
         expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
         expect(listHeadline('1,300 matches')).toBeInTheDocument()
+    })
+})
+
+
+describe('SearchMapPanel — how far the group counts go', () => {
+    // Forty matches, one listed: the groups are either the server's
+    // counts over all forty or a rollup of the one hit on the page.
+    const finished = { status: 'complete', totalCount: 40, candidateCount: 40 }
+    const withFacet = { aggregations: [{ by: 'ancestor', maxBuckets: 20000 }] }
+
+    it('calls the group counts exact when the container facet came back', () => {
+        renderPanel({ ...finished, aggregates: [[]] }, withFacet)
+        expect(screen.getByText(/Group counts are exact\./)).toBeInTheDocument()
+    })
+
+    it('says they cover only the listed matches without it', () => {
+        renderPanel(finished)
+        expect(screen.getByText(/Group counts cover only the matches listed\./)).toBeInTheDocument()
+        expect(screen.queryByText(/Group counts are exact/)).not.toBeInTheDocument()
+    })
+
+    it('says so too when the facet was asked for but did not come back', () => {
+        renderPanel({ ...finished, aggregates: [] }, withFacet)
+        expect(screen.queryByText(/Group counts are exact/)).not.toBeInTheDocument()
     })
 })

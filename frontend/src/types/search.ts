@@ -69,6 +69,9 @@ import type {
     SearchMembershipResult as GenSearchMembershipResult,
     SearchCountsRequest as GenSearchCountsRequest,
     SearchCountsResult as GenSearchCountsResult,
+    SearchAncestorCountsRequest as GenSearchAncestorCountsRequest,
+    SearchAncestorCountsResult as GenSearchAncestorCountsResult,
+    SearchAncestorCount as GenSearchAncestorCount,
     SearchRuleCount as GenSearchRuleCount,
 } from './generated/searchquery'
 
@@ -217,6 +220,11 @@ export type SearchMembershipResult = RequireKeys<GenSearchMembershipResult, 'mat
 export type SearchCountsRequest = GenSearchCountsRequest
 export type SearchRuleCount = GenSearchRuleCount
 export type SearchCountsResult = RequireKeys<GenSearchCountsResult, 'counts'>
+export type SearchAncestorCountsRequest = GenSearchAncestorCountsRequest
+export type SearchAncestorCount = RequireKeys<GenSearchAncestorCount, 'typeCounts'>
+export type SearchAncestorCountsResult = Omit<GenSearchAncestorCountsResult, 'counts'> & {
+    counts: Record<string, SearchAncestorCount>
+}
 
 export type SearchValuesResult = RequireKeys<
     Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },

@@ -51,6 +51,7 @@ from backend.app.providers.falkordb_search.plan import (
     count_statement,
     make_plan,
     page_statements,
+    tally_statement,
     within_hops,
 )
 from backend.app.providers.falkordb_search.relevance import score_expr
@@ -60,6 +61,8 @@ from backend.app.providers.falkordb_search.session import (
     RUNNING,
     Session,
     SessionStore,
+    Tally,
+    add_tally,
     store_for,
     wait_for_commit,
 )
@@ -81,8 +84,9 @@ from backend.common.models.search import (
 logger = logging.getLogger(__name__)
 
 #: Bumped when a session's meaning changes, so no session from an older
-#: build answers a newer one's request.
-ENGINE_VERSION = "2"
+#: build answers a newer one's request. (3: a search asking for the
+#: ``ancestor`` facet tallies it during the scan.)
+ENGINE_VERSION = "3"
 
 #: How long past its wait a request lets its in-flight units finish before
 #: giving them up (they are retried by the next request).
@@ -114,12 +118,15 @@ async def execute_session_search(
         relevance = score_expr(query, name_key=name_key,
                                reserved_keys=frozenset(_RESERVED_NODE_KEYS))
     sort = build_sort_spec(query, name_key=name_key, relevance=relevance)
+    containment = _containment(provider)
     ctx = Context(
         where=where, params={**compiler.params, **hop_params}, sort=sort,
-        containment=_containment(provider), max_depth=int(query.scope.max_depth or 12),
+        containment=containment, max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
         within_hops=hops,
+        tally=(options.results == "both" and bool(containment)
+               and any(a.by == "ancestor" for a in options.aggregations or [])),
     )
     page_size = options.page_size
     # The rows a session keeps: whole pages, at least ``session_rows``.
@@ -148,13 +155,17 @@ async def execute_session_search(
     facets = None
     wants_facets = (after is None and options.results == "both"
                     and bool(options.aggregations))
-    if wants_facets:
-        facets = await _facets(provider, query, session.sid, store, run, settings)
+    # The ``ancestor`` facet is tallied by the scan itself; the others come
+    # from the capped engine's statements, computed beside it.
+    capped_specs = [a for a in options.aggregations or [] if a.by != "ancestor"]
+    if wants_facets and capped_specs:
+        facets = await _facets(provider, query, capped_specs, session.sid, store, run,
+                               settings)
 
     session = await _advance(session, created, ctx, store, run, deadline, settings)
     if session.status == FAILED:
         raise SearchFailed(f"search failed: {session.error}")
-    if wants_facets and facets is None:
+    if wants_facets and capped_specs and facets is None:
         facets = await _await_facets(store, session.sid, deadline)
     return await _answer(provider, query, session, 0, context, started, deadline,
                          total=cursor.get("t") if cursor else None, cache_hit=False,
@@ -248,7 +259,8 @@ async def _session_for(provider, query, compiler, store, run, query_id: str, k: 
         width=settings.chunk_width, walk_max=settings.walk_max,
         timeout_s=max(0.5, deadline - time.monotonic()),
     )
-    return Session.start(sid, query_id, context.data_version, after, k, plan), True
+    return Session.start(sid, query_id, context.data_version, after, k, plan,
+                         scope_hash=context.scope_hash), True
 
 
 async def _advance(session: Session, created: bool, ctx: Context, store: SessionStore,
@@ -266,13 +278,17 @@ async def _advance(session: Session, created: bool, ctx: Context, store: Session
     token = await store.lease(session.sid, lease_ms)
     if token is None:
         return await wait_for_commit(store, session.sid, session, deadline) or session
+    # The ancestor counts of the units this request completes: committed
+    # with them, so a unit is tallied exactly when it is counted.
+    tally: Dict[str, Tally] = {}
     try:
-        await _hop(session, ctx, run, deadline, settings)
+        await _hop(session, ctx, run, deadline, settings, tally)
     finally:
         if session.status == FAILED:
             await store.delete(session.sid)
         else:
-            await store.save(session, token, settings.session_ttl_seconds)
+            await store.save(session, token, settings.session_ttl_seconds,
+                             tallies=tally or None)
         await store.release(session.sid, token)
     return session
 
@@ -347,9 +363,11 @@ def _containment(provider) -> Tuple[str, ...]:
 # The scan
 # ---------------------------------------------------------------------------
 
-async def _hop(session: Session, ctx: Context, run, deadline: float, settings) -> None:
+async def _hop(session: Session, ctx: Context, run, deadline: float, settings,
+               tally: Dict[str, Tally]) -> None:
     """Run pending units until ``deadline``, ``chunk_concurrency`` at a time,
-    folding each into the session as it lands."""
+    folding each into the session (and its ancestor counts into ``tally``)
+    as it lands."""
     timeout_s = settings.chunk_timeout_ms / 1000.0
     in_flight: Dict["asyncio.Task[Any]", Unit] = {}
     busy = False
@@ -376,7 +394,7 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings) -
             for task in done:
                 unit = in_flight.pop(task)
                 try:
-                    count, rows = task.result()
+                    count, rows, tallied = task.result()
                 except ProviderBusy:
                     # The fleet is full: give the unit back and stop starting
                     # new ones. The next request carries on.
@@ -397,6 +415,9 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings) -
                 session.scanned += unit.size
                 if rows:
                     session.rows = ctx.sort.merge(session.rows, rows, limit=session.k)
+                for urn, name, label, et, k in tallied:
+                    if urn:
+                        add_tally(tally, urn, [k, name or "", label or "", {et or "": k}])
         if session.status == RUNNING and not session.pending and not in_flight:
             session.status = COMPLETE
         if busy and session.scanned == 0 and session.status == RUNNING:
@@ -409,21 +430,24 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings) -
 
 
 async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: float
-                    ) -> Tuple[int, List[List[Any]]]:
-    """One unit's exact count and ordered first rows (a later page's
-    session counts nothing — the total is page 1's; a count session keeps
-    no rows)."""
+                    ) -> Tuple[int, List[List[Any]], List[List[Any]]]:
+    """One unit's exact count, ordered first rows and — when the search
+    tallies ancestors — its ``[urn, name, label, entity type, matches]``
+    rows (a later page's session counts nothing — the total is page 1's;
+    a count session keeps no rows)."""
     if session.k == 0:
         cypher, params = count_statement(unit, ctx, session.clamps)
         res = await run(cypher, params, timeout_s)
         rs = res.result_set or []
-        return (int(rs[0][0]) if rs else 0), []
+        return (int(rs[0][0]) if rs else 0), [], []
     if session.after is not None:
         cypher, params = after_statement(unit, ctx, session.clamps, session.k, session.after)
         res = await run(cypher, params, timeout_s)
-        return 0, [list(r) for r in (res.result_set or [])]
-    count, rows = 0, []
+        return 0, [list(r) for r in (res.result_set or [])], []
+    count, rows, tallied = 0, [], []
     statements = page_statements(unit, ctx, session.clamps, session.k)
+    if ctx.tally:
+        statements.append((*tally_statement(unit, ctx, session.clamps), "tally"))
     results = await asyncio.gather(*(run(c, p, timeout_s) for c, p, _ in statements))
     for (_, _, yields), res in zip(statements, results):
         rs = res.result_set or []
@@ -432,9 +456,11 @@ async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: 
                 count, rows = int(rs[0][0]), [list(r) for r in (rs[0][1] or [])]
         elif yields == "count":
             count = int(rs[0][0]) if rs else 0
+        elif yields == "tally":
+            tallied = [list(r) for r in rs]
         else:
             rows = [list(r) for r in rs]
-    return count, rows
+    return count, rows, tallied
 
 
 def _is_pressure(exc: BaseException) -> bool:
@@ -456,25 +482,26 @@ def _describe(exc: BaseException) -> str:
 # Facets
 # ---------------------------------------------------------------------------
 
-async def _facets(provider, query: SearchQuery, sid: str, store: SessionStore, run,
+async def _facets(provider, query: SearchQuery, specs, sid: str, store: SessionStore, run,
                   settings) -> Optional[List[List[Dict[str, Any]]]]:
-    """The session's facets when computed; otherwise start computing them
-    (once per session, in this process) and answer None meanwhile."""
+    """The session's ``specs`` facets when computed; otherwise start
+    computing them (once per session, in this process) and answer None
+    meanwhile."""
     held = await store.load_facets(sid)
     if held is not None:
         return held
     budget_s = query.options.soft_deadline_ms / 1000.0
     if sid not in _FACET_TASKS and await store.claim_facets(sid, int(budget_s) + 30):
         task = asyncio.ensure_future(
-            _compute_facets(provider, query, sid, store, run, budget_s, settings))
+            _compute_facets(provider, query, specs, sid, store, run, budget_s, settings))
         _FACET_TASKS[sid] = task
         task.add_done_callback(lambda _t: _FACET_TASKS.pop(sid, None))
     return None
 
 
-async def _compute_facets(provider, query: SearchQuery, sid: str, store: SessionStore,
+async def _compute_facets(provider, query: SearchQuery, specs, sid: str, store: SessionStore,
                           run, budget_s: float, settings) -> None:
-    """Each requested facet, by the capped engine's statement for it."""
+    """Each of ``specs``, by the capped engine's statement for it."""
     started = time.monotonic()
     compiler = _build_compiler_for_provider(provider)
     where = compiler.compile(query.predicate)
@@ -495,7 +522,7 @@ async def _compute_facets(provider, query: SearchQuery, sid: str, store: Session
     facets: Any
     try:
         facets = []
-        for spec in query.options.aggregations or []:
+        for spec in specs:
             remaining = max(0.5, budget_s - (time.monotonic() - started))
             buckets = await _run_aggregation(
                 _Admitted(), capped, params, spec, query=query, timeout_s=remaining,
@@ -524,12 +551,62 @@ async def _await_facets(store: SessionStore, sid: str, deadline: float):
     return await store.load_facets(sid)
 
 
-def _facet_models(facets) -> Tuple[Optional[List[List[SearchAggregateBucket]]], List[str]]:
-    if facets is None:
-        return None, []
+async def _facet_models(query: SearchQuery, session: Session, store: SessionStore, facets
+                        ) -> Tuple[Optional[List[List[SearchAggregateBucket]]], List[str]]:
+    """Every requested facet, in request order — or None until they are all
+    ready: the ``ancestor`` facet once the scan has tallied every unit, the
+    others once the capped statements have answered. A capped facet that
+    failed is empty, and a note says why."""
+    specs = list(query.options.aggregations or [])
+    capped = [a for a in specs if a.by != "ancestor"]
+    notes: List[str] = []
+    if capped and facets is None:
+        return None, notes
     if isinstance(facets, dict):
-        return [], [f"facets could not be computed: {facets.get('error')}"]
-    return [[SearchAggregateBucket.model_validate(b) for b in facet] for facet in facets], []
+        notes.append(f"facets could not be computed: {facets.get('error')}")
+        facets = [[] for _ in capped]
+    if len(capped) < len(specs) and session.status != COMPLETE:
+        return None, notes
+    computed = iter(facets or [])
+    models: List[List[SearchAggregateBucket]] = []
+    for spec in specs:
+        if spec.by == "ancestor":
+            models.append([_ancestor_bucket(urn, entry)
+                           for urn, entry in await store.top_tallies(session.sid,
+                                                                     spec.max_buckets)])
+        else:
+            models.append([SearchAggregateBucket.model_validate(b) for b in next(computed)])
+    return models, notes
+
+
+def _ancestor_bucket(urn: str, entry: Tally) -> SearchAggregateBucket:
+    total, name, label, types = entry
+    return SearchAggregateBucket(
+        ancestor_urn=urn, ancestor_display_name=name or "", ancestor_entity_type=label or "",
+        ancestor_depth_from_scope_root=0, match_count=int(total),
+        type_counts={str(et): int(k) for et, k in types.items()},
+    )
+
+
+async def read_ancestor_counts(provider, session_id: str, urns: List[str], *,
+                               scope_hash: str) -> Dict[str, Any]:
+    """How many matches each of ``urns`` holds, from a search session's
+    tally — any container's exact count, however many there are, not only
+    the fullest ones the facet lists. ``expired`` when the session is gone
+    or was planned for another scope; ``running`` counts are so far."""
+    store = store_for(provider)
+    session = await store.load(session_id)
+    if session is None or session.scope_hash != scope_hash:
+        return {"status": "expired", "counts": {}}
+    held = await store.read_tallies(session_id, urns)
+    none: Tally = [0, "", "", {}]
+    return {
+        "status": "complete" if session.status == COMPLETE else "running",
+        "counts": {urn: {"count": int(total), "typeCounts": dict(types),
+                         "displayName": name or "", "entityType": label or ""}
+                   for urn in urns
+                   for total, name, label, types in [held.get(urn, none)]},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +633,8 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
     first_page = session.after is None
     if first_page and complete:
         total = session.count
-    facet_models, facet_notes = _facet_models(facets)
+    facet_models, facet_notes = (await _facet_models(query, session, store_for(provider), facets)
+                                 if wants_facets else (None, []))
     if wants_facets and facet_models is None:
         complete = False       # the page is not done until its facets are
 

@@ -62,6 +62,8 @@ import type {
     SearchMembershipResult,
     SearchCountsRequest,
     SearchCountsResult,
+    SearchAncestorCountsRequest,
+    SearchAncestorCountsResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -583,6 +585,22 @@ export class RemoteGraphProvider implements GraphDataProvider {
             body: JSON.stringify(body),
             signal: opts?.signal,
             timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * How many of a finished search's matches each of these containers
+     * (≤ 2,000) holds — POST /search/ancestor-counts, read from the
+     * search's session. Answers for any container, not only the fullest
+     * ones the search's ``ancestor`` facet lists.
+     */
+    async searchAncestorCounts(
+        body: SearchAncestorCountsRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchAncestorCountsResult> {
+        return await this.fetch<SearchAncestorCountsResult>('/search/ancestor-counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
         })
     }
 

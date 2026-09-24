@@ -25,6 +25,7 @@ from backend.app.providers.falkordb_search.plan import (
     after_statement,
     make_plan,
     page_statements,
+    tally_statement,
 )
 from backend.app.providers.falkordb_search.relevance import score_expr
 from backend.app.providers.falkordb_search.session import (
@@ -361,6 +362,17 @@ class TestStatements:
         assert count.endswith("RETURN count(n)")
         assert "LIMIT $_k RETURN _k0, _k1" in rows and "collect(" not in rows
 
+    def test_a_units_ancestors_are_tallied_by_entity_type(self):
+        cypher, params = tally_statement(Unit("range", "A", 10, 20), self._ctx(), [[3]])
+        assert cypher.startswith("MATCH (n:`A`) WHERE ID(n) >= $_lo AND ID(n) < $_hi")
+        # After the scope clamp: only in-scope matches are tallied.
+        assert cypher.index("ID(_r0) IN $_roots0") < cypher.index("(_c)")
+        assert cypher.endswith(
+            "WITH n MATCH (_c)-[:CONTAINS*1..12]->(n) "
+            "WITH _c, labels(n)[0] AS _et, count(DISTINCT n) AS _k "
+            "RETURN _c.urn, _c.displayName, labels(_c)[0], _et, _k")
+        assert params == {"p0": 1, "_lo": 10, "_hi": 20, "_roots0": [3]}
+
     def test_a_later_page_filters_before_it_orders(self):
         cypher, params = after_statement(Unit("visible", "A"), self._ctx(visible=["u"]),
                                          [], 5, ["m", "u9"])
@@ -423,6 +435,51 @@ class TestStores:
     async def test_an_unreadable_session_is_a_miss(self):
         assert Session.from_json('{"sid": "x"}') is None
 
+    async def test_tallies_add_up_across_commits_and_rank_fullest_first(self, store):
+        token = await store.lease("s1", 10_000)
+        assert await store.save(_session(), token, 60, tallies={
+            "urn:db": [3, "db", "Container", {"Dataset": 3}],
+            "urn:x": [1, "x", "Container", {"Dataset": 1}],
+        })
+        assert await store.save(_session(), token, 60, tallies={
+            "urn:db": [4, "db", "Container", {"Field": 4}],
+            "urn:y": [1, "y", "Container", {"Field": 1}],
+        })
+        assert await store.top_tallies("s1", 10) == [
+            ("urn:db", [7, "db", "Container", {"Dataset": 3, "Field": 4}]),
+            # A tie ranks in descending urn order — the same on both stores.
+            ("urn:y", [1, "y", "Container", {"Field": 1}]),
+            ("urn:x", [1, "x", "Container", {"Dataset": 1}]),
+        ]
+        assert [urn for urn, _ in await store.top_tallies("s1", 1)] == ["urn:db"]
+        assert await store.read_tallies("s1", ["urn:x", "urn:none"]) == {
+            "urn:x": [1, "x", "Container", {"Dataset": 1}]}
+
+    async def test_a_holder_that_lost_its_lease_commits_no_tally(self, store):
+        token = await store.lease("s1", 10_000)
+        await store.release("s1", token)
+        other = await store.lease("s1", 10_000)
+        tally = {"urn:db": [2, "db", "Container", {"Dataset": 2}]}
+        assert not await store.save(_session(), token, 60, tallies=tally)
+        assert await store.top_tallies("s1", 10) == []
+        assert await store.save(_session(), other, 60, tallies=tally)
+        assert await store.read_tallies("s1", ["urn:db"]) == {"urn:db": tally["urn:db"]}
+
+    async def test_an_expired_session_takes_its_tally_with_it(self, monkeypatch):
+        from backend.app.providers.falkordb_search import session as session_mod
+        store = MemorySessionStore()
+        await store.save(_session(), None, 60, tallies={"urn:db": [1, "", "", {"": 1}]})
+        now = session_mod.time.monotonic()
+        monkeypatch.setattr(session_mod.time, "monotonic", lambda: now + 61)
+        assert await store.load("s1") is None
+        assert "s1" not in store._tallies
+
+    async def test_deleting_a_session_drops_its_tally(self, store):
+        await store.save(_session(), None, 60, tallies={"urn:db": [1, "", "", {"": 1}]})
+        await store.delete("s1")
+        assert await store.top_tallies("s1", 10) == []
+        assert await store.read_tallies("s1", ["urn:db"]) == {}
+
 
 # ---------------------------------------------------------------------------
 # Sessions, end to end against a fake scan
@@ -451,13 +508,15 @@ class _Provider:
 
 class _Scan:
     """Stands in for ``make_plan`` and ``_run_unit``: each unit is a label
-    whose rows are ``[name, urn]``, already in order."""
+    whose rows are ``[name, urn]``, already in order — and, for a search
+    that tallies, whose ``tallies`` are its ancestor rows."""
 
-    def __init__(self, units, *, delay=0.0, fail=None, pressure=None):
+    def __init__(self, units, *, delay=0.0, fail=None, pressure=None, tallies=None):
         self.units = units
         self.delay = delay
         self.fail = fail or set()
         self.pressure = pressure or set()
+        self.tallies = tallies or {}
         self.runs = []
 
     async def plan(self, provider, query, compiler, **kw):
@@ -475,8 +534,10 @@ class _Scan:
             if width > 4:           # too much to read in one chunk
                 raise RuntimeError("Query timed out")
         rows = [r for r in self.units[unit.label] if session.after is None or r > session.after]
+        tallied = (self.tallies.get(unit.label, [])
+                   if ctx.tally and session.after is None and session.k else [])
         return (0 if session.after is not None else len(self.units[unit.label]),
-                rows[:session.k])
+                rows[:session.k], tallied)
 
 
 @pytest.fixture
@@ -658,7 +719,7 @@ class TestFacets:
         scan({"A": _rows("a", 3)})
         calls = []
 
-        async def facets(provider, query, sid, store, run, budget_s, settings):
+        async def facets(provider, query, specs, sid, store, run, budget_s, settings):
             calls.append(sid)
             await asyncio.sleep(0.05)
             await store.save_facets(sid, [[]], 60)
@@ -674,13 +735,103 @@ class TestFacets:
     async def test_facets_that_fail_say_why_and_do_not_cost_the_hits(self, scan, monkeypatch):
         scan({"A": _rows("a", 3)})
 
-        async def facets(provider, query, sid, store, run, budget_s, settings):
+        async def facets(provider, query, specs, sid, store, run, budget_s, settings):
             await store.save_facets(sid, {"error": "too slow"}, 60)
 
         monkeypatch.setattr(engine_mod, "_compute_facets", facets)
         page = await _search(_Provider(), results="both", aggregations=[{"by": "entityType"}])
-        assert page.aggregates == [] and len(page.hits) == 3
+        # The failed facet keeps its place (empty), so the others stay aligned.
+        assert page.aggregates == [[]] and len(page.hits) == 3
         assert any("too slow" in n for n in page.scope_diagnostics.notes)
+
+
+class TestAncestorTally:
+    """The ``ancestor`` facet — the canvas's "N matches inside" badges — is
+    tallied by the scan, a unit at a time, instead of one statement over
+    every match."""
+
+    UNITS = {"A": _rows("a", 3), "B": _rows("b", 4)}
+    TALLIES = {
+        "A": [["urn:root", "Root", "Domain", "Dataset", 3],
+              ["urn:db1", "db1", "Container", "Dataset", 3]],
+        "B": [["urn:root", "Root", "Domain", "SchemaField", 4],
+              ["urn:db2", "db2", "Container", "SchemaField", 4]],
+    }
+
+    @staticmethod
+    def _no_capped_facets(monkeypatch):
+        async def facets(*a, **kw):
+            raise AssertionError("the ancestor facet needs no capped statement")
+        monkeypatch.setattr(engine_mod, "_compute_facets", facets)
+
+    async def test_the_facet_is_the_scans_tally_fullest_first(self, scan, monkeypatch):
+        scan(self.UNITS, tallies=self.TALLIES)
+        self._no_capped_facets(monkeypatch)
+        page = await _search(_Provider(), results="both",
+                             aggregations=[{"by": "ancestor", "maxBuckets": 2}])
+        assert page.status == "complete" and page.total_count == 7
+        [facet] = page.aggregates
+        assert [(b.ancestor_urn, b.match_count) for b in facet] == [("urn:root", 7), ("urn:db2", 4)]
+        root = facet[0]
+        assert (root.ancestor_display_name, root.ancestor_entity_type) == ("Root", "Domain")
+        assert root.type_counts == {"Dataset": 3, "SchemaField": 4}
+
+    async def test_the_facet_waits_for_the_whole_scan(self, scan, monkeypatch):
+        # More units than one wave (two), so the first answer is partial.
+        scan({**self.UNITS, "C": _rows("c", 1), "D": _rows("d", 1)},
+             tallies=self.TALLIES, delay=0.05)
+        self._no_capped_facets(monkeypatch)
+        provider = _Provider()
+        agg = [{"by": "ancestor"}]
+        first = await _search(provider, results="both", aggregations=agg, wait_ms=0)
+        assert first.status == "running" and first.aggregates is None
+        page = first
+        while page.status == "running":
+            page = await _search(provider, results="both", aggregations=agg, wait_ms=200,
+                                 session_id=first.session_id)
+        assert {b.ancestor_urn: b.match_count for b in page.aggregates[0]} == {
+            "urn:root": 7, "urn:db1": 3, "urn:db2": 4}
+
+    async def test_facets_keep_the_order_they_were_asked_in(self, scan, monkeypatch):
+        scan(self.UNITS, tallies=self.TALLIES)
+
+        async def facets(provider, query, specs, sid, store, run, budget_s, settings):
+            assert [a.by for a in specs] == ["entityType"]
+            await store.save_facets(sid, [[{"ancestorUrn": "t", "ancestorDisplayName": "t",
+                                            "ancestorEntityType": "t",
+                                            "ancestorDepthFromScopeRoot": 0,
+                                            "matchCount": 7}]], 60)
+
+        monkeypatch.setattr(engine_mod, "_compute_facets", facets)
+        page = await _search(_Provider(), results="both",
+                             aggregations=[{"by": "entityType"}, {"by": "ancestor"}])
+        assert [b.ancestor_urn for b in page.aggregates[0]] == ["t"]
+        assert page.aggregates[1][0].ancestor_urn == "urn:root"
+
+    async def test_any_containers_count_is_read_from_the_session(self, scan, monkeypatch):
+        scan(self.UNITS, tallies=self.TALLIES)
+        self._no_capped_facets(monkeypatch)
+        provider = _Provider()
+        page = await _search(provider, results="both", aggregations=[{"by": "ancestor"}])
+        read = engine_mod.read_ancestor_counts
+        out = await read(provider, page.session_id, ["urn:db1", "urn:elsewhere"], scope_hash="h")
+        assert out == {"status": "complete", "counts": {
+            "urn:db1": {"count": 3, "typeCounts": {"Dataset": 3},
+                        "displayName": "db1", "entityType": "Container"},
+            "urn:elsewhere": {"count": 0, "typeCounts": {},
+                              "displayName": "", "entityType": ""}}}
+        # Another scope's session, or none: run the search again.
+        assert (await read(provider, page.session_id, ["urn:db1"], scope_hash="other")
+                )["status"] == "expired"
+        assert (await read(provider, "gone", ["urn:db1"], scope_hash="h"))["status"] == "expired"
+
+    async def test_a_search_without_the_facet_tallies_nothing(self, scan):
+        s = scan(self.UNITS, tallies=self.TALLIES)
+        provider = _Provider()
+        page = await _search(provider, results="both", aggregations=[{"by": "entityType"}])
+        out = await engine_mod.read_ancestor_counts(provider, page.session_id, ["urn:root"],
+                                                    scope_hash="h")
+        assert out["counts"]["urn:root"]["count"] == 0 and s.runs
 
 
 # ---------------------------------------------------------------------------

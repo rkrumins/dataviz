@@ -478,10 +478,43 @@ The plan lives in its session.
 
 **Facets**
 
-A search asking for facets gets the capped engine's statements for
-them. They are computed once per session, in the background of the
-request that claimed them. The page reports `running` until they land;
-if they fail, the note in its diagnostics says why.
+The `ancestor` facet (the canvas's "N matches inside" badges) is
+tallied by the scan itself:
+
+- Each first-page unit runs one more statement. It walks the unit's
+  matches up their containment and counts them per ancestor and entity
+  type. `count(DISTINCT n)` means a match reached down two paths counts
+  once.
+- The tally is committed with its unit, in the same Redis transaction
+  as the session, which WATCHes the lease. Each unit is counted exactly
+  once, even when the lease changes hands mid-scan.
+- The facet lists the `maxBuckets` fullest ancestors. Any other
+  container's count is read from the session with
+  `POST /search/ancestor-counts`. So every container on screen gets its
+  exact count, not only the fullest ones.
+
+Measured on `bench_1m`, with the tally run one chunk at a time:
+
+| Predicate | Matches | One statement (before) | Tallied in 50k chunks | Containers holding matches |
+|---|---:|---:|---:|---:|
+| name contains `field_12` | 11,111 | 1.65 s, 10,536 buckets | 1.52 s | 10,536 |
+| gvHash contains `74` | 167,163 | 2.85 s, capped at 20,000 buckets | 4.49 s | 48,462 |
+| sourceId > 50000 | 500,886 | 6.70 s, capped at 20,000 buckets | 11.70 s | 50,544 |
+
+- The one statement grows with the match set until it misses its time
+  budget.
+- At 20,000 buckets it already left out about 60% of the containers
+  holding matches on the broad predicates.
+- The tally never runs a statement bigger than one chunk: 0.7 s at most
+  here. The engine runs two chunks at a time.
+- A broad search's tally on 1M nodes holds about 3 MB in Redis, for as
+  long as its session lives.
+
+The other facets still come from the capped engine's statements. They
+are computed once per session, in the background of the request that
+claimed them. The page reports `running` until every facet is ready. A
+facet that fails comes back empty, and a note in the page's diagnostics
+says why.
 
 **Response**
 

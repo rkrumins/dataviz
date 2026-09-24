@@ -51,6 +51,8 @@ from backend.common.models.search import (
     PathPredicate,
     PropertyPredicate,
     ScopeDiagnostics,
+    SearchAncestorCountsRequest,
+    SearchAncestorCountsResult,
     SearchCountsRequest,
     SearchCountsResult,
     SearchMembershipRequest,
@@ -629,6 +631,23 @@ class AdvancedSearchService:
             )
         return SearchCountsResult(counts=counts, data_version=context.data_version or None,
                                   elapsed_ms=int((time.monotonic() - started) * 1000))
+
+    async def ancestor_counts(
+        self,
+        request: SearchAncestorCountsRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchAncestorCountsResult:
+        """How many of a search's matches each requested container holds,
+        from the search's session — which must have been planned for this
+        view's scope, resolved here as the search resolved it."""
+        eff_scope = await self._resolve_scope(request.scope)
+        await self._guard_view_data_source(eff_scope)
+        op = self._provider_op("deep_search_ancestor_counts")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff_scope.scope_hash)
+        out = await op(request.session_id, list(dict.fromkeys(u for u in request.urns if u)),
+                       context=context)
+        return SearchAncestorCountsResult.model_validate(out)
 
     async def _rule_scope(self, requested: SearchScope):
         """The resolved scope a rule is evaluated in, or None when every root
