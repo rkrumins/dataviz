@@ -98,7 +98,8 @@ class ProjectionWorker:
         """One pass of the idle-draft janitor (plan §17 #8); no-op without a service. What a swept
         draft held in views goes with it, as on abandon, and any draft whose views were left
         unsettled by its publish or abandon is settled (``draft_views``). Import/export artifacts
-        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store."""
+        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store, and the staged rows
+        of imports finished more than ``STAGING_GC_DAYS`` ago from ``import_rows``."""
         if self._versioning is None:
             return []
         swept = await self._versioning.sweep_idle_drafts()
@@ -116,6 +117,12 @@ class ProjectionWorker:
             await prune_uploads()
         except Exception:  # noqa: BLE001 — tried again next pass
             logger.exception("pruning view package uploads failed")
+        try:
+            from .import_export.import_worker import sweep_staged_rows
+
+            await sweep_staged_rows(older_than_days=config.STAGING_GC_DAYS)
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("sweeping finished imports' staged rows failed")
         try:
             from backend.app.services.storage.object_store import get_object_store
 

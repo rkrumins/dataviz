@@ -233,7 +233,8 @@ class ImportExportService:
         ontology = None
         if self._ontology_resolver is not None:
             ontology = await self._ontology_resolver(ws, ds)
-        worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology)
+        worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
+                              facts=bool(view_id and self._layout_writer is not None))
         summary = await worker.run(job_id)
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
