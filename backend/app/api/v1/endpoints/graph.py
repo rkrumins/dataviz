@@ -2127,8 +2127,12 @@ async def search_export_download(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
-    engine: ContextEngine = Depends(get_context_engine),
-    session: AsyncSession = Depends(get_engine_session),
+    # Function-scoped: given back before the body streams. The file streams from the object
+    # store alone, for as long as it takes, and holds no graph-read connection or admission.
+    _admission: None = Depends(_admit_graph_request, scope="function"),
+    session: AsyncSession = Depends(get_graph_read_db_session, scope="function"),
+    # The session the route's gate read the data source with (the same one, per request).
+    gate: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
 ):
     """A complete export, streamed as the file it is — for the person it
@@ -2144,6 +2148,9 @@ async def search_export_download(
                             detail="This download link has expired — export the matches again.")
     if not ws_id:
         raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+    engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
+                                      branchId=branchId, _admission=None, session=session,
+                                      user=user)
     svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
                                 data_source_id=dataSourceId, branch_id=branchId)
     try:
@@ -2153,10 +2160,13 @@ async def search_export_download(
     if opened is None:
         raise HTTPException(status_code=404,
                             detail="This export is no longer kept — export the matches again.")
+    # The gate's read is done: give its connection back now, not when the download ends.
+    await gate.commit()
     answer, body = opened
     media = "text/csv; charset=utf-8" if answer.format == "csv" else "application/x-ndjson"
     return StreamingResponse(body, media_type=media, headers={
-        "Content-Disposition": f'attachment; filename="{answer.filename}"'})
+        "Content-Disposition": f'attachment; filename="{answer.filename}"',
+        "Cache-Control": "no-store"})
 
 
 def _principal(user) -> str:

@@ -456,6 +456,111 @@ class TestRoute:
                           ("s2", SimpleNamespace(id="usr_a"))):
             with pytest.raises(HTTPException) as exc:
                 await graph_mod.search_export_download(
-                    session_id=sid, token=token, ws_id="ws", engine=SimpleNamespace(provider=None),
-                    session=None, user=user)
+                    session_id=sid, token=token, ws_id="ws", session=None, gate=None, user=user)
             assert exc.value.status_code == 403
+
+    async def test_a_download_outlives_the_graph_timeout(self, monkeypatch):
+        """``/graph/`` requests end at 60 s — cleanly, once the response has
+        begun, so a download cut there would look complete. A download runs
+        as long as the file takes; the export's other requests do not."""
+        from backend.app.main import _TimeoutMiddleware
+        monkeypatch.setenv("HTTP_TIMEOUT_GRAPH_SECS", "0.2")
+
+        async def slow_download(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await asyncio.sleep(0.5)
+            await send({"type": "http.response.body", "body": b"rows\n", "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+        async def receive():
+            await asyncio.sleep(10)
+            return {"type": "http.disconnect"}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        path = "/api/v1/ws_1/graph/search/exports/exp_1/download"
+        mw = _TimeoutMiddleware(slow_download)
+        await mw({"type": "http", "method": "GET", "path": path, "raw_path": path.encode(),
+                  "query_string": b"", "headers": []}, receive, send)
+        bodies = [m for m in sent if m["type"] == "http.response.body"]
+        assert b"".join(m["body"] for m in bodies) == b"rows\n"
+        assert sum(not m.get("more_body") for m in bodies) == 1
+        assert not mw._is_sse_path("/api/v1/ws_1/graph/search/exports")
+        assert not mw._is_sse_path(path + "/x")
+
+    async def test_a_download_holds_nothing_while_it_streams(self, test_client, db_session,
+                                                             monkeypatch):
+        """The file streams from the object store alone, for as long as it
+        takes: by its first byte the request has given back its graph-read
+        connection, its admission slot and the connection its gate read the
+        data source with."""
+        from backend.app.db.engine import get_graph_read_db_session
+        from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+        from backend.app.main import app
+        from backend.app.providers.manager import provider_manager
+        from backend.app.services import search_downloads
+
+        db_session.add(ProviderORM(id="prov_x", name="P", provider_type="falkordb"))
+        ws = WorkspaceORM(name="Home")
+        db_session.add(ws)
+        await db_session.flush()
+        ds = WorkspaceDataSourceORM(workspace_id=ws.id, provider_id="prov_x", graph_name="g",
+                                    label="Finance", is_primary=True, is_active=True)
+        db_session.add(ds)
+        await db_session.commit()
+        url = f"/api/v1/{ws.id}/graph/search/exports/exp_1/download"
+        params = {"token": "t", "dataSourceId": ds.id}
+
+        held = {"graph_read": False, "admitted": 0, "committed": 0}
+
+        async def graph_read():
+            held["graph_read"] = True
+            try:
+                yield SimpleNamespace()
+            finally:
+                held["graph_read"] = False
+
+        admit, release = (provider_manager.admit_graph_request,
+                          provider_manager.release_graph_request)
+
+        def admitted(key):
+            held["admitted"] += 1
+            return admit(key)
+
+        def released(key):
+            held["admitted"] -= 1
+            return release(key)
+
+        commit = db_session.commit
+
+        async def committed():
+            held["committed"] += 1
+            return await commit()
+
+        async def for_workspace(ws_id, manager, session, **kw):
+            return SimpleNamespace(provider=SimpleNamespace())
+
+        async def opened(self, session_id, scope_hash):
+            async def body():
+                assert not held["graph_read"] and held["admitted"] == 0 and held["committed"]
+                yield b"urn\r\n"
+            return SimpleNamespace(format="csv", filename="search-export-x.csv"), body()
+
+        app.dependency_overrides[get_graph_read_db_session] = graph_read
+        monkeypatch.setattr(provider_manager, "admit_graph_request", admitted)
+        monkeypatch.setattr(provider_manager, "release_graph_request", released)
+        monkeypatch.setattr(db_session, "commit", committed)
+        monkeypatch.setattr(graph_mod.ContextEngine, "for_workspace", staticmethod(for_workspace))
+        monkeypatch.setattr(AdvancedSearchService, "open_export", opened)
+        monkeypatch.setattr(search_downloads, "read_download_token",
+                            lambda *a, **k: ("exp_1", "scope-1"))
+        try:
+            resp = await test_client.get(url, params=params)
+        finally:
+            app.dependency_overrides.pop(get_graph_read_db_session, None)
+        assert resp.status_code == 200, resp.text
+        assert resp.content == b"urn\r\n"
+        assert resp.headers["cache-control"] == "no-store"
