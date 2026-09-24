@@ -6,6 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
 import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
@@ -539,6 +540,7 @@ export function usePublishBranch(wsId: string, graphId: string) {
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
       // the FalkorDB cache catches up, and force live graph reads to refetch.
       expectCatchUp(wsId, graphId)
+      qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
       bumpMainEpoch()
       // Rollups changed with main. Refetch now, and once more after the post-commit
@@ -563,6 +565,7 @@ function invalidateAfterMainAdvance(
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'restorePreview'] })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
   expectCatchUp(wsId, graphId)
+  qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
   bumpMainEpoch()
   invalidateAggregatedEdges()
@@ -702,6 +705,7 @@ export function useMergeMergeRequest(wsId: string) {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
       expectCatchUp(wsId, v.graphId)
+      qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved
       // Rollups changed with main (see usePublishBranch): refetch now + after the projection nudge.

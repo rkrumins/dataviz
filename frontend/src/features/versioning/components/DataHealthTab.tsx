@@ -12,7 +12,7 @@
  * spinning forever. Driven by the two projection mutations plus the watermark poll (forced
  * while a rebuild is being watched, so the terminal transition is never missed).
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2, CheckCircle2, AlertTriangle, Info, ChevronDown, ChevronRight, RefreshCw, RotateCcw,
   ShieldCheck,
@@ -23,6 +23,8 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { DriftReport, Watermark } from '@/services/versioningApiService'
 import { useProjectionWatermark, useReconcileProjection, useRebuildProjection } from '../hooks/useVersioning'
+import { useSyncStatus } from '@/features/sync-status/useSyncStatus'
+import { deriveSync, type SyncLane } from '@/features/sync-status/deriveSync'
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
 
@@ -57,7 +59,9 @@ function heroState(wm: Watermark | undefined): HeroState {
  * (the fast read layer is projected afterwards — in sync, catching up, N versions behind, or its
  * last refresh failed). One row each, same shape, so they read as a pair.
  */
-function SyncRows({ wm, state, progressPct }: { wm: Watermark | undefined; state: HeroState; progressPct: number | null }) {
+function SyncRows({ wm, state, progressPct, summaries }: {
+  wm: Watermark | undefined; state: HeroState; progressPct: number | null; summaries?: SyncLane
+}) {
   const committed = wm?.committed ?? 0
   const behind = wm ? Math.max(0, wm.committed - wm.projected) : 0
   const versions = (n: number) => plural(n, 'version', 'versions')
@@ -78,6 +82,14 @@ function SyncRows({ wm, state, progressPct }: { wm: Watermark | undefined; state
         text={!wm ? 'Checking…' : committed > 0 ? `Saved · published version #${committed}` : 'Nothing published yet'}
       />
       <SyncRow label="Graph" tech="FalkorDB" tone={graph.tone} text={graph.text + updated} />
+      {summaries && (
+        <SyncRow
+          label="Lineage summaries"
+          tech="Rollups"
+          tone={summaries.tone === 'bad' ? 'bad' : summaries.tone === 'warn' ? 'warn' : summaries.tone === 'busy' ? 'busy' : summaries.tone === 'ok' ? 'ok' : 'idle'}
+          text={summaries.status + (summaries.tone === 'ok' && summaries.lines[0] ? ` · ${summaries.lines[0].toLowerCase()}` : '')}
+        />
+      )}
     </dl>
   )
 }
@@ -106,8 +118,13 @@ function SyncRow({ label, tech, tone, text }: {
   )
 }
 
-export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string }) {
+export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; graphId: string; dataSourceId?: string | null }) {
   const { notify } = useAppNotifications()
+  // The same reading the header's sync chip shows — here for the lineage summaries' automation:
+  // whether a rebuild is queued or running, so nothing asks the user to do what is already in hand.
+  const syncQ = useSyncStatus(wsId, dataSourceId)
+  const summariesLane = useMemo(
+    () => deriveSync(syncQ.data).lanes.find((l) => l.key === 'summaries'), [syncQ.data])
 
   // Rebuild lifecycle: 'running' once we've kicked one; terminal 'done' (fresh again after
   // observed progress) or 'failed' (idle + behind, with the recorded reason when there is one).
@@ -279,7 +296,7 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
               <ProgressBar value={progressPct} label="Rebuilding the fast read layer" className="mt-2.5" />
             )}
 
-            <SyncRows wm={wm} state={state} progressPct={progressPct} />
+            <SyncRows wm={wm} state={state} progressPct={progressPct} summaries={summariesLane} />
 
             {state === 'failed' && (
               <>
@@ -348,6 +365,18 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
                     : 'This data source has no fast read layer yet.'}
                 </span>
               </div>
+            ) : report.inSync && report.rollups?.status && report.rollups.status !== 'ok'
+                && (summariesLane?.tone === 'busy' || wm?.status === 'projecting' || wm?.status === 'rebuilding') ? (
+              // Already in hand: a rebuild is queued or running, or the refresh that updates them
+              // is under way. Say so — and offer nothing to press.
+              <div className="flex items-start gap-2 rounded-lg border border-indigo-500/25 bg-indigo-500/[0.06] px-3 py-2.5 text-[12px] text-ink">
+                <Loader2 className="w-4 h-4 shrink-0 mt-0.5 animate-spin text-indigo-500" />
+                <span>
+                  Every item and connection matches the source of truth. The lineage summaries are being
+                  brought up to date automatically{summariesLane?.tone === 'busy' ? ` — ${summariesLane.status.toLowerCase()}` : ' as part of the refresh in progress'}.
+                  Nothing to do.
+                </span>
+              </div>
             ) : report.inSync && report.rollups?.status && report.rollups.status !== 'ok' ? (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.07] px-3 py-3">
                 <div className="flex items-start gap-2">
@@ -358,6 +387,12 @@ export function DataHealthTab({ wsId, graphId }: { wsId: string; graphId: string
                       ? 'have not been built yet'
                       : 'need rebuilding'}. A rebuild keeps every item in place and re-creates them.
                   </p>
+                </div>
+                <p className="mt-1.5 ml-6 text-[11px] text-ink-muted">
+                  They are normally kept up to date automatically with every publish, and no automatic
+                  rebuild is queued right now. If you checked just after publishing, check again in a moment.
+                </p>
+                <div>
                 </div>
                 <button
                   onClick={() => setConfirmRebuild(true)}

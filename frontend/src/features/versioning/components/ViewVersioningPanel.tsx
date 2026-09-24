@@ -174,7 +174,7 @@ export function ViewVersioningPanel({
             <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} canManage={canManage} />
           )}
 
-          {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} />}
+          {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} dataSourceId={dataSourceId} />}
         </div>
       </motion.aside>
     </>,
