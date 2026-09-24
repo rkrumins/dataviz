@@ -5,7 +5,7 @@ Both the visualization service and graph service import from here.
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Awaitable, Callable, List, Optional, Dict, Any
+from typing import AsyncIterator, Awaitable, Callable, List, Optional, Dict, Any
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -153,6 +153,30 @@ class GraphDataProvider(ABC):
         rows = await self.get_nodes(query.model_copy(update={"limit": limit + 1}))
         page = rows[:limit]
         return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
+
+    async def scan_nodes(self, page_size: int = 2000) -> AsyncIterator[List[GraphNode]]:
+        """Every node, a page at a time — what an export of a graph without version control
+        reads. Offset pages of `get_nodes` here; a provider with a cheaper full scan overrides it.
+        Not a snapshot: what changes while it runs may or may not be in it."""
+        offset = 0
+        while True:
+            page = await self.get_nodes(NodeQuery(offset=offset, limit=page_size, includeChildCount=False))
+            if page:
+                yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
+
+    async def scan_edges(self, page_size: int = 2000) -> AsyncIterator[List[GraphEdge]]:
+        """Every edge, a page at a time (see `scan_nodes`)."""
+        offset = 0
+        while True:
+            page = await self.get_edges(EdgeQuery(offset=offset, limit=page_size))
+            if page:
+                yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
 
     @abstractmethod
     async def search_nodes(self, query: str, limit: int = 10) -> List[GraphNode]:

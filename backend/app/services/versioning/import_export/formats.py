@@ -12,12 +12,13 @@ nested/complex property values belong in the single-line ``properties_json`` col
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 from typing import Any, AsyncIterator, Dict, List, Protocol, Sequence
 
-from .rowmodel import parse_list_cells
+from .rowmodel import cell_text, parse_list_cells
 
 
 class FormatAdapter(Protocol):
@@ -119,8 +120,14 @@ class NdjsonAdapter:
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str] = ()
     ) -> AsyncIterator[bytes]:
-        async for rec in records:
-            yield (json.dumps(rec) + "\n").encode("utf-8")
+        async for chunk in self.write_pages(pages_of(records)):
+            yield chunk
+
+    async def write_pages(
+        self, pages: AsyncIterator[List[Dict[str, Any]]], *, columns: Sequence[str] = ()
+    ) -> AsyncIterator[bytes]:
+        async for page in pages:
+            yield await asyncio.to_thread(_ndjson_lines, page)
 
 
 class DelimitedAdapter:
@@ -142,20 +149,26 @@ class DelimitedAdapter:
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str]
     ) -> AsyncIterator[bytes]:
-        cols = list(columns)
-        yield self._row(cols)
-        async for rec in records:
-            yield self._row(["" if rec.get(c) is None else str(rec.get(c)) for c in cols])
+        async for chunk in self.write_pages(pages_of(records), columns=columns):
+            yield chunk
 
-    def _row(self, values: Sequence[str]) -> bytes:
+    async def write_pages(
+        self, pages: AsyncIterator[List[Dict[str, Any]]], *, columns: Sequence[str]
+    ) -> AsyncIterator[bytes]:
+        cols = list(columns)
+        yield self._rows([cols])
+        async for page in pages:
+            yield await asyncio.to_thread(self._rows, [[cell_text(r.get(c)) for c in cols] for r in page])
+
+    def _rows(self, rows: Sequence[Sequence[str]]) -> bytes:
         buf = io.StringIO()
-        csv.writer(buf, delimiter=self._delim, lineterminator="\n").writerow(values)
+        csv.writer(buf, delimiter=self._delim, lineterminator="\n").writerows(rows)
         return buf.getvalue().encode("utf-8")
 
 
 class JsonAdapter:
-    """A single JSON array of records: ``[{...}, ...]``. Not line-streamable, so the whole file is
-    buffered — fine for human-scale exports; ndjson/csv are the streaming formats for millions."""
+    """A single JSON array of records: ``[{...}, ...]``. Written as it streams, one record per line;
+    read whole, since an array isn't line-streamable (ndjson/csv are the formats for millions)."""
 
     fmt = "json"
 
@@ -176,8 +189,44 @@ class JsonAdapter:
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str] = ()
     ) -> AsyncIterator[bytes]:
-        rows = [rec async for rec in records]
-        yield json.dumps(rows).encode("utf-8")
+        async for chunk in self.write_pages(pages_of(records)):
+            yield chunk
+
+    async def write_pages(
+        self, pages: AsyncIterator[List[Dict[str, Any]]], *, columns: Sequence[str] = ()
+    ) -> AsyncIterator[bytes]:
+        """Valid JSON whatever the count: ``[]`` when there is nothing to write."""
+        first = True
+        yield b"["
+        async for page in pages:
+            if page:
+                yield await asyncio.to_thread(_json_items, page, first)
+                first = False
+        yield b"]\n" if first else b"\n]\n"
+
+
+#: Records per page when a writer is handed records one at a time.
+_PAGE = 2000
+
+
+async def pages_of(records: AsyncIterator[Dict[str, Any]], size: int = _PAGE) -> AsyncIterator[List[Dict[str, Any]]]:
+    """Group a record stream into pages: writers encode a page at a time, off the event loop."""
+    page: List[Dict[str, Any]] = []
+    async for rec in records:
+        page.append(rec)
+        if len(page) >= size:
+            yield page
+            page = []
+    if page:
+        yield page
+
+
+def _ndjson_lines(page: List[Dict[str, Any]]) -> bytes:
+    return "".join(json.dumps(r) + "\n" for r in page).encode("utf-8")
+
+
+def _json_items(page: List[Dict[str, Any]], first: bool) -> bytes:
+    return (("\n" if first else ",\n") + ",\n".join(json.dumps(r) for r in page)).encode("utf-8")
 
 
 def _xlsx_adapter():

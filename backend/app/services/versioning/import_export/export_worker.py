@@ -6,20 +6,19 @@ the object store via the chosen format adapter. A whole-graph export doubles as 
 identity columns let a re-import restore/clone faithfully (round-trips to a zero diff when
 unchanged). ``as_of_seq`` gives point-in-time exports (E5).
 
-v1 materializes the state then streams the write; a keyset-streaming read (for 5M+) is a follow-up
-that swaps ``materialize_state`` for ``reconcile._stream_pg_nodes`` without changing the rest.
+The job reads and writes a page at a time through :mod:`.stream`, as the streamed download does,
+so an export of any size runs in flat memory; this module keeps the row shape both share.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, List, Optional
-
-from sqlalchemy import select
+from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..merkle import content_hash
-from ..models import BranchORM, JobORM
-from .formats import get_adapter
+from ..models import JobORM
+from .import_worker import heartbeat
 from .rowmodel import denormalize_edge, denormalize_node
 
 _NODE_COL_ORDER = ["entity_id", "urn", "entityType", "displayName", "qualifiedName",
@@ -99,93 +98,6 @@ def example_template_records() -> List[Dict[str, Any]]:
     ]
 
 
-def _containment_children(edges: Dict[str, dict], cont: set) -> Dict[str, List[str]]:
-    """Parent-entity-id -> child-entity-ids over the graph's containment edges."""
-    children: Dict[str, List[str]] = {}
-    for e in edges.values():
-        if str(e.get("edgeType") or "").upper() in cont:
-            children.setdefault(e.get("sourceEntityId"), []).append(e.get("targetEntityId"))
-    return children
-
-
-def _keep_from_assignments(nodes, edges, assigned_urns: set, inherit_urns: set, cont: set) -> set:
-    """The view's entities: each explicitly layer-assigned URN, plus (when the assignment inherits
-    children — the default for a Context View placing a subtree into a layer) all its containment
-    descendants. This is the AUTHORITATIVE 'what the view contains', taken straight from the view's
-    canonical reference-layout ``assignments`` map rather than a heuristic."""
-    urn_to_eid = {p.get("urn"): eid for eid, p in nodes.items() if p.get("urn")}
-    children = _containment_children(edges, cont)
-    keep, seen = set(), set()
-    stack = [(urn_to_eid[u], u in inherit_urns) for u in assigned_urns if u in urn_to_eid]
-    while stack:
-        eid, descend = stack.pop()
-        if eid in seen:
-            continue
-        seen.add(eid)
-        keep.add(eid)
-        if descend:
-            for child in children.get(eid, []):
-                stack.append((child, True))
-    return keep
-
-
-def _keep_from_filters(nodes, scope: Dict[str, Any]) -> set:
-    """Fallback scope for views defined by entity-type / layer allow-lists (empty = unrestricted)."""
-    types = {str(t).upper() for t in (scope.get("entity_types") or [])}
-    layers = set(scope.get("layers") or [])
-    if not types and not layers:
-        return set(nodes.keys())
-    keep = set()
-    for eid, p in nodes.items():
-        if types and str(p.get("entityType") or "").upper() not in types:
-            continue
-        if layers and p.get("layerAssignment") not in layers:
-            continue
-        keep.add(eid)
-    return keep
-
-
-def filter_to_scope(nodes: Dict[str, dict], edges: Dict[str, dict], scope: Dict[str, Any]):
-    """Restrict a materialized ``{nodes, edges}`` to a view's entity set (plan Phase 4).
-
-    Primary source: the view's explicit layer assignments (the view config's canonical
-    reference-layout ``assignments`` map) — the assigned URNs plus their containment descendants.
-    Fallback: entity-type/layer allow-lists. Edges are kept only when BOTH endpoints are in-scope."""
-    cont = {str(t).upper() for t in (scope.get("containment_types") or [])}
-    assigned = set(scope.get("assigned_urns") or [])
-    if assigned:
-        keep = _keep_from_assignments(nodes, edges, assigned, set(scope.get("inherit_urns") or []), cont)
-    else:
-        keep = _keep_from_filters(nodes, scope)
-    fnodes = {eid: p for eid, p in nodes.items() if eid in keep}
-    fedges = {eid: p for eid, p in edges.items()
-              if p.get("sourceEntityId") in keep and p.get("targetEntityId") in keep}
-    return fnodes, fedges
-
-
-def filter_to_selection(nodes, edges, ids=None, types=None):
-    """Row-scoped export: keep only nodes matching an explicit id/urn set and/or an entity-type set
-    (intersection when both given), plus edges whose endpoints are both kept. Lets a user pull just
-    'these 50 entities' or 'all Tables' to edit — never the whole graph. Composes after view scope."""
-    id_set = set(ids or [])
-    type_set = {str(t).strip().lower() for t in (types or []) if str(t).strip()}
-    if not id_set and not type_set:
-        return nodes, edges
-
-    def keep(p, eid):
-        if id_set and eid not in id_set and p.get("urn") not in id_set:
-            return False
-        if type_set and str(p.get("entityType") or "").strip().lower() not in type_set:
-            return False
-        return True
-
-    kept = {eid for eid, p in nodes.items() if keep(p, eid)}
-    fnodes = {eid: p for eid, p in nodes.items() if eid in kept}
-    fedges = {eid: p for eid, p in edges.items()
-              if p.get("sourceEntityId") in kept and p.get("targetEntityId") in kept}
-    return fnodes, fedges
-
-
 class ExportWorker:
     def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None,
                  options: Optional[Dict[str, Any]] = None, after_write=None) -> None:
@@ -204,40 +116,34 @@ class ExportWorker:
         self._select_types = options.get("types") or []
 
     async def run(self, job_id: str) -> Dict[str, int]:
+        from . import stream                       # stream builds on this module's column order
+        from .snapshot import open_snapshot
+
         async with db.graphver_session() as s:
             job = await s.get(JobORM, job_id)
             job.status = "running"
             job.started_at = _now()
             graph_id, fmt = job.graph_id, job.import_format or "ndjson"
             as_of_seq, result_uri, branch_id = job.as_of_seq, job.result_uri, job.branch_id
-            if branch_id is None:                        # default: published main
-                branch_id = (await s.execute(
-                    select(BranchORM.id).where(
-                        BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
 
-        # A branch_id (a working draft) composes main + committed + draft ops — so a user can export
-        # their in-progress branch, edit in Excel, and re-import onto the same branch.
-        state = await self._svc.materialize_state(
-            graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
-        nodes, edges = state["nodes"], state["edges"]
-        if self._scope:                                   # view-scoped export (Phase 4)
-            nodes, edges = filter_to_scope(nodes, edges, self._scope)
-        nodes, edges = filter_to_selection(nodes, edges, self._select_ids, self._select_types)
-        records = records_from_state(nodes, edges)
-        # Every property is its own column: existing ones (unioned in column_order) + any the user
-        # asked to add, so a brand-new property is an empty column ready to fill.
-        schema_props = {"node": self._extra_props, "edge": self._extra_props} if self._extra_props else None
-        columns = column_order(records, schema_props)
+        # Read a page at a time from one pinned snapshot (stream.py), never the whole state. A
+        # branch_id (a working draft) composes main + committed + staged changes — so a user can
+        # export their in-progress branch, edit in Excel, and re-import onto the same branch.
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
+        keep = (await stream.view_entities(snap, self._scope))["keep"] if self._scope else None
+        selection = stream.Selection.of(keep=keep, ids=self._select_ids, types=self._select_types)
+        # A spreadsheet makes every property its own column: existing ones + any the user asked to
+        # add, so a brand-new property is an empty column ready to fill.
+        tally = {"node": 0, "edge": 0}
+        body = stream.write_export(lambda: stream.record_pages(snap, selection, tally=tally), fmt=fmt,
+                                   props=self._extra_props)
+        beat = asyncio.create_task(heartbeat(job_id))   # a large export writes for many minutes
+        try:
+            stat = await self._store.put_stream(result_uri, body)
+        finally:
+            beat.cancel()
 
-        adapter = get_adapter(fmt)
-
-        async def _iter() -> AsyncIterator[Dict[str, Any]]:
-            for rec in records:
-                yield rec
-
-        stat = await self._store.put_stream(result_uri, adapter.write(_iter(), columns=columns))
-
-        summary = {"nodes": len(nodes), "edges": len(edges), "bytes": stat.size}
+        summary = {"nodes": tally["node"], "edges": tally["edge"], "bytes": stat.size}
         finished = (await self._after_write(job_id, result_uri, summary) or {}) if self._after_write else {}
         summary = {**summary, **(finished.get("summary") or {})}
         async with db.graphver_session() as s:

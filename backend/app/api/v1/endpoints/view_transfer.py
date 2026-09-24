@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Type, TypeVar
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
@@ -181,7 +181,6 @@ async def preview_view_export(
 @router.post("/packages", dependencies=[Depends(require_feature("viewExportEnabled")),
                                         Depends(require_feature("graphExportEnabled"))])
 async def export_view_package(
-    background: BackgroundTasks,
     req: PackageRequest = Body(...),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -257,7 +256,8 @@ async def export_view_package(
     prefix = created["result_uri"].rsplit("/", 1)[0]
     await ie.store.put_stream(f"{prefix}/view-bundle.json",
                               _package_bytes(json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")))
-    background.add_task(ie.run_export_safe, created["job_id"])
+    # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
+    spawn_detached(ie.run_export_safe(created["job_id"]), name=f"export {created['job_id']}")
     return {"jobId": created["job_id"], "graphId": graph["graph_id"], "workspaceId": first.workspace_id,
             "fileName": filename, "bundleHash": bundle["bundleHash"], "status": "running",
             "views": [{"viewId": item.row.id, "version": item.version.version} for item in sealed]}

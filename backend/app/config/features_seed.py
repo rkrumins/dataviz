@@ -442,8 +442,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "file they can take away."
         ),
         "impact_when_off": (
-            "The export controls disappear and the server refuses both the export job and the "
-            "download. Everything inside the product is unaffected: people can still read, filter "
+            "The export controls disappear and the server refuses every export: streamed, as a job, "
+            "and its download. Everything inside the product is unaffected: people can still read, filter "
             "and trace every graph they have access to. Files already downloaded are not recalled — "
             "this stops new ones leaving."
         ),

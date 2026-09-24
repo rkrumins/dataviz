@@ -17,7 +17,8 @@ from collections import defaultdict, deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import (
-    Awaitable, Callable, Dict, Any, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
+    AsyncIterator, Awaitable, Callable, Dict, Any, Iterable, List, NamedTuple, Optional, Sequence, Set,
+    Tuple,
 )
 
 
@@ -52,7 +53,7 @@ from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError
-from backend.common.derived_artifacts import is_derived_label
+from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 
 logger = logging.getLogger(__name__)
 
@@ -6464,6 +6465,55 @@ class FalkorDBProvider(GraphDataProvider):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
             edges.append(_edge_from_row(src, tgt, rel_type, rprops))
         return edges
+
+    async def scan_nodes(self, page_size: int = 2000) -> AsyncIterator[List[GraphNode]]:
+        """Every entity node, by windows of internal ids: each window is one index seek
+        (NodeByIdSeek), where offset pages would scan ever deeper. The platform's own bookkeeping
+        nodes are left out."""
+        await self._ensure_connected()
+        top = await self._scan_top()
+        for lo in range(0, top + 1, page_size):
+            res = await self._ro_query(
+                "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi RETURN n",
+                params={"lo": lo, "hi": lo + page_size}, op="export.nodes")
+            page = [n for n in (self._extract_node_from_result(row) for row in (res.result_set or []))
+                    if n is not None and not is_derived_label(n.entity_type)]
+            if page:
+                yield page
+
+    async def scan_edges(self, page_size: int = 2000) -> AsyncIterator[List[GraphEdge]]:
+        """Every edge, by windows of its source node's internal ids (a seek, then its out-edges),
+        paged within a window so a hub node never comes back whole. Materialised edges
+        (aggregation rollups) are left out: the platform derives them again."""
+        await self._ensure_connected()
+        top = await self._scan_top()
+        for lo in range(0, top + 1, page_size):
+            skip = 0
+            while True:
+                res = await self._ro_query(
+                    "MATCH (a)-[r]->(b) WHERE ID(a) >= $lo AND ID(a) < $hi "
+                    "RETURN a.urn, b.urn, type(r), properties(r) SKIP $skip LIMIT $limit",
+                    params={"lo": lo, "hi": lo + page_size, "skip": skip, "limit": page_size},
+                    op="export.edges")
+                rows = res.result_set or []
+                page = [_edge_from_row(r[0], r[1], r[2], r[3] or {}) for r in rows
+                        if not is_derived_edge_type(r[2])]
+                if page:
+                    yield page
+                if len(rows) < page_size:
+                    break
+                skip += len(rows)
+
+    async def _scan_top(self) -> int:
+        """The highest internal node id (-1 for an empty or absent graph): where a scan stops."""
+        try:
+            res = await self._ro_query("MATCH (n) RETURN max(ID(n))", op="export.top")
+        except Exception as exc:
+            if await self._is_verified_missing_graph(exc):
+                return -1
+            raise
+        rows = res.result_set or []
+        return int(rows[0][0]) if rows and rows[0][0] is not None else -1
 
     async def get_children(
         self,

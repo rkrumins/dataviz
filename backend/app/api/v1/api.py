@@ -8,7 +8,7 @@ from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
-    graph, canvas, assignments, providers, ontologies, workspaces,
+    graph, graph_export, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
@@ -365,6 +365,12 @@ api_router.include_router(
 #
 # Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
 # (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
+# Graph data export for a data source without version control (a version-controlled one exports
+# from its version store). Mounted before the graph router so its literal paths win. Takes
+# workspace:datasource:read itself: a whole data source is more than a view's reach.
+api_router.include_router(
+    graph_export.router, prefix="/{ws_id}/graph/export", tags=["graph:workspace"],
+)
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view)],

@@ -2331,29 +2331,34 @@ async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, bran
     if not (workspace_id and view_id):
         return None
     try:
-        from backend.app.db.engine import get_async_session
-        from backend.app.db.models import ViewORM
-        from backend.app.db.repositories.view_repo import effective_view_config
-        from backend.app.services.layout_config import parse_reference_layout
-        async with get_async_session() as session:
-            view = await session.get(ViewORM, view_id)
-            if view is None:
-                return None
-            # Branch-effective export scope: a draft export scopes to the draft's
-            # own layer assignments (base ⊕ overlay); no branch/overlay → base.
-            config = await effective_view_config(session, view, branch_id)
-            cont = await _live_containment_types(session, workspace_id, data_source_id)
-        layout = parse_reference_layout(config)
-        # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
-        # pseudo-nodes, not graph entities (harmlessly skipped — they won't match a node urn).
-        assigned = [u for u, a in layout.assignments.items() if a.get("layerId")]
-        inherit = [u for u, a in layout.assignments.items() if a.get("inheritsChildren", True)]
-        if not assigned:
-            return None                              # nothing explicitly scoped → export whole DS
-        return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": cont}
+        return await _view_export_scope(workspace_id, data_source_id, view_id, branch_id)
     except Exception:
         logger.exception("view-scope resolution failed for export (view=%s)", view_id)
         return None
+
+
+async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=None):
+    """:func:`_resolve_export_view_scope`'s work, raising on failure instead of failing open."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ViewORM
+    from backend.app.db.repositories.view_repo import effective_view_config
+    from backend.app.services.layout_config import parse_reference_layout
+    async with get_async_session() as session:
+        view = await session.get(ViewORM, view_id)
+        if view is None:
+            return None
+        # Branch-effective export scope: a draft export scopes to the draft's
+        # own layer assignments (base ⊕ overlay); no branch/overlay → base.
+        config = await effective_view_config(session, view, branch_id)
+        cont = await _live_containment_types(session, workspace_id, data_source_id)
+    layout = parse_reference_layout(config)
+    # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
+    # pseudo-nodes, not graph entities (harmlessly skipped — they won't match a node urn).
+    assigned = [u for u, a in layout.assignments.items() if a.get("layerId")]
+    inherit = [u for u, a in layout.assignments.items() if a.get("inheritsChildren", True)]
+    if not assigned:
+        return None                                  # nothing explicitly scoped → export whole DS
+    return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": cont}
 
 
 async def _resolve_ontology_types(workspace_id, data_source_id):
@@ -2550,7 +2555,6 @@ class CreateExportResponse(_ApiModel):
              dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def create_export(
     ws_id: str, graph_id: str,
-    background: BackgroundTasks,
     format: str = Query("ndjson"),
     as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
     view_id: Optional[str] = Query(None, alias="viewId"),
@@ -2560,25 +2564,164 @@ async def create_export(
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
     meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     """Export the graph (or an as-of snapshot, E5) to a downloadable, re-importable artifact.
-    A whole-data-source export doubles as a backup. Async: dispatches the worker, poll status."""
+    A whole-data-source export doubles as a backup. Async: dispatches the worker, poll status.
+    The same records as ``/exports/stream``, stored for a later download (the dialog streams)."""
     from backend.app.services.versioning.import_export.formats import get_adapter
     try:
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
+    await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
+                               user=user, claims=claims, session=session, svc=svc)
     with _domain_errors():
         created = await ie.create_export_job(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
             actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
             branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
             select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key)
-    background.add_task(ie.run_export_safe, created["job_id"])
+    # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
+    spawn_detached(ie.run_export_safe(created["job_id"]), name=f"export {created['job_id']}")
     return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": "running"}
+
+
+# Streamed exports. The export dialog asks for a plan (what the export holds, so an empty one is
+# never downloaded), then the browser downloads the stream itself: nothing is stored, any pod
+# serves it, and memory stays flat at any size (import_export/stream.py).
+
+def _split_list(value: Optional[str]) -> List[str]:
+    return [x.strip() for x in (value or "").split(",") if x.strip()]
+
+
+async def _check_export_access(
+    ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], view_id: Optional[str],
+    viewer: Viewer, user: User, claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
+) -> None:
+    """What every export checks before it reads: a draft only its readers export (someone else's
+    private draft is 403), and a view only one the caller can read, of this data source (404)."""
+    from backend.app.api.v1.endpoints.view_guards import readable_view
+
+    if branch_id:
+        with _domain_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    if view_id:
+        row = await readable_view(session, view_id, user, claims)
+        if row.workspace_id != ws_id or row.data_source_id != meta.get("data_source_id"):
+            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+
+async def _export_selection(
+    ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], as_of_seq: Optional[int],
+    view_id: Optional[str], ids: Optional[str], types: Optional[str], viewer: Viewer, user: User,
+    claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
+):
+    """The snapshot an export reads and the selection it keeps, with what the view contributed."""
+    from backend.app.services.versioning.import_export import stream
+    from backend.app.services.versioning.import_export.snapshot import open_snapshot
+
+    await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
+                               user=user, claims=claims, session=session, svc=svc)
+    try:
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    keep, view = None, None
+    if view_id:
+        scope = await _view_export_scope(ws_id, meta.get("data_source_id"), view_id, branch_id)
+        view = {"viewId": view_id, "placements": 0, "found": 0, "entities": None}
+        if scope:
+            found = await stream.view_entities(snap, scope)
+            keep = found["keep"]
+            view.update(placements=found["placed"], found=found["found"], entities=len(keep))
+    selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
+    return snap, selection, view
+
+
+@router.get("/graphs/{graph_id}/exports/plan", dependencies=[Depends(_GATE_GRAPH_EXPORT)])
+async def plan_export(
+    ws_id: str, graph_id: str,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    ids: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """What an export would hold, before anything is downloaded: node and edge counts (``None``
+    when too large to count quickly), whether it is empty, what the view contributed, and whether
+    the format can hold it (an Excel sheet stops at 1,048,575 rows)."""
+    from backend.app.api.v1.endpoints.graph_export import excel_limit, export_format
+    from backend.app.services.versioning.import_export import stream
+    fmt = export_format(format)
+    snap, selection, view = await _export_selection(
+        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
+        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+    counts = await stream.count(snap, selection)
+    if counts["exact"]:
+        empty = counts["nodes"] + counts["edges"] == 0
+    else:
+        empty = False if counts.get("seen") else None           # unknown: nothing seen yet
+    return {"format": fmt, "nodes": counts["nodes"], "edges": counts["edges"], "exact": counts["exact"],
+            "empty": empty, "asOfSeq": snap.as_of_seq, "branchId": snap.branch_id, "view": view,
+            "formatLimit": excel_limit(fmt, counts), "maxBytes": stream.MAX_BYTES}
+
+
+@router.get("/graphs/{graph_id}/exports/stream", dependencies=[Depends(_GATE_GRAPH_EXPORT)])
+async def stream_export(
+    ws_id: str, graph_id: str,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
+    ids: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+    filename: Optional[str] = Query(None, description="The download's name, without its extension"),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    # Closed before the body streams: a long download holds no database connection.
+    session: AsyncSession = Depends(get_db_session, scope="function"),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Download an export as it is produced: the same records as the export job, streamed from
+    one pinned snapshot, in flat memory at any size. A plain GET so the browser downloads it
+    natively. Exports take turns (a few per server process); a request that waits too long for
+    one gets 429 with ``Retry-After``."""
+    from backend.app.api.v1.endpoints.graph_export import (
+        ExportStreamResponse, export_format, take_turn, xlsx_columns,
+    )
+    from backend.app.services.versioning.import_export import stream
+    fmt = export_format(format)
+    snap, selection, _view = await _export_selection(
+        ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
+        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+    await take_turn()
+    try:
+        columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))
+    except BaseException:
+        stream.slots.release()
+        raise
+    return ExportStreamResponse(
+        stream.write_export(lambda: stream.record_pages(snap, selection), fmt=fmt, columns=columns,
+                            props=_split_list(props)), fmt=fmt,
+        filename=filename or f"{meta.get('data_source_id') or graph_id}-export",
+        headers={"X-Export-As-Of": "" if snap.as_of_seq is None else str(snap.as_of_seq)})
 
 
 @router.get("/graphs/{graph_id}/exports")
@@ -2619,6 +2762,10 @@ async def download_export(
     job, stream = result
     if job.get("status") != "completed":
         raise HTTPException(status_code=409, detail={"type": "not_ready", "status": job.get("status")})
+    try:
+        await ie.store.stat(job["resultUri"])
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="This export is no longer kept. Export again.")
     fmt = job.get("importFormat") or "ndjson"
     filename = job.get("fileName") or f"export-{job_id}.{fmt}"      # a view package names itself
     return StreamingResponse(

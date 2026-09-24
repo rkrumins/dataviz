@@ -4102,6 +4102,12 @@ class GraphVersioningService:
         if viewer is not None and not await self._branch_readable(s, branch, viewer):
             raise AccessDenied(f"{viewer.actor} cannot view branch {branch.id}")
 
+    async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"]) -> None:
+        """Raise ``ValueError`` when ``branch_id`` isn't one of the graph's branches, and
+        ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
+        async with self._session() as s:
+            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
         (view-scoped commit logs, entity history). Bounded by the distinct branches involved."""

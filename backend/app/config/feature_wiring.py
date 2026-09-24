@@ -339,6 +339,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         key="graphExportEnabled",
         posture="capability",
         server_gates=(
+            "GET /graphs/{id}/exports/plan and /stream — check, then download, a streamed export",
+            "GET /graph/export/plan and /stream — the same for a data source without version control",
             "POST /graphs/{id}/exports — start an export job",
             "GET /graphs/{id}/exports/{job}/download — take the file",
         ),

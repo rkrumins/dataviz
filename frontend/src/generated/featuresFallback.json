@@ -213,7 +213,7 @@
       "options": null,
       "helpUrl": null,
       "adminHint": "This is the switch that decides whether your lineage can leave the product. Note that 'Export layers' only covers the SCHEMA \u2014 the shape of your estate. This one covers the data. If you are turning one off for confidentiality, you almost certainly want both.",
-      "impactWhenOff": "The export controls disappear and the server refuses both the export job and the download. Everything inside the product is unaffected: people can still read, filter and trace every graph they have access to. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
+      "impactWhenOff": "The export controls disappear and the server refuses every export: streamed, as a job, and its download. Everything inside the product is unaffected: people can still read, filter and trace every graph they have access to. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
       "sortOrder": 0,
       "deprecated": false,
       "stage": "active",
@@ -221,6 +221,8 @@
       "enforcedServerSide": true,
       "posture": "capability",
       "serverGates": [
+        "GET /graphs/{id}/exports/plan and /stream \u2014 check, then download, a streamed export",
+        "GET /graph/export/plan and /stream \u2014 the same for a data source without version control",
         "POST /graphs/{id}/exports \u2014 start an export job",
         "GET /graphs/{id}/exports/{job}/download \u2014 take the file"
       ],

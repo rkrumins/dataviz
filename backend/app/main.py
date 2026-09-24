@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import socket
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -2498,6 +2499,13 @@ class _TimeoutMiddleware:
     # the contract is explicit registration, not endswith heuristics.
     _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
+    # Downloads streamed while they are produced (a whole data source can be gigabytes). A
+    # deadline would cut one short, and T-2 would end it cleanly, so a truncated file would look
+    # complete. They pace themselves: bounded per process, and each page is a short query.
+    _STREAM_PATHS: tuple[re.Pattern, ...] = (
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/stream$"),
+        re.compile(r"^/api/v1/[^/]+/graph/export/stream$"),
+    )
 
     def __init__(self, app):
         self.app = app
@@ -2552,7 +2560,7 @@ class _TimeoutMiddleware:
         for suffix in self._SSE_PATH_SUFFIXES:
             if path.endswith(suffix):
                 return True
-        return False
+        return any(p.match(path) for p in self._STREAM_PATHS)
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
