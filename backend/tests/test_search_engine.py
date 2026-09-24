@@ -745,6 +745,45 @@ class TestFacets:
         assert any("too slow" in n for n in page.scope_diagnostics.notes)
 
 
+class TestLeaseHandover:
+    async def test_the_holder_carries_on_from_the_latest_commit(self, fresh_memory_store):
+        """A request reads a session, then takes its lease — and another
+        request may have committed and released in between. The holder must
+        run what is pending NOW, not what was pending when it read: running
+        a unit twice counts its matches twice."""
+        from backend.app.services.deep_search import get_deep_search_settings
+        store = fresh_memory_store
+        units = [Unit("range", label, size=1) for label in "ABCD"]
+        session = Session("s1", "q", "1", None, 0, list(units), [], 4)
+        await store.save(session, None, 60)
+        stale = await store.load("s1")
+
+        # Another request runs A and B and commits, while ``stale`` waits.
+        done = await store.load("s1")
+        done.pending, done.scanned, done.count = done.pending[2:], 2, 20
+        await store.save(done, None, 60)
+
+        class _Work:
+            ran: list = []
+
+            async def unit(self, unit, timeout_s):
+                self.ran.append(unit.label)
+                return 5
+
+            def fold(self, unit, result):
+                stale.count += result
+
+            def commit(self):
+                return {}
+
+        work = _Work()
+        after = await engine_mod._advance(stale, False, store, work,
+                                          asyncio.get_running_loop().time() + 5,
+                                          get_deep_search_settings())
+        assert work.ran == ["C", "D"]
+        assert (after.status, after.count, after.scanned) == ("complete", 30, 4)
+
+
 class TestAncestorTally:
     """The ``ancestor`` facet — the canvas's "N matches inside" badges — is
     tallied by the scan, a unit at a time, instead of one statement over

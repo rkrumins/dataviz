@@ -162,7 +162,8 @@ async def execute_session_search(
         facets = await _facets(provider, query, capped_specs, session.sid, store, run,
                                settings)
 
-    session = await _advance(session, created, ctx, store, run, deadline, settings)
+    session = await _advance(session, created, store, _SearchWork(session, ctx, run),
+                             deadline, settings)
     if session.status == FAILED:
         raise SearchFailed(f"search failed: {session.error}")
     if wants_facets and capped_specs and facets is None:
@@ -221,7 +222,8 @@ async def execute_count_session(
 
     session, created = await _session_for(provider, query, compiler, store, run, query_id,
                                           0, None, context, deadline, settings)
-    session = await _advance(session, created, ctx, store, run, deadline, settings)
+    session = await _advance(session, created, store, _SearchWork(session, ctx, run),
+                             deadline, settings)
     if session.status == FAILED:
         raise SearchFailed(f"count failed: {session.error}")
     return _count_answer(session)
@@ -263,32 +265,64 @@ async def _session_for(provider, query, compiler, store, run, query_id: str, k: 
                          scope_hash=context.scope_hash), True
 
 
-async def _advance(session: Session, created: bool, ctx: Context, store: SessionStore,
-                   run, deadline: float, settings) -> Session:
+class _SearchWork:
+    """What a search (or a count) takes from each unit: its exact count, its
+    first rows and — when the search tallies ancestors — their counts, which
+    the session commits beside it (so a unit is tallied exactly when it is
+    counted)."""
+
+    def __init__(self, session: Session, ctx: Context, run) -> None:
+        self.session, self.ctx, self.run = session, ctx, run
+        self.tally: Dict[str, Tally] = {}
+
+    async def unit(self, unit: Unit, timeout_s: float):
+        return await _run_unit(unit, self.session, self.ctx, self.run, timeout_s)
+
+    def fold(self, unit: Unit, result) -> None:
+        count, rows, tallied = result
+        self.session.count += count
+        if rows:
+            self.session.rows = self.ctx.sort.merge(self.session.rows, rows,
+                                                    limit=self.session.k)
+        for urn, name, label, et, k in tallied:
+            if urn:
+                add_tally(self.tally, urn, [k, name or "", label or "", {et or "": k}])
+
+    def commit(self) -> Dict[str, Any]:
+        """What the store saves with the session, in the same transaction."""
+        return {"tallies": self.tally or None}
+
+
+async def _advance(session: Session, created: bool, store: SessionStore, work,
+                   deadline: float, settings, ttl_s: Optional[int] = None) -> Session:
     """This request's share of the scan: under the session's lease, run
-    what is pending until ``deadline`` and commit it; or, when another
-    request holds the lease, answer with its next commit."""
+    what is pending until ``deadline`` — each unit by ``work`` — and commit
+    it; or, when another request holds the lease, answer with its next
+    commit."""
+    ttl_s = ttl_s or settings.session_ttl_seconds
     if session.status != RUNNING:
         if created:
             # Nothing to run (an empty scope): keep the answer all the same.
-            await store.save(session, None, settings.session_ttl_seconds)
+            await store.save(session, None, ttl_s)
         return session
     budget_s = max(0.0, deadline - time.monotonic())
     lease_ms = int((budget_s + _GRACE_S + settings.chunk_timeout_ms / 1000.0) * 1000)
     token = await store.lease(session.sid, lease_ms)
     if token is None:
         return await wait_for_commit(store, session.sid, session, deadline) or session
-    # The ancestor counts of the units this request completes: committed
-    # with them, so a unit is tallied exactly when it is counted.
-    tally: Dict[str, Tally] = {}
+    # The lease is ours: carry on from the latest commit, not from what was
+    # read before taking it — another request may have committed and let go
+    # in between, and running its units again would count them twice.
+    latest = await store.load(session.sid)
+    if latest is not None:
+        session.adopt(latest)
     try:
-        await _hop(session, ctx, run, deadline, settings, tally)
+        await _hop(session, work, deadline, settings)
     finally:
         if session.status == FAILED:
             await store.delete(session.sid)
         else:
-            await store.save(session, token, settings.session_ttl_seconds,
-                             tallies=tally or None)
+            await store.save(session, token, ttl_s, **work.commit())
         await store.release(session.sid, token)
     return session
 
@@ -363,11 +397,9 @@ def _containment(provider) -> Tuple[str, ...]:
 # The scan
 # ---------------------------------------------------------------------------
 
-async def _hop(session: Session, ctx: Context, run, deadline: float, settings,
-               tally: Dict[str, Tally]) -> None:
+async def _hop(session: Session, work, deadline: float, settings) -> None:
     """Run pending units until ``deadline``, ``chunk_concurrency`` at a time,
-    folding each into the session (and its ancestor counts into ``tally``)
-    as it lands."""
+    each by ``work``, folding each into the session as it lands."""
     timeout_s = settings.chunk_timeout_ms / 1000.0
     in_flight: Dict["asyncio.Task[Any]", Unit] = {}
     busy = False
@@ -381,7 +413,7 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings,
                    and (time.monotonic() < deadline
                         or started < settings.chunk_concurrency)):
                 unit = session.pending.pop(0)
-                task = asyncio.ensure_future(_run_unit(unit, session, ctx, run, timeout_s))
+                task = asyncio.ensure_future(work.unit(unit, timeout_s))
                 in_flight[task] = unit
                 started += 1
             if not in_flight:
@@ -394,7 +426,7 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings,
             for task in done:
                 unit = in_flight.pop(task)
                 try:
-                    count, rows, tallied = task.result()
+                    result = task.result()
                 except ProviderBusy:
                     # The fleet is full: give the unit back and stop starting
                     # new ones. The next request carries on.
@@ -411,13 +443,8 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings,
                     session.status = FAILED
                     session.error = _describe(exc)
                     break
-                session.count += count
                 session.scanned += unit.size
-                if rows:
-                    session.rows = ctx.sort.merge(session.rows, rows, limit=session.k)
-                for urn, name, label, et, k in tallied:
-                    if urn:
-                        add_tally(tally, urn, [k, name or "", label or "", {et or "": k}])
+                work.fold(unit, result)
         if session.status == RUNNING and not session.pending and not in_flight:
             session.status = COMPLETE
         if busy and session.scanned == 0 and session.status == RUNNING:

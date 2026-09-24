@@ -72,6 +72,11 @@ class Session:
             session.status = COMPLETE
         return session
 
+    def adopt(self, other: "Session") -> None:
+        """Become ``other`` — a later commit of this same session — in
+        place, so whatever holds this object sees it."""
+        self.__dict__.update(other.__dict__)
+
     def to_json(self) -> str:
         return json.dumps({
             "sid": self.sid, "q": self.query_id, "dv": self.data_version,
