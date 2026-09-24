@@ -8,12 +8,12 @@ from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
-    graph, canvas, assignments, providers, ontologies, workspaces,
+    graph, graph_export, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
-    groups, workspace_members, view_grants, role_bindings,
+    groups, workspace_members, view_grants, view_versions, view_transfer, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
     admin_idp_groups,
@@ -150,6 +150,20 @@ api_router.include_router(
     view_grants.router,
     prefix="/views/{view_id}/grants",
     tags=["views:grants"],
+)
+# The history of a view's design (not graph version control). Included before
+# views.router like the grants above, so no `/{view_id}` route can capture it.
+api_router.include_router(
+    view_versions.router,
+    prefix="/views/{view_id}/versions",
+    tags=["views:versions"],
+)
+# Moving views between environments (export / import files). Before views.router
+# for the same reason: `/views/transfer/...` must never reach a `/{view_id}` route.
+api_router.include_router(
+    view_transfer.router,
+    prefix="/views/transfer",
+    tags=["views:transfer"],
 )
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(
@@ -351,6 +365,12 @@ api_router.include_router(
 #
 # Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
 # (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
+# Graph data export for a data source without version control (a version-controlled one exports
+# from its version store). Mounted before the graph router so its literal paths win. Takes
+# workspace:datasource:read itself: a whole data source is more than a view's reach.
+api_router.include_router(
+    graph_export.router, prefix="/{ws_id}/graph/export", tags=["graph:workspace"],
+)
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view)],

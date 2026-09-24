@@ -14,6 +14,8 @@ Invalid rows are quarantined (partial acceptance), not fatal; the tally lands on
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -26,11 +28,41 @@ from .formats import get_adapter
 from .resolve import resolve_rows
 from .rowmodel import normalize
 
+logger = logging.getLogger(__name__)
+
 _PARSE_BATCH = 2000
+# How often a running import or export touches its job's ``updated_at``. ``get_job`` reports a job
+# silent for JOB_STALE_AFTER_SECS as failed, and a long parse or apply window says nothing on its own.
+_HEARTBEAT_SECS = 15
+
+
+async def heartbeat(job_id: str) -> None:
+    """Say "still running" on a timer rather than per batch, until cancelled: resolving or applying
+    one window, or writing a long export, can take minutes without a batch boundary."""
+    while True:
+        await asyncio.sleep(_HEARTBEAT_SECS)
+        try:
+            async with db.graphver_session() as s:
+                await s.execute(update(JobORM).where(JobORM.id == job_id).values(updated_at=_now()))
+        except Exception:  # noqa: BLE001 — the next beat tries again
+            logger.debug("job %s: heartbeat skipped", job_id, exc_info=True)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sniff_format(declared: str, head: bytes) -> str | None:
+    """The format an upload's first bytes say it is, when that overrides the declared one. Only a
+    declared ``ndjson``/``json`` is checked — clients (the UI's own detection included) mix the two
+    up: the first non-whitespace byte after an optional UTF-8 BOM decides, ``[`` for a JSON array,
+    ``{`` for json-lines. ``None`` keeps the declared format; csv/tsv/xlsx are never overridden."""
+    declared = (declared or "").lower()
+    if declared not in ("ndjson", "json"):
+        return None
+    first = head.removeprefix(b"\xef\xbb\xbf").lstrip()[:1]
+    sniffed = {b"[": "json", b"{": "ndjson"}.get(first, declared)
+    return sniffed if sniffed != declared else None
 
 
 def _chunks(seq: List[Any], size: int):
@@ -177,12 +209,16 @@ class ImportWorker:
 
     async def run(self, job_id: str) -> Dict[str, int]:
         job = await self._load_running(job_id)
-        graph_id, branch_id = job["graph_id"], job["branch_id"]
-        actor = await self._branch_owner(graph_id, branch_id)
+        beat = asyncio.create_task(heartbeat(job_id))
+        try:
+            graph_id, branch_id = job["graph_id"], job["branch_id"]
+            actor = await self._branch_owner(graph_id, branch_id)
 
-        await self._parse(job_id, job["source_uri"], job["import_format"])
-        summary = await self._resolve_and_build(
-            job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+            await self._parse(job_id, job["source_uri"], job["import_format"])
+            summary = await self._resolve_and_build(
+                job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        finally:
+            beat.cancel()
 
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
@@ -211,11 +247,11 @@ class ImportWorker:
             branch = await s.get(BranchORM, branch_id)
             return (branch.owner if branch else None) or "system"
 
-    async def _reject_binary(self, source_uri: str) -> None:
+    async def _reject_binary(self, source_uri: str) -> bytes:
         """Fail fast with a clear message on a binary (non-text) file — uploading an Excel
         workbook (.xlsx/.xls) instead of CSV is a common mistake that would otherwise parse into
         meaningless rows. Raised in the normal flow (not inside a generator) so the message
-        surfaces on the job."""
+        surfaces on the job. Returns the first chunk for the format sniff."""
         async for chunk in self._store.open_stream(source_uri):
             if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
                 raise ValueError(
@@ -224,11 +260,17 @@ class ImportWorker:
             if chunk[:4] == b"\xd0\xcf\x11\xe0":
                 raise ValueError(
                     "This looks like a legacy Excel file (.xls). Please save it as CSV and import that.")
-            return  # only the first chunk is needed to sniff the file type
+            return chunk  # only the first chunk is needed to sniff the file type
+        return b""
 
     async def _parse(self, job_id: str, source_uri: str, fmt: str) -> int:
         if (fmt or "").lower() != "xlsx":
-            await self._reject_binary(source_uri)   # xlsx IS a zip (PK); its adapter reads it natively
+            head = await self._reject_binary(source_uri)   # xlsx IS a zip (PK); its adapter reads it natively
+            sniffed = _sniff_format(fmt, head)
+            if sniffed:
+                logger.info("import job %s: declared format %r overridden to %r by the content sniff",
+                            job_id, fmt, sniffed)
+                fmt = sniffed
         adapter = get_adapter(fmt)
         batch: List[ImportRowORM] = []
         idx = 0

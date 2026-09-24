@@ -323,6 +323,13 @@ export const docEntries: DocEntry[] = [
     description: 'Telling the platform an external data source changed',
     importFn: () => import('@docs/features/external-change-notification.md?raw'),
   },
+  {
+    slug: 'feature-view-portability',
+    section: 'services',
+    title: 'View Portability & Versions',
+    description: 'Moving views between environments: the view file and package formats, import, and view versions',
+    importFn: () => import('@docs/features/view-portability.md?raw'),
+  },
 
   // Versioning
   {

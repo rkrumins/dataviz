@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { cn } from '@/lib/utils'
 import {
@@ -91,6 +91,10 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
+import { invalidateViewVersions, useViewVersionStatus } from '@/hooks/useViewVersions'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { timeAgo } from '@/lib/timeAgo'
 import {
@@ -204,6 +208,14 @@ export function ViewPageHeader({ viewId, workspaceName }: {
         next.focus()
     }
     const [shareOpen, setShareOpen] = useState(false)
+    const [exportOpen, setExportOpen] = useState(false)
+    // Versions and Export are a preview behind one switch (Admin → Features).
+    const portability = useViewPortability()
+    const exportEnabled = portability.canExport
+    const [versionsOpen, setVersionsOpen] = useState(false)
+    // The latest version of the view's design, and whether it has changed since: the chip's
+    // "v8 •". Above the `!view` guard, like every hook here.
+    const { data: versionStatus } = useViewVersionStatus(viewId, portability.versions)
     // Double-click the name to rename it — the affordance came up with the name
     // when the canvas toolbar's duplicate title was removed. The long way round
     // (Details → Name) is unchanged; this is the shortcut people already had.
@@ -337,6 +349,8 @@ export function ViewPageHeader({ viewId, workspaceName }: {
         closeDetails()
         queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, viewId] })
         queryClient.invalidateQueries({ queryKey: ['views'] })
+        // A new name, description or tags is a change since the latest version: the chip's dot.
+        invalidateViewVersions(queryClient, viewId)
         // The canvas reads its view from the schema store, not React Query — without
         // this a rename would update the header and leave the canvas (and the tab
         // title, which is derived from it) showing the old name until a reload.
@@ -392,6 +406,23 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             >
                                 {view.name}
                             </h1>
+                        )}
+                        {view.draftBranchId && (
+                            /* An import waiting in its draft: not in any list, and private,
+                               until that draft is published. The badge opens it on the draft. */
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label="Not live yet: this view waits in a draft"
+                                detail="It goes live when the draft is published or its review request merges"
+                            >
+                                <Link
+                                    to={`/views/${view.id}?branch=${view.draftBranchId}`}
+                                    className="inline-flex items-center gap-1 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 shrink-0 hover:bg-indigo-500/15"
+                                >
+                                    <GitPullRequestDraft className="w-3 h-3" aria-hidden />
+                                    In a draft
+                                </Link>
+                            </HoverTip>
                         )}
                         {readOnly && (
                             <HoverTip
@@ -630,6 +661,57 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         </button>
                     </HoverTip>
 
+                    {/* The history of the view's DESIGN, which every view has; not the
+                        graph's drafts and commits, which Reviews opens. The dot says the
+                        design has changed since its latest version. */}
+                    {portability.versions && (
+                        <HoverTip
+                            className="inline-flex"
+                            label="Versions of this view’s design: its layers, placements and settings"
+                            detail={versionStatus?.dirty
+                                ? `Changed since v${versionStatus.headVersion ?? 1}. Save it as a version, compare, or go back to an earlier one`
+                                : 'Compare versions, or go back to an earlier one'}
+                        >
+                            <button
+                                type="button"
+                                onClick={() => setVersionsOpen(true)}
+                                className={actionButtonClass}
+                                aria-label={versionStatus?.headVersion
+                                    ? `Versions, at v${versionStatus.headVersion}${versionStatus.dirty ? ' with unsaved changes' : ''}`
+                                    : 'Versions'}
+                            >
+                                <Milestone className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">
+                                    {versionStatus?.headVersion ? `v${versionStatus.headVersion}` : 'Versions'}
+                                </span>
+                                {versionStatus?.dirty && (
+                                    <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                )}
+                            </button>
+                        </HoverTip>
+                    )}
+
+                    {/* Anyone who can read the view can take a copy of its design
+                        elsewhere; the admin switch withdraws the button and the
+                        server refuses the file together. */}
+                    {exportEnabled && (
+                        <HoverTip
+                            className="inline-flex"
+                            label="Download this view as a file to import into another environment"
+                            detail="Its design and version history, not the graph data"
+                        >
+                            <button
+                                type="button"
+                                onClick={() => setExportOpen(true)}
+                                className={actionButtonClass}
+                                aria-label="Export"
+                            >
+                                <FileDown className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">Export</span>
+                            </button>
+                        </HoverTip>
+                    )}
+
                     {/* Came up from CanvasVersioningBar, which held it and the
                         branch switcher and nothing else. A read-only session
                         gets no versioning chrome at all (CanvasRouter mounts
@@ -790,6 +872,21 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                 isOpen={activityOpen}
                 onClose={() => setActivityOpen(false)}
             />
+
+            <ViewVersionsDrawer
+                viewId={view.id}
+                viewName={view.name}
+                isOpen={versionsOpen}
+                onClose={() => setVersionsOpen(false)}
+                canEdit={canEditDetails}
+            />
+
+            {exportOpen && (
+                <ExportViewDialog
+                    views={[{ id: view.id, name: view.name }]}
+                    onClose={() => setExportOpen(false)}
+                />
+            )}
 
             {/* Approve / decline already live in the Share dialog — the badge
                 and the audience control are routes to them, not a second

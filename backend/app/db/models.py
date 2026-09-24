@@ -12,8 +12,10 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 from sqlalchemy.orm import relationship
@@ -890,6 +892,19 @@ class ViewORM(Base):
     data_updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # The identity that travels with a view between environments. `id` is minted
+    # per environment; this one is copied into an exported file and adopted by the
+    # import, so dev's view and prod's copy of it can recognise each other and a
+    # second import updates the first instead of duplicating it. Not unique: a
+    # workspace may legitimately hold a view and a separate copy of it. NULL only
+    # on rows that predate the column and escaped its backfill.
+    portable_id = Column(Text, nullable=True, default=lambda: f"pv_{uuid.uuid4().hex}")
+    # Set while the view exists only in a draft: an import staged for review. It goes live,
+    # and this clears, when that draft is published or its review merges; abandoning the draft
+    # discards the view. Until then it is in no list, count or metric (``view_is_live``) and
+    # stays private. A logical ref to a graph-versioning branch, with no cross-schema FK (as
+    # ``view_layout_overlays.branch_id``).
+    draft_branch_id = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -906,6 +921,8 @@ class ViewORM(Base):
         Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        Index("idx_view_portable", "portable_id"),
+        Index("idx_view_draft_branch", "draft_branch_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
@@ -914,6 +931,15 @@ class ViewORM(Base):
 
     def __repr__(self) -> str:
         return f"<View id={self.id!r} name={self.name!r} type={self.view_type!r}>"
+
+
+def view_is_live():
+    """The views there are: not deleted, and not waiting in a draft to go live.
+
+    Every query that lists, counts or measures views filters on this rather than on
+    ``deleted_at`` alone, so a view staged in a draft shows up nowhere until the draft is
+    published (tests/test_view_live_filter.py keeps new queries from missing it)."""
+    return and_(ViewORM.deleted_at.is_(None), ViewORM.draft_branch_id.is_(None))
 
 
 # ------------------------------------------------------------------ #
@@ -949,7 +975,8 @@ class ViewActivityLogORM(Base):
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
             "'data_changed', 'publish_requested', 'publish_denied', "
-            "'admin_viewed')",
+            "'admin_viewed', 'imported', 'exported', 'version_saved', "
+            "'version_restored')",
             name="ck_val_action_enum",
         ),
     )
@@ -1027,6 +1054,17 @@ class ViewLayoutOverlayORM(Base):
     # JSON: base bare referenceLayout snapshot captured at draft open.
     fork_base_layout = Column(Text, nullable=False, default="{}")
     fork_base_entity_scope = Column(Text, nullable=True)
+    # A draft that imports a file into the view proposes more than a layout: the rest of its
+    # design (``definition``: the portable definition minus the layout and scope above) and its
+    # label (name, description, icon, tags, view type), each beside the published value it
+    # replaces, so publishing merges them 3-way as it does the layout. NULL when the draft only
+    # edited layers. ``staged_provenance`` is the import's record (where the file came from,
+    # how it matched, its request id), written into the view's history when the draft goes live.
+    definition = Column(Text, nullable=True)
+    fork_base_definition = Column(Text, nullable=True)
+    label = Column(Text, nullable=True)
+    fork_base_label = Column(Text, nullable=True)
+    staged_provenance = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -1036,6 +1074,111 @@ class ViewLayoutOverlayORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewLayoutOverlay view_id={self.view_id!r} branch_id={self.branch_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# view_versions (the history of a view's design)                       #
+# ------------------------------------------------------------------ #
+class ViewVersionORM(Base):
+    """One immutable, content-addressed checkpoint of a view's design.
+
+    ``definition`` is the portable definition (``view_transfer.canonical``) as canonical JSON,
+    and ``content_hash`` is its SHA-256. The same design hashes the same in every
+    environment, which is how an imported view proves nothing was lost and how a later import
+    finds the version the two sides last agreed on.
+
+    This is NOT graph version control. Drafts, commits and pull requests version the graph's
+    DATA; this table versions the view's layers, assignments and settings, for every view
+    whether or not its data source is version-controlled.
+
+    Checkpoints are taken at deliberate moments (create, wizard save, import, restore, draft
+    promote, export, "Save version"), never per canvas autosave, so history stays readable and
+    bounded. ``name``/``description``/``icon``/``tags``/``view_type`` snapshot the label at that
+    moment; ``provenance`` records where an imported or restored version came from.
+    """
+    __tablename__ = "view_versions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"vv_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version = Column(Integer, nullable=False)
+    content_hash = Column(Text, nullable=False)
+    definition = Column(Text, nullable=False)                 # canonical JSON
+    # Import versions only, when what was stored differs from the file (entities remapped or
+    # dropped, a merge, edits in the wizard): the FILE's design hash. A later file from the
+    # same lineage carries that hash in its history, so this version is still its merge base;
+    # the file's design itself is kept in ``provenance["originDefinition"]``.
+    origin_hash = Column(Text, nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    icon = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                        # JSON array
+    view_type = Column(Text, nullable=False)
+    # baseline | create | wizard | import | restore | promote | export | manual | snapshot
+    source = Column(Text, nullable=False)
+    message = Column(Text, nullable=True)
+    parent_version = Column(Integer, nullable=True)
+    stats = Column(Text, nullable=True)                       # JSON: headline counts
+    provenance = Column(Text, nullable=True)                  # JSON: origin / restoredFrom / report
+    ontology_digest = Column(Text, nullable=True)
+    # Client-supplied idempotency key: a retried import returns the version its first
+    # attempt wrote instead of writing a second one.
+    request_id = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("view_id", "version", name="uq_view_versions_view_version"),
+        Index("idx_vv_view_created", "view_id", "created_at"),
+        # Partial on both dialects: a bare postgresql_where is silently dropped on SQLite,
+        # where the repo tests run (see the uq_ds_* indexes above for the same trap).
+        Index("uq_vv_request_id", "request_id",
+              unique=True,
+              postgresql_where=text("request_id IS NOT NULL"),
+              sqlite_where=text("request_id IS NOT NULL")),
+        CheckConstraint(
+            "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
+            "'promote', 'export', 'manual', 'snapshot')",
+            name="ck_view_versions_source",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewVersion view_id={self.view_id!r} v{self.version} {self.content_hash[:15]!r}>"
+
+
+# ------------------------------------------------------------------ #
+# object_store_objects / object_store_chunks (import/export artifacts) #
+# ------------------------------------------------------------------ #
+
+class ObjectStoreObjectORM(Base):
+    """One import/export artifact (an upload, an export, a view package) in the shared store.
+
+    Every API pod reads and writes these rows, so a file stored by one pod is there for the
+    next request whichever pod serves it. The bytes are ``object_store_chunks`` rows of
+    ``blob_id``. An overwrite writes a new blob and repoints this row in one transaction, so a
+    reader never sees half an object (``services/storage/object_store.DatabaseObjectStore``).
+    """
+    __tablename__ = "object_store_objects"
+
+    key = Column(Text, primary_key=True)                      # {ws}/{ds}/{graph}/{job}/{name}
+    blob_id = Column(Text, nullable=False)
+    size = Column(BigInteger, nullable=False)
+    chunk_count = Column(Integer, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+
+class ObjectStoreChunkORM(Base):
+    """Chunk ``seq`` of blob ``blob_id``: 1 MiB of an artifact's bytes (the last may be shorter)."""
+    __tablename__ = "object_store_chunks"
+
+    blob_id = Column(Text, primary_key=True)
+    seq = Column(Integer, primary_key=True)
+    data = Column(LargeBinary, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
 
 
 # ------------------------------------------------------------------ #

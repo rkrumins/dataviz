@@ -17,7 +17,8 @@ from collections import defaultdict, deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import (
-    Awaitable, Callable, Dict, Any, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
+    AsyncIterator, Awaitable, Callable, Dict, Any, Iterable, List, NamedTuple, Optional, Sequence, Set,
+    Tuple,
 )
 
 
@@ -52,7 +53,7 @@ from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError
-from backend.common.derived_artifacts import is_derived_label
+from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 
 logger = logging.getLogger(__name__)
 
@@ -1536,13 +1537,10 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     # rewrite its own previous work without ever touching a node that carried a
     # native urn / displayName. Provider-owned bookkeeping, not user data.
     "urnSource", "nameSource",
-    # The versioning projector's content fingerprint (``_node_merge_cypher``
-    # SETs ``n.gvHash`` on every projected node). Unreserved, it read back as
-    # a user property — a 19-digit int64 the browser cannot represent — and
-    # the canvas round-trips ``properties`` on save, so every drawer edit wrote
-    # the ROUNDED copy back and ``n += nativeProps`` overwrote the fingerprint
-    # the reconcile compares against. Reserving it closes both: the read path
-    # stops offering it and the write-side sanitiser strips it.
+    # The versioning projector's content fingerprint, SET on every node it writes
+    # (``n.gvHash``) so its in-place reconcile can tell what changed. Bookkeeping:
+    # unreserved, it read back as a user property on every projected node — and a
+    # canvas save wrote the browser's rounded copy of the 19-digit int64 back over it.
     "gvHash",
 })
 
@@ -6553,6 +6551,55 @@ class FalkorDBProvider(GraphDataProvider):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
             edges.append(_edge_from_row(src, tgt, rel_type, rprops))
         return edges
+
+    async def scan_nodes(self, page_size: int = 2000) -> AsyncIterator[List[GraphNode]]:
+        """Every entity node, by windows of internal ids: each window is one index seek
+        (NodeByIdSeek), where offset pages would scan ever deeper. The platform's own bookkeeping
+        nodes are left out."""
+        await self._ensure_connected()
+        top = await self._scan_top()
+        for lo in range(0, top + 1, page_size):
+            res = await self._ro_query(
+                "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi RETURN n",
+                params={"lo": lo, "hi": lo + page_size}, op="export.nodes")
+            page = [n for n in (self._extract_node_from_result(row) for row in (res.result_set or []))
+                    if n is not None and not is_derived_label(n.entity_type)]
+            if page:
+                yield page
+
+    async def scan_edges(self, page_size: int = 2000) -> AsyncIterator[List[GraphEdge]]:
+        """Every edge, by windows of its source node's internal ids (a seek, then its out-edges),
+        paged within a window so a hub node never comes back whole. Materialised edges
+        (aggregation rollups) are left out: the platform derives them again."""
+        await self._ensure_connected()
+        top = await self._scan_top()
+        for lo in range(0, top + 1, page_size):
+            skip = 0
+            while True:
+                res = await self._ro_query(
+                    "MATCH (a)-[r]->(b) WHERE ID(a) >= $lo AND ID(a) < $hi "
+                    "RETURN a.urn, b.urn, type(r), properties(r) SKIP $skip LIMIT $limit",
+                    params={"lo": lo, "hi": lo + page_size, "skip": skip, "limit": page_size},
+                    op="export.edges")
+                rows = res.result_set or []
+                page = [_edge_from_row(r[0], r[1], r[2], r[3] or {}) for r in rows
+                        if not is_derived_edge_type(r[2])]
+                if page:
+                    yield page
+                if len(rows) < page_size:
+                    break
+                skip += len(rows)
+
+    async def _scan_top(self) -> int:
+        """The highest internal node id (-1 for an empty or absent graph): where a scan stops."""
+        try:
+            res = await self._ro_query("MATCH (n) RETURN max(ID(n))", op="export.top")
+        except Exception as exc:
+            if await self._is_verified_missing_graph(exc):
+                return -1
+            raise
+        rows = res.result_set or []
+        return int(rows[0][0]) if rows and rows[0][0] is not None else -1
 
     async def get_children(
         self,
@@ -14181,6 +14228,139 @@ class FalkorDBProvider(GraphDataProvider):
                 continue  # absent = unknown, never zero
             for urn in bucket_urns:
                 out[urn] = counts.get(urn, {"in": 0, "out": 0})
+        return out
+
+    #: URNs per label-qualified seek in ``resolve_identities``.
+    _RESOLVE_IDENTITIES_CHUNK = 5000
+    #: Seeks in flight at once. A view from another environment can name tens of thousands of
+    #: entities that aren't here, each sought under every label: one at a time, 30,000 of them
+    #: across 30 labels took 2.4 s; four at a time with the larger chunk, 0.54 s.
+    _RESOLVE_IDENTITIES_CONCURRENCY = 4
+
+    async def _cached_urn_labels(self, urns: List[str]) -> Dict[str, str]:
+        """The urn→label cache's entries for ``urns`` (sanitized labels), and nothing else: no
+        bootstrap on a miss. Empty when the cache can't be read."""
+        if self._redis is None:
+            return {}
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for urn in urns:
+                pipe.hget(self._urn_label_key(), urn)
+            raws = await pipe.execute()
+        except Exception as exc:  # noqa: BLE001 — every URN then goes through the full seek
+            logger.debug("resolve_identities: urn→label cache unreadable: %s", exc)
+            return {}
+        return {
+            urn: _sanitize_label(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+            for urn, raw in zip(urns, raws) if raw is not None
+        }
+
+    async def _identity_seek(self, label: str, urns: List[str]) -> Dict[str, Dict[str, Any]]:
+        """One label-qualified index seek: the found subset of ``urns`` with its identity.
+        Raises on failure; the caller decides what a failure means."""
+        cypher = (
+            f"MATCH (n:{label}) WHERE n.urn IN $urns "
+            "RETURN n.urn, labels(n)[0], coalesce(n.displayName, n.name, n.title, n.label), "
+            "n.qualifiedName"
+        )
+        result = await self._ro_query(cypher, params={"urns": urns}, timeout=10.0,
+                                      op="resolve_identities")
+        found: Dict[str, Dict[str, Any]] = {}
+        for row in (result.result_set or []):
+            if not row or not row[0]:
+                continue
+            urn = str(row[0])
+            found[urn] = {
+                "type": str(row[1]) if row[1] is not None else "unknown",
+                "name": str(row[2]) if row[2] is not None else urn,
+                "qualifiedName": str(row[3]) if row[3] is not None else None,
+            }
+        return found
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which of ``urns`` exist, and as what. See the interface for the three states.
+
+        Overridden because ``get_nodes`` logs and swallows a failed label query, so the default
+        would report a failure as "missing". Two passes, both label-qualified index seeks (this
+        build has no label-less URN index, so an unlabeled ``IN`` would be a full scan):
+
+        1. Seek each URN under the label the urn→label cache holds for it. That finds nearly
+           everything in one query per label per chunk.
+        2. Seek whatever pass 1 didn't find under EVERY label in the graph. The cache is not
+           proof of absence: its entries can be stale (a re-typed node lives under a new label)
+           or missing. A URN is reported absent only when every label's seek succeeded and
+           none held it; a URN whose seek failed and wasn't found elsewhere stays unknown.
+
+        Pass 1 reads the cache alone, not ``_label_buckets``: on a miss that one bootstraps by
+        seeking every label itself, so a URN that isn't here was sought under every label twice.
+        Seeks run a few at a time (``_RESOLVE_IDENTITIES_CONCURRENCY``).
+        """
+        wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
+        out: Dict[str, Optional[Dict[str, Any]]] = {}
+        if not wanted:
+            return out
+        await self._ensure_connected()
+        size = self._RESOLVE_IDENTITIES_CHUNK
+        slots = asyncio.Semaphore(self._RESOLVE_IDENTITIES_CONCURRENCY)
+
+        async def seek(label: str, chunk: List[str]) -> Dict[str, Dict[str, Any]]:
+            async with slots:
+                return await self._identity_seek(label, chunk)
+
+        cached = await self._cached_urn_labels(wanted)
+        buckets: Dict[str, List[str]] = {}
+        pending: List[str] = []
+        for urn in wanted:
+            if cached.get(urn):
+                buckets.setdefault(cached[urn], []).append(urn)
+            else:
+                pending.append(urn)
+        chunks = [(label, bucket[start:start + size]) for label, bucket in sorted(buckets.items())
+                  for start in range(0, len(bucket), size)]
+        results = await asyncio.gather(*(seek(label, chunk) for label, chunk in chunks),
+                                       return_exceptions=True)
+        for (label, chunk), found in zip(chunks, results):
+            if isinstance(found, BaseException):
+                logger.warning("resolve_identities seek failed (%d urns, label=%r): %s",
+                               len(chunk), label, found)
+                pending.extend(chunk)
+                continue
+            out.update(found)
+            pending.extend(u for u in chunk if u not in found)
+
+        if not pending:
+            return out
+        try:
+            res = await self._ro_query("CALL db.labels() YIELD label RETURN label", timeout=5.0,
+                                       op="resolve_identities")
+            labels = [_sanitize_label(str(r[0])) for r in (res.result_set or [])
+                      if r and r[0] and not str(r[0]).startswith("_")]
+        except Exception as exc:
+            logger.warning("resolve_identities: label enumeration failed: %s", exc)
+            return out  # every pending URN stays unknown
+        failed: set = set()
+        remaining = pending
+        # Labels in waves as wide as the seeks allowed at once: what one wave finds isn't sought
+        # again under the labels after it.
+        wave_size = self._RESOLVE_IDENTITIES_CONCURRENCY
+        for first in range(0, len(labels), wave_size):
+            if not remaining:
+                break
+            chunks = [(label, remaining[start:start + size]) for label in labels[first:first + wave_size]
+                      for start in range(0, len(remaining), size)]
+            results = await asyncio.gather(*(seek(label, chunk) for label, chunk in chunks),
+                                           return_exceptions=True)
+            for (label, chunk), found in zip(chunks, results):
+                if isinstance(found, BaseException):
+                    logger.warning("resolve_identities confirm seek failed (%d urns, label=%r): %s",
+                                   len(chunk), label, found)
+                    failed.update(chunk)
+                    continue
+                out.update(found)
+            remaining = [u for u in remaining if u not in out]
+        for urn in remaining:
+            if urn not in failed:
+                out[urn] = None
         return out
 
     async def get_distinct_values(self, property_name: str) -> List[Any]:

@@ -128,13 +128,14 @@ frontend-only gap.)*
 
 See [08](08-import-export.md) for detail; the load-bearing ones:
 
-- **In-process `BackgroundTasks` dispatch, not a real async dispatcher.** A `uvicorn --reload` (or a
-  crash) mid-import/export kills the job and leaves its summary null. A Redis/Postgres dispatcher is a
-  designed slot-in behind the same call.
+- **In-process dispatch, not a real async dispatcher.** A `uvicorn --reload` (or a crash)
+  mid-import/export kills the job; it is reported `failed` once silent for `JOB_STALE_AFTER_SECS`.
+  A Redis/Postgres dispatcher is a designed slot-in behind the same call.
 - **Export doesn't stream the read.** It `materialize_state`s the whole state then streams the write —
   fine for human-scale exports, not 5M+ (swap `materialize_state` → keyset streaming).
-- **Object store is local-only** (`LocalFsObjectStore`); S3/GCS raise `NotImplementedError`; the
-  `presigned` upload path is modeled but unbacked. JSON/xlsx adapters are buffered, not streamed.
+- **No cloud object store yet**: artifacts live in the management database (`DatabaseObjectStore`,
+  shared by every API pod); S3/GCS raise `NotImplementedError`; the `presigned` upload path is
+  modeled but unbacked. JSON/xlsx adapters are buffered, not streamed.
 - **Row-scoped export is API-only — not surfaced in the UI.** The backend export options (`props`,
   row-scope `ids`/`types`, view-scope, branch-vs-published, as-of) are wired consistently end-to-end
   (`create_export` → `create_export_job` packs an `options` dict → `ExportWorker`). The **ExportDialog

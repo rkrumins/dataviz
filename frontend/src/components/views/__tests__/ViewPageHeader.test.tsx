@@ -22,12 +22,14 @@
  *     Reviews joined Details and Activity. (Edit details and Share are not
  *     duplicated — the Details button and the audience control already opened
  *     the very same form and the very same dialog.)
+ *   - Versions and Export are a preview behind one admin switch: while it is off
+ *     neither is offered, and the version status behind the chip is never asked for.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /** Hover a control and read the app's own tooltip off it.
  *
@@ -47,6 +49,12 @@ vi.mock('@/services/viewApiService', async () => {
     '@/services/viewApiService',
   )
   return { ...actual, getView: vi.fn(), updateView: vi.fn() }
+})
+vi.mock('@/services/viewVersionsApiService', async () => {
+  const actual = await vi.importActual<typeof import('@/services/viewVersionsApiService')>(
+    '@/services/viewVersionsApiService',
+  )
+  return { ...actual, getViewVersionStatus: vi.fn() }
 })
 vi.mock('@/store/schema', () => ({
   useSchemaStore: (selector: (s: unknown) => unknown) => selector({ updateView: vi.fn() }),
@@ -86,10 +94,13 @@ import {
   type ViewPublishRequest,
 } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { getViewVersionStatus } from '@/services/viewVersionsApiService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 
 const mockGetView = vi.mocked(getView)
 const mockUpdateView = vi.mocked(updateView)
+const mockVersionStatus = vi.mocked(getViewVersionStatus)
 
 const OWNER_ACCESS: ViewAccess = {
   canEdit: true,
@@ -612,5 +623,49 @@ describe('Reviews, relocated from the versioning band', () => {
     renderHeader(viewResponse({ access: VIEWER_ACCESS }))
     await screen.findByText('Test View')
     expect(screen.queryByRole('button', { name: 'Reviews' })).toBeNull()
+  })
+})
+
+describe('Versions and Export, a preview behind one admin switch', () => {
+  const preview = (on: boolean) =>
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewPortabilityEnabled: on } })
+  afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+
+  it('are not offered while the preview is off, and the chip asks the server nothing', async () => {
+    preview(false)
+    renderHeader(viewResponse({ access: OWNER_ACCESS }))
+    await screen.findByText('Test View')
+    expect(screen.queryByRole('button', { name: /^Versions/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Export' })).toBeNull()
+    expect(mockVersionStatus).not.toHaveBeenCalled()
+  })
+
+  it('are offered with the preview on, the chip naming the latest version', async () => {
+    preview(true)
+    mockVersionStatus.mockResolvedValue({
+      headVersion: 8, headHash: 'sha256:a', workingHash: 'sha256:b',
+      designChanged: true, labelChanged: false, dirty: true,
+    })
+    renderHeader(viewResponse({ access: OWNER_ACCESS }))
+    expect(await screen.findByRole('button', { name: 'Versions, at v8 with unsaved changes' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Export' })).toBeInTheDocument()
+  })
+
+  it('asks again after a rename, which is a change since the latest version', async () => {
+    preview(true)
+    mockVersionStatus.mockResolvedValue({
+      headVersion: 8, headHash: 'sha256:a', workingHash: 'sha256:a',
+      designChanged: false, labelChanged: false, dirty: false,
+    })
+    mockUpdateView.mockResolvedValue(viewResponse({ access: OWNER_ACCESS, name: 'Renamed' }))
+    renderHeader(viewResponse({ access: OWNER_ACCESS }))
+    await screen.findByRole('button', { name: 'Versions, at v8' })
+    expect(mockVersionStatus).toHaveBeenCalledTimes(1)
+
+    fireEvent.doubleClick(await screen.findByText('Test View'))
+    const input = screen.getByRole('textbox', { name: 'View name' })
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(mockVersionStatus).toHaveBeenCalledTimes(2))
   })
 })

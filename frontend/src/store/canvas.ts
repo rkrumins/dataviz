@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
+import { useStagedChangesStore } from './stagedChangesStore'
+import { filterIncomingEdges, overlayOnReplace } from './stagedOverlay'
 
 export interface LineageNode extends Node {
   data: {
@@ -163,6 +165,13 @@ interface CanvasState {
   missingEntityCount: number
   noteNodeFetchFailure: (batches: number, entities: number) => void
   clearNodeFetchFailures: () => void
+
+  // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
+  // graph didn't return (failed batches are left out, since those are unknown rather than
+  // absent). A view brought in from another environment keeps these, marked not found.
+  // `null` = not checked yet.
+  placementsNotFound: { viewId: string; urns: string[] } | null
+  setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
 
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
@@ -339,7 +348,9 @@ function mergeGraph(
       uniqueNodes.push(n)
     }
   }
-  const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id) && !batchEdges.has(e.id) && !!batchEdges.add(e.id))
+  // A page never brings back a relationship the user's pending edits removed (see stagedOverlay).
+  const uniqueEdges = filterIncomingEdges(newEdges, useStagedChangesStore.getState().changes)
+    .filter((e) => !state._edgeIndex.has(e.id) && !batchEdges.has(e.id) && !!batchEdges.add(e.id))
   const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
   if (uniqueNodes.length === 0 && uniqueEdges.length === 0 && !enriched) return null
   const nodeIndex = uniqueNodes.length > 0 ? new Set(state._nodeIndex) : state._nodeIndex
@@ -385,6 +396,8 @@ export const useCanvasStore = create<CanvasState>()(
         missingEntityCount: entities,
       }),
       clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
+      placementsNotFound: null,
+      setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the
@@ -427,7 +440,13 @@ export const useCanvasStore = create<CanvasState>()(
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
-      setGraph: (nodes, edges) => set((state) => {
+      setGraph: (serverNodes, serverEdges) => set((state) => {
+        // The server's view ⊕ the user's pending edits — a reload never wipes unsaved work.
+        const { nodes, edges } = overlayOnReplace(
+          { nodes: serverNodes, edges: serverEdges },
+          { nodes: state.nodes, edges: state.edges },
+          useStagedChangesStore.getState().changes,
+        )
         // Dedup by id to prevent React duplicate-key warnings when callers
         // pass arrays with overlapping entries (e.g. assigned + child nodes).
         const seenNodes = new Set<string>()

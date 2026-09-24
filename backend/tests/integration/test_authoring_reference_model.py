@@ -123,7 +123,25 @@ def _batch(rng: random.Random, m: Model) -> list:
                 m.apply(op)
                 ops.append(op)
             continue
-        elif live_e and r < 0.95:
+        elif r < 0.92:                                    # a server-resolved move (or to the top)
+            node = rng.choice(live_n)
+            under, stack = set(), [node]
+            while stack:
+                x = stack.pop()
+                under.add(x)
+                stack.extend(m.children(x))
+            cands = [n for n in live_n if n not in under]
+            parent = rng.choice(cands) if cands and rng.random() < 0.8 else None
+            eid = m.fresh("e")
+            for e in [e for e, v in m.edges.items()
+                      if v["edgeType"] == "CONTAINS" and v["targetEntityId"] == node]:
+                m.edges.pop(e)
+            if parent:
+                m.edges[eid] = {"sourceEntityId": parent, "targetEntityId": node, "edgeType": "CONTAINS"}
+            ops.append({"op": "move", "entity_kind": "node", "entity_id": node,
+                        "payload": {"parentEntityId": parent, "edgeType": "CONTAINS", "edgeId": eid}})
+            continue
+        elif live_e and r < 0.96:
             op = {"op": "update", "entity_kind": "edge", "entity_id": rng.choice(live_e),
                   "payload": {"properties": {"w": rng.randint(0, 9)}}}
         elif live_e:
@@ -159,7 +177,7 @@ async def _run(seed: int) -> None:
             ops = _batch(rng, m)
             if not ops:
                 continue
-            if rng.random() < 0.5:
+            if rng.random() < 0.5 or any(o["op"] == "move" for o in ops):   # moves: canvas path
                 await svc.apply_ops(graph_id=gid, branch_id=d, actor="alice", ops=ops,
                                     containment_edge_types=CSET)
             else:

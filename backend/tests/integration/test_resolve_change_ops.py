@@ -61,3 +61,18 @@ if __name__ == "__main__":
     test_explicit_urn_is_preserved()
     test_edge_and_update_refs_resolve_to_minted_urns()
     print("resolver urn-minting + ref-resolution: OK")
+
+
+def test_a_stand_in_gv_id_addresses_the_entity_itself():
+    """A reader shows an urn-less entity as "gv:<entity id>"; an edit, delete, move, or edge end
+    addressed to that id means the entity — not an edit of nothing (which failed as "needs a type")."""
+    ops, _ = _resolve_change_ops([
+        _op("update", "node", id="gv:ent_1", payload={"displayName": "Fixed"}),
+        _op("create", "edge", payload={"edgeType": "HAS", "sourceEntityId": "gv:ent_2", "targetEntityId": "gv:ent_1"}),
+        _op("move", "node", id="gv:ent_1", payload={"parentEntityId": "gv:ent_2", "edgeType": "HAS"}),
+        _op("delete", "node", id="gv:ent_3"),
+    ], prefixed_id, make_urn)
+    assert ops[0]["entity_id"] == "ent_1"
+    assert (ops[1]["payload"]["sourceEntityId"], ops[1]["payload"]["targetEntityId"]) == ("ent_2", "ent_1")
+    assert (ops[2]["entity_id"], ops[2]["payload"]["parentEntityId"]) == ("ent_1", "ent_2")
+    assert ops[3]["entity_id"] == "ent_3"

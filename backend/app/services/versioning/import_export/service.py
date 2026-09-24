@@ -12,6 +12,7 @@ importing it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -23,17 +24,27 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..models import BranchORM, ImportRowORM, JobORM
 from ..service import GraphVersioningService
-from .export_worker import (
-    ExportWorker, column_order, example_template_records, records_from_state,
-)
+from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
 from .import_worker import ImportWorker
+from .rowmodel import column_order
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# What a job reads when it stopped mid-run: its task was cancelled, or its server went away.
+_INTERRUPTED = ("The job stopped before it finished (the server restarted or it was interrupted). "
+                "Start it again.")
+
+
+def _silent_secs(row: JobORM) -> float:
+    """Seconds since the job last showed life: its heartbeat, else its start, else its creation."""
+    last = datetime.fromisoformat(row.updated_at or row.started_at or row.created_at)
+    return (datetime.now(timezone.utc) - last).total_seconds()
 
 
 class ImportExportService:
@@ -117,14 +128,25 @@ class ImportExportService:
     async def _run_safe(self, job_id: str, runner) -> None:
         try:
             await runner(job_id)
+        except asyncio.CancelledError:
+            # A shutdown or a cancelled task: record it, or the job reads "running" forever.
+            logger.warning("job %s was cancelled", job_id)
+            try:
+                await self._mark_failed(job_id, _INTERRUPTED)
+            except Exception:  # noqa: BLE001 — the cancellation must still propagate
+                logger.exception("recording the cancellation of job %s failed", job_id)
+            raise
         except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
             logger.exception("job %s failed", job_id)
-            async with db.graphver_session() as s:
-                row = await s.get(JobORM, job_id)
-                if row is not None:
-                    row.status = "failed"
-                    row.error_message = str(exc)[:2000]
-                    row.completed_at = _now()
+            await self._mark_failed(job_id, str(exc))
+
+    async def _mark_failed(self, job_id: str, message: str) -> None:
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            if row is not None and row.status in ("pending", "running"):
+                row.status = "failed"
+                row.error_message = message[:2000]
+                row.completed_at = _now()
 
     async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Job summary + a bounded sample of resolved rows (the inline preview; the full diff is
@@ -233,14 +255,18 @@ class ImportExportService:
         select_ids: Optional[List[str]] = None,
         select_types: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
+        package: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
         ``branch_id`` exports that working branch's composed state (main + committed + draft),
         defaulting to published main. Export options (``props``/``ids``/``types``) ride in
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
-        row-scope to just those entities / entity types."""
+        row-scope to just those entities / entity types. ``package`` makes the job a view package's
+        (view_transfer.package): the data is written, then packaged with the views."""
         options: Dict[str, Any] = {}
+        if package:
+            options["package"] = package
         if extra_props:
             options["props"] = extra_props
         if select_ids:
@@ -275,7 +301,15 @@ class ImportExportService:
             # Branch-effective: an export of a draft branch scopes to that
             # draft's own view assignments (base ⊕ overlay).
             scope = await self._scope_resolver(ws, ds, view_id, branch_id)
-        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {}).run(job_id)
+        after_write = None
+        package = (options or {}).get("package")
+        if package:
+            from backend.app.services.view_transfer.package import finish_export
+
+            async def after_write(job_id, result_uri, summary):
+                return await finish_export(self._store, job_id, result_uri, summary, package=package)
+        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {},
+                                  after_write=after_write).run(job_id)
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)
@@ -312,11 +346,19 @@ class ImportExportService:
         return b"".join(chunks)
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Job as a camelCase dict (frontend wire shape)."""
+        """Job as a camelCase dict (frontend wire shape). A pending or running import/export silent
+        for ``JOB_STALE_AFTER_SECS`` is reported failed: the process running it went away (a
+        restart, a killed pod) and nothing will finish it, while a live import beats every few
+        seconds (``ImportWorker``)."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is None:
                 return None
+            if row.job_type in ("ingest", "export") and row.status in ("pending", "running") \
+                    and _silent_secs(row) > config.JOB_STALE_AFTER_SECS:
+                row.status = "failed"
+                row.error_message = _INTERRUPTED
+                row.completed_at = _now()
             return {
                 "jobId": row.id, "jobType": row.job_type, "status": row.status,
                 "graphId": row.graph_id, "branchId": row.branch_id,
@@ -327,4 +369,7 @@ class ImportExportService:
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,
                 "createdAt": row.created_at, "completedAt": row.completed_at,
+                # A view package names its own download (view_transfer.package).
+                "fileName": ((row.field_scope or {}).get("package") or {}).get("fileName")
+                if isinstance(row.field_scope, dict) else None,
             }

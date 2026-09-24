@@ -18,9 +18,10 @@ import type { GraphNode, GraphEdge, EntityTypeDefinition, NodeQuery, NodePage } 
 import { BoundedQueue, mapWithConcurrency } from '@/lib/concurrency'
 import { classifyGraphFailure, isFailoverFailure } from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
-import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
+import { useBranchCreatedDelta, committedCreatedUrns, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import { isTempUrn } from '@/components/canvas/context-view/assignmentMutations'
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
 import { resetCircuitBreakers } from '@/services/circuitBreaker'
@@ -557,12 +558,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // building" between attempts; a retry only clears them by SUCCEEDING
         // (markReady) below.
         if (isFreshView) setGraph([], [])
+        // How this load writes the graph. A genuinely NEW view replaces the canvas. A re-run of the
+        // SAME view — after a save changed the draft's diff, a retry, an ontology refresh — MERGES:
+        // replacing threw away every child page the user had expanded, so saved children vanished
+        // after each save until their parent was collapsed and re-opened. (Unsaved work survives
+        // either way: every graph write overlays the pending edits, see stagedOverlay.)
+        const writeGraph = isFreshView
+            ? setGraph
+            : (n: LineageNode[], e: LineageEdge[]) => useCanvasStore.getState().addGraph(n, e)
         // Fresh attempt → fresh integrity state; failures from the previous
         // attempt would otherwise keep the incomplete-canvas banner/pill up
         // after a clean reload.
         useCanvasStore.getState().clearEdgeFetchFailures()
         useCanvasStore.getState().setEdgesTruncated(false)
         useCanvasStore.getState().clearNodeFetchFailures()
+        useCanvasStore.getState().setPlacementsNotFound(null)
 
         const controller = new AbortController()
 
@@ -615,6 +625,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Assigned entities inside the batches that failed — what a
                     // partial load is missing, by count, for the pill.
                     let missingEntities = 0
+                    // Their URNs: whether those exist is unknown, so they are never reported
+                    // as placements that point at nothing.
+                    const failedUrns = new Set<string>()
                     const loadNodeBatches = async (queries: NodeQuery[]): Promise<GraphNode[]> => {
                         const settled = await mapWithConcurrency(
                             queries, HYDRATION_CONCURRENCY, q => provider.getNodes(q),
@@ -626,6 +639,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             } else {
                                 batchErrors.push(outcome.reason)
                                 missingEntities += queries[i].urns?.length ?? 0
+                                for (const urn of queries[i].urns ?? []) failedUrns.add(String(urn))
                             }
                         })
                         return loaded
@@ -643,7 +657,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // and would otherwise never be fetched. Empty delta /
                         // non-draft ⇒ assigned-only, identical to before.
                         const urnBatches: string[][] = []
-                        const urnArray = closedScopeLoadUrns(assignedUrns, branchCreatedDelta, isDraft)
+                        // Children the branch created are reached through their parents (see
+                        // committedCreatedChildUrns); only the branch's new ROOTS load flat here.
+                        const createdChildren = committedCreatedChildUrns(activeChangeSet, containmentEdgeTypes)
+                        const createdRoots = new Set([...branchCreatedDelta].filter((u) => !createdChildren.has(u)))
+                        const urnArray = closedScopeLoadUrns(assignedUrns, createdRoots, isDraft)
                         deltaLoadedCount = urnArray.length - assignedUrns.size
                         // Batch URNs to avoid overly large queries
                         for (let i = 0; i < urnArray.length; i += 100) {
@@ -723,6 +741,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             if (controller.signal.aborted) return
                             allNodes = [...allNodes, ...placed]
                         }
+                    }
+
+                    // Placements the graph was asked for and didn't return: a view brought in
+                    // from another environment keeps these, marked not found (the canvas shows
+                    // them; see CanvasStatusChips). Either scope asks for every placement by URN
+                    // that nothing else brought, so what isn't here now was looked for and absent.
+                    if (activeView?.id) {
+                        const returned = new Set(allNodes.map(n => n.urn))
+                        useCanvasStore.getState().setPlacementsNotFound({
+                            viewId: activeView.id,
+                            urns: [...assignedUrns].filter(u => !returned.has(u) && !failedUrns.has(u) && !isTempUrn(u)),
+                        })
                     }
 
                     // ── Anchored columns ──────────────────────────────
@@ -820,7 +850,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     }
 
                     // Show nodes immediately, then fetch edges
-                    setGraph(
+                    writeGraph(
                         allNodes.map(n => toCanvasNode(n)),
                         anchorEdges.map(e => toCanvasEdge(e)),
                     )
@@ -855,7 +885,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     }
 
                     // Replace with complete dataset atomically
-                    setGraph(
+                    writeGraph(
                         allNodes.map(n => toCanvasNode(n)),
                         allEdges.map(e => toCanvasEdge(e)),
                     )
@@ -910,7 +940,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     }
 
                     // Show roots immediately
-                    setGraph(
+                    writeGraph(
                         rootNodes.map(n => toCanvasNode(n, { randomPosition: true })),
                         [],
                     )
@@ -1009,7 +1039,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     console.log(`[useGraphHydration] Loaded ${uniqueNodes.length} nodes (${rootNodes.length} roots, ${allChildren.length} children, ${orphanNodes.length} orphans), ${allEdges.length} edges`)
 
-                    setGraph(
+                    writeGraph(
                         uniqueNodes.map(n => toCanvasNode(n, { randomPosition: true })),
                         allEdges.map(e => toCanvasEdge(e)),
                     )

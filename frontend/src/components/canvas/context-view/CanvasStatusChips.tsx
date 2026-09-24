@@ -11,11 +11,15 @@
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
+ *  - "N placements not found here" — entities placed in the view that this
+ *    graph doesn't hold (typically a view brought in from another
+ *    environment); popover lists them and says what to do.
  *
  * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
  * the end of the layer strip (LineageGuide).
  *
- * Every relationship counted here is a FLOW: every one of these numbers
+ * Every relationship counted here is a FLOW (the placements chip counts
+ * placements, not relationships): every one of these numbers
  * comes from `useEdgeProjection`, which drops containment edges in all
  * three of its sections, or from `useExternalDegrees`, which asks the
  * server for lineage types only. Nothing structural can reach a chip.
@@ -31,7 +35,7 @@
  */
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { Unlink, Layers, ListPlus, Focus } from 'lucide-react'
+import { Unlink, Layers, ListPlus, Focus, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
@@ -41,6 +45,13 @@ const CHIP_CLASS =
   'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
+
+/** A placement in the view whose entity this graph doesn't hold. */
+export interface NotFoundPlacement {
+  urn: string
+  label: string
+  layerName?: string
+}
 
 export interface UnassignedEntity {
   id: string
@@ -65,6 +76,7 @@ export function CanvasStatusChips({
   onLoadMoreRoots,
   selectedExternal,
   onPreviewExternal,
+  notFoundPlacements = [],
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -97,8 +109,11 @@ export function CanvasStatusChips({
   selectedExternal?: { in: number; out: number } | null
   /** Feature-flagged: fetch + show the out-of-view partners in the Lens. */
   onPreviewExternal?: () => void
+  /** Placements the load asked the graph for and didn't get: kept in the view, marked not found. */
+  notFoundPlacements?: NotFoundPlacement[]
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
+  const [notFoundOpen, setNotFoundOpen] = useState(false)
 
   const showUnresolved = unresolvedEdgeCount > 0
   const showUnassigned = unassignedEntities.length > 0
@@ -106,8 +121,9 @@ export function CanvasStatusChips({
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
+  const showNotFound = notFoundPlacements.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal && !showNotFound) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -308,6 +324,46 @@ export function CanvasStatusChips({
               {unassignedEntities.length > UNASSIGNED_LIST_CAP && (
                 <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted/60">
                   +{unassignedEntities.length - UNASSIGNED_LIST_CAP} more
+                </p>
+              )}
+            </PopoverPrimitive.Content>
+          </PopoverPrimitive.Portal>
+        </PopoverPrimitive.Root>
+      )}
+
+      {showNotFound && (
+        <PopoverPrimitive.Root open={notFoundOpen} onOpenChange={setNotFoundOpen}>
+          <PopoverPrimitive.Trigger asChild>
+            <button type="button" className={`${CHIP_CLASS} cursor-pointer hover:scale-105 active:scale-95 transition-transform`}>
+              <SearchX className="w-3 h-3 text-amber-500" />
+              {/* The space is for screen readers: the flex gap separates them on screen. */}
+              <span className="tabular-nums">{notFoundPlacements.length.toLocaleString()}</span>{' '}
+              <span>{notFoundPlacements.length === 1 ? 'placement' : 'placements'} not found here</span>
+            </button>
+          </PopoverPrimitive.Trigger>
+          <PopoverPrimitive.Portal>
+            <PopoverPrimitive.Content
+              side="top"
+              align="start"
+              sideOffset={6}
+              className="z-[9999] w-80 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl shadow-black/40 p-2"
+            >
+              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed in this view, but not in this graph</p>
+              <p className="px-1.5 pt-0.5 pb-2 text-[11px] text-ink-muted leading-relaxed">
+                Usually a view brought in from another environment. They’re kept, and appear as soon as the entity
+                arrives here. To remove them, edit the view and see Assignments.
+              </p>
+              <div className="max-h-64 overflow-y-auto custom-scrollbar">
+                {notFoundPlacements.slice(0, UNASSIGNED_LIST_CAP).map(p => (
+                  <div key={p.urn} className="px-1.5 py-1 flex items-center gap-2 min-w-0" title={p.urn}>
+                    <span className="truncate text-[11.5px] text-ink">{p.label}</span>
+                    {p.layerName && <span className="ml-auto flex-shrink-0 text-[10px] text-ink-muted">{p.layerName}</span>}
+                  </div>
+                ))}
+              </div>
+              {notFoundPlacements.length > UNASSIGNED_LIST_CAP && (
+                <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted">
+                  +{(notFoundPlacements.length - UNASSIGNED_LIST_CAP).toLocaleString()} more
                 </p>
               )}
             </PopoverPrimitive.Content>

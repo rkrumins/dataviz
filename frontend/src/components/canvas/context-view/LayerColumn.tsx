@@ -27,7 +27,9 @@ import {
 } from '@/store/searchStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
-import { FlatTreeItem, type RowSelectModifiers } from './FlatTreeItem'
+import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
+import type { PlacedOut, PlacementInfo } from './placement'
+import { groupSubtreeIds, listGroups } from './layerMutations'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -110,11 +112,35 @@ interface LayerColumnProps {
    *  was said against: no load-more row while the parent still has that count,
    *  even when some of its children render in other columns. */
   exhaustedParents?: Map<string, number>
+  /** Every loaded child of each parent, whichever column it is drawn in (the canvas's containment
+   *  map). A child placed in another column is loaded — counting only this column's rows offered a
+   *  "Load 1 more" for it that could never arrive. */
+  loadedChildren?: Map<string, string[]>
+  /** Entities PLACED in a column apart from their parent, with their full path in the data. */
+  placedApart?: Map<string, PlacementInfo>
+  /** Parents whose children are placed in other columns (the other end of a placement). */
+  placedOut?: Map<string, PlacedOut>
+  /** Take the reader to a placed entity's parent (expanding its path on the way). */
+  onRevealPlacement?: (placement: PlacementInfo) => void
+  /** Undo a row's view placement (show it under its parent again). */
+  onReturnPlacement?: (entityId: string, parentName?: string) => void
   onScroll?: () => void
   onAssignToLayer?: (entityId: string, layerId: string) => void
   /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
    *  Edit mode, so View mode stays read-only. Reorder moves the column; its nodes/edges follow. */
   onRenameLayer?: (layerId: string, name: string) => void
+  /** Groups — view-only containers in this layer: create (optionally inside another group), rename,
+   *  delete, and place an entity into one (a drop on the group row). */
+  onCreateGroup?: (layerId: string, name: string, parentGroupId?: string) => void
+  onRenameGroup?: (layerId: string, groupId: string, name: string) => void
+  onDeleteGroup?: (layerId: string, groupId: string, groupName: string) => void
+  onPlaceInGroup?: (entityId: string, layerId: string, groupId: string, groupName: string) => void
+  /** Move a group (with everything in it) from one layer to a layer — the same one or another. */
+  onMoveGroup?: (fromLayerId: string, groupId: string, toLayerId: string, newParentId: string | null) => void
+  /** Every layer's groups — where a group on this column can move to. */
+  groupDestinations?: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
+  onMoveGroupContents?: (layerId: string, fromId: string, toId: string) => void
+  onUngroup?: (layerId: string, groupId: string, groupName: string) => void
   onDeleteLayer?: (layerId: string) => void
   onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
   /** Effective node sort mode for this column (override → layer → view default). */
@@ -284,11 +310,24 @@ export const LayerColumn = React.memo(function LayerColumn({
   loadingNodes,
   failedNodes,
   exhaustedParents,
+  loadedChildren,
+  placedApart,
+  placedOut,
+  onRevealPlacement,
+  onReturnPlacement,
   feedMore,
   onFeedMore,
   onScroll,
   onAssignToLayer,
   onRenameLayer,
+  onCreateGroup,
+  onRenameGroup,
+  onDeleteGroup,
+  onPlaceInGroup,
+  onMoveGroup,
+  groupDestinations,
+  onMoveGroupContents,
+  onUngroup,
   onDeleteLayer,
   onReorderLayer,
   sortMode = 'alpha-asc',
@@ -380,9 +419,29 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Draft layer-management: inline rename, delete-confirm, and which kind of drag is hovering
   // (a layer being reordered vs an entity being reassigned) so the drop hint reads right.
   const [isRenaming, setIsRenaming] = useState(false)
+  const [isNamingGroup, setIsNamingGroup] = useState(false)
+  // Group rows' actions, bound to this layer (stable, so rows keep their memo).
+  const groupActions = useMemo<GroupActions | undefined>(() =>
+    onCreateGroup && onRenameGroup && onDeleteGroup && onPlaceInGroup && onMoveGroup && onMoveGroupContents && onUngroup ? {
+      layerId: layer.id,
+      layerName: layer.name,
+      groups: listGroups([layer], layer.id),
+      otherLayers: (groupDestinations ?? []).filter((d) => d.layerId !== layer.id),
+      subtreeOf: (groupId) => groupSubtreeIds([layer], layer.id, groupId),
+      create: (name, parentGroupId) => onCreateGroup(layer.id, name, parentGroupId),
+      rename: (groupId, name) => onRenameGroup(layer.id, groupId, name),
+      remove: (groupId, name) => onDeleteGroup(layer.id, groupId, name),
+      place: (entityId, groupId, groupName) => onPlaceInGroup(entityId, layer.id, groupId, groupName),
+      move: (groupId, newParentId, toLayerId) => onMoveGroup(layer.id, groupId, toLayerId ?? layer.id, newParentId),
+      receive: (groupId, fromLayerId, newParentId) => onMoveGroup(fromLayerId, groupId, layer.id, newParentId),
+      moveContents: (fromId, toId) => onMoveGroupContents(layer.id, fromId, toId),
+      ungroup: (groupId, name) => onUngroup(layer.id, groupId, name),
+    } : undefined,
+  [layer, groupDestinations, onCreateGroup, onRenameGroup, onDeleteGroup, onPlaceInGroup, onMoveGroup, onMoveGroupContents, onUngroup])
+  const [draftGroupName, setDraftGroupName] = useState('')
   const [draftName, setDraftName] = useState(layer.name)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [dragKind, setDragKind] = useState<'entity' | 'layer' | null>(null)
+  const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
@@ -664,7 +723,8 @@ export const LayerColumn = React.memo(function LayerColumn({
         // In trace mode the trace API already returns the complete set of
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
-        const hasMore = !isTracing && node.children.length < childCount && !activeQuery
+        const loaded = Math.max(node.children.length, loadedChildren?.get(node.id)?.length ?? 0)
+        const hasMore = !isTracing && loaded < childCount && !activeQuery
           && exhaustedParents?.get(node.id) !== childCount
 
         // What the session found INSIDE this container, at any depth — the
@@ -694,7 +754,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         const hasInline = inline !== null && (inline.rows.length > 0 || inline.overflow > 0)
 
         if (hasMore) {
-          stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - node.children.length })
+          stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - loaded })
         }
 
         if (inline && hasInline) {
@@ -717,7 +777,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents, feedMore, layer.id, layer.name])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick, anchorMore, exhaustedParents, loadedChildren, feedMore, layer.id, layer.name])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -1594,13 +1654,14 @@ export const LayerColumn = React.memo(function LayerColumn({
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
           const isEntity = types.includes('text/x-entity-id')
+          const isGroup = types.includes('text/x-group-id')
           // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
           // gate on the presence of the typed key + the matching handler).
-          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer)) {
+          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer) || (isGroup && groupActions)) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'move'
             setIsDragOver(true)
-            setDragKind(isLayer ? 'layer' : 'entity')
+            setDragKind(isLayer ? 'layer' : isGroup ? 'group' : 'entity')
           }
         }}
         onDragLeave={(e) => {
@@ -1612,6 +1673,11 @@ export const LayerColumn = React.memo(function LayerColumn({
           setDragKind(null)
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
+          const groupId = e.dataTransfer.getData('text/x-group-id')
+          if (groupId && groupActions) {
+            groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+            return
+          }
           const entityId = e.dataTransfer.getData('text/x-entity-id')
           if (entityId && onAssignToLayer) onAssignToLayer(entityId, layer.id)
         }}
@@ -1631,7 +1697,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   arrow carry it. */}
               {!isCollapsed && (
                 <span className="text-xs font-medium" style={{ color: layer.color }}>
-                  {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
+                  {dragKind === 'layer' ? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : `Move to ${layer.name}`}
                 </span>
               )}
             </div>
@@ -1759,7 +1825,23 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           ) : (
             <>
-              {isRenaming && onRenameLayer ? (
+              {isNamingGroup && onCreateGroup ? (
+                <input
+                  autoFocus
+                  value={draftGroupName}
+                  placeholder="New group name"
+                  aria-label={`Name the new group in ${layer.name}`}
+                  onChange={(e) => setDraftGroupName(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                    if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }
+                    if (e.key === 'Escape') setIsNamingGroup(false)
+                  }}
+                  onBlur={() => { if (draftGroupName.trim()) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
+                  className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-violet-400/60 text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal"
+                />
+              ) : isRenaming && onRenameLayer ? (
                 <input
                   autoFocus
                   value={draftName}
@@ -1868,6 +1950,20 @@ export const LayerColumn = React.memo(function LayerColumn({
                     title={`Add entity to ${layer.name}`}
                   >
                     <LucideIcons.Plus className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                {onCreateGroup && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setDraftGroupName('')
+                      setIsNamingGroup(true)
+                    }}
+                    className="p-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-500 transition-all duration-200 hover:scale-110 active:scale-95"
+                    title={`New group in ${layer.name} — organise entities in this view (the data is unchanged)`}
+                    aria-label={`New group in ${layer.name}`}
+                  >
+                    <LucideIcons.FolderPlus className="w-3.5 h-3.5" />
                   </button>
                 )}
                 {onBuildToLayer && (
@@ -2272,13 +2368,33 @@ export const LayerColumn = React.memo(function LayerColumn({
               // the rAF loop below applies smooth, distance-proportional
               // scrolling and self-terminates ~200ms after events stop
               // (drop, cancel, or the pointer leaving the column).
-              // Deliberately does NOT preventDefault — drop acceptance stays
-              // with the row targets.
-              if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+              // Deliberately does NOT preventDefault for entities — drop
+              // acceptance stays with the row targets. A GROUP is taken
+              // anywhere in the column (rows that aren't groups don't take it):
+              // it moves to the top of this layer, lit up in the header.
+              const isGroup = e.dataTransfer.types.includes('text/x-group-id') && !!groupActions
+              if (isGroup) {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (!isDragOver) setIsDragOver(true)
+                if (dragKind !== 'group') setDragKind('group')
+              }
+              if (!e.dataTransfer.types.includes('text/x-entity-id') && !isGroup) return
               dragPointerRef.current = { y: e.clientY, t: performance.now() }
               if (dragScrollRafRef.current == null) {
                 dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
               }
+            }}
+            onDragLeave={(e) => {
+              if (dragKind === 'group' && !e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+            }}
+            onDrop={(e) => {
+              const groupId = e.dataTransfer.getData('text/x-group-id')
+              if (!groupId || !groupActions) return
+              e.preventDefault()
+              setIsDragOver(false)
+              setDragKind(null)
+              groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
             }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.
@@ -2622,6 +2738,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <div style={animStyle}>
                       <FlatTreeItem
                         node={node}
+                        placement={placedApart?.get(node.id)}
+                        placedOut={placedOut?.get(node.id)}
+                        onRevealPlacement={onRevealPlacement}
+                        onReturnPlacement={onReturnPlacement}
+                        groupActions={groupActions}
                         depth={depth}
                         isLast={isLast}
                         parentIsLast={parentIsLast}

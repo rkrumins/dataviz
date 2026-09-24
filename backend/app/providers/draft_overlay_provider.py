@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, TypeVar
 
+from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
     GraphNode, NodePage, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
@@ -209,6 +210,26 @@ class DraftOverlayProvider:
             return d.overlay_existing(base)
         up = d.node_upsert.get(urn)                          # draft-NEW node (no base)
         return d.with_child_count(up) if up else None
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which ``urns`` exist on the draft, and as what: main's answer (through its own, faster
+        lookup where it has one), with what the draft created, changed or removed on top. The
+        same three states as ``GraphDataProvider.resolve_identities``."""
+        base_lookup = getattr(self._base, "resolve_identities", None)
+        found = (await base_lookup(urns) if callable(base_lookup)
+                 else await resolve_identities_by_query(self._base, urns))
+        d = await self._delta_()
+        if d.empty:
+            return found
+        out = dict(found)
+        for urn in urns:
+            if urn in d.node_remove:
+                out[urn] = None
+            elif urn in d.node_upsert:
+                node = d.node_upsert[urn]
+                out[urn] = {"type": node.entity_type, "name": node.display_name,
+                            "qualifiedName": node.qualified_name}
+        return out
 
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
         base = await self._base.get_nodes(query)
@@ -609,6 +630,20 @@ class DraftOverlayProvider:
         )
 
     # ---- writes: commit to the draft (reused from the branch provider) -- #
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """Containment chains on the DRAFT (its moves included) — the branch reader's walk over the
+        draft's composed state. ``{urn: [parent, …, root]}``; absent = unknown, ``[]`` = a root."""
+        return await self._writer.get_ancestor_chains(urns)
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        """An entity's ancestors in the draft, parent first, root last (as the main reader)."""
+        chain = (await self.get_ancestor_chains([urn])).get(urn, [])[offset: offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain)))
+        by_urn = {n.urn: n for n in nodes}
+        return [by_urn[u] for u in chain if u in by_urn]
+
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         self._delta = None
         return await self._writer.create_node(node, containment_edge)

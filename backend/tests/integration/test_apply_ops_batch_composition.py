@@ -77,13 +77,19 @@ async def _run() -> None:
 
     # An "update" of a node that does not exist creates it — so it is judged as a create:
     # with no type it is refused, and nothing is written.
-    with pytest.raises(OntologyViolation):
+    with pytest.raises(OntologyViolation) as exc:
         await svc.apply_ops(graph_id=gid, actor="alice", ops=[_update("GHOST", displayName="x")])
     assert "GHOST" not in await _state(svc, gid)
+    # …and says so plainly: an edit of something that isn't here, named — not "needs a type".
+    v = exc.value.violations[0]
+    assert (v["rule"], v["entity_id"], v["name"]) == ("entity_not_found", "GHOST", "x"), v
+    assert "isn't on this draft" in v["reason"], v
 
     # A create with no type is refused outright.
-    with pytest.raises(OntologyViolation):
+    with pytest.raises(OntologyViolation) as exc:
         await svc.apply_ops(graph_id=gid, actor="alice", ops=[_node("T", urn="T", displayName="t")])
+    assert exc.value.violations[0]["rule"] == "missing_entity_type"
+    assert exc.value.violations[0]["reason"] == "'t' has no entity type. Choose a type from the ontology."
 
     await _staged_rename_keeps_the_node(svc, gid, shared=False)
     await _staged_rename_keeps_the_node(svc, gid, shared=True)

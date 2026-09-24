@@ -240,6 +240,18 @@ def signup_enabled():
 
 
 @pytest.fixture()
+def view_portability_enabled():
+    """Turn the view versions, import and export preview ON for a test.
+
+    It is an experimental flag, so it ships OFF, and every ``/views/transfer`` and
+    ``/views/{id}/versions`` route answers to it before anything else. Primed in the cache,
+    like ``signup_enabled`` above."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "viewPortabilityEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+    yield
+
+
+@pytest.fixture()
 async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """
     Per-test async session.

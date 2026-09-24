@@ -100,3 +100,15 @@ def test_import_rowmodel():
 if __name__ == "__main__":
     _run()
     print("import rowmodel: OK")
+
+
+def test_edges_carry_their_endpoint_urns():
+    """Entity ids are minted per graph; an edge exported from one environment finds its endpoints
+    in another by URN, so the URNs are written on export and read back on import."""
+    from backend.app.services.versioning.import_export.rowmodel import denormalize_edge, normalize
+
+    rec = denormalize_edge("e1", "h", {"edgeType": "PRODUCES", "sourceEntityId": "a", "targetEntityId": "b"},
+                           source_urn="urn:orders", target_urn="urn:revenue")
+    assert (rec["sourceUrn"], rec["targetUrn"]) == ("urn:orders", "urn:revenue")
+    row = normalize(rec, "edge")
+    assert (row["sourceUrn"], row["targetUrn"]) == ("urn:orders", "urn:revenue")

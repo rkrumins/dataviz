@@ -11,7 +11,8 @@
  *    mid-flight) is SHOWN — the re-run skips in-flight URNs, so the original
  *    run is the only one that can re-render for them;
  *  - child paging records what the SERVER said (hasMore) and whether the last
- *    page failed, and reads each page where the server said it starts.
+ *    page failed, and reads each page where the server said it starts;
+ *  - an identity the Import journey already knows (its seed) is used as is, never looked up.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -54,6 +55,18 @@ describe('useWizardEntityIndex — resolving assigned URNs', () => {
     expect(provider.getNode).not.toHaveBeenCalled()
     const sizes = provider.getNodes.mock.calls.map(c => (c[0] as { urns: string[] }).urns.length).sort((a, b) => b - a)
     expect(sizes).toEqual([100, 100, 50])
+  })
+
+  it('uses what the import already knows, and looks up only the rest', async () => {
+    const provider = makeProvider()
+    const seed = new Map([[urn(0), { name: 'orders_v2', type: 'Table', childCount: 0, missing: true }]])
+    const assignments = assignmentsFor(2)
+    const { result } = renderHook(() => useWizardEntityIndex({
+      provider: provider as never, containmentEdgeTypes: ['CONTAINS'], assignments, snapshot: null, seed,
+    }))
+    await waitFor(() => expect(result.current.resolve(urn(1))?.name).toBe(`name ${urn(1)}`))
+    expect(result.current.resolve(urn(0))).toMatchObject({ name: 'orders_v2', missing: true })
+    expect(provider.getNodes.mock.calls.flatMap(c => (c[0] as { urns: string[] }).urns)).toEqual([urn(1)])
   })
 
   it('tombstones only a URN the graph confirms it does not know', async () => {

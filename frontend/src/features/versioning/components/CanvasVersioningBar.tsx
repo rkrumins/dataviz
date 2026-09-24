@@ -21,7 +21,7 @@
  * (the Context View). Every other canvas has no toolbar slot for it and keeps it here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, LayoutTemplate } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -30,7 +30,7 @@ import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
+import { useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, useResolveGraph, useBranchViewChanges } from '../hooks/useVersioning'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
@@ -91,6 +91,9 @@ export function CanvasVersioningBar({
   const uncommitted = useStagedChangeCount()
 
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null)
+  // Views the draft creates or changes (imports staged in it, layer edits) go live with it too.
+  const viewChangesQ = useBranchViewChanges(workspaceId, graphId, isDraft ? branchId : null)
+  const viewChangeCount = (viewChangesQ.data?.views.length ?? 0) + (viewChangesQ.data?.hidden ?? 0)
   const changeSet = useMemo(
     () => (diffQ.data && branchId ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET),
     [diffQ.data, branchId],
@@ -296,9 +299,20 @@ export function CanvasVersioningBar({
                       <span className="text-[11px] text-ink-muted/80">in branch</span>
                     </span>
                   </HoverTip>
-                ) : uncommitted === 0 ? (
+                ) : uncommitted === 0 && viewChangeCount === 0 ? (
                   <span className="text-xs">No changes yet</span>
                 ) : null}
+                {viewChangeCount > 0 && (
+                  <HoverTip
+                    className="inline-flex"
+                    label={`${viewChangeCount === 1 ? 'A view' : `${viewChangeCount} views`} this ${BRANCH_VOCAB.draft.toLowerCase()} creates or changes`}
+                    detail={`They go live when it's published — ${BRANCH_VOCAB.publish} shows which`}
+                  >
+                    <span className="text-xs font-medium text-indigo-500 inline-flex items-center gap-1">
+                      <LayoutTemplate className="w-3 h-3" /> {viewChangeCount} {viewChangeCount === 1 ? 'view' : 'views'}
+                    </span>
+                  </HoverTip>
+                )}
                 {uncommitted > 0 && (
                   <HoverTip
                     className="inline-flex"

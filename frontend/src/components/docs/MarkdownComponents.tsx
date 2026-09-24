@@ -56,6 +56,7 @@ export const filenameMap: Record<string, string> = {
   // Feature docs (subfolder; the two link each other by basename)
   'features/aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
   'features/external-change-notification.md': 'feature-external-change-notification',
+  'features/view-portability.md': 'feature-view-portability',
   'aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
   'external-change-notification.md': 'feature-external-change-notification',
 }

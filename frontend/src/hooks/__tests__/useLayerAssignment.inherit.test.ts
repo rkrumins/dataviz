@@ -295,3 +295,46 @@ describe('useLayerAssignment — explicit assignment wins (wizard cross-level pl
     expect(rootIds(res, 'B')).toEqual(['c'])
   })
 })
+
+describe('useLayerAssignment — a child placed into a GROUP (view arrangement)', () => {
+  // My Data Domain (p) contains App A (a) and App B (b). The layer defines group "Critical apps".
+  const withGroup = (): ViewLayerConfig[] => [
+    { ...layer('A', 0, []), logicalNodes: [{ id: 'crit', name: 'Critical apps', type: 'group' }] },
+    layer('B', 1, []),
+  ]
+  const family = () => ({
+    parentMap: new Map([['a', 'p'], ['b', 'p']]),
+    childMap: new Map([['p', ['a', 'b']]]),
+  })
+
+  it("lands in a group in its PARENT'S OWN layer (it used to stay nested, the group never got it)", () => {
+    const res = resolveCurated({
+      nodes: [node('p', 'domain'), node('a', 'app'), node('b', 'app')],
+      sortedLayers: withGroup(),
+      assignments: { p: { layerId: 'A', inheritsChildren: true }, b: { layerId: 'A', inheritsChildren: true, logicalNodeId: 'crit' } },
+      ...family(),
+    })
+    const roots = res.nodesByLayer.get('A')!
+    const group = roots.find(n => n.id === 'logical:crit')!
+    expect(group.children.map(n => n.id)).toEqual(['b'])                 // App B is in the group
+    const domain = roots.find(n => n.id === 'p')!
+    expect(domain.children.map(n => n.id)).toEqual(['a'])                // and no longer under p
+    expect(res.nodeGroupMap.get('b')?.name).toBe('Critical apps')
+  })
+
+  it('a child in the SAME group as its parent stays nested under it', () => {
+    const res = resolveCurated({
+      nodes: [node('p', 'domain'), node('a', 'app')],
+      sortedLayers: withGroup(),
+      assignments: {
+        p: { layerId: 'A', inheritsChildren: true, logicalNodeId: 'crit' },
+        a: { layerId: 'A', inheritsChildren: true, logicalNodeId: 'crit' },
+      },
+      parentMap: new Map([['a', 'p']]),
+      childMap: new Map([['p', ['a']]]),
+    })
+    const group = res.nodesByLayer.get('A')!.find(n => n.id === 'logical:crit')!
+    expect(group.children.map(n => n.id)).toEqual(['p'])
+    expect(group.children[0].children.map(n => n.id)).toEqual(['a'])
+  })
+})

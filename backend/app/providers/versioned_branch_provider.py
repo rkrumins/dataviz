@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
     GraphEdge, GraphNode, GraphSchemaStats, NodePage, NodeQuery, TagSummary, TopLevelNodesResult,
@@ -98,6 +99,14 @@ class VersionedBranchProvider:
             containment_edge_types=self._containment_types,
             include_child_count=getattr(query, "include_child_count", True))
         return [GraphNode(**d) for d in rows]
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which ``urns`` exist on this branch, and as what: the three states of
+        ``GraphDataProvider.resolve_identities`` (found / absent / left out when its lookup
+        failed), from bounded ``get_nodes`` reads. This class doesn't inherit that default, and
+        without it every view checked against a version-controlled data source came back
+        "couldn't be checked"."""
+        return await resolve_identities_by_query(self, urns)
 
     async def get_nodes_page(self, query: NodeQuery) -> NodePage:
         # Same probe as the interface default (this class doesn't inherit it):
@@ -591,6 +600,22 @@ class VersionedBranchProvider:
             edgeTypeStats=[EdgeTypeSummary(id=t, name=t, count=c) for t, c in edge_counts.items()],
             tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"]) for t, c in tag_counts.items()],
         )
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        """An entity's ancestors on this branch, parent first, root last (as FalkorDB's reader)."""
+        chain = (await self.get_ancestor_chains([urn])).get(urn, [])[offset: offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain)))
+        by_urn = {n.urn: n for n in nodes}
+        return [by_urn[u] for u in chain if u in by_urn]
+
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """``{urn: [parent, …, root]}`` from this branch's own state (a draft's moves included);
+        absent = unknown, ``[]`` = a root — the GraphDataProvider contract."""
+        return await self._svc.ancestor_chains(
+            graph_id=self._gid, branch_id=self._branch, urns=urns,
+            containment_edge_types=self._containment_types, as_of_seq=self._as_of)
 
     # ---- writes: one audited commit on this branch via apply_ops -------- #
     async def _commit(self, ops: List[dict], message: str) -> Optional[str]:

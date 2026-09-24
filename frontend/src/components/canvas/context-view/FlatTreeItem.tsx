@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
+import type { PlacedOut, PlacementInfo } from './placement'
+import { PlacedTag } from '@/components/ui/PlacedTag'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
@@ -32,6 +34,15 @@ export interface RowSelectModifiers {
 }
 
 interface FlatTreeItemProps {
+  /** Set when this row is PLACED in this column apart from its parent: its path in the data. */
+  placement?: PlacementInfo
+  /** Set on a parent whose children are placed in other columns (the other end of a placement). */
+  placedOut?: PlacedOut
+  onRevealPlacement?: (placement: PlacementInfo) => void
+  /** Undo this row's view placement: show it under its parent again. */
+  onReturnPlacement?: (entityId: string, parentName?: string) => void
+  /** Group rows (view-only containers): manage the group, and place what is dropped on it. */
+  groupActions?: GroupActions
   node: HierarchyNode
   depth: number
   isLast: boolean
@@ -104,6 +115,11 @@ const FLAT_ROW_STYLE: Record<string, string> = {
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
+  placement,
+  placedOut,
+  onRevealPlacement,
+  onReturnPlacement,
+  groupActions,
   depth,
   isLast,
   parentIsLast,
@@ -306,7 +322,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // safe at every depth; logical wrappers stay out (they aren't orderable).
   const reorderBandsActive = reorderEnabled && !isLogical && !!onReorderDrop
   const isRootDraggable = depth === 0 && !node.parentId && !isLogical
-  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive)
+  // A group row drags as a GROUP (drop it on another group to nest it) — never as an entity.
+  const isGroupDraggable = isLogical && !!groupActions
+  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive || isGroupDraggable)
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
@@ -321,8 +339,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     const onDragStart = (e: DragEvent) => {
       if (!e.dataTransfer) return
       e.dataTransfer.effectAllowed = 'move'
-      e.dataTransfer.setData('text/x-entity-id', node.id)
-      e.dataTransfer.setData('text/x-entity-name', node.name)
+      if (isGroupDraggable) {
+        e.dataTransfer.setData('text/x-group-id', node.id.replace(/^logical:/, ''))
+        e.dataTransfer.setData('text/x-group-layer', groupActions!.layerId)
+      } else {
+        e.dataTransfer.setData('text/x-entity-id', node.id)
+        e.dataTransfer.setData('text/x-entity-name', node.name)
+      }
       e.dataTransfer.setDragImage(el, 20, 20)
     }
     const onDragEnd = () => {
@@ -335,7 +358,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       el.removeEventListener('dragstart', onDragStart)
       el.removeEventListener('dragend', onDragEnd)
     }
-  }, [node.id, node.name, isDraggable])
+  }, [node.id, node.name, isDraggable, isGroupDraggable])
 
   const { reparent } = useReparentNode()
   const [dropHover, setDropHover] = useState(false)
@@ -373,7 +396,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       onDragOver={(e) => {
         // Accept a node drag (reparent / reorder). The id can't be read during
         // dragover, so we can't exclude self here — drop handlers guard that.
-        if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+        const groupOnGroup = isLogical && !!groupActions && e.dataTransfer.types.includes('text/x-group-id')
+        if (!e.dataTransfer.types.includes('text/x-entity-id') && !groupOnGroup) return
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
@@ -394,6 +418,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (dropIndicator) setDropIndicator(null)
       }}
       onDrop={(e) => {
+        // A GROUP dropped on a group nests inside it (view arrangement).
+        const draggedGroup = e.dataTransfer.getData('text/x-group-id')
+        if (draggedGroup && isLogical && groupActions) {
+          e.preventDefault()
+          e.stopPropagation()
+          setDropHover(false)
+          const target = node.id.replace(/^logical:/, '')
+          const from = e.dataTransfer.getData('text/x-group-layer') || groupActions.layerId
+          if (draggedGroup !== target) groupActions.receive(draggedGroup, from, target)
+          return
+        }
         const draggedId = e.dataTransfer.getData('text/x-entity-id')
         if (!draggedId) return
         e.preventDefault()
@@ -401,6 +436,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         const indicator = dropIndicator
         setDropHover(false)
         setDropIndicator(null)
+        // A drop on a GROUP places the entity in it — view arrangement, never a data move.
+        if (isLogical && groupActions) {
+          groupActions.place(draggedId, node.id.replace(/^logical:/, ''), node.name)
+          return
+        }
         if (indicator && reorderBandsActive) {
           if (draggedId !== node.id) onReorderDrop!(draggedId, node.id, indicator)
           return
@@ -750,6 +790,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
         )}
+        {placement && (
+          <PlacementPath
+            placement={placement}
+            entityName={node.name}
+            onReveal={onRevealPlacement}
+            onReturn={onReturnPlacement ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
+          />
+        )}
+        {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}
+        {isLogical && groupActions && (
+          <GroupRowControls groupId={node.id.replace(/^logical:/, '')} name={node.name} actions={groupActions} />
+        )}
         {/* Display-rule tags — shared chip cluster (premium chips +
             overflow popover) so all canvases render identically. */}
         <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" className="mt-1" />
@@ -959,3 +1011,205 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
 // `formatBreakdown` + `pluralize` moved into ./SearchMatchBadge.tsx
 // alongside the tooltip rendering that consumes them.
+
+/**
+ * The placed end: "Placed · Part of <path> · in <parent's layer>". The tag says this column is a view
+ * arrangement; "Part of" says where the entity really sits in the data (root → parent); a click goes
+ * there. A long path keeps its start and its last two steps; the tooltip carries all of it.
+ */
+function PlacementPath({ placement, entityName, onReveal, onReturn }: {
+  placement: PlacementInfo
+  entityName: string
+  onReveal?: (placement: PlacementInfo) => void
+  onReturn?: () => void
+}) {
+  const names = placement.path.map((a) => a.displayName)
+  const shown = names.length > 3 ? [names[0], '…', ...names.slice(-2)] : names
+  const lead = placement.complete ? '' : '… › '
+  const full = `${lead}${names.join(' › ')}`
+  const parentName = names[names.length - 1] ?? 'its parent'
+  const explain = `Placed in ${placement.placedLayerName} for this view only — the data source is unchanged. `
+    + `In the data, ${entityName} is part of ${full} (shown in ${placement.parentLayerName}). `
+    + 'Click to go to its parent.'
+  return (
+    <span className="mt-1 flex items-center gap-1 min-w-0 max-w-full">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onReveal?.(placement) }}
+        title={explain}
+        aria-label={explain}
+        className="flex items-center gap-1.5 min-w-0 text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+      >
+        <PlacedTag />
+        <span className="text-[10.5px] text-ink-muted truncate">
+          Part of <span className="text-ink font-medium">{lead}{shown.join(' › ')}</span>
+          <span className="text-ink-muted/70"> · in {placement.parentLayerName}</span>
+        </span>
+      </button>
+      {onReturn && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReturn() }}
+          title={`Return to ${parentName} — show it under its parent again (this view only)`}
+          aria-label={`Return ${entityName} to ${parentName}`}
+          className="flex-shrink-0 p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+        >
+          <LucideIcons.Undo2 className="w-3 h-3" aria-hidden />
+        </button>
+      )}
+    </span>
+  )
+}
+
+/** What a group row can do — bound to its layer by the column. */
+export interface GroupActions {
+  layerId: string
+  layerName: string
+  /** Every group in the layer, with its path — the targets the pickers offer. */
+  groups: Array<{ id: string; name: string; path: string }>
+  /** A group's own subtree (it can't move into any of these). */
+  subtreeOf: (groupId: string) => string[]
+  create: (name: string, parentGroupId?: string) => void
+  rename: (groupId: string, name: string) => void
+  remove: (groupId: string, name: string) => void
+  place: (entityId: string, groupId: string, groupName: string) => void
+  /** Move one of THIS layer's groups — within it, or to another layer (`toLayerId`). */
+  move: (groupId: string, newParentId: string | null, toLayerId?: string) => void
+  /** Take a group dropped here from any layer: to the top of this layer, or into one of its groups. */
+  receive: (groupId: string, fromLayerId: string, newParentId: string | null) => void
+  /** The other layers a group can move to, with their groups. */
+  otherLayers: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
+  moveContents: (fromId: string, toId: string) => void
+  ungroup: (groupId: string, name: string) => void
+}
+
+/**
+ * A group row's own controls: add a group inside it, rename it, delete it. Quiet until the row is
+ * hovered or focused; naming happens in place; delete asks once and says what happens to the
+ * entities (they stay in the column, ungrouped — nothing leaves the view, the data is untouched).
+ */
+function GroupRowControls({ groupId, name, actions }: { groupId: string; name: string; actions: GroupActions }) {
+  const [mode, setMode] = useState<'idle' | 'rename' | 'inside' | 'confirm' | 'move' | 'contents'>('idle')
+  const [draft, setDraft] = useState('')
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation()
+  const commit = () => {
+    if (mode === 'rename') actions.rename(groupId, draft)
+    if (mode === 'inside' && draft.trim()) actions.create(draft, groupId)
+    setMode('idle')
+  }
+  const iconBtn = 'p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors'
+  if (mode === 'rename' || mode === 'inside') {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        placeholder={mode === 'inside' ? `Group inside ${name}` : 'Group name'}
+        aria-label={mode === 'inside' ? `Name a new group inside ${name}` : `Rename group ${name}`}
+        onChange={(e) => setDraft(e.target.value)}
+        onClick={stop}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commit(); if (e.key === 'Escape') setMode('idle') }}
+        onBlur={commit}
+        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none placeholder:text-ink-muted"
+      />
+    )
+  }
+  if (mode === 'move' || mode === 'contents') {
+    const own = new Set(actions.subtreeOf(groupId))
+    const targets = actions.groups.filter((g) => (mode === 'move' ? !own.has(g.id) : g.id !== groupId && !own.has(g.id)))
+    // A choice is where the group goes: a layer, and a group in it (none = the layer's top level).
+    const dest = (layerId: string, parent: string | null) => JSON.stringify([layerId, parent])
+    return (
+      <select
+        autoFocus
+        defaultValue=""
+        aria-label={mode === 'move' ? `Move group ${name} into` : `Move everything in ${name} into`}
+        onClick={stop}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setMode('idle') }}
+        onBlur={() => setMode('idle')}
+        onChange={(e) => {
+          const v = e.target.value
+          if (mode === 'move' && v) {
+            const [layerId, parent] = JSON.parse(v) as [string, string | null]
+            actions.move(groupId, parent, layerId)
+          } else if (v) actions.moveContents(groupId, v)
+          setMode('idle')
+        }}
+        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
+      >
+        <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
+        {mode === 'move' ? (
+          <>
+            <optgroup label={`In ${actions.layerName}`}>
+              <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
+              {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
+            </optgroup>
+            {actions.otherLayers.map((l) => (
+              <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
+                {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+              </optgroup>
+            ))}
+          </>
+        ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
+      </select>
+    )
+  }
+  if (mode === 'confirm') {
+    return (
+      <span className="mt-1 flex items-center gap-1.5 text-[10.5px] text-ink-muted" onClick={stop}>
+        Delete “{name}”? Its entities stay in this column.
+        <button type="button" onClick={(e) => { stop(e); actions.remove(groupId, name); setMode('idle') }}
+          className="px-1.5 py-px rounded-md bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 font-semibold">Delete</button>
+        <button type="button" onClick={(e) => { stop(e); setMode('idle') }}
+          className="px-1.5 py-px rounded-md hover:bg-white/10">Keep</button>
+      </span>
+    )
+  }
+  return (
+    <span className="mt-1 flex items-center gap-0.5 opacity-0 group-hover/item:opacity-100 focus-within:opacity-100 transition-opacity">
+      <button type="button" className={iconBtn} title={`New group inside ${name}`} aria-label={`New group inside ${name}`}
+        onClick={(e) => { stop(e); setDraft(''); setMode('inside') }}>
+        <LucideIcons.FolderPlus className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Rename group ${name}`} aria-label={`Rename group ${name}`}
+        onClick={(e) => { stop(e); setDraft(name); setMode('rename') }}>
+        <LucideIcons.Pencil className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Move group ${name} into another group or layer`} aria-label={`Move group ${name}`}
+        onClick={(e) => { stop(e); setMode('move') }}>
+        <LucideIcons.FolderInput className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Move everything in ${name} into another group`} aria-label={`Move the contents of ${name}`}
+        onClick={(e) => { stop(e); setMode('contents') }}>
+        <LucideIcons.ArrowRightLeft className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Ungroup ${name} — its contents move up a level`} aria-label={`Ungroup ${name}`}
+        onClick={(e) => { stop(e); actions.ungroup(groupId, name) }}>
+        <LucideIcons.Ungroup className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Delete group ${name}`} aria-label={`Delete group ${name}`}
+        onClick={(e) => { stop(e); setMode('confirm') }}>
+        <LucideIcons.Trash2 className="w-3 h-3" aria-hidden />
+      </button>
+      <span className="text-[10px] text-ink-muted ml-1 truncate">Drop entities or groups here</span>
+    </span>
+  )
+}
+
+/** The parent's end: which of its children this view shows in other columns. */
+function PlacedOutNote({ placedOut, parentName }: { placedOut: PlacedOut; parentName: string }) {
+  const n = placedOut.children.length
+  const where = placedOut.layerNames.join(', ')
+  const explain = `${placedOut.children.join(', ')} ${n === 1 ? 'is' : 'are'} placed in ${where} for this view only. `
+    + `In the data, ${n === 1 ? 'it is' : 'they are'} still part of ${parentName}.`
+  return (
+    <span
+      title={explain}
+      aria-label={explain}
+      className="mt-1 flex items-center gap-1 min-w-0 text-[10.5px] text-violet-600/80 dark:text-violet-300/80 truncate"
+    >
+      <LucideIcons.LayoutGrid className="w-2.5 h-2.5 flex-shrink-0" aria-hidden />
+      {n} {n === 1 ? 'child' : 'children'} placed in {where}
+    </span>
+  )
+}

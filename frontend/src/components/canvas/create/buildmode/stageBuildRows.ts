@@ -182,7 +182,7 @@ export interface StageBuildRowsOptions {
    *  matching layer placement — both the canonical view-config entry and the
    *  optimistic session assignment (`assignEntityToLayer`). Receives the full
    *  row, not just its id. */
-  onRowStaged?: (row: BuildRow, urn: string) => void
+  onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void
 }
 
 export function useStageBuildRows(): {
@@ -226,7 +226,7 @@ export function useStageBuildRows(): {
 
       for (const row of rows) {
         const urn = plan.rowUrn.get(row.id)
-        if (urn) opts.onRowStaged?.(row, urn)
+        if (urn) opts.onRowStaged?.(row, urn, row.parentId != null || opts.rootParentUrn != null)
       }
 
       return plan.rowUrn

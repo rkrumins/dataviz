@@ -74,3 +74,34 @@ def test_import_routes_get_the_larger_cap():
     assert mw._cap_for("/api/v1/admin/providers") == 1_000
     assert mw._cap_for("/api/v1/ws_1/graph/save") == 100_000
     assert mw._cap_for("/api/v1/versioning/graphs/g1/commit") == 100_000
+    # The versioning router is mounted per workspace, so the real bulk
+    # import path carries a workspace segment the prefix has to see past.
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports") == 100_000
+    assert mw._cap_for("/api/v1/views/transfer/packages/inspect") == 100_000
+    # A view file is up to 64 MB, and its designs travel on to reconcile and import.
+    for route in ("inspect", "reconcile", "import"):
+        assert mw._cap_for(f"/api/v1/views/transfer/{route}") == 100_000
+    assert mw._cap_for("/api/v1/views/transfer/export") == 1_000, "a list of view ids is small"
+
+
+@pytest.mark.parametrize("path", [
+    "/api/v1/ws_1/versioning/graphs/g1/imports",
+    "/api/v1/views/transfer/inspect",
+    "/api/v1/views/transfer/packages/inspect",
+])
+async def test_upload_routes_take_up_to_100_mib(csrf_client: AsyncClient, path):
+    """The installed stack lets a 100 MiB upload through to the route and
+    still refuses a byte more. Sent without a CSRF token, so what answers
+    a body under the cap is the CSRF check behind the size check, before
+    anything reads the body or opens a database."""
+    headers = {"Content-Type": "application/octet-stream"}
+    cap = 100 * 1024 * 1024
+
+    under = await csrf_client.post(
+        path, content=b"x", headers={**headers, "Content-Length": str(cap)},
+    )
+    assert under.status_code != 413, under.text
+    over = await csrf_client.post(
+        path, content=b"x", headers={**headers, "Content-Length": str(cap + 1)},
+    )
+    assert over.status_code == 413, over.text

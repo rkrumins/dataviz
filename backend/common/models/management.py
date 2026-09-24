@@ -1112,6 +1112,23 @@ class ViewUpdateRequest(BaseModel):
         populate_by_name = True
 
 
+class ViewCheckpointRequest(BaseModel):
+    """Ask a layout write to record the resulting design as a version.
+
+    The wizard sends this on the LAST write of a save, so one save is one version and the
+    version holds exactly what was saved. Only the two sources a client legitimately causes
+    are accepted; import, restore and the rest are recorded by the server itself.
+    """
+    source: str
+    message: Optional[str] = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> "ViewCheckpointRequest":
+        if self.source not in ("create", "wizard"):
+            raise ValueError("checkpoint.source must be 'create' or 'wizard'")
+        return self
+
+
 class ViewLayoutUpdateRequest(BaseModel):
     """Body for ``PUT /views/{id}/layout`` — a layout-only update (layer
     definitions + the flattened urn->assignment map), decoupled from the
@@ -1124,6 +1141,9 @@ class ViewLayoutUpdateRequest(BaseModel):
     # Accepted from older clients and ignored: a view's display rules are
     # written through its library (PUT /views/{id}/library/rules/{ruleId}).
     display_rules: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRules")
+    # Record the saved design as a version. Ignored on a draft (``?branchId``) write: a draft
+    # is not the view yet, and its design is versioned when the draft is promoted.
+    checkpoint: Optional[ViewCheckpointRequest] = None
 
     class Config:
         populate_by_name = True
@@ -1296,6 +1316,10 @@ class ViewResponse(BaseModel):
     publish_request: Optional[ViewPublishRequest] = Field(None, alias="publishRequest")
     # Reach, in people — single-view read only.
     audience: Optional[ViewAudience] = None
+    # The identity this view carries between environments (see ViewORM.portable_id).
+    portable_id: Optional[str] = Field(None, alias="portableId")
+    # Set while the view exists only in a draft, waiting to go live (see ViewORM.draft_branch_id).
+    draft_branch_id: Optional[str] = Field(None, alias="draftBranchId")
 
     class Config:
         populate_by_name = True
