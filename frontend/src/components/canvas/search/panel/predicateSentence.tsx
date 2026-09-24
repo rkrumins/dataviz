@@ -289,7 +289,8 @@ function leafSentence(p: Predicate): ReactNode {
                     <Value>{p.key}</Value> {operatorLabel(op, type)}
                     {arity === 'duration' && <> <Value quoted={false}>{describeDuration(p.value) ?? '…'}</Value></>}
                     {arity !== 'none' && arity !== 'duration' && (
-                        <>{' '}<PropertyValue value={p.value} between={op === 'between'} /></>
+                        <>{' '}<PropertyValue value={p.value} between={op === 'between'}
+                                              bare={BARE_TYPES.has(type) && !TEXT_OPS.has(op)} /></>
                     )}
                     {p.caseSensitive && arity !== 'none' && <span className="text-ink-muted"> (match case)</span>}
                     {p.includeMissing && isNegative(op) && <span className="text-ink-muted"> (or not set)</span>}
@@ -324,16 +325,28 @@ function leafSentence(p: Predicate): ReactNode {
 }
 
 
+/** Compared as these, a value reads bare — unless the operator reads its
+ *  text ("contains 74" means the digits). */
+const BARE_TYPES = new Set(['number', 'boolean'])
+const TEXT_OPS = new Set(['contains', 'notContains', 'startsWith', 'endsWith'])
+
+
 /** A property value as the query will compare it: text quoted, numbers and
  *  booleans bare, a list as its items, a range as both ends, and an empty
  *  value as a gap waiting to be filled — never as `""`, which read as "equals
  *  the empty string". */
-function PropertyValue({ value, between }: { value: unknown; between?: boolean }) {
+function PropertyValue({ value, between, bare }: {
+    value: unknown
+    between?: boolean
+    /** A number or true/false: bare even when it travels as text (a 64-bit
+     *  integer does, to keep its digits). */
+    bare?: boolean
+}) {
     const one = (v: unknown, key?: number) => {
         if (v === null || v === undefined || v === '') {
             return <span key={key} className="text-ink-muted">…</span>
         }
-        if (typeof v === 'string') return <Value key={key}>{v}</Value>
+        if (typeof v === 'string') return <Value key={key} quoted={!bare}>{v}</Value>
         return <Value key={key} quoted={false}>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</Value>
     }
     if (!Array.isArray(value)) return one(value)

@@ -72,7 +72,7 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
-import type { LayerOption } from './layerOptions'
+import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
@@ -126,10 +126,16 @@ export const QueryCard: FC<QueryCardProps> = ({
     const clearSearchResults = useSearchStore((s) => s.clearSearchResults)
     const discovery = useDiscovery(viewId)
     const knownEntityTypes = useEntityTypeNames()
-    // Layers are a VIEW concept, not an entity property — source them
-    // from the active view's reference-layout config first, then fall
-    // back to any 'layer' / 'layerAssignment' values discovered from
-    // entity property samples (for views without an explicit layer set).
+    // What the omnibox and the first-run examples offer: the types this
+    // view's data holds, most common first — every "Everything of type …"
+    // returns something. The ontology's full list until discovery answers.
+    const presentEntityTypes = useMemo(
+        () => entityTypesInView(discovery.discovery?.labels, knownEntityTypes),
+        [discovery.discovery, knownEntityTypes],
+    )
+    // Layers are a VIEW concept, not an entity property — the
+    // ``layerAssignment`` values entities carry, named from the view's
+    // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
 
     const [mode, setMode] = useState<ViewMode>('visual')
@@ -330,7 +336,7 @@ export const QueryCard: FC<QueryCardProps> = ({
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
             onBrowseAll={onOpenAdvanced}
-            entityTypes={knownEntityTypes}
+            entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
             propertyKeys={discovery.allKeys}
             valueSamples={valueSamples}
@@ -434,7 +440,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                             omnibox={omnibox}
                             onSeed={(p) => commitDraft(p)}
                             onUseCodeMode={() => setMode('code')}
-                            discoveredEntityTypes={knownEntityTypes}
+                            discoveredEntityTypes={presentEntityTypes}
                             discoveredTags={discovery.tagValues}
                             discoveredLayers={discoveredLayers}
                             discoveryLoading={discovery.isInitialLoading}
@@ -1538,9 +1544,9 @@ function useEntityTypeNames(): string[] {
  * Resolve layer options for the active view.
  *
  * Strategy:
- *   1. Sample DB-stored ``layer`` / ``layerAssignment`` property values
- *      (these are exactly what the BE will compare against). For each,
- *      enrich the label from the view config when possible.
+ *   1. Sample DB-stored ``layerAssignment`` values (exactly what the BE
+ *      compares against). For each, enrich the label from the view
+ *      config when possible.
  *   2. If discovery returns nothing, fall back to the view's reference-
  *      layout config — using ``layer.id`` as value (typical assignment
  *      writer) and ``layer.name`` as label.
@@ -1553,30 +1559,8 @@ function useViewLayerOptions(
     getValueSamples: (key: string) => unknown[],
 ): LayerOption[] {
     const activeView = useActiveView()
-    return useMemo<LayerOption[]>(() => {
-        const viewLayers = activeView?.layout?.referenceLayout?.layers ?? []
-        const labelOf = new Map<string, string>()
-        for (const l of viewLayers) {
-            if (l.id) labelOf.set(l.id, l.name || l.id)
-            if (l.name) labelOf.set(l.name, l.name)
-        }
-
-        const discovered = new Set<string>()
-        for (const key of ['layer', 'layerAssignment']) {
-            for (const v of getValueSamples(key)) {
-                if (typeof v === 'string' && v) discovered.add(v)
-            }
-        }
-
-        if (discovered.size > 0) {
-            return Array.from(discovered)
-                .sort()
-                .map((value) => ({ value, label: labelOf.get(value) ?? value }))
-        }
-
-        return viewLayers
-            .filter((l) => !!l.id)
-            .map((l) => ({ value: l.id, label: l.name || l.id }))
-            .sort((a, b) => a.label.localeCompare(b.label))
-    }, [activeView, getValueSamples])
+    return useMemo<LayerOption[]>(
+        () => layerOptions(activeView?.layout?.referenceLayout?.layers ?? [], getValueSamples),
+        [activeView, getValueSamples],
+    )
 }

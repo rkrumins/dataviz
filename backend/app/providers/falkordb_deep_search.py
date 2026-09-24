@@ -3719,11 +3719,23 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
             chain = []
         return h.node.urn, chain
 
-    # 1. Parallel-fetch every hit's ancestor chain.
-    chain_results = await asyncio.gather(
-        *(_safe_chain(h) for h in hits), return_exceptions=False,
-    )
-    chains: Dict[str, List[str]] = dict(chain_results)
+    # 1. Every hit's ancestor chain: in one pass where the provider reads
+    # them in bulk (one pipelined cache read, one Cypher for the misses) —
+    # a chain per hit is a query per hit on a cold cache, and a page holds
+    # up to a thousand hits.
+    bulk = getattr(provider, "get_ancestor_chains", None)
+    chains: Dict[str, List[str]] = {}
+    if bulk is not None:
+        try:
+            chains = await bulk([h.node.urn for h in hits])
+        except Exception:
+            logger.warning("deep_search: bulk ancestor chains failed; "
+                           "ancestor_path will be empty on this page")
+    else:
+        chain_results = await asyncio.gather(
+            *(_safe_chain(h) for h in hits), return_exceptions=False,
+        )
+        chains = dict(chain_results)
     needed_urns: set = set()
     for urns in chains.values():
         needed_urns.update(urns)

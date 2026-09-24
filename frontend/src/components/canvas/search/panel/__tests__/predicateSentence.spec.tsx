@@ -150,6 +150,18 @@ describe('predicateSentence — property values read as what they are', () => {
         expect(rendered(prop('eq', true))).toContain('"gvHash" is true')
     })
 
+    it('reads a 64-bit integer as the number it is, though it travels as text', () => {
+        const typed = (op: string, value: unknown, valueType: string): Predicate =>
+            ({ kind: 'property', key: 'gvHash', op, value, valueType } as Predicate)
+        expect(rendered(typed('eq', '-3746471915534727923', 'number')))
+            .toContain('"gvHash" equals -3746471915534727923')
+        expect(rendered(typed('between', ['1', '9007199254740993'], 'number')))
+            .toContain('is between 1 and 9007199254740993')
+        expect(rendered(typed('eq', 'true', 'boolean'))).toContain('"gvHash" is true')
+        // A text operator on a number reads its digits: still quoted.
+        expect(rendered(typed('contains', '74', 'number'))).toContain('"gvHash" contains "74"')
+    })
+
     it('says each operator the way its type reads', () => {
         const typed = (op: string, value: unknown, valueType: string, extra = {}): Predicate =>
             ({ kind: 'property', key: 'updated', op, value, valueType, ...extra } as Predicate)

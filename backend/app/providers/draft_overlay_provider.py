@@ -525,6 +525,14 @@ class DraftOverlayProvider:
     #: service layer.
     is_overlay = True
 
+    # The ontology's edge classification, as the base reads it (the scope
+    # diagnostics report it).
+    def _get_containment_edge_types(self):
+        return self._base._get_containment_edge_types()
+
+    def _get_lineage_edge_types(self):
+        return self._base._get_lineage_edge_types()
+
     async def deep_search(self, query, *, deadline_ms=None):
         """Search the base graph — the draft's own edits are NOT included.
 

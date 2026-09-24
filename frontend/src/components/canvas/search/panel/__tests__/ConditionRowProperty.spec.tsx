@@ -160,6 +160,8 @@ describe('property row types', () => {
         render(<Harness initial={prop({})} samples={['2024-05-01']} onChange={onChange} />)
         fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2024-05-02' } })
         expect(last(onChange)).toMatchObject({ value: '2024-05-02', valueType: 'date' })
+        // A year past four digits is no date anything stores.
+        expect(screen.getByLabelText('Date')).toHaveAttribute('max', '9999-12-31')
     })
 
     it('"within the last" takes an amount and a unit', async () => {

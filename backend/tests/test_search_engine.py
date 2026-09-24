@@ -597,6 +597,38 @@ class TestSessions:
         assert page.progress.scanned == page.progress.total == 7
         assert not page.truncated and not page.deadline_exceeded
 
+    async def test_a_complete_page_is_complete_even_when_its_paths_run_late(self, scan,
+                                                                           monkeypatch):
+        """Where each hit sits decorates the page; running out of time for it
+        leaves the paths out and says so — never "partial results" on an
+        answer whose every match was counted and listed."""
+        monkeypatch.setattr(engine_mod, "_PATHS_FLOOR_S", 0.05)
+        scan({"A": _rows("a", 3)})
+        provider = _Provider()
+
+        async def slow_chains(urns):
+            await asyncio.sleep(0.5)
+            return {u: ["urn:parent"] for u in urns}
+
+        provider.get_ancestor_chains = slow_chains
+        page = await _search(provider, wait_ms=0, includeAncestorPath=True)
+        assert page.status == "complete" and page.total_count == 3
+        assert not page.deadline_exceeded and not page.truncated
+        assert all(h.ancestor_path == [] for h in page.hits)
+        assert any("could not be read in time" in n for n in page.scope_diagnostics.notes)
+
+    async def test_a_page_learns_where_its_hits_sit(self, scan):
+        scan({"A": _rows("a", 2)})
+        provider = _Provider()
+
+        async def chains(urns):
+            return {u: ["urn:parent"] for u in urns}
+
+        provider.get_ancestor_chains = chains
+        page = await _search(provider, wait_ms=0, includeAncestorPath=True)
+        assert [[a.urn for a in h.ancestor_path] for h in page.hits] == [["urn:parent"]] * 2
+        assert not page.deadline_exceeded and page.scope_diagnostics is None
+
     async def test_pages_follow_the_order_to_the_end(self, scan):
         scan({"A": _rows("a", 12), "B": _rows("b", 9)})
         provider, seen, cursor = _Provider(), [], None

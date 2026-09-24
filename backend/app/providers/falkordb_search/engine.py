@@ -100,6 +100,10 @@ ENGINE_VERSION = "3"
 #: giving them up (they are retried by the next request).
 _GRACE_S = 3.0
 
+#: The least time a page's hits get to learn where they sit (their ancestor
+#: paths) — a progressive wait may have been spent on the scan by then.
+_PATHS_FLOOR_S = 1.5
+
 #: Facets computed in this process, by session, while they run.
 _FACET_TASKS: Dict[str, "asyncio.Task[None]"] = {}
 
@@ -691,13 +695,20 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
     rows = session.rows[pos:pos + options.page_size]
     remaining = max(0.5, deadline - time.monotonic())
     hits = await _hydrate_hits(provider, query, [r[-1] for r in rows], timeout_s=remaining)
-    deadline_exceeded = False
+    path_notes: List[str] = []
     if hits and options.include_ancestor_path:
+        # Where each hit sits finishes the page, whatever the wait spent on
+        # the scan. Running late leaves the paths out — the hits and the
+        # count are no less complete for it.
         try:
-            await asyncio.wait_for(_hydrate_ancestors(provider, hits),
-                                   timeout=max(0.2, deadline - time.monotonic()))
+            await asyncio.wait_for(
+                _hydrate_ancestors(provider, hits),
+                timeout=max(_PATHS_FLOOR_S, deadline - time.monotonic()))
         except asyncio.TimeoutError:
-            deadline_exceeded = True
+            for hit in hits:
+                hit.ancestor_path = []
+            path_notes.append("Where each match sits could not be read in time; "
+                              "run the search again to see them grouped.")
 
     complete = session.status == COMPLETE
     first_page = session.after is None
@@ -722,7 +733,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
             })
 
     running = not complete
-    notes = list(session.notes) + facet_notes
+    notes = list(session.notes) + facet_notes + path_notes
     page = SearchResultPage(
         hits=hits,
         aggregates=facet_models if wants_facets else None,
@@ -730,7 +741,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
         truncated=running and not progressive,
         candidate_count=session.count if first_page else (total or len(session.rows)),
         total_count=total if not running else None,
-        deadline_exceeded=deadline_exceeded or (running and not progressive),
+        deadline_exceeded=running and not progressive,
         elapsed_ms=int((time.monotonic() - started) * 1000),
         cache_hit=cache_hit,
         session_id=session.sid,

@@ -840,8 +840,10 @@ class AdvancedSearchService:
             )
 
         lineage: list[str] = []
+        lineage_known = False
         try:
             lineage = sorted(provider._get_lineage_edge_types())
+            lineage_known = True
         except ProviderConfigurationError:
             notes.append(
                 "Ontology was not resolved for this provider; lineage "
@@ -853,7 +855,9 @@ class AdvancedSearchService:
             # Non-FalkorDB provider — diagnostic info just unavailable.
             pass
 
-        if not lineage and "edge classification is unknown" not in (notes[-1] if notes else ""):
+        # Only a provider that answered "none" has no lineage edge types —
+        # one that couldn't say is not reported as having none.
+        if lineage_known and not lineage:
             notes.append(
                 "No edge types are flagged is_lineage in the active "
                 "ontology. Lineage-aware predicates (IsOrphan, "

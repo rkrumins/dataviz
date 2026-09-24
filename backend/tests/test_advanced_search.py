@@ -2722,6 +2722,42 @@ class TestHydrateAncestorsBatched:
         assert h5.ancestor_path == []
 
     @pytest.mark.asyncio
+    async def test_reads_every_chain_in_one_bulk_call_when_the_provider_can(self):
+        """A chain per hit is a query per hit on a cold cache; a provider
+        that reads chains in bulk is asked once for the whole page."""
+        from backend.app.providers.falkordb_deep_search import (
+            _hydrate_ancestors,
+        )
+        from backend.common.models.search import SearchHit
+
+        asked = []
+
+        class _Anc:
+            def __init__(self, urn):
+                self.urn, self.display_name, self.entity_type = urn, urn.upper(), "domain"
+
+        class _BulkProvider:
+            async def get_ancestor_chains(self, urns):
+                asked.append(list(urns))
+                return {"urn:hit:1": ["urn:anc:b", "urn:anc:a"], "urn:hit:2": []}
+
+            async def _get_ancestor_chain(self, urn):  # pragma: no cover
+                raise AssertionError("a chain per hit when the provider reads them in bulk")
+
+            async def get_nodes_batch(self, urns):
+                return [_Anc(u) for u in urns]
+
+        hits = [SearchHit(node={"urn": u, "entityType": "dataset", "displayName": u},
+                          score=1.0, matched_predicates=[], highlights=[], ancestor_path=[])
+                for u in ("urn:hit:1", "urn:hit:2")]
+
+        await _hydrate_ancestors(_BulkProvider(), hits)
+
+        assert asked == [["urn:hit:1", "urn:hit:2"]]
+        assert [a.urn for a in hits[0].ancestor_path] == ["urn:anc:a", "urn:anc:b"]
+        assert hits[1].ancestor_path == []
+
+    @pytest.mark.asyncio
     async def test_no_op_on_empty_hit_list(self):
         from backend.app.providers.falkordb_deep_search import (
             _hydrate_ancestors,
@@ -5365,3 +5401,66 @@ class TestRankingIsTotallyOrdered:
 
         assert set(page1).isdisjoint(set(page2))
         assert sorted(page1 + page2) == sorted(urns)
+
+
+# ---------------------------------------------------------------------------
+# Scope diagnostics: the ontology's edge classification, through wrappers
+# ---------------------------------------------------------------------------
+
+class TestScopeDiagnosticsEdgeTypes:
+    """The diagnostics report the lineage and containment edge types the
+    search compiled with — read through whatever wraps the provider (the
+    versioned-write recorder, a draft's overlay) — and say there are none
+    only when the provider says so, never when it could not be asked."""
+
+    class _Inner:
+        def __init__(self, lineage, containment=("CONTAINS",)):
+            self.lineage, self.containment = lineage, containment
+
+        def _get_lineage_edge_types(self):
+            return set(self.lineage)
+
+        def _get_containment_edge_types(self):
+            return set(self.containment)
+
+    @staticmethod
+    def _diagnostics(provider):
+        from types import SimpleNamespace
+
+        from backend.app.services.advanced_search_service import AdvancedSearchService
+        from backend.app.services.view_scope import EffectiveViewScope
+
+        eff = EffectiveViewScope(
+            view_id="v", workspace_id="ws", data_source_id=None, canvas_kind="graph",
+            root_urns=("urn:root",), entity_type_allow_list=frozenset(),
+            layer_allow_list=frozenset(), max_depth=12, scope_hash="h")
+        svc = AdvancedSearchService(SimpleNamespace(provider=provider), session=None,
+                                    workspace_id="ws")
+        return svc._build_scope_diagnostics(eff)
+
+    def test_the_versioned_write_recorder_reports_what_it_wraps(self):
+        from backend.app.providers.versioned_write_provider import VersionedWriteProvider
+
+        wrapped = VersionedWriteProvider(self._Inner(["TRANSFORMS"]), workspace_id="ws",
+                                         data_source_id="ds", actor="a", svc=object())
+        diag = self._diagnostics(wrapped)
+        assert diag.lineage_edge_types == ["TRANSFORMS"]
+        assert diag.containment_edge_types == ["CONTAINS"]
+        assert not any("is_lineage" in n for n in diag.notes)
+
+    def test_a_drafts_overlay_reports_its_base(self):
+        from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+
+        overlay = DraftOverlayProvider(self._Inner(["FLOWS"]), svc=object(), graph_id="g",
+                                       branch_id="b")
+        diag = self._diagnostics(overlay)
+        assert diag.lineage_edge_types == ["FLOWS"]
+        assert not any("is_lineage" in n for n in diag.notes)
+
+    def test_none_is_said_only_when_the_provider_says_none(self):
+        assert any("is_lineage" in n for n in self._diagnostics(self._Inner([])).notes)
+
+        class _Unaskable:
+            pass
+
+        assert not any("is_lineage" in n for n in self._diagnostics(_Unaskable()).notes)

@@ -228,6 +228,9 @@ function DateInput({
         <div className="flex items-center gap-2">
             <input
                 type={withTime ? 'datetime-local' : 'date'}
+                // Four-digit years: past 9999 is no date anything stores, and
+                // the bound keeps a mistyped year from running as one.
+                max={withTime ? '9999-12-31T23:59' : '9999-12-31'}
                 value={withTime ? localInputValue(text) : text}
                 onChange={(e) => onChange(withTime ? utcFromLocal(e.target.value) : e.target.value)}
                 onKeyDown={onEnter}
