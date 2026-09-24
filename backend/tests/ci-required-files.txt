@@ -88,6 +88,7 @@ tests/test_reconcile_sweeper.py
 tests/test_run_step_ledger.py
 tests/test_search_catalog.py
 tests/test_search_engine.py
+tests/test_search_export.py
 tests/test_search_rules.py
 tests/test_search_schema_endpoint.py
 tests/test_search_semantics.py

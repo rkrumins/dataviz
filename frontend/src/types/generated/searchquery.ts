@@ -442,9 +442,54 @@ export type Notes2 = string[]
 export type Resolvedscope = {
     [k: string]: unknown
 } | null
+/**
+ * Properties to add to each row, after its urn, name, type and qualified name — ``description`` and ``tags`` included.
+ */
+export type Columns = string[]
+export type Format = 'csv' | 'ndjson'
+export type Predicate1 =
+    | TextPredicate
+    | PropertyPredicate
+    | TagPredicate
+    | HasPropertyPredicate
+    | DescendantOfPredicate
+    | WithinHopsPredicate
+    | EntityTypePredicate
+    | LayerPredicate
+    | DegreePredicate
+    | IsOrphanPredicate
+    | IsLeafPredicate
+    | IsRootPredicate
+    | HasIncomingPredicate
+    | HasOutgoingPredicate
+    | PathPredicate
+    | MatchAllPredicate
+    | GroupPredicate
+export type Sessionid4 = string | null
+export type Waitms2 = number
+/**
+ * Every column, in order.
+ */
+export type Columns1 = string[]
+export type Dataversion2 = string | null
+/**
+ * Once complete: ``GET /search/exports/{sessionId}/download?token=…`` for an hour, for whoever ran the export.
+ */
+export type Downloadtoken = string | null
+/**
+ * What the download is saved as.
+ */
+export type Filename = string | null
+export type Format1 = 'csv' | 'ndjson'
+/**
+ * Rows written so far — every match, once complete.
+ */
+export type Rows = number
+export type Sessionid5 = string
+export type Status3 = 'running' | 'complete'
 export type Items1 = SearchRuleItem[]
 export type Urns3 = string[]
-export type Dataversion2 = string | null
+export type Dataversion3 = string | null
 export type Elapsedms2 = number
 export type $Schemaversion = '1'
 /**
@@ -491,7 +536,7 @@ export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
 /**
  * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
  */
-export type Sessionid4 = string | null
+export type Sessionid6 = string | null
 /**
  * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
  */
@@ -505,8 +550,8 @@ export type Sortproperty = string | null
 /**
  * Progressive mode (uncapped engine). Answer after this long with what the scan has found so far — ``status: 'running'``, provisional hits in their final order, a ``progress`` block — and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.
  */
-export type Waitms2 = number | null
-export type Predicate1 =
+export type Waitms3 = number | null
+export type Predicate2 =
     | TextPredicate
     | PropertyPredicate
     | TagPredicate
@@ -582,7 +627,7 @@ export type Cursor1 = string | null
 /**
  * The graph data the session read. Opaque.
  */
-export type Dataversion3 = string | null
+export type Dataversion4 = string | null
 export type Deadlineexceeded = boolean
 export type Elapsedms3 = number
 /**
@@ -612,7 +657,7 @@ export type Notes3 = string[]
 /**
  * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
  */
-export type Sessionid5 = string | null
+export type Sessionid7 = string | null
 /**
  * The graph changed after this session started; run the search again for an answer on the current data.
  */
@@ -620,7 +665,7 @@ export type Stale1 = boolean
 /**
  * ``running``: the scan is not finished — the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.
  */
-export type Status3 = ('running' | 'complete') | null
+export type Status4 = ('running' | 'complete') | null
 /**
  * Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).
  */
@@ -665,6 +710,8 @@ export interface SearchApiContract {
     searchCountsResult?: SearchCountsResult | null
     searchDiscoverResult?: SearchDiscoverResult | null
     searchExplainResult?: SearchExplainResult | null
+    searchExportRequest?: SearchExportRequest | null
+    searchExportResult?: SearchExportResult | null
     searchMembershipRequest?: SearchMembershipRequest | null
     searchMembershipResult?: SearchMembershipResult | null
     searchQuery?: SearchQuery | null
@@ -1211,6 +1258,32 @@ export interface Params {
     [k: string]: unknown
 }
 /**
+ * ``POST /search/exports``: every entity in the view that matches
+ * ``predicate``, written to a file — exactly, however many. A large export
+ * takes more than one request: send the same request again with the
+ * returned ``sessionId`` until ``status`` is ``complete``, then download
+ * it from ``GET /search/exports/{sessionId}/download``.
+ */
+export interface SearchExportRequest {
+    columns?: Columns
+    format?: Format
+    predicate: Predicate1
+    scope: SearchScope
+    sessionId?: Sessionid4
+    waitMs?: Waitms2
+}
+export interface SearchExportResult {
+    columns?: Columns1
+    dataVersion?: Dataversion2
+    downloadToken?: Downloadtoken
+    filename?: Filename
+    format?: Format1
+    progress?: SearchProgress | null
+    rows?: Rows
+    sessionId: Sessionid5
+    status: Status3
+}
+/**
  * ``POST /search/membership``: which of these entities — the ones on
  * screen — match which rules. Answers only for entities inside the view's
  * scope; one outside it never matches, whatever it holds.
@@ -1221,7 +1294,7 @@ export interface SearchMembershipRequest {
     urns: Urns3
 }
 export interface SearchMembershipResult {
-    dataVersion?: Dataversion2
+    dataVersion?: Dataversion3
     elapsedMs?: Elapsedms2
     errors?: Errors
     matches?: Matches
@@ -1251,7 +1324,7 @@ export interface Matches {
 export interface SearchQuery {
     $schemaVersion?: $Schemaversion
     options?: SearchOptions
-    predicate: Predicate1
+    predicate: Predicate2
     scope: SearchScope
 }
 /**
@@ -1270,12 +1343,12 @@ export interface SearchOptions {
     includeAncestorPath?: Includeancestorpath
     pageSize?: Pagesize
     results?: Results
-    sessionId?: Sessionid4
+    sessionId?: Sessionid6
     softDeadlineMs?: Softdeadlinems
     sort?: Sort
     sortDir?: Sortdir
     sortProperty?: Sortproperty
-    waitMs?: Waitms2
+    waitMs?: Waitms3
 }
 /**
  * Roll matches up to ancestors (or facets) for orient-before-drill UX.
@@ -1308,7 +1381,7 @@ export interface SearchResultPage {
     candidateCount?: Candidatecount
     countStatus?: Countstatus
     cursor?: Cursor1
-    dataVersion?: Dataversion3
+    dataVersion?: Dataversion4
     deadlineExceeded?: Deadlineexceeded
     elapsedMs: Elapsedms3
     hits?: Hits
@@ -1319,9 +1392,9 @@ export interface SearchResultPage {
      * Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain.
      */
     scopeDiagnostics?: ScopeDiagnostics | null
-    sessionId?: Sessionid5
+    sessionId?: Sessionid7
     stale?: Stale1
-    status?: Status3
+    status?: Status4
     totalCount?: Totalcount
     truncated?: Truncated
 }

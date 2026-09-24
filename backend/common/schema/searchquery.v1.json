@@ -2044,6 +2044,230 @@
       "title": "SearchExplainResult",
       "type": "object"
     },
+    "SearchExportRequest": {
+      "description": "``POST /search/exports``: every entity in the view that matches\n``predicate``, written to a file \u2014 exactly, however many. A large export\ntakes more than one request: send the same request again with the\nreturned ``sessionId`` until ``status`` is ``complete``, then download\nit from ``GET /search/exports/{sessionId}/download``.",
+      "properties": {
+        "columns": {
+          "description": "Properties to add to each row, after its urn, name, type and qualified name \u2014 ``description`` and ``tags`` included.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Columns",
+          "type": "array"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "ndjson"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/MatchAllPredicate",
+              "degree": "#/$defs/DegreePredicate",
+              "descendantOf": "#/$defs/DescendantOfPredicate",
+              "entityType": "#/$defs/EntityTypePredicate",
+              "group": "#/$defs/GroupPredicate",
+              "hasIncoming": "#/$defs/HasIncomingPredicate",
+              "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+              "hasProperty": "#/$defs/HasPropertyPredicate",
+              "isLeaf": "#/$defs/IsLeafPredicate",
+              "isOrphan": "#/$defs/IsOrphanPredicate",
+              "isRoot": "#/$defs/IsRootPredicate",
+              "layer": "#/$defs/LayerPredicate",
+              "path": "#/$defs/PathPredicate",
+              "property": "#/$defs/PropertyPredicate",
+              "tag": "#/$defs/TagPredicate",
+              "text": "#/$defs/TextPredicate",
+              "withinHops": "#/$defs/WithinHopsPredicate"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TextPredicate"
+            },
+            {
+              "$ref": "#/$defs/PropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/TagPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasPropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/DescendantOfPredicate"
+            },
+            {
+              "$ref": "#/$defs/WithinHopsPredicate"
+            },
+            {
+              "$ref": "#/$defs/EntityTypePredicate"
+            },
+            {
+              "$ref": "#/$defs/LayerPredicate"
+            },
+            {
+              "$ref": "#/$defs/DegreePredicate"
+            },
+            {
+              "$ref": "#/$defs/IsOrphanPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsLeafPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsRootPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasIncomingPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasOutgoingPredicate"
+            },
+            {
+              "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
+              "$ref": "#/$defs/GroupPredicate"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessionid"
+        },
+        "waitMs": {
+          "default": 2000,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Waitms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "predicate"
+      ],
+      "title": "SearchExportRequest",
+      "type": "object"
+    },
+    "SearchExportResult": {
+      "properties": {
+        "columns": {
+          "description": "Every column, in order.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "downloadToken": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Once complete: ``GET /search/exports/{sessionId}/download?token=\u2026`` for an hour, for whoever ran the export.",
+          "title": "Downloadtoken"
+        },
+        "filename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the download is saved as.",
+          "title": "Filename"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "ndjson"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rows": {
+          "default": 0,
+          "description": "Rows written so far \u2014 every match, once complete.",
+          "title": "Rows",
+          "type": "integer"
+        },
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "complete"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "status"
+      ],
+      "title": "SearchExportResult",
+      "type": "object"
+    },
     "SearchHighlight": {
       "description": "Where in a hit's text the match landed, for ``<mark>`` rendering.",
       "properties": {
@@ -3309,6 +3533,28 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SearchExplainResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchExportRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchExportRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchExportResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchExportResult"
         },
         {
           "type": "null"

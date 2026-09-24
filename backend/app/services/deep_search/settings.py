@@ -82,6 +82,9 @@ class DeepSearchSettings:
     # (a fresh one on request) — so a busy graph is not rescanned on every
     # open of the Property Manager.
     catalog_reuse_seconds: int
+    # How long a search export is kept for its download after its last
+    # request (``DEEP_SEARCH_EXPORT_TTL``); its parts are swept two days on.
+    export_ttl_seconds: int
 
     @classmethod
     def from_env(cls) -> "DeepSearchSettings":
@@ -135,6 +138,7 @@ class DeepSearchSettings:
             walk_max=max(0, _read_int("DEEP_SEARCH_WALK_MAX", 300_000)),
             catalog_ttl_seconds=max(60, _read_int("DEEP_SEARCH_CATALOG_TTL", 3600)),
             catalog_reuse_seconds=max(0, _read_int("DEEP_SEARCH_CATALOG_REUSE", 600)),
+            export_ttl_seconds=max(600, min(86400, _read_int("DEEP_SEARCH_EXPORT_TTL", 86400))),
         )
 
 

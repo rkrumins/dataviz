@@ -6401,6 +6401,21 @@ class FalkorDBProvider(GraphDataProvider):
         return await execute_catalog_session(self, scope, context=context, wait_ms=wait_ms,
                                              session_id=session_id, refresh=refresh)
 
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """Every match of ``query``, written to a file, in as many requests
+        as the scan takes. See ``falkordb_search/export.py``."""
+        from .falkordb_search.export import execute_export_session
+        await self._ensure_connected()
+        return await execute_export_session(self, query, context=context, fmt=fmt,
+                                            columns=columns, wait_ms=wait_ms,
+                                            session_id=session_id)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A complete export of ``context``'s scope, to stream — or None."""
+        from .falkordb_search.export import open_export
+        return await open_export(self, session_id, scope_hash=context.scope_hash)
+
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """How many of a search's matches each container holds, from the
         session's tally. See ``falkordb_search/engine.py``."""

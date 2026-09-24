@@ -78,6 +78,8 @@ import type {
     SearchCatalogValue as GenSearchCatalogValue,
     SearchCatalogTag as GenSearchCatalogTag,
     SearchRuleCount as GenSearchRuleCount,
+    SearchExportRequest as GenSearchExportRequest,
+    SearchExportResult as GenSearchExportResult,
 } from './generated/searchquery'
 
 
@@ -250,6 +252,10 @@ export type SearchCatalogResult = RequireKeys<
     },
     'entities' | 'entityTypes' | 'properties' | 'tags' | 'stale'
 >
+
+/** ``POST /search/exports`` — every match of a search, written to a file. */
+export type SearchExportRequest = GenSearchExportRequest
+export type SearchExportResult = RequireKeys<GenSearchExportResult, 'rows' | 'columns' | 'format'>
 
 export type SearchValuesResult = RequireKeys<
     Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },

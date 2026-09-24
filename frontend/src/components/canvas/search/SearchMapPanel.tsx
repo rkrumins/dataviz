@@ -50,6 +50,9 @@ import {
     useAdvancedSearch,
     type UseAdvancedSearchResult,
 } from '@/hooks/useAdvancedSearch'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useFeature } from '@/store/features'
 import {
     DEFAULT_DRAFT_OPTIONS,
     readPersistedCanvasFilterMode,
@@ -65,6 +68,7 @@ import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
+import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
 import { LibraryPopover } from './panel/LibraryPopover'
 import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
@@ -238,6 +242,9 @@ function PanelInner({
     // see SaveQueryDialog for the framer-motion portal rationale and
     // LibraryPopover for the lifecycle handoff.
     const [saveTarget, setSaveTarget] = useState<RecentQueryEntry | null>(null)
+    const [exportOpen, setExportOpen] = useState(false)
+    const exportEnabled = useFeature('graphExportEnabled')
+    const provider = useGraphProvider()
 
     const openAdvanced = useCallback((tab: DrawerTab = 'options') => {
         setAdvancedTab(tab)
@@ -413,6 +420,11 @@ function PanelInner({
         ? (view.result.candidateCount ?? null)
         : null
     const showResultsSection = hasReportableView(view)
+    // Every match, to a file — a search's matches, not a path search's routes.
+    const canExport = exportEnabled
+        && provider instanceof RemoteGraphProvider
+        && view.kind === 'results'
+        && !view.result.paths
 
     // Resolve the focused match's ancestor path from the current
     // result page. Stepping (J/K) only updates ``focusedMatchIndex``;
@@ -575,6 +587,7 @@ function PanelInner({
                                     onClear={view.kind === 'results' || view.kind === 'error'
                                         ? handleClear
                                         : undefined}
+                                    onExport={canExport ? () => setExportOpen(true) : undefined}
                                     viewId={viewId}
                                 />
                                 <ResultsPane
@@ -589,6 +602,14 @@ function PanelInner({
                                     isLoadingAll={isLoadingAll}
                                     onCancelLoadAll={cancelLoadAll}
                                 />
+                                {exportOpen && view.kind === 'results' && (
+                                    <ExportMatchesDialog
+                                        viewId={viewId}
+                                        query={view.query}
+                                        matchCount={countIsExact ? resultsCount : null}
+                                        onClose={() => setExportOpen(false)}
+                                    />
+                                )}
                             </div>
                         )}
                     </div>

@@ -16,6 +16,7 @@
  *     ``canvasFilterMode`` (persisted per-view). See
  *     ``useSearchHighlight`` for the per-row semantics.
  *   - Frame: fly the canvas viewport to encompass all matches.
+ *   - Export: every match, to a file (``ExportMatchesDialog``).
  *   - Clear: dismiss results.
  *
  * Pure presentational + store wiring. The auto-reveal effect lives in
@@ -25,7 +26,7 @@
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, ChevronLeft, ChevronRight,
-    Crosshair, EyeOff, Filter, Maximize2, Sparkles, X,
+    Crosshair, EyeOff, FileDown, Filter, Maximize2, Sparkles, X,
 } from 'lucide-react'
 import {
     type FC, type ReactNode, useLayoutEffect, useMemo, useRef, useState,
@@ -72,6 +73,8 @@ export interface MatchBarProps {
     onShowFocusedOnCanvas?: () => void
     /** Clear results + draft state. */
     onClear?: () => void
+    /** Export every match to a file. Shown only when there are matches. */
+    onExport?: () => void
     /** The view this panel is bound to — passed to setCanvasFilterMode
      *  so the choice persists for this view in localStorage. */
     viewId: string
@@ -81,7 +84,7 @@ export interface MatchBarProps {
 export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
     deadlineExceeded, candidateCount, scanning, progress, onFrame,
-    onShowFocusedOnCanvas, onClear, viewId,
+    onShowFocusedOnCanvas, onClear, onExport, viewId,
 }) => {
     const orderedMatchUrns = useOrderedMatchUrns()
     const focusedMatchIndex = useFocusedMatchIndex()
@@ -123,6 +126,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                 scannedPercent={scanning && !isRunning && !isError
                     ? scannedPercent(progress) : null}
                 onClear={onClear}
+                onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
             />
             {scanning && !isRunning && !isError && (
                 <ProgressBar
@@ -172,7 +176,7 @@ function scannedPercent(progress: { scanned: number; total: number } | null | un
 
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, onClear,
+    showPlus, scannedPercent: scanned, onClear, onExport,
 }: {
     isRunning: boolean
     isError: boolean
@@ -183,6 +187,7 @@ function SummaryStrip({
     /** Set while the search is still scanning; its progress. */
     scannedPercent: number | null
     onClear?: () => void
+    onExport?: () => void
 }) {
     return (
         <div className={cn(
@@ -198,21 +203,38 @@ function SummaryStrip({
                 showPlus={showPlus}
                 scannedPercent={scanned}
             />
-            {onClear && (
-                <button
-                    type="button"
-                    onClick={onClear}
-                    title="Clear results"
-                    aria-label="Clear results"
-                    className={cn(
-                        'inline-flex items-center justify-center w-7 h-7 rounded-md shrink-0',
-                        'text-ink-muted transition-colors',
-                        'hover:text-rose-500 hover:bg-rose-500/10',
-                    )}
-                >
-                    <X className="w-3.5 h-3.5" />
-                </button>
-            )}
+            <div className="flex items-center gap-1 shrink-0">
+                {onExport && (
+                    <button
+                        type="button"
+                        onClick={onExport}
+                        title="Export every match to a CSV or NDJSON file"
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
+                            'text-[11px] font-medium text-ink-secondary transition-colors',
+                            'hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-cyan-500/10',
+                        )}
+                    >
+                        <FileDown className="w-3 h-3" />
+                        Export
+                    </button>
+                )}
+                {onClear && (
+                    <button
+                        type="button"
+                        onClick={onClear}
+                        title="Clear results"
+                        aria-label="Clear results"
+                        className={cn(
+                            'inline-flex items-center justify-center w-7 h-7 rounded-md shrink-0',
+                            'text-ink-muted transition-colors',
+                            'hover:text-rose-500 hover:bg-rose-500/10',
+                        )}
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                )}
+            </div>
         </div>
     )
 }

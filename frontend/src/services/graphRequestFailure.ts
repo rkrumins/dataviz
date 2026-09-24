@@ -204,8 +204,9 @@ const READ_ONLY_POST_PATHS = [
   /^\/edges\/between$/,
   /^\/edges\/aggregated$/,
   // membership and the counts only read: a replayed counts request just
-  // picks its sessions up where they have got to.
-  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog)?$/,
+  // picks its sessions up where they have got to. So does an export's:
+  // the same request always continues the same export.
+  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports)?$/,
   /^\/trace(\/v2|\/closure|\/expand|\/expand-batch)?$/,
   /^\/assignments\/compute$/,
 ]

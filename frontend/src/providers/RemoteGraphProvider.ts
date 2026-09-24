@@ -66,6 +66,8 @@ import type {
     SearchAncestorCountsResult,
     SearchCatalogRequest,
     SearchCatalogResult,
+    SearchExportRequest,
+    SearchExportResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -621,6 +623,30 @@ export class RemoteGraphProvider implements GraphDataProvider {
             body: JSON.stringify(body),
             signal: opts?.signal,
         })
+    }
+
+    /**
+     * Every match of a search, written to a CSV or NDJSON file on the
+     * server — POST /search/exports. A large export takes several calls:
+     * send the returned session back until it is complete
+     * (``services/searchExport.ts``); that answer carries a download token.
+     */
+    async searchExport(
+        body: SearchExportRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchExportResult> {
+        return await this.fetch<SearchExportResult>('/search/exports', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /** Where a complete export downloads from. The browser sends the
+     *  session cookie; ``token`` names the export and whose it is. */
+    searchExportDownloadUrl(sessionId: string, token: string): string {
+        return this.buildUrl(
+            `/search/exports/${encodeURIComponent(sessionId)}/download`, { token })
     }
 
     /**

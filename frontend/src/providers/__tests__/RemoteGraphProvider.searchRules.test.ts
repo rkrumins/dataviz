@@ -117,4 +117,36 @@ describe('RemoteGraphProvider display-rule reads', () => {
     expect(JSON.parse(String(init?.body))).toEqual(body)
     expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_ADVANCED_MS)
   })
+
+  it('searchExport POSTs the search, format and columns to /search/exports with the search timeout', async () => {
+    mockFetch.mockResolvedValue(okJson({
+      sessionId: 's', status: 'running', rows: 5, format: 'csv', columns: ['urn'],
+    }))
+    const provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
+    const controller = new AbortController()
+    const body = {
+      scope: { viewId: 'v1', scopeMode: 'view' as const }, predicate,
+      format: 'ndjson' as const, columns: ['owner'], waitMs: 2000, sessionId: 's',
+    }
+
+    const answer = await provider.searchExport(body, { signal: controller.signal })
+
+    expect(answer.rows).toBe(5)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(String(url)).toContain('/graph/search/exports?')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toEqual(body)
+    expect(init?.signal).toBe(controller.signal)
+    expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_ADVANCED_MS)
+  })
+
+  it('searchExportDownloadUrl names the export, its token and the data source', () => {
+    const provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
+
+    const url = new URL(provider.searchExportDownloadUrl('s/1', 'a.b+c'), 'http://x')
+
+    expect(url.pathname).toBe('/api/v1/ws_1/graph/search/exports/s%2F1/download')
+    expect(url.searchParams.get('token')).toBe('a.b+c')
+    expect(url.searchParams.get('dataSourceId')).toBe('ds_1')
+  })
 })

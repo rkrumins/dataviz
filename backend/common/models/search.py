@@ -1338,6 +1338,50 @@ class SearchCatalogResult(_Base):
     notes: List[str] = Field(default_factory=list)
 
 
+#: The columns every export row starts with, before the chosen properties.
+SEARCH_EXPORT_BASE_COLUMNS = ("urn", "displayName", "entityType", "qualifiedName")
+SEARCH_EXPORT_COLUMNS_MAX = 200
+
+
+def export_columns(columns: List[str]) -> List[str]:
+    """Every column of an export: the base ones, then the properties asked
+    for, each once."""
+    return list(dict.fromkeys([*SEARCH_EXPORT_BASE_COLUMNS, *(c for c in columns if c)]))
+
+
+class SearchExportRequest(_Base):
+    """``POST /search/exports``: every entity in the view that matches
+    ``predicate``, written to a file — exactly, however many. A large export
+    takes more than one request: send the same request again with the
+    returned ``sessionId`` until ``status`` is ``complete``, then download
+    it from ``GET /search/exports/{sessionId}/download``."""
+    scope: SearchScope
+    predicate: Predicate
+    format: Literal["csv", "ndjson"] = "csv"
+    columns: List[str] = Field(
+        default_factory=list, max_length=SEARCH_EXPORT_COLUMNS_MAX,
+        description="Properties to add to each row, after its urn, name, type and "
+                    "qualified name — ``description`` and ``tags`` included.")
+    wait_ms: int = Field(2000, alias="waitMs", ge=0, le=60000)
+    session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
+
+
+class SearchExportResult(_Base):
+    session_id: str = Field(alias="sessionId")
+    status: Literal["running", "complete"]
+    rows: int = Field(0, description="Rows written so far — every match, once "
+                                     "complete.")
+    progress: Optional[SearchProgress] = None
+    format: Literal["csv", "ndjson"] = "csv"
+    columns: List[str] = Field(default_factory=list, description="Every column, in order.")
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    filename: Optional[str] = Field(None, description="What the download is saved as.")
+    download_token: Optional[str] = Field(
+        None, alias="downloadToken",
+        description="Once complete: ``GET /search/exports/{sessionId}/download?token=…`` "
+                    "for an hour, for whoever ran the export.")
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1370,6 +1414,10 @@ class SearchApiContract(_Base):
         None, alias="searchCatalogRequest")
     search_catalog_result: Optional[SearchCatalogResult] = Field(
         None, alias="searchCatalogResult")
+    search_export_request: Optional[SearchExportRequest] = Field(
+        None, alias="searchExportRequest")
+    search_export_result: Optional[SearchExportResult] = Field(
+        None, alias="searchExportResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

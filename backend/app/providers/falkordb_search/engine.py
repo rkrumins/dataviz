@@ -483,22 +483,28 @@ async def _hop(session: Session, work, deadline: float, settings) -> None:
             session.pending.insert(0, unit)
 
 
+async def unit_context(unit: Unit, ctx: Context, run, timeout_s: float) -> Context:
+    """``ctx`` for one unit: the values its nodes keep raw answered first
+    (``raw_properties``) — none to read in a label whose nodes keep nothing
+    raw."""
+    if not ctx.raw_leaves:
+        return ctx
+    lists = empty_params(ctx.raw_leaves)
+    if unit.label is None or unit.label in ctx.raw_labels:
+        cypher, params = raw_probe_statement(unit, ctx)
+        res = await run(cypher, params, timeout_s)
+        lists = evaluate_rows(res.result_set or [], ctx.raw_leaves)
+    return dataclasses.replace(ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
+                               params={**ctx.params, **lists})
+
+
 async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: float
                     ) -> Tuple[int, List[List[Any]], List[List[Any]]]:
     """One unit's exact count, ordered first rows and — when the search
     tallies ancestors — its ``[urn, name, label, entity type, matches]``
     rows (a later page's session counts nothing — the total is page 1's;
     a count session keeps no rows)."""
-    if ctx.raw_leaves:
-        # The unit's raw-kept values, answered before its statements run —
-        # none to read in a label whose nodes keep nothing raw.
-        lists = empty_params(ctx.raw_leaves)
-        if unit.label is None or unit.label in ctx.raw_labels:
-            cypher, params = raw_probe_statement(unit, ctx)
-            res = await run(cypher, params, timeout_s)
-            lists = evaluate_rows(res.result_set or [], ctx.raw_leaves)
-        ctx = dataclasses.replace(ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
-                                  params={**ctx.params, **lists})
+    ctx = await unit_context(unit, ctx, run, timeout_s)
     if session.k == 0:
         cypher, params = count_statement(unit, ctx, session.clamps)
         res = await run(cypher, params, timeout_s)

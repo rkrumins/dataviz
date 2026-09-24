@@ -35,6 +35,7 @@ from backend.app.services.deep_search import (
     SearchRunContext,
     get_deep_search_settings,
 )
+from backend.app.services.search_downloads import mint_download_token
 from backend.app.services.view_scope import (
     EffectiveViewScope,
     ViewNotFound,
@@ -57,6 +58,8 @@ from backend.common.models.search import (
     SearchCatalogResult,
     SearchCountsRequest,
     SearchCountsResult,
+    SearchExportRequest,
+    SearchExportResult,
     SearchMembershipRequest,
     SearchMembershipResult,
     SearchOptions,
@@ -68,6 +71,7 @@ from backend.common.models.search import (
     SearchScope,
     TextPredicate,
     WithinHopsPredicate,
+    export_columns,
 )
 from backend.common.search_semantics import SemanticsError, resolve_predicate
 
@@ -650,6 +654,50 @@ class AdvancedSearchService:
         out = await op(scope, context=context, wait_ms=request.wait_ms,
                        session_id=request.session_id, refresh=request.refresh)
         return SearchCatalogResult.model_validate(out)
+
+    async def export(
+        self,
+        request: SearchExportRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+        principal: str = "",
+    ) -> SearchExportResult:
+        """Every entity in the view matching the request's predicate, written
+        to a file — exactly, however many, in the view's scope resolved here
+        as a search's is. A large export takes more than one request; the
+        answer that completes it carries a download token for ``principal``."""
+        leaves = _validate_predicate(request.predicate, path="$.predicate")
+        max_leaves = get_deep_search_settings().max_leaf_count
+        if leaves > max_leaves:
+            raise ValidationError(f"$.predicate has {leaves} leaves (max {max_leaves})")
+        scope, eff = await self._rule_scope(request.scope)
+        if scope is None:
+            # Every root the client named lies outside the view: nothing.
+            return SearchExportResult(session_id="", status="complete", format=request.format,
+                                      columns=export_columns(request.columns))
+        op = self._provider_op("deep_search_export")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        query = SearchQuery(predicate=request.predicate, scope=scope,
+                            options=SearchOptions(results="hits"))
+        out = await op(query, context=context, fmt=request.format, columns=request.columns,
+                       wait_ms=request.wait_ms, session_id=request.session_id)
+        result = SearchExportResult.model_validate(out)
+        if result.status == "complete" and result.session_id:
+            from backend.auth_service.core import config as auth_config
+            result.download_token = mint_download_token(
+                result.session_id, eff.scope_hash, principal, auth_config.JWT_SECRET_KEY)
+        return result
+
+    async def open_export(self, session_id: str, scope_hash: str):
+        """A complete export of this view's ``scope_hash`` — its answer and
+        its bytes to stream — or None when there is none (expired, never
+        finished, another scope's)."""
+        op = self._provider_op("deep_search_export_open")
+        opened = await op(session_id, context=SearchRunContext(scope_hash=scope_hash))
+        if opened is None:
+            return None
+        answer, body = opened
+        return SearchExportResult.model_validate(answer), body
 
     async def ancestor_counts(
         self,

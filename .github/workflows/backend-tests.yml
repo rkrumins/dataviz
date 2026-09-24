@@ -125,7 +125,8 @@ jobs:
       # The uncapped engine: its chunked, paged answer must equal one
       # uncapped ORDER BY, row for row, under every scope shape — and a
       # property kept raw (propertiesRaw) must be searched as exactly as one
-      # kept natively.
+      # kept natively. An export of a search's matches must hold each one
+      # once, every value exactly as the graph keeps it.
       - name: Search comparison semantics and the uncapped engine, against the real engine
         working-directory: backend
         env:
@@ -135,7 +136,8 @@ jobs:
         run: |
           python -m pytest tests/integration/test_search_semantics_live.py \
             tests/integration/test_search_engine_live.py \
-            tests/integration/test_raw_properties_live.py -q
+            tests/integration/test_raw_properties_live.py \
+            tests/integration/test_search_export_live.py -q
 
   full-suite:
     name: Full backend suite (informational)

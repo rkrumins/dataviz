@@ -565,6 +565,17 @@ class DraftOverlayProvider:
         return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
                                                     session_id=session_id, refresh=refresh)
 
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """An export of every match — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_export(query, context=context, fmt=fmt,
+                                                   columns=columns, wait_ms=wait_ms,
+                                                   session_id=session_id)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A complete export, to stream — the base's."""
+        return await self._base.deep_search_export_open(session_id, context=context)
+
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """Container counts from a search session — the base's, like
         :meth:`deep_search_session`."""

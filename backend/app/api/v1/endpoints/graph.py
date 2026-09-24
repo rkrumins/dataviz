@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, RootModel
 
 logger = logging.getLogger(__name__)
@@ -34,13 +34,18 @@ from backend.common.models.search import (
     SearchAncestorCountsRequest,
     SearchCatalogRequest,
     SearchCountsRequest,
+    SearchExportRequest,
     SearchMembershipRequest,
     SearchQuery,
 )
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
+from backend.app.services.deep_search import (
+    CompileError,
+    SearchRunContext,
+    get_deep_search_settings,
+)
 from backend.common.adapters import ProviderFailingOver
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
@@ -98,6 +103,7 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 require_trace = require_feature("traceEnabled")        # POST /trace*
 require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
+require_export = require_feature("graphExportEnabled")  # /search/exports*
 
 
 # ------------------------------------------------------------------ #
@@ -2080,6 +2086,82 @@ async def search_catalog(
         ))
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/exports", response_model_by_alias=True,
+             dependencies=[Depends(require_export)])
+async def search_export(
+    body: SearchExportRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    user=Depends(get_optional_user),
+):
+    """Every entity in the view matching ``predicate``, written to a CSV or
+    NDJSON file — exactly, however many, each value as stored (a 64-bit
+    integer keeps its digits). A large export takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``; that answer carries a ``downloadToken`` for
+    ``GET /search/exports/{sessionId}/download``.
+    """
+    from backend.app.services.advanced_search_service import ValidationError
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.export(body, principal=_principal(user), run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except (ValidationError, CompileError) as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.get("/search/exports/{session_id}/download", dependencies=[Depends(require_export)])
+async def search_export_download(
+    session_id: str,
+    token: str = Query(..., max_length=2048),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    user=Depends(get_optional_user),
+):
+    """A complete export, streamed as the file it is — for the person it
+    was exported for, for an hour after (``downloadToken``)."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.search_downloads import read_download_token
+    from backend.auth_service.core import config as auth_config
+
+    vouched = read_download_token(token, _principal(user),
+                                  [key for _kid, key in auth_config.JWT_VERIFICATION_KEYS])
+    if vouched is None or vouched[0] != session_id:
+        raise HTTPException(status_code=403,
+                            detail="This download link has expired — export the matches again.")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+    svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
+                                data_source_id=dataSourceId, branch_id=branchId)
+    try:
+        opened = await svc.open_export(session_id, vouched[1])
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+    if opened is None:
+        raise HTTPException(status_code=404,
+                            detail="This export is no longer kept — export the matches again.")
+    answer, body = opened
+    media = "text/csv; charset=utf-8" if answer.format == "csv" else "application/x-ndjson"
+    return StreamingResponse(body, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{answer.filename}"'})
+
+
+def _principal(user) -> str:
+    """Whose request this is, as a download token names them."""
+    return str(getattr(user, "id", "") or "anonymous")
 
 
 @router.post("/search/ancestor-counts", response_model_by_alias=True)
