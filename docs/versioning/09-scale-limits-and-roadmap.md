@@ -8,7 +8,7 @@
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Interactive edits and publishes are `O(change)`, not `O(graph)`. The remaining sharp edges are
 deliberately-deferred scale items — a full-graph Merkle rebuild on *draft* checkpoints, an `O(N·E)`
-FalkorDB full seed, an in-process import dispatcher, no GC/retention, and a partitioning key that
+FalkorDB full seed, import and export jobs that start over when interrupted, no GC/retention, and a partitioning key that
 doesn't help a single hot collaborative graph. Read this chapter before betting a large production
 workload on it.
 
@@ -128,14 +128,16 @@ frontend-only gap.)*
 
 See [08](08-import-export.md) for detail; the load-bearing ones:
 
-- **In-process dispatch, not a real async dispatcher.** A `uvicorn --reload` (or a crash)
-  mid-import/export kills the job; it is reported `failed` once silent for `JOB_STALE_AFTER_SECS`.
-  A Redis/Postgres dispatcher is a designed slot-in behind the same call.
+- **An interrupted job starts over.** Jobs queue in Postgres and run on the versioning worker
+  (`GRAPHVER_TRANSFER_INPROCESS=0`, as the compose and Kubernetes manifests set it), or in the web
+  process by default. Either way, a process that stops mid-import/export takes the job with it: it
+  is reported `failed` once silent for `JOB_STALE_AFTER_SECS`, and runs again from the start.
 - **Export doesn't stream the read.** It `materialize_state`s the whole state then streams the write —
   fine for human-scale exports, not 5M+ (swap `materialize_state` → keyset streaming).
-- **No cloud object store yet**: artifacts live in the management database (`DatabaseObjectStore`,
-  shared by every API pod); S3/GCS raise `NotImplementedError`; the `presigned` upload path is
-  modeled but unbacked. JSON/xlsx adapters are buffered, not streamed.
+- **No native cloud client yet**: artifacts live in the management database (`DatabaseObjectStore`,
+  shared by every API pod), or as files on a mount every pod shares, which can be a bucket's FUSE
+  mount (`OBJECT_STORE_BACKEND=local`); S3/GCS clients raise `NotImplementedError`; the `presigned`
+  upload path is modeled but unbacked. JSON/xlsx adapters are buffered, not streamed.
 - **Row-scoped export is API-only — not surfaced in the UI.** The backend export options (`props`,
   row-scope `ids`/`types`, view-scope, branch-vs-published, as-of) are wired consistently end-to-end
   (`create_export` → `create_export_job` packs an `options` dict → `ExportWorker`). The **ExportDialog

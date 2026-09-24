@@ -154,10 +154,10 @@ See [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/v
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST /graphs/{gid}/imports` (`:1982`) | `_MANAGE` | `?format&reconcileMode(upsert\|replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status:"running"}`. Opens/append a draft, streams to the object store, dispatches `run_import` in the background. |
+| `POST /graphs/{gid}/imports` (`:1982`) | `_MANAGE` | `?format&reconcileMode(upsert\|replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens/append a draft, streams to the object store, then starts the job: `status` is `running` when it runs in this process, `pending` when it is queued for the versioning worker (`GRAPHVER_TRANSFER_INPROCESS=0`). |
 | `GET /graphs/{gid}/imports` (`:2018`) | `_READ` | Import job history. |
 | `GET /graphs/{gid}/imports/template` (`:2030`) | `_READ` | `?format` → a prepopulated starter file. (Declared **before** `/{job_id}` so the literal wins.) |
-| `GET /graphs/{gid}/imports/{job_id}` (`:2053`) | `_READ` | Job status (camelCase). |
+| `GET /graphs/{gid}/imports/{job_id}` (`:2053`) | `_READ` | Job status (camelCase). `queuedAhead`: for a job queued for the versioning worker, how many jobs were queued before it; `null` otherwise. |
 | `GET /graphs/{gid}/imports/{job_id}/preview` (`:2066`) | `_READ` | `{job, summary, sample, previewDownloadUrl, rejectedDownloadUrl}`. |
 | `GET /graphs/{gid}/exports/plan` | `_READ` + `graphExportEnabled` | `?format&asOfSeq&viewId&branchId&ids&types` → what the export would hold, before downloading: `{nodes, edges, exact, empty, formatLimit, view:{placements, found, entities}, asOfSeq, branchId}`. Counts are `null` when they take longer than `GRAPH_EXPORT_PLAN_BUDGET_SECS` to count. |
 | `GET /graphs/{gid}/exports/stream` | `_READ` + `graphExportEnabled` | Same params plus `props&filename` → the file, **streamed as it is written** from one pinned commit (flat memory at any size; exempt from the request timeout). Waits for a turn (`GRAPH_EXPORT_CONCURRENCY` exports stream at once per pod) for up to `GRAPH_EXPORT_SLOT_WAIT_SECS`, then **429** + `Retry-After`; **422** `EXCEL_ROW_LIMIT` for an xlsx a sheet can't hold. What the Export dialog uses. |

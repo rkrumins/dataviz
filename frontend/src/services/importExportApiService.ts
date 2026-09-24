@@ -46,6 +46,16 @@ export interface Job {
   errorMessage?: string | null
   createdAt?: string
   completedAt?: string | null
+  /** Queued for the server's import/export workers: how many jobs are ahead of it; else absent. */
+  queuedAhead?: number | null
+}
+
+/** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
+export function queuePosition(job: Job | null | undefined): string | null {
+  const ahead = job?.queuedAhead
+  if (ahead == null) return null
+  if (ahead === 0) return 'It starts next.'
+  return `${ahead} ${ahead === 1 ? 'job is' : 'jobs are'} ahead of it.`
 }
 
 export interface CreateImportResult {

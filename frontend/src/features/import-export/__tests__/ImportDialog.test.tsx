@@ -3,7 +3,8 @@
  *   - a file larger than one import can take is refused before any upload, saying how to split it
  *     (the proxy would otherwise answer an opaque 413 after sending it);
  *   - an import job that failed or was cancelled on the server ends as a failure that says why,
- *     never as a finished import.
+ *     never as a finished import;
+ *   - an import queued for the server's workers says it is waiting, and how many are ahead of it.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -56,5 +57,18 @@ describe('ImportDialog', () => {
 
     expect(await screen.findByText(shown)).toBeInTheDocument()
     expect(screen.queryByText('Import another')).not.toBeInTheDocument()
+  })
+
+  it('says when the import waits its turn, and how many are ahead of it', async () => {
+    vi.mocked(createImport).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockImplementation(async (_fetcher, opts) => {
+      opts?.onTick?.({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'pending', queuedAhead: 2 } as Job)
+      return new Promise<Job>(() => {})   // still waiting
+    })
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText('Waiting to start…')).toBeInTheDocument()
+    expect(screen.getByText('2 jobs are ahead of it.')).toBeInTheDocument()
   })
 })

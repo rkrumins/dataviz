@@ -66,11 +66,13 @@ class _ImportExport:
         uri = f"{kwargs['workspace_id']}/{kwargs['data_source_id']}/{kwargs['graph_id']}/{job_id}/source.ndjson"
         return {"job_id": job_id, "branch_id": kwargs["branch_id"], "source_uri": uri}
 
-    async def run_export_safe(self, job_id):
+    async def start_export(self, job_id):
         self.ran.append(job_id)
+        return "running"
 
-    async def run_import_safe(self, job_id):
+    async def start_import(self, job_id):
         self.ran.append(job_id)
+        return "running"
 
     async def get_job(self, job_id):
         job = next((j for j in self.imports if j["job_id"] == job_id), None)

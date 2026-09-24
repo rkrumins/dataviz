@@ -79,22 +79,37 @@ is (`service.py:86-88`). It inserts the `JobORM` row and mints a self-describing
 (`{ws}/{ds}/{graph}/{job}/source.<fmt>`) for the caller to stream the upload into
 (`service.py:102-105`).
 
-**Dispatch.** The endpoint streams the uploaded file into the object store, then runs the worker as
-a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI `BackgroundTasks`:
-those run inside the request's ASGI call, so the route's 120 s timeout tier cancelled any import
-that outlasted it. `run_import_safe` / `_run_safe` wrap the run so any exception, or a
-cancellation, marks the job `failed` with an `error_message` — the failure is durable on the job
-row.
+**Dispatch.** The endpoint stores the job's inputs (it streams the upload into the object store),
+then starts the job with `ImportExportService.start_import` / `start_export` (`service.py`). Where
+the job runs is `GRAPHVER_TRANSFER_INPROCESS`:
 
-> **Limitation — in-process dispatch.** v1 runs imports (detached tasks) and exports (**FastAPI
-> `BackgroundTasks`**) inside the web process, not a real async dispatcher (`service.py:9-11`). Two
-> consequences to know: a `uvicorn --reload` (or any process restart) **mid-import kills the job** —
-> it never reaches `completed`, and since a running import touches its `updated_at` every 15 s,
-> `get_job` reports a job silent for `JOB_STALE_AFTER_SECS` (default 900) as `failed` so the UI
-> stops waiting; and a very large import competes with request handling.
-> A Redis/Postgres dispatcher (mirroring the aggregation worker) slots in behind the same
-> `run_import_safe` call without touching the pipeline. Tracked in
-> [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
+- **On** (the code default, so a single-process stack needs nothing else): in the web process that
+  took the request, as a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI
+  `BackgroundTasks`: those run inside the request's ASGI call, so the route's 120 s timeout tier
+  cancelled any import that outlasted it.
+- **Off** (the compose and Kubernetes manifests): the web process only **queues** the job. It stays
+  `pending`, in phase `queued`, and the versioning worker claims queued jobs oldest first with
+  `FOR UPDATE SKIP LOCKED` (`import_export/runner.py`), so a job goes to one worker only. Each worker
+  process runs `GRAPHVER_TRANSFER_SLOTS` (2) at a time (`ProjectionWorker._transfer_loop`), so a
+  large import or export never shares a web pod's CPU and memory with interactive requests. A job
+  is queued only once its inputs are stored, so no worker takes one whose upload is still arriving.
+  While a job waits, `get_job` reports `queuedAhead`, the jobs queued before it, and the dialogs say
+  "Waiting to start… 2 jobs are ahead of it." A queued job no worker starts within
+  `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours) reads as failed, since no worker may be running.
+  A stopping worker takes no more jobs and gives its running ones 40 s to finish. Every worker
+  runs the transfer loop, whatever its own setting, so the switch only needs setting on the web
+  pods. An export job also takes one of its pod's export turns (`GRAPH_EXPORT_CONCURRENCY`, 2), so
+  raise the two together.
+
+Either way, `run_import_safe` / `_run_safe` wrap the run so any exception, or a cancellation, marks
+the job `failed` with an `error_message`: the failure is durable on the job row. A running job
+touches its `updated_at` every 15 s, and `get_job` reports one silent for `JOB_STALE_AFTER_SECS`
+(default 900) as `failed` so the UI stops waiting: its process went away (a restart, a killed pod).
+
+> **Limitation — an interrupted job starts over.** Nothing resumes a job whose process stopped
+> mid-run: it reads as failed ("Start it again"), and running it again redoes it from the start.
+> The web tier's restarts no longer touch jobs once they run on the worker, but a worker's do.
+> Tracked in [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
 
 The service is wired as a singleton (`get_import_export_service`, `versioning.py:1964-1972`) with two
 injected resolvers so the worker stays decoupled from the management DB: a **scope resolver**
@@ -359,11 +374,23 @@ one place every pod shares:
 - The versioning worker's daily sweep deletes objects older than `OBJECT_STORE_TTL_HOURS`
   (default 24), and chunks no object names once they are an hour old (a put that died mid-way).
 
-`OBJECT_STORE_BACKEND=local` keeps the filesystem store rooted at `IMPORT_STORE_ROOT`
-(`LocalFsObjectStore`, `object_store.py:79-173`) for a single-node stack; a path-escape guard
-rejects keys that resolve outside the root (`:85-91`), and the same sweep deletes its files by age.
+**Or files on a mount.** `OBJECT_STORE_BACKEND=local` keeps the files under `IMPORT_STORE_ROOT`
+instead (`LocalFsObjectStore`), which keeps multi-GB files out of the database. Point it at a
+directory that every pod serving the API or running the versioning worker mounts:
 
-> **Limitation — no cloud store yet.** `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
+- a shared volume: a `ReadWriteMany` PersistentVolumeClaim (NFS, Amazon EFS, Filestore);
+- a bucket through its FUSE driver: S3 through Mountpoint for Amazon S3 (with `--allow-delete` and
+  `--allow-overwrite`), GCS through Cloud Storage FUSE;
+- for one pod whose jobs run in-process, the pod's own disk (the default,
+  `/tmp/synodic-import-store`). Several pods can't share it, and neither can a separate worker.
+
+A file is written once, front to back, and never appended to or renamed, which is all a bucket
+mount supports. A write that fails, or whose upload fails when the file closes, deletes what it
+wrote, so a reader never takes half a file for the whole one. A path-escape guard rejects keys that
+resolve outside the root, and the same sweep deletes files by age.
+
+> **Limitation — no native cloud client yet.** A bucket is used through its mount (above).
+> `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
 > (`get_object_store`, `object_store.py:333-348`). Cloud backends implement the same `ObjectStore`
 > Protocol and differ only in `upload_target` (a presigned PUT vs the backend-streamed blob), so
 > callers don't change — but the presigned path is modeled, not yet backed (`UploadTarget`,
@@ -396,13 +423,15 @@ rejects keys that resolve outside the root (`:85-91`), and the same sweep delete
 
 ## 11. Limitations & open items (candid)
 
-- **In-process dispatch**, not a durable async dispatcher — a process restart mid-import kills the
-  job, which is then reported `failed` once stale (`service.py:9-11`). Highest-priority hardening
-  item.
+- **An interrupted job starts over.** A job whose process stops mid-run reads as failed and runs
+  again from the start (§2). With `GRAPHVER_TRANSFER_INPROCESS` on (the code default), jobs share
+  the web process with requests; the compose and Kubernetes manifests turn it off, so they run on
+  the versioning worker.
 - **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable); every
   format *writes* streaming. Imports are capped at 100 MB per file anyway.
-- **No cloud object store yet**: artifacts live in the management database (§9); S3/GCS and the
-  presigned-upload path are stubbed (`object_store.py:333-348`).
+- **No native cloud client yet**: artifacts live in the management database, or on a mount, which
+  can be a bucket's FUSE mount (§9); S3/GCS clients and the presigned-upload path are stubbed
+  (`get_object_store`).
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow

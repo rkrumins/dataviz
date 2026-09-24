@@ -41,7 +41,6 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
-from backend.app.services.background import spawn_detached
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
@@ -2476,10 +2475,9 @@ async def create_import(
             branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
             idempotency_key=idempotency_key)
     await ie.store.put_stream(created["source_uri"], request.stream())
-    # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
-    spawn_detached(ie.run_import_safe(created["job_id"]), name=f"import {created['job_id']}")
+    status = await ie.start_import(created["job_id"])
     return {"jobId": created["job_id"], "branchId": created["branch_id"],
-            "sourceUri": created["source_uri"], "status": "running"}
+            "sourceUri": created["source_uri"], "status": status}
 
 
 @router.get("/graphs/{graph_id}/imports")
@@ -2588,9 +2586,8 @@ async def create_export(
             actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
             branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
             select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key)
-    # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
-    spawn_detached(ie.run_export_safe(created["job_id"]), name=f"export {created['job_id']}")
-    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": "running"}
+    status = await ie.start_export(created["job_id"])
+    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": status}
 
 
 # Streamed exports. The export dialog asks for a plan (what the export holds, so an empty one is

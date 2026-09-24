@@ -9,6 +9,48 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Imports and exports off the web servers
+
+### Changed
+
+**Imports and exports run on the versioning worker, not the web servers.** An import or export job
+ran inside the web server that took the request, sharing its CPU and memory with every other
+request. The web server now only queues the job, in Postgres, and the versioning worker runs it:
+two at a time per worker process (`GRAPHVER_TRANSFER_SLOTS`), oldest first, each job taken by one
+worker only. A job waiting its turn says so, with how many are ahead of it, in the canvas's Import
+dialog, a view package's export and a view package's data import. The compose and Kubernetes
+manifests run this way (`GRAPHVER_TRANSFER_INPROCESS=0`). Without a versioning worker (a single
+process, the Helm chart), jobs run in the web server as before.
+
+**Import and export files can live on a mount.** `OBJECT_STORE_BACKEND=local` keeps them as files
+under `IMPORT_STORE_ROOT`, and that can now be any directory every server mounts: a shared volume,
+or an S3 or GCS bucket through its FUSE driver (Mountpoint for Amazon S3, Cloud Storage FUSE). That
+keeps multi-GB files out of the database. A file is written once, front to back, and a write that
+fails now deletes what it wrote instead of leaving half a file.
+
+### Upgrading
+
+Nothing to migrate. The compose and Kubernetes manifests set `GRAPHVER_TRANSFER_INPROCESS=0` on the
+web tier, so imports and exports start only while their versioning worker runs. On stop the worker
+gives running jobs 40 s to finish, within its 60 s grace (compose now sets `stop_grace_period`).
+New settings, all optional: `GRAPHVER_TRANSFER_INPROCESS` (on unless set), `GRAPHVER_TRANSFER_SLOTS`
+(2 per worker process; an export job also takes one of its pod's `GRAPH_EXPORT_CONCURRENCY` turns,
+so raise the two together), `GRAPHVER_TRANSFER_POLL_SECS` (1) and
+`GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours; a job no worker starts in that time reads as
+failed).
+
+To keep import and export files on a mount, set `OBJECT_STORE_BACKEND=local` and `IMPORT_STORE_ROOT`
+to its path on the web servers and the versioning worker alike. Mountpoint for Amazon S3 needs
+`--allow-delete` and `--allow-overwrite`. Files already in the database store aren't moved, so jobs
+in flight when you switch need starting again.
+
+### Known limitations
+
+- **An interrupted job starts over.** A worker that stops mid-job (a deploy, a crash) takes the job
+  with it: the job reads as failed, and running it again redoes it from the start.
+
+---
+
 ## [Unreleased] — Views that travel between environments, and remember their versions
 
 ### Added

@@ -14,8 +14,8 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  createImport, detectFormat, getImport, getImportPreview, pollJob, templateDownloadUrl,
-  triggerBrowserDownload,
+  createImport, detectFormat, getImport, getImportPreview, pollJob, queuePosition,
+  templateDownloadUrl, triggerBrowserDownload,
   type ImportFormat, type ImportPreviewRow, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
 
@@ -388,7 +388,9 @@ function ModeCard(props: {
 
 // ── running ──────────────────────────────────────────────────────────────────
 function RunningStep({ job, fileName }: { job: Job | null; fileName?: string }) {
-  const phaseLabel = !job || job.status === 'pending' ? 'Uploading…' : 'Reconciling changes…'
+  const queued = queuePosition(job)
+  const phaseLabel = queued ? 'Waiting to start…'
+    : !job || job.status === 'pending' ? 'Uploading…' : 'Reconciling changes…'
   return (
     <div className="px-8 py-16 flex flex-col items-center gap-5">
       <div className="relative w-16 h-16">
@@ -399,6 +401,7 @@ function RunningStep({ job, fileName }: { job: Job | null; fileName?: string }) 
       </div>
       <div className="text-center">
         <p className="text-sm font-semibold text-ink">{phaseLabel}</p>
+        {queued && <p className="text-[11px] text-ink-muted mt-1">{queued}</p>}
         <p className="text-[11px] text-ink-muted mt-1 truncate max-w-[24rem]">{fileName}</p>
       </div>
       <div className="w-full max-w-sm h-1 rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">

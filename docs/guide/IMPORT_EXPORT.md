@@ -33,7 +33,9 @@ editing dozens of nodes on the canvas.
 2. **Edit it** anywhere — a spreadsheet, a script, whatever's convenient.
 3. **Upload it.** The import runs in the background, so you can keep working
    while it processes. One file can be up to 100 MB; split a larger one and
-   import the parts one after another — each adds to the same draft.
+   import the parts one after another — each adds to the same draft. When the
+   server is busy with other imports and exports, yours waits its turn, and
+   the dialog says how many are ahead of it.
 4. **Review every change.** When it's done, you get a clear breakdown — how
    many items are new, updated, deleted, or need fixing — plus a preview of
    the actual rows, before anything touches the published graph.
