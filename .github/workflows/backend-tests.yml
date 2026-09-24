@@ -123,7 +123,9 @@ jobs:
       # the entities the Python reference evaluator does, on every stored
       # kind — the engine quirks it works around are version-specific.
       # The uncapped engine: its chunked, paged answer must equal one
-      # uncapped ORDER BY, row for row, under every scope shape.
+      # uncapped ORDER BY, row for row, under every scope shape — and a
+      # property kept raw (propertiesRaw) must be searched as exactly as one
+      # kept natively.
       - name: Search comparison semantics and the uncapped engine, against the real engine
         working-directory: backend
         env:
@@ -132,7 +134,8 @@ jobs:
           FALKORDB_PORT: "6379"
         run: |
           python -m pytest tests/integration/test_search_semantics_live.py \
-            tests/integration/test_search_engine_live.py -q
+            tests/integration/test_search_engine_live.py \
+            tests/integration/test_raw_properties_live.py -q
 
   full-suite:
     name: Full backend suite (informational)

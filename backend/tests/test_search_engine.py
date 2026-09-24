@@ -505,6 +505,12 @@ class _Provider:
         self.fetched.append(list(urns))
         return [GraphNode(urn=u, entityType="t", displayName=u) for u in urns]
 
+    async def _ro_query(self, cypher, params=None, *, timeout=None, op=None):
+        # The one statement the engine runs itself (the scan is scripted):
+        # whether the graph keeps any property raw. This one keeps none.
+        assert "propertiesRaw" in cypher
+        return type("Result", (), {"result_set": []})()
+
 
 class _Scan:
     """Stands in for ``make_plan`` and ``_run_unit``: each unit is a label

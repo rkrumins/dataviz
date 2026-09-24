@@ -15,6 +15,10 @@ never matches, whatever it holds. Containment scope — the view's roots, and
 a rule's own ``descendantOf`` — is checked against each entity's ancestors,
 read in the same statement. ``withinHops`` and ``path`` say nothing about
 one entity on its own, so a rule using them is refused (``errors``).
+
+A property a node keeps raw (``propertiesRaw``) is answered as a search
+answers it (``raw_properties``): the batch's raw JSON is read first, when
+the graph keeps anything raw.
 """
 from __future__ import annotations
 
@@ -27,25 +31,33 @@ from backend.app.providers.falkordb_deep_search import (
     _searchable_labels,
 )
 from backend.app.providers.falkordb_search.plan import _labels_in_scope, _quote, _rel
+from backend.app.providers.falkordb_search.raw_properties import (
+    RawLeaf, answered, empty_params, evaluate_rows, graph_raw_labels, probe_condition,
+)
 from backend.app.services.deep_search import CompileError
 from backend.common.models.search import SearchScope
 
 
 async def evaluate_membership(
     provider, scope: SearchScope, items: Sequence[Tuple[str, Any]], urns: Sequence[str],
-    *, run, timeout_s: float,
+    *, run, timeout_s: float, data_version: str = "",
 ) -> Dict[str, Any]:
     """``{"matches": {item: [urn…]}, "errors": {item: why}, "elapsedMs"}``.
 
     ``scope`` is the RESOLVED scope (the service stamps it): its roots, its
     entity types, its visible URNs. ``run(cypher, params)`` executes one
-    statement under the caller's admission."""
+    statement under the caller's admission; ``data_version`` keys whether
+    the graph keeps any property raw."""
     started = time.monotonic()
     matches: Dict[str, List[str]] = {item_id: [] for item_id, _ in items}
     errors: Dict[str, str] = {}
     urns = list(dict.fromkeys(u for u in urns if u))
-    columns, params, hoisted = _compile(provider, items, errors)
-    if not urns or not columns:
+    if not urns:
+        return _result(matches, errors, started)
+    raw_labels = await graph_raw_labels(provider, run, data_version)
+    columns, params, hoisted, raw_leaves = _compile(provider, items, errors,
+                                                    raw=bool(raw_labels))
+    if not columns:
         return _result(matches, errors, started)
 
     containment = _containment(provider)
@@ -63,14 +75,16 @@ async def evaluate_membership(
 
     anc = (f"[(n)<-[:{_rel(containment)}*0..{depth}]-(_ma) | _ma.urn]"
            if ancestors_needed else "[]")
-    flags = ", ".join(f"ANY(_mz IN [0] WHERE {where}) AS m{i}"
-                      for i, (_, where) in enumerate(columns))
     rows: Dict[str, Tuple[Set[str], Set[str], List[bool]]] = {}
     for label, label_urns in by_label.items():
+        lists = (await _raw_answers(run, label, label_urns, raw_leaves)
+                 if label in raw_labels else empty_params(raw_leaves))
+        flags = ", ".join(f"ANY(_mz IN [0] WHERE {answered(where, raw_leaves, lists)}) AS m{i}"
+                          for i, (_, where) in enumerate(columns))
         res = await run(
             f"MATCH (n:`{_sanitize_label(label)}`) WHERE n.urn IN $_urns "
             f"RETURN n.urn, labels(n), {anc}, {flags}",
-            {**params, "_urns": label_urns},
+            {**params, **lists, "_urns": label_urns},
         )
         for row in res.result_set or []:
             urn, node_labels, ancestors, values = row[0], row[1], row[2], row[3:]
@@ -98,18 +112,35 @@ async def evaluate_membership(
     return _result(matches, errors, started)
 
 
-def _compile(provider, items, errors) -> Tuple[List[Tuple[str, str]], Dict[str, Any],
-                                              Dict[str, List[Set[str]]]]:
+async def _raw_answers(run, label: str, urns: List[str], leaves: Sequence[RawLeaf]
+                      ) -> Dict[str, List[int]]:
+    """The rules' property conditions answered for the values these
+    entities keep raw — nothing to ask when no rule reads a property."""
+    if not leaves:
+        return {}
+    cond, params = probe_condition(leaves)
+    res = await run(f"MATCH (n:`{_sanitize_label(label)}`) WHERE n.urn IN $_urns AND {cond} "
+                    "RETURN ID(n), n.propertiesRaw", {**params, "_urns": urns})
+    return evaluate_rows(res.result_set or [], leaves)
+
+
+def _compile(provider, items, errors, *, raw: bool = False
+             ) -> Tuple[List[Tuple[str, str]], Dict[str, Any], Dict[str, List[Set[str]]],
+                        List[RawLeaf]]:
     """Each rule's WHERE fragment — parameters numbered on from the last
-    rule's, so every rule shares one statement — and its ``descendantOf``
-    URN sets."""
+    rule's, so every rule shares one statement — its ``descendantOf`` URN
+    sets and, when the graph keeps properties ``raw``, every rule's property
+    conditions to answer for them."""
     columns: List[Tuple[str, str]] = []
     params: Dict[str, Any] = {}
     hoisted: Dict[str, List[Set[str]]] = {}
+    raw_leaves: List[RawLeaf] = []
     counter = 0
     for item_id, predicate in items:
         compiler = _build_compiler_for_provider(provider)
         compiler._param_counter = counter
+        if raw:
+            compiler.raw_leaves = []
         try:
             where = compiler.compile(predicate)
         except CompileError as exc:
@@ -122,8 +153,9 @@ def _compile(provider, items, errors) -> Tuple[List[Tuple[str, str]], Dict[str, 
         counter = compiler._param_counter
         params.update(compiler.params)
         hoisted[item_id] = [set(s) for s in compiler.hoisted_root_urns]
+        raw_leaves.extend(compiler.raw_leaves or [])
         columns.append((item_id, where if where else "true"))
-    return columns, params, hoisted
+    return columns, params, hoisted, raw_leaves
 
 
 async def _labels_by_urn(provider, run, labels, urns: List[str], timeout_s: float

@@ -647,9 +647,10 @@ function PropertyRow({
                     )}
 
                     {property.residual > 0 && (
-                        <p className="text-[11px] text-amber-300 leading-snug">
+                        <p className="text-[11px] text-ink-muted leading-snug">
                             {property.residual.toLocaleString()} {property.residual === 1 ? 'entity holds' : 'entities hold'} it
-                            past the graph's native-property budget — search doesn't read those yet.
+                            past the graph's native-property budget, as raw text — search still
+                            compares those values exactly, only more slowly.
                         </p>
                     )}
                 </div>

@@ -35,8 +35,8 @@ How a view's roots bound the search (§7):
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
     _build_within_hops_continuation,
@@ -45,6 +45,7 @@ from backend.app.providers.falkordb_deep_search import (
     _searchable_labels,
 )
 from backend.app.providers.falkordb_search.keys import SortSpec
+from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
 
 #: Root sets up to this size clamp range units with an ``IN`` list. The
 #: check costs (ancestor rows) × (roots): 50 roots cost 2× an unclamped
@@ -131,6 +132,11 @@ class Context:
     # A first page's units also tally their matches' containment ancestors
     # (the search asked for the ``ancestor`` facet: the canvas's badges).
     tally: bool = False
+    # The predicate's property conditions, when the graph keeps values
+    # raw: each unit of a label in ``raw_labels`` (and every walk or
+    # visible unit) answers them first (``raw_probe_statement``).
+    raw_leaves: Tuple[RawLeaf, ...] = ()
+    raw_labels: FrozenSet[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +420,17 @@ def count_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     """This unit's exact count, and nothing else — a rule's total."""
     head, params = match_statement(unit, ctx, clamps)
     return f"{head} RETURN count(n)", params
+
+
+def raw_probe_statement(unit: Unit, ctx: Context) -> Tuple[str, Dict[str, Any]]:
+    """The ids and raw JSON of this unit's nodes that may keep one of the
+    predicate's keys raw — the unit's nodes alone: the predicate, the scope's
+    clamps and hops belong to the statements that use the answer."""
+    head, params = match_statement(
+        unit, replace(ctx, where="", params={}, within_hops=""), [])
+    cond, cond_params = probe_condition(ctx.raw_leaves)
+    params.update(cond_params)
+    return f"{head} WITH n WHERE {cond} RETURN ID(n), n.propertiesRaw", params
 
 
 def tally_statement(unit: Unit, ctx: Context, clamps: List[List[int]]

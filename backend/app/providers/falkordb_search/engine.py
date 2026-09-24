@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
@@ -51,8 +52,15 @@ from backend.app.providers.falkordb_search.plan import (
     count_statement,
     make_plan,
     page_statements,
+    raw_probe_statement,
     tally_statement,
     within_hops,
+)
+from backend.app.providers.falkordb_search.raw_properties import (
+    answered,
+    empty_params,
+    evaluate_rows,
+    graph_raw_labels,
 )
 from backend.app.providers.falkordb_search.relevance import score_expr
 from backend.app.providers.falkordb_search.session import (
@@ -107,7 +115,11 @@ async def execute_session_search(
     deadline = started + budget_s
     admit = context.admit
 
-    compiler = _build_compiler_for_provider(provider)
+    async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
+        async with (admit() if admit else contextlib.nullcontext()):
+            return await provider._ro_query(cypher, params=params, timeout=timeout_s)
+
+    compiler, raw_labels = await _compiler_for(provider, run, context, settings)
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("path search is not run by the uncapped engine")
@@ -127,6 +139,7 @@ async def execute_session_search(
         within_hops=hops,
         tally=(options.results == "both" and bool(containment)
                and any(a.by == "ancestor" for a in options.aggregations or [])),
+        raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     page_size = options.page_size
     # The rows a session keeps: whole pages, at least ``session_rows``.
@@ -134,10 +147,6 @@ async def execute_session_search(
     query_id = query_identity(query, context.scope_hash, k)
     cursor = _read_cursor(options.cursor, query_id)
     store = store_for(provider)
-
-    async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
-        async with (admit() if admit else contextlib.nullcontext()):
-            return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     # A later page the session behind the previous one already holds.
     if cursor is not None and cursor.get("sid"):
@@ -200,7 +209,11 @@ async def execute_count_session(
                           else options.soft_deadline_ms) / 1000.0
     admit = context.admit
 
-    compiler = _build_compiler_for_provider(provider)
+    async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
+        async with (admit() if admit else contextlib.nullcontext()):
+            return await provider._ro_query(cypher, params=params, timeout=timeout_s)
+
+    compiler, raw_labels = await _compiler_for(provider, run, context, settings)
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("a path search has no count")
@@ -212,13 +225,10 @@ async def execute_count_session(
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
         within_hops=hops,
+        raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     query_id = query_identity(query, context.scope_hash, 0)
     store = store_for(provider)
-
-    async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
-        async with (admit() if admit else contextlib.nullcontext()):
-            return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     session, created = await _session_for(provider, query, compiler, store, run, query_id,
                                           0, None, context, deadline, settings)
@@ -227,6 +237,19 @@ async def execute_count_session(
     if session.status == FAILED:
         raise SearchFailed(f"count failed: {session.error}")
     return _count_answer(session)
+
+
+async def _compiler_for(provider, run, context: SearchRunContext, settings):
+    """The provider's compiler — answering property conditions for values
+    kept in ``propertiesRaw`` too, when the graph keeps any — and the labels
+    whose nodes do."""
+    compiler = _build_compiler_for_provider(provider)
+    timeout_s = max(1.0, settings.chunk_timeout_ms / 1000.0)
+    raw_labels = await graph_raw_labels(provider, lambda c, p: run(c, p, timeout_s),
+                                        context.data_version)
+    if raw_labels:
+        compiler.raw_leaves = []
+    return compiler, raw_labels
 
 
 def _count_answer(session: Session) -> Dict[str, Any]:
@@ -466,6 +489,16 @@ async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: 
     tallies ancestors — its ``[urn, name, label, entity type, matches]``
     rows (a later page's session counts nothing — the total is page 1's;
     a count session keeps no rows)."""
+    if ctx.raw_leaves:
+        # The unit's raw-kept values, answered before its statements run —
+        # none to read in a label whose nodes keep nothing raw.
+        lists = empty_params(ctx.raw_leaves)
+        if unit.label is None or unit.label in ctx.raw_labels:
+            cypher, params = raw_probe_statement(unit, ctx)
+            res = await run(cypher, params, timeout_s)
+            lists = evaluate_rows(res.result_set or [], ctx.raw_leaves)
+        ctx = dataclasses.replace(ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
+                                  params={**ctx.params, **lists})
     if session.k == 0:
         cypher, params = count_statement(unit, ctx, session.clamps)
         res = await run(cypher, params, timeout_s)

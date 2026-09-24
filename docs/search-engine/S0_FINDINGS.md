@@ -621,3 +621,40 @@ Two costs changed the design:
   2–3× slower. They now run only for keys that hold numbers.
 - Filtering out the 40 platform keys in Cypher (`NOT _k IN $_skip`) cost
   another 10%. They are dropped in Python instead.
+
+## 14. Properties kept raw (P5a)
+
+A node keeps a user property in `propertiesRaw`, as JSON text, when the
+value is nested or the name is past the graph's native-name budget. Cypher
+can't parse that text, so a search on such a key used to match nothing
+there. Now it is exact (`falkordb_search/raw_properties.py`):
+
+- **Which labels hold raw data.** One statement per graph and data
+  version. `bench_1m` holds none, so the whole path is skipped there.
+- **Per unit of those labels,** a probe reads the raw text of the nodes
+  whose JSON names one of the predicate's keys (`"key":`, as `json.dumps`
+  writes it). Python evaluates each condition on those values with
+  `search_semantics.evaluate`, the same reference the compiled Cypher is
+  tested against.
+- **The answer goes into two ID lists per condition.** The condition
+  becomes `(raw ∧ true) ∨ (¬raw ∧ native)`: a node keeps a key in one
+  place, so this is exact inside AND, OR and NOT. A condition that no node
+  of the unit keeps raw goes back to its plain form.
+- **Membership** (rule chips) answers the same way, for each URN batch.
+- **Free-text search** (`searchableText`) now includes string values kept
+  raw. Existing nodes pick this up when rewritten, or with
+  `migrate_native_properties.py --searchable-text`.
+- **A nested value** compares as its JSON text.
+
+Measured on `bench_1m`: an exact count of `gvHash > 0` (499,566 matches).
+Raw data was forced on to measure the probes, because the graph has none.
+
+| | |
+|---|---:|
+| Label check (whole graph, once per data version) | about 100 ms |
+| No raw data | 2.0–2.2 s |
+| Raw data in every label (worst case) | 2.2–3.0 s |
+| Raw data in one small label | no measurable cost |
+| One probe, per 50k–150k-node unit | 8–32 ms |
+
+The counts vary by about ±0.4 s from run to run as FalkorDB's caches warm.

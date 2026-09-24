@@ -68,6 +68,7 @@ from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
     platform_property_names,
 )
+from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.derived_artifacts import is_derived_label
@@ -230,6 +231,11 @@ class _Compiler:
         # path queries cleanly.
         self.hoisted_path: Optional[Dict[str, Any]] = None
         self._param_counter = 0
+        # Node property conditions answered for values kept in
+        # ``propertiesRaw`` too (``falkordb_search.raw_properties``): None
+        # compiles them for native values only; a list — set by a caller
+        # whose graph keeps anything raw — collects each one's ``RawLeaf``.
+        self.raw_leaves: Optional[List[RawLeaf]] = None
         # Ontology-resolved edge type sets. ``None`` means the caller
         # didn't inject them — predicates that depend on lineage /
         # containment classification will raise CompileError on visit.
@@ -363,9 +369,11 @@ class _Compiler:
             # A property holds any kind — ``toString`` on a list aborts the
             # whole query — so this is the typed TEXT comparison a
             # PropertyPredicate makes, not a raw column wrap.
-            return self._compile_comparison(
-                f"n.{_safe_property_name(t.property_key)}",
-                _text_on_property(t),
+            as_property = _text_on_property(t)
+            return self._raw_value(
+                self._compile_comparison(
+                    f"n.{_safe_property_name(t.property_key)}", as_property),
+                as_property,
             )
         elif target == "any":
             # n.searchableText is denormalised at write-time (already
@@ -417,7 +425,23 @@ class _Compiler:
         return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
-        return self._compile_comparison(f"n.{_safe_property_name(p.key)}", p)
+        return self._raw_value(
+            self._compile_comparison(f"n.{_safe_property_name(p.key)}", p), p)
+
+    def _raw_leaf(self, native: str, key: str, cmp, key_match: str) -> str:
+        leaf = RawLeaf(key=key, cmp=cmp, key_match=key_match,
+                       raw_ids=self._next(), true_ids=self._next(), native=native)
+        # Empty until a scan's probe fills them: native values alone.
+        self.params[leaf.raw_ids] = []
+        self.params[leaf.true_ids] = []
+        self.raw_leaves.append(leaf)
+        return leaf.wrapped
+
+    def _raw_value(self, native: str, p) -> str:
+        """A node property comparison, exact for values kept raw too."""
+        if self.raw_leaves is None:
+            return native
+        return self._raw_leaf(native, p.key, resolve_predicate(p), "exact")
 
     def _compile_comparison(self, col: str, p) -> str:
         """A typed comparison (``search_semantics``) of the stored value
@@ -466,6 +490,8 @@ class _Compiler:
             platform = self._bind(sorted(platform_property_names()))
             expr = (f"ANY(_k IN keys(n) WHERE NOT _k IN {platform} "
                     f"AND toLower(_k) {keyword} {self._bind(fold_case(h.key))})")
+        if self.raw_leaves is not None:
+            expr = self._raw_leaf(expr, h.key, None, h.key_match)
         return f"NOT ({expr})" if h.negate else expr
 
     def _visit_entity_type(self, e) -> str:

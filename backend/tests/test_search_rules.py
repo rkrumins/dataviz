@@ -261,7 +261,7 @@ class TestMembershipStatement:
         out = await _members(graph, SearchScope(view_id="v", scope_mode="data_source"),
                              items, ["u1"])
         assert out["matches"] == {"r0": ["u1"], "r1": []}
-        cypher, params = next(s for s in graph.statements if "labels(n)" in s[0])
+        cypher, params = next(s for s in graph.statements if "RETURN n.urn, labels(n)" in s[0])
         assert cypher.count("ANY(_mz IN [0] WHERE") == 2
         assert params["p0"] == "x" and params["p1"] == "y"
         assert "[] ," not in cypher and ", [], " in cypher      # no ancestors needed
@@ -272,7 +272,7 @@ class TestMembershipStatement:
         scope = SearchScope(view_id="v", scope_mode="view", root_urns=["root"])
         out = await _members(graph, scope, [("r", P({"kind": "all"}))], ["in", "out"])
         assert out["matches"] == {"r": ["in"]}
-        cypher = next(s[0] for s in graph.statements if "labels(n)" in s[0])
+        cypher = next(s[0] for s in graph.statements if "RETURN n.urn, labels(n)" in s[0])
         assert "[(n)<-[:CONTAINS*0..12]-(_ma) | _ma.urn]" in cypher
 
     async def test_a_rules_own_descendant_of_is_checked_against_ancestors(self):

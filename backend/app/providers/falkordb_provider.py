@@ -1440,6 +1440,13 @@ def resolve_falkordb_target(host: Optional[str], port: Optional[int]) -> Tuple[s
     return host, port
 
 
+def _text_properties(props: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The user properties free-text search reads: every one a node keeps —
+    natively or, past the native budget, in ``propertiesRaw``. A value kept
+    raw is still text a person searches for."""
+    return {k: v for k, v in (props or {}).items() if k not in _RESERVED_NODE_KEYS}
+
+
 def _compute_searchable_text(
     display_name: Optional[str],
     qualified_name: Optional[str],
@@ -1744,12 +1751,13 @@ async def reserve_platform_property_names(
 #: frees one: a source whose nodes carry thousands of per-node metadata keys
 #: spends the graph's 65,533 ids on keys that appear once, after which no
 #: rollup can be written or indexed and the graph can only be recreated. The
-#: budget keeps the names that carry the graph native (searchable,
-#: indexable) and puts the long tail where the Properties panel still shows
-#: it and only search predicates cannot reach it. Counted against every name
-#: the graph has registered, platform names included. Applies as a graph is
-#: written, and a name already registered stays native — so raising it
-#: takes full effect only on a recreated graph.
+#: budget keeps the names that carry the graph native (indexable, and
+#: compared by Cypher) and puts the long tail in ``propertiesRaw``, where the
+#: Properties panel shows it and search compares it from the JSON text —
+#: exactly, but without an index (``falkordb_search.raw_properties``).
+#: Counted against every name the graph has registered, platform names
+#: included. Applies as a graph is written, and a name already registered
+#: stays native — so raising it takes full effect only on a recreated graph.
 #:
 #: 50,000, not the 8,000 this shipped with, because
 #: :func:`reserve_platform_property_names` now stakes the platform's own
@@ -1757,7 +1765,7 @@ async def reserve_platform_property_names(
 #: platform, and its only remaining job is to stop a graph reaching the
 #: ceiling, where the store refuses every further new name — no rollup
 #: write, no index — and the graph can only be recreated. What a demoted key
-#: actually costs is searchability, not memory or the value itself: a
+#: actually costs is search speed, not memory or the value itself: a
 #: registered name that appears on few nodes costs almost nothing, because a
 #: FalkorDB entity's attribute set is sized by the attributes PRESENT on it,
 #: not by the names the graph has registered — so a generous default is
@@ -6381,7 +6389,8 @@ class FalkorDBProvider(GraphDataProvider):
             async with admit():
                 return await self._ro_query(cypher, params=params)
 
-        return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0)
+        return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0,
+                                         data_version=context.data_version)
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False):
@@ -14410,8 +14419,8 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> None:
         logger.warning(
             "%s on %s: %d property key(s) stored as values in propertiesRaw "
-            "rather than as node properties — shown in the Properties panel, "
-            "not reachable by search predicates. The graph holds %d of the %d "
+            "rather than as node properties — shown in the Properties panel and "
+            "searched from that text, without an index. The graph holds %d of the %d "
             "native property names FALKORDB_NATIVE_PROPERTY_BUDGET allows. "
             "Most common first: %s",
             where, self._graph_name, len(demoted), len(native), budget, demoted[:5],
@@ -14595,7 +14604,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "level": self._get_node_level(node.entity_type),
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props, tags=node.tags,
+                    node.description, _text_properties(node.properties), tags=node.tags,
                 ),
             })
 
@@ -14768,7 +14777,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "lastSyncedAt": node.last_synced_at or "",
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props, tags=node.tags,
+                    node.description, _text_properties(node.properties), tags=node.tags,
                 ),
             }
             if node.child_count is not None:
