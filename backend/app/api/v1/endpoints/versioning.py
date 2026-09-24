@@ -2697,6 +2697,7 @@ async def create_export(
     ids: Optional[str] = Query(None, description="Comma-separated entity_id/urn set — export only these entities"),
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    filename: Optional[str] = Query(None, description="The download's name, without its extension"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     viewer: Viewer = Depends(viewer_ctx),
@@ -2707,7 +2708,9 @@ async def create_export(
 ):
     """Export the graph (or an as-of snapshot, E5) to a downloadable, re-importable artifact.
     A whole-data-source export doubles as a backup. Async: dispatches the worker, poll status.
-    The same records as ``/exports/stream``, stored for a later download (the dialog streams)."""
+    The same records as ``/exports/stream``, written by the workers and stored, so the download
+    that follows resumes: how the Export dialog exports a data source with version control."""
+    from backend.app.api.v1.endpoints.graph_export import download_name
     from backend.app.services.versioning.import_export.formats import get_adapter
     try:
         get_adapter(format)
@@ -2721,7 +2724,8 @@ async def create_export(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
             actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
             branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
-            select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key)
+            select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key,
+            file_name=download_name(filename, format) if filename else None)
     status = await ie.start_export(created["job_id"])
     return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": status}
 
@@ -2857,53 +2861,109 @@ async def stream_export(
         headers={"X-Export-As-Of": "" if snap.as_of_seq is None else str(snap.as_of_seq)})
 
 
+async def _may_read_export(ws_id: str, graph_id: str, meta: dict, job: Dict[str, Any], **caller) -> bool:
+    """Whether the caller may read an export job: what creating it checked, asked again, since
+    access changes. An export of a draft is its readers' only, and one of a view its readers'."""
+    try:
+        await _check_export_access(ws_id, graph_id, meta, branch_id=job.get("branchId"),
+                                   view_id=job.get("scopeViewId"), **caller)
+    except HTTPException as exc:
+        if exc.status_code in (403, 404):
+            return False
+        raise
+    return True
+
+
+async def _readable_export(ws_id: str, graph_id: str, job_id: str, meta: dict, ie, **caller) -> Dict[str, Any]:
+    """This graph's export job ``job_id``, when the caller may read it; else 404, as for none."""
+    job = await ie.get_job(job_id)
+    if (job is None or job.get("graphId") != graph_id or job.get("jobType") != "export"
+            or not await _may_read_export(ws_id, graph_id, meta, job, **caller)):
+        raise HTTPException(status_code=404, detail="export not found")
+    return job
+
+
 @router.get("/graphs/{graph_id}/exports")
 async def list_exports(
     ws_id: str, graph_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
-    _meta: dict = Depends(graph_in_workspace),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    return await ie.list_jobs(graph_id=graph_id, job_type="export")
+    """The graph's export jobs the caller may read, newest first."""
+    caller = dict(viewer=viewer, user=user, claims=claims, session=session, svc=svc)
+    readable: Dict[tuple, bool] = {}                    # one check per draft and view, not per job
+    jobs = []
+    for job in await ie.list_jobs(graph_id=graph_id, job_type="export"):
+        key = (job.get("branchId"), job.get("scopeViewId"))
+        if key not in readable:
+            readable[key] = await _may_read_export(ws_id, graph_id, meta, job, **caller)
+        if readable[key]:
+            jobs.append(job)
+    return jobs
 
 
 @router.get("/graphs/{graph_id}/exports/{job_id}")
 async def get_export(
     ws_id: str, graph_id: str, job_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
-    _meta: dict = Depends(graph_in_workspace),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    job = await ie.get_job(job_id)
-    if job is None or job.get("graphId") != graph_id:
-        raise HTTPException(status_code=404, detail="export job not found")
+    """An export job: its status, its place in the queue, and how far it has got while it runs
+    (``summary``: this pass's nodes and edges, the passes so far, the bytes written). A finished
+    one says whether its file is still ``kept`` to download (the store sweeps it after a day)."""
+    job = await _readable_export(ws_id, graph_id, job_id, meta, ie, viewer=viewer, user=user, claims=claims,
+                                 session=session, svc=svc)
+    if job.get("status") == "completed" and job.get("resultUri"):
+        job["kept"] = (await ie.store.stat(job["resultUri"])).exists
     return job
 
 
 @router.get("/graphs/{graph_id}/exports/{job_id}/download",
             dependencies=[Depends(_GATE_GRAPH_EXPORT)])
 async def download_export(
-    ws_id: str, graph_id: str, job_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
-    _meta: dict = Depends(graph_in_workspace),
+    ws_id: str, graph_id: str, job_id: str, request: Request,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    # Closed before the body streams: a download that takes hours holds no database connection.
+    session: AsyncSession = Depends(get_db_session, scope="function"),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    from fastapi.responses import StreamingResponse
-    result = await ie.open_result(job_id)
-    if result is None or result[0].get("graphId") != graph_id:
-        raise HTTPException(status_code=404, detail="export not found")
-    job, stream = result
+    """A finished export's file, as a download that resumes: ``Range`` asks for the part a broken
+    download lacks, and ``If-Range`` gets the whole file instead should it no longer be the one
+    that part came from."""
+    from datetime import datetime, timezone
+    from email.utils import format_datetime
+
+    from backend.app.api.v1.endpoints.graph_export import stored_download
+
+    job = await _readable_export(ws_id, graph_id, job_id, meta, ie, viewer=viewer, user=user, claims=claims,
+                                 session=session, svc=svc)
     if job.get("status") != "completed":
         raise HTTPException(status_code=409, detail={"type": "not_ready", "status": job.get("status")})
-    try:
-        await ie.store.stat(job["resultUri"])
-    except FileNotFoundError:
+    stat = await ie.store.stat(job["resultUri"])
+    if not stat.exists:
         raise HTTPException(status_code=404, detail="This export is no longer kept. Export again.")
     fmt = job.get("importFormat") or "ndjson"
-    filename = job.get("fileName") or f"export-{job_id}.{fmt}"      # a view package names itself
-    return StreamingResponse(
-        stream, media_type="application/zip" if filename.endswith(".zip") else "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    filename = job.get("fileName") or f"export-{job_id}.{fmt}"
+    modified = (format_datetime(datetime.fromisoformat(job["completedAt"]).astimezone(timezone.utc), usegmt=True)
+                if job.get("completedAt") else None)
+    return stored_download(
+        ie.store, job["resultUri"], size=stat.size, etag=f'"{job_id}-{stat.size}"', modified=modified,
+        filename=filename, media_type="application/zip" if filename.endswith(".zip") else "application/octet-stream",
+        range_header=request.headers.get("range"), if_range=request.headers.get("if-range"))
 
 
 # --------------------------------------------------------------------------- #

@@ -6,8 +6,9 @@
  * send the whole file as the body of `POST …/imports`), the server opens/appends a **draft**,
  * resolves + applies the rows onto it, and the changes become reviewable through the existing
  * draft diff/publish endpoints.
- * Export is symmetric: ask what an export would hold (the plan), then the browser downloads it
- * as the server writes it, a re-importable artifact (a backup) of any size.
+ * Export is symmetric: ask what an export would hold (the plan), then download it, a
+ * re-importable artifact (a backup). The server's workers prepare a data source with version
+ * control's export (up to 50 GB), and its download resumes; one without streams as it is read.
  *
  * Talks to the workspace-scoped versioning router, mirroring `versioningApiService`
  * (cookie + CSRF session via `fetchWithTimeout`, camelCase wire types).
@@ -35,6 +36,9 @@ export interface ExportSummary {
   nodes: number
   edges: number
   bytes: number
+  /** While it runs: the passes over the records so far (a spreadsheet reads them all once for its
+   *  columns, then again to write them); `nodes` and `edges` count the current pass. */
+  passes?: number
 }
 
 export interface Job {
@@ -51,6 +55,8 @@ export interface Job {
   completedAt?: string | null
   /** Queued for the server's import/export workers: how many jobs are ahead of it; else absent. */
   queuedAhead?: number | null
+  /** A finished export: whether its file is still kept to download (it is for a day). */
+  kept?: boolean
 }
 
 /** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
@@ -169,11 +175,11 @@ function remembered(key: string): string | null {
   try { return localStorage.getItem(key) } catch { return null }
 }
 
-function remember(key: string, uploadId: string | null): void {
+function remember(key: string, value: string | null): void {
   try {
-    if (uploadId) localStorage.setItem(key, uploadId)
+    if (value) localStorage.setItem(key, value)
     else localStorage.removeItem(key)
-  } catch { /* private mode: the upload just can't be resumed after a reload */ }
+  } catch { /* private mode: nothing is picked up again after a reload */ }
 }
 
 /**
@@ -330,6 +336,45 @@ function exportBase(target: ExportTarget): string {
 
 export function planExport(target: ExportTarget, format: ImportFormat): Promise<ExportPlan> {
   return authFetch<ExportPlan>(`${exportBase(target)}/plan?${exportQuery(target, format)}`)
+}
+
+export interface CreateExportResult {
+  jobId: string
+  resultUri: string
+  status: JobStatus
+}
+
+/** Have the server prepare an export of a data source with version control: its workers write
+ *  the file, then `downloadExportUrl` downloads it, a download the browser can resume. Follow it
+ *  with `getExport`. */
+export function createExport(
+  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+): Promise<CreateExportResult> {
+  return authFetch<CreateExportResult>(`${exportBase(target)}?${exportQuery(target, format, {
+    props: opts.props?.length ? opts.props.join(',') : undefined,
+    filename: opts.filename,
+  })}`, { method: 'POST' })
+}
+
+/** An export the server is preparing, remembered in this browser until its download starts, so
+ *  the dialog finds it again after being closed. */
+export interface PreparedExport {
+  jobId: string
+  fileName: string
+  format: ImportFormat
+  /** The records the plan counted (nodes and edges), for the progress; null when unknown. */
+  total: number | null
+  exact: boolean
+}
+
+const preparedKey = (wsId: string, graphId: string) => `graph-export:${wsId}:${graphId}`
+
+export function preparedExport(wsId: string, graphId: string): PreparedExport | null {
+  try { return JSON.parse(remembered(preparedKey(wsId, graphId)) ?? 'null') } catch { return null }
+}
+
+export function rememberExport(wsId: string, graphId: string, prepared: PreparedExport | null): void {
+  remember(preparedKey(wsId, graphId), prepared && JSON.stringify(prepared))
 }
 
 /** The streamed download itself: a plain GET the browser saves as it arrives (the session cookie

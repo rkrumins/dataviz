@@ -329,14 +329,28 @@ as-of, draft, draft as-of and fork, many pages each).
 
 Three ways out, one pipeline:
 
-- **`GET /exports/plan` then `GET /exports/stream`** — what the Export dialog does: the plan says
-  what the export would hold (counts, emptiness, whether Excel can hold it), then the browser
-  downloads the stream natively. Nothing is stored; any pod serves it.
+- **`GET /exports/plan`, then `POST /exports`** — what the Export dialog does for a data source with
+  version control. The plan says what the export would hold (counts, emptiness, whether Excel can
+  hold it); then the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
+  file to the `result_uri` artifact, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB). While it runs, its
+  heartbeat (every 5 s) keeps its progress in `summary`: this pass's `nodes` and `edges`, the
+  `passes` so far (a spreadsheet reads everything once for its columns, then again to write it), and
+  the `bytes` written; the finished `{nodes, edges, bytes}` replaces it. Then
+  **`GET /exports/{job}/download`** serves the file as a download that resumes: `Content-Length`,
+  `Accept-Ranges: bytes`, a strong `ETag` and `Last-Modified`, and the part a `Range` asks for (206;
+  an `If-Range` naming another file gets all of it, a range past the end 416). Nothing compresses it
+  on the way (gzip would hide its size and move the ranges), and it is exempt from the request
+  deadline and from nginx's buffering, like the streams: a download that takes hours at the
+  client's pace ties up only a file read on the web pod.
+- **`GET /exports/stream`** — the same records, streamed as they are read: nothing is stored, and
+  any pod serves it. For scripts; a download that breaks off starts again.
 - **`GET /{ws}/graph/export/plan · /stream`** (`import_export/live.py`) — a data source **without**
   version control: the provider's `scan_nodes`/`scan_edges` (FalkorDB: internal-id windows, each
   one `NodeByIdSeek`) into the same rows, with no entity ids, so a re-import matches by URN.
-- **`POST /exports`** — the job (`ExportWorker.run`), for API clients: the same stream written to
-  the `result_uri` artifact, then a `{nodes, edges, bytes}` summary.
+
+Reading an export job (the list, its status, its download) checks again what creating it checked
+(`_check_export_access`): an export of a draft is for that draft's readers, and one of a view for
+the view's readers. Any other is a 404, as for a job that doesn't exist, and is left out of the list.
 
 All three take turns (`stream.Slots`). An export keeps about one CPU core busy, so a pod streams
 `GRAPH_EXPORT_CONCURRENCY` (2) at once, whichever of its worker processes serve them. A turn is an
@@ -448,9 +462,12 @@ resolve outside the root, and the same sweep deletes files by age.
   can be deleted), uploads, polls the job (`pollJob`, `:215-228`), and shows a
   New/Updated/Deleted/Needs-fixing summary + changed-row preview with a "Review changes" handoff to
   the draft's Changes panel. The ExportDialog offers format, branch-vs-published (when on a draft),
-  view-vs-whole-DS (when in a view), and "add property columns"; `exportAndDownload`
-  (`:200-212`) creates → polls → downloads with a correct `.<format>` filename
-  (`triggerBrowserDownload`, `:169-177`). See [07 — Frontend Integration](07-frontend-integration.md).
+  view-vs-whole-DS (when in a view), and "add property columns"; it asks for the plan, then for a
+  data source with version control has the server prepare the file (`createExport`, then `getExport`
+  polled: its place in the queue, then its progress) and downloads it once ready
+  (`downloadExportUrl`), named `.<format>` (`triggerBrowserDownload`). The export being prepared is
+  remembered in the browser, so the dialog closed meanwhile opens on it again. A data source without
+  version control streams (`exportStreamUrl`). See [07 — Frontend Integration](07-frontend-integration.md).
 
 ---
 
@@ -465,6 +482,11 @@ resolve outside the root, and the same sweep deletes files by age.
 - **A 10 GB import takes hours**: about 1,500–2,500 rows a second (a 10 GB NDJSON file holds ~40M
   rows). It runs on the worker and shows its place in the queue, not yet its progress.
 - **A large import's staged rows take their space in Postgres** until they are swept (§3c).
+- **A 50 GB export takes hours to prepare**: one job writes about 10 MB a second as NDJSON, 3.5 as
+  CSV (which reads everything twice), on one worker. Nothing splits an export across workers yet,
+  or cancels one being prepared; its file is swept a day after it is written.
+- **Exports download uncompressed**, so that their size is known and a download resumes: a 50 GB
+  CSV is 50 GB on the wire.
 - **No native cloud client yet**: artifacts live in the management database, or on a mount, which
   can be a bucket's FUSE mount (§9); S3/GCS clients and the presigned-upload path are stubbed
   (`get_object_store`).

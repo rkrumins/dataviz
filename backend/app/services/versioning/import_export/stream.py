@@ -30,9 +30,9 @@ from .xlsx_adapter import EXCEL_MAX_ROWS, sheet_columns
 
 logger = logging.getLogger(__name__)
 
-#: The largest export one request may stream; beyond it the download is cut off. A guard against a
-#: runaway, not a size anyone should reach: a whole data source with every property fits well under.
-MAX_BYTES = int(os.getenv("GRAPH_EXPORT_MAX_BYTES", str(20 * 1024 ** 3)))
+#: The largest export: one streamed or written past it is cut off. 50 GB, what an export prepared on
+#: the workers and downloaded in resumable pieces is built for.
+MAX_BYTES = int(os.getenv("GRAPH_EXPORT_MAX_BYTES", str(50 * 1024 ** 3)))
 #: Exports one server streams at once: one pod, across all of its worker processes (an export keeps
 #: about one CPU core busy). Another waits its turn for up to SLOT_WAIT_S, then fails.
 CONCURRENCY = int(os.getenv("GRAPH_EXPORT_CONCURRENCY", "2"))
@@ -161,9 +161,9 @@ async def _edge_page(snap: Snapshot, sel: Selection, page: List[Winner]):
 async def record_pages(snap: Snapshot, sel: Selection,
                        tally: Optional[Dict[str, int]] = None) -> AsyncIterator[List[Dict[str, Any]]]:
     """The export's records, a page at a time: every node, then every edge. ``tally``, when
-    given, counts this pass's records by kind as they go."""
+    given, counts this pass's records by kind as they go, and the passes (a spreadsheet takes two)."""
     tally = tally if tally is not None else {}
-    tally.update(node=0, edge=0)
+    tally.update(node=0, edge=0, passes=tally.get("passes", 0) + 1)
     async for page in snap.iter_live("node", payload=True):
         page = [w for w in page if sel.node_ok(w)]
         if page:

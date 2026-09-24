@@ -18,6 +18,7 @@ import {
   queuePosition, templateDownloadUrl, triggerBrowserDownload,
   type ImportFormat, type ImportPreviewRow, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
+import { prettyBytes } from './format'
 
 export interface ImportDialogProps {
   wsId: string
@@ -56,13 +57,6 @@ function tooLargeReason(size: number, format: ImportFormat): string | null {
       + `of it can be at most ${prettyBytes(cap)}. Export NDJSON or CSV instead: they can be up to ${prettyBytes(MAX_IMPORT_BYTES)}.`
     : `This file is ${prettyBytes(size)}, and one import can be at most ${prettyBytes(cap)}. `
       + 'Split it into smaller files and import them one after another: each adds to the same draft.'
-}
-
-function prettyBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
-  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
 }
 
 export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onReviewChanges, onImported }: ImportDialogProps) {

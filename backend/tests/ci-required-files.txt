@@ -41,6 +41,7 @@ tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py
+tests/test_export_downloads.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
 tests/test_falkordb_native_properties.py

@@ -283,6 +283,7 @@ class ImportExportService:
         select_types: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
         package: Optional[Dict[str, Any]] = None,
+        file_name: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
@@ -290,10 +291,13 @@ class ImportExportService:
         defaulting to published main. Export options (``props``/``ids``/``types``) ride in
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
         row-scope to just those entities / entity types. ``package`` makes the job a view package's
-        (view_transfer.package): the data is written, then packaged with the views."""
+        (view_transfer.package): the data is written, then packaged with the views. ``file_name``
+        names the download."""
         options: Dict[str, Any] = {}
         if package:
             options["package"] = package
+        if file_name:
+            options["fileName"] = file_name
         if extra_props:
             options["props"] = extra_props
         if select_ids:
@@ -340,13 +344,6 @@ class ImportExportService:
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)
-
-    async def open_result(self, job_id: str):
-        """Return ``(job, byte-stream)`` for downloading a completed export, else ``None``."""
-        job = await self.get_job(job_id)
-        if job is None or not job.get("resultUri"):
-            return None
-        return job, self._store.open_stream(job["resultUri"])
 
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
         """A small, prepopulated starter template so users learn the format instantly: the column
@@ -406,7 +403,8 @@ class ImportExportService:
                 "createdAt": row.created_at, "completedAt": row.completed_at,
                 # Queued for the versioning worker: how many jobs it waits behind (else None).
                 "queuedAhead": ahead,
-                # A view package names its own download (view_transfer.package).
-                "fileName": ((row.field_scope or {}).get("package") or {}).get("fileName")
+                # The download's name: the export's own, or a view package's (view_transfer.package).
+                "fileName": (row.field_scope.get("fileName")
+                             or (row.field_scope.get("package") or {}).get("fileName"))
                 if isinstance(row.field_scope, dict) else None,
             }

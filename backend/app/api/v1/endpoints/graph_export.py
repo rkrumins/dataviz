@@ -8,11 +8,13 @@ memory stays flat at any size. The helpers both share live here.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Optional
+import re
+from typing import AsyncIterator, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.feature_gate import require_feature
@@ -95,6 +97,63 @@ class ExportStreamResponse(StreamingResponse):
             raise
         finally:
             stream.slots.release(self.turn)
+
+
+# ── A stored export's download, which resumes ───────────────────────────────
+
+_RANGE = re.compile(r"bytes=(\d*)-(\d*)")
+
+
+def byte_range(header: Optional[str], size: int) -> Optional[Tuple[int, int]]:
+    """The bytes a ``Range`` header asks for, ``(first, last)`` inclusive; ``None`` for the whole
+    file: no header, or one this doesn't serve (several ranges, another unit, not valid), which HTTP
+    lets a server answer with the whole file. :class:`ValueError` when no byte of it is in the file
+    (a 416)."""
+    match = _RANGE.fullmatch((header or "").strip())
+    if not match or match.groups() == ("", ""):
+        return None
+    first, last = match.groups()
+    if not first:                                       # the last N bytes
+        if int(last) == 0 or size == 0:
+            raise ValueError("no bytes in range")
+        return max(0, size - int(last)), size - 1
+    if last and int(last) < int(first):
+        return None
+    if int(first) >= size:
+        raise ValueError("range starts past the end")
+    return int(first), min(int(last), size - 1) if last else size - 1
+
+
+async def _first_bytes(chunks: AsyncIterator[bytes], n: int) -> AsyncIterator[bytes]:
+    """The first ``n`` bytes of ``chunks``, which are closed once those are read."""
+    async with contextlib.aclosing(chunks):
+        async for chunk in chunks:
+            if n <= 0:
+                break
+            yield chunk[:n]
+            n -= len(chunk)
+
+
+def stored_download(store, key: str, *, size: int, etag: str, modified: Optional[str], filename: str,
+                    media_type: str, range_header: Optional[str], if_range: Optional[str]) -> Response:
+    """A stored file as a download that resumes: its size, validators and ``Accept-Ranges`` up
+    front, then the part a ``Range`` asks for (206), or the whole file (200) when ``If-Range``
+    names a version other than this one."""
+    if if_range and if_range.strip() not in (etag, modified):
+        range_header = None
+    try:
+        wanted = byte_range(range_header, size)
+    except ValueError:
+        return Response(status_code=416, headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{size}"})
+    first, last = wanted or (0, size - 1)
+    headers = {"Accept-Ranges": "bytes", "ETag": etag, "Content-Length": str(last - first + 1),
+               "Content-Disposition": f'attachment; filename="{filename}"'}
+    if modified:
+        headers["Last-Modified"] = modified
+    if wanted:
+        headers["Content-Range"] = f"bytes {first}-{last}/{size}"
+    return StreamingResponse(_first_bytes(store.open_stream(key, start=first), last - first + 1),
+                             status_code=206 if wanted else 200, media_type=media_type, headers=headers)
 
 
 async def _provider(ws_id: str, data_source_id: str, session: AsyncSession, user: User):

@@ -3,8 +3,8 @@
 With ``GRAPHVER_TRANSFER_INPROCESS`` off the API only queues a job, and workers claim it with
 ``FOR UPDATE SKIP LOCKED``. Proven here: workers claiming at once never take the same job; a job is
 claimed only once its creator queued it (its inputs stored), oldest first; a queued job reports how
-many are ahead of it; and a real import, then an export of its draft, queued this way, run to
-completion through the worker's transfer loop.
+many are ahead of it; a real import, then an export of its draft, queued this way, run to
+completion through the worker's transfer loop; and a running export says how far it has got.
 """
 import asyncio
 import json
@@ -17,6 +17,7 @@ from sqlalchemy import update
 
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, models
+from backend.app.services.versioning.import_export import export_worker
 from backend.app.services.versioning.import_export.runner import QUEUED, TransferRunner
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.models import JobORM
@@ -116,6 +117,31 @@ async def _through_the_worker() -> None:
             assert (job["summary"]["nodes"], job["summary"]["edges"]) == (2, 1), job["summary"]
             text = b"".join([c async for c in store.open_stream(export["result_uri"])]).decode()
             assert "urn:A" in text and "urn:B" in text
+
+            # Running, an export says how far it has got: a CSV reads every record for its columns,
+            # then again to write them. Its own summary replaces that when it finishes.
+            put = store.put_stream
+
+            async def slow_put(key, chunks):
+                async def slowly():
+                    async for chunk in chunks:
+                        await asyncio.sleep(0.2)
+                        yield chunk
+                return await put(key, slowly())
+
+            store.put_stream = slow_put
+            csv = await ie.create_export_job(workspace_id="ws1", data_source_id=G["graph_id"], graph_id=gid,
+                                             actor="u", export_format="csv", branch_id=created["branch_id"])
+            await ie.start_export(csv["job_id"])
+            seen = []
+            while (job := await ie.get_job(csv["job_id"]))["status"] not in ("completed", "failed", "cancelled"):
+                if job["status"] == "running" and job["summary"]:
+                    seen.append(job["summary"])
+                await asyncio.sleep(0.05)
+            assert job["status"] == "completed", job
+            assert seen and seen[-1]["passes"] == 2 and seen[-1]["edges"] == 1, seen
+            assert 0 < seen[-1]["bytes"] <= job["summary"]["bytes"], (seen, job["summary"])
+            assert job["summary"] == {"nodes": 2, "edges": 1, "bytes": job["summary"]["bytes"]}
         finally:
             worker.stop()
             await asyncio.wait_for(loop, 60)
@@ -134,4 +160,5 @@ async def _run() -> None:
 def test_transfer_queue_e2e(monkeypatch):
     monkeypatch.setattr(config, "TRANSFER_INPROCESS", False)
     monkeypatch.setattr(config, "TRANSFER_POLL_SECS", 0.05)
+    monkeypatch.setattr(export_worker, "_PROGRESS_SECS", 0.05)
     asyncio.run(_run())

@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -52,14 +52,19 @@ _RESOLVE_ROWS = text(
 _HEARTBEAT_SECS = 15
 
 
-async def heartbeat(job_id: str) -> None:
+async def heartbeat(job_id: str, progress: Optional[Callable[[], Dict[str, Any]]] = None,
+                    every: Optional[float] = None) -> None:
     """Say "still running" on a timer rather than per batch, until cancelled: resolving or applying
-    one window, or writing a long export, can take minutes without a batch boundary."""
+    one window, or writing a long export, can take minutes without a batch boundary. ``progress``,
+    when given, says how far the job has got: its summary until the job's own replaces it."""
     while True:
-        await asyncio.sleep(_HEARTBEAT_SECS)
+        await asyncio.sleep(every or _HEARTBEAT_SECS)
+        values: Dict[str, Any] = {"updated_at": _now()}
+        if progress is not None:
+            values["summary"] = progress()
         try:
             async with db.graphver_session() as s:
-                await s.execute(update(JobORM).where(JobORM.id == job_id).values(updated_at=_now()))
+                await s.execute(update(JobORM).where(JobORM.id == job_id).values(**values))
         except Exception:  # noqa: BLE001 — the next beat tries again
             logger.debug("job %s: heartbeat skipped", job_id, exc_info=True)
 

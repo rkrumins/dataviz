@@ -132,8 +132,10 @@ See [08](08-import-export.md) for detail; the load-bearing ones:
   (`GRAPHVER_TRANSFER_INPROCESS=0`, as the compose and Kubernetes manifests set it), or in the web
   process by default. Either way, a process that stops mid-import/export takes the job with it: it
   is reported `failed` once silent for `JOB_STALE_AFTER_SECS`, and runs again from the start.
-- **Export doesn't stream the read.** It `materialize_state`s the whole state then streams the write —
-  fine for human-scale exports, not 5M+ (swap `materialize_state` → keyset streaming).
+- **A 50 GB export takes hours.** An export reads one snapshot a page at a time, in flat memory at any
+  size, and the Export dialog has the workers write it to the object store, then downloads it in
+  pieces that resume. One export runs on one worker, at about 10 MB a second as NDJSON and 3.5 as
+  CSV (two passes): nothing splits it across workers yet. `GRAPH_EXPORT_MAX_BYTES` caps it at 50 GiB.
 - **No native cloud client yet**: artifacts live in the management database (`DatabaseObjectStore`,
   shared by every API pod), or as files on a mount every pod shares, which can be a bucket's FUSE
   mount (`OBJECT_STORE_BACKEND=local`); S3/GCS clients raise `NotImplementedError`; the `presigned`

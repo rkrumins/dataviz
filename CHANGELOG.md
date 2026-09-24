@@ -9,6 +9,58 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Exports up to 50 GB, with downloads that resume
+
+### Added
+
+**Exports of up to 50 GB, prepared on the server, with downloads that resume.** The Export dialog no
+longer streams a data source with version control from the web server while it downloads. The
+versioning workers write the file, the dialog shows its place in the queue and then how far it has
+got, and the browser downloads it once it's ready, with its size known. A download that breaks off
+picks up where it stopped: the download answers `Range` and `If-Range`, which is what a browser's
+Resume and `curl -C -` send. Close the dialog while the file is being prepared and it opens on that
+export again; the file is kept for a day. A data source without version control still streams its
+live graph as before.
+
+### Changed
+
+- **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
+- **A running export says how far it has got.** Its job's `summary` holds the records read or written
+  so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the
+  bytes, until the finished summary replaces it; a finished one says whether its file is still
+  `kept`. `POST …/exports` takes a `filename` for the download.
+- **A stored export downloads uncompressed**, so that the browser knows its size and can resume it.
+
+### Fixed
+
+- **A stored export's download could be cut short.** It was held to the API's two-minute deadline,
+  which ends a response cleanly, so a large file (a view package's, say) could arrive incomplete while
+  looking whole, and nginx buffered it to disk. It now runs as long as it takes, as the streamed
+  export does.
+- **Anyone who could read a workspace could download its export jobs.** Listing a graph's exports,
+  reading one and downloading it checked only workspace access, so another user's export of their
+  private draft, or of a view you can't read, was yours to download. Each now checks again what
+  creating the export checked: an export you may not read is a 404, and missing from the list.
+- The download of an export whose file was swept now says so (404) instead of failing once started.
+
+### Upgrading
+
+No migration. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
+(no buffering, an hour between reads): an nginx config of your own in front of the API needs the
+same. Exports are kept in the object store for a day: keep it on a mount
+(`OBJECT_STORE_BACKEND=local`) rather than in the database for exports of many gigabytes.
+
+### Known limitations
+
+- **Preparing a 50 GB export takes hours.** One export runs on one worker, at about 10 MB a second as
+  NDJSON and 3.5 as CSV, which reads everything twice. Nothing splits an export across workers yet,
+  or cancels one being prepared: "Export something else" leaves it to finish, and its file is swept.
+- **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
+  manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
+- **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
+
+---
+
 ## [Unreleased] — Imports up to 10 GB
 
 ### Added
