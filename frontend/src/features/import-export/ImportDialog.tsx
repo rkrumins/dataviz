@@ -6,7 +6,7 @@
  * server imports it onto your working **draft** → review the added/updated/deleted changes in the
  * normal Changes UI and Publish/PR. It's the manual create/edit flow, at scale.
  */
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowRight, CheckCircle2, Download, FileUp, Info, Loader2, Lock, Plus, Pencil,
   RefreshCw, ShieldAlert, Sparkles, Trash2, UploadCloud, X,
@@ -14,8 +14,8 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  createImport, detectFormat, getImport, getImportPreview, pollJob, queuePosition,
-  templateDownloadUrl, triggerBrowserDownload,
+  detectFormat, getImport, getImportPreview, importInParts, importLimit, MAX_IMPORT_BYTES, pollJob,
+  queuePosition, templateDownloadUrl, triggerBrowserDownload,
   type ImportFormat, type ImportPreviewRow, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
 
@@ -47,14 +47,15 @@ function unsupportedReason(name: string): string | null {
     : null
 }
 
-/** The most one import uploads: the proxy and the server both refuse a larger body (100 MB). */
-const MAX_IMPORT_BYTES = 100 * 1024 * 1024
-
-function tooLargeReason(size: number): string | null {
-  return size > MAX_IMPORT_BYTES
-    ? `This file is ${prettyBytes(size)}, and one import can be at most ${prettyBytes(MAX_IMPORT_BYTES)}. `
+/** Refused before any of it uploads: the server holds the same limits. */
+function tooLargeReason(size: number, format: ImportFormat): string | null {
+  const cap = importLimit(format)
+  if (size <= cap) return null
+  return format === 'json' || format === 'xlsx'
+    ? `This file is ${prettyBytes(size)}. A${format === 'json' ? ' JSON' : 'n Excel'} file is read whole, so one import `
+      + `of it can be at most ${prettyBytes(cap)}. Export NDJSON or CSV instead: they can be up to ${prettyBytes(MAX_IMPORT_BYTES)}.`
+    : `This file is ${prettyBytes(size)}, and one import can be at most ${prettyBytes(cap)}. `
       + 'Split it into smaller files and import them one after another: each adds to the same draft.'
-    : null
 }
 
 function prettyBytes(n: number): string {
@@ -75,7 +76,11 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [error, setError] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
   const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([])
+  const [upload, setUpload] = useState<{ sent: number; total: number } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  // Leaving stops an upload in flight; choosing the same file again resumes it.
+  const uploadRun = useRef<AbortController | null>(null)
+  useEffect(() => () => uploadRun.current?.abort(), [])
 
   const handleFile = useCallback((f: File | null) => {
     setFile(f)
@@ -90,15 +95,21 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     if (f) handleFile(f)
   }, [handleFile])
 
-  const warning = file ? unsupportedReason(file.name) ?? tooLargeReason(file.size) : null
+  const warning = file ? unsupportedReason(file.name) ?? tooLargeReason(file.size, format) : null
 
   async function start() {
     if (!file) return
     setPhase('running')
     setError(null)
     setPreviewRows([])
+    setJob(null)
+    setUpload(null)
+    uploadRun.current = new AbortController()
     try {
-      const created = await createImport(wsId, graphId, file, { format, reconcileMode, branchId, viewId })
+      const created = await importInParts(wsId, graphId, file, {
+        format, reconcileMode, branchId, viewId, signal: uploadRun.current.signal,
+        onProgress: (sent, total) => setUpload({ sent, total }),
+      })
       setResultBranch(created.branchId)
       const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob })
       if (done.status === 'failed' || done.status === 'cancelled') {
@@ -160,7 +171,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               onDownloadTemplate={() => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, 'csv'), 'import-template.csv')}
             />
           )}
-          {phase === 'running' && <RunningStep job={job} fileName={file?.name} />}
+          {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
           {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows} />}
           {phase === 'failed' && <FailedStep error={error} />}
         </div>
@@ -387,10 +398,16 @@ function ModeCard(props: {
 }
 
 // ── running ──────────────────────────────────────────────────────────────────
-function RunningStep({ job, fileName }: { job: Job | null; fileName?: string }) {
+function RunningStep({ job, upload, fileName }: {
+  job: Job | null
+  upload: { sent: number; total: number } | null
+  fileName?: string
+}) {
   const queued = queuePosition(job)
-  const phaseLabel = queued ? 'Waiting to start…'
-    : !job || job.status === 'pending' ? 'Uploading…' : 'Reconciling changes…'
+  const phaseLabel = !job
+    ? (upload ? `Uploading… ${prettyBytes(upload.sent)} of ${prettyBytes(upload.total)}` : 'Uploading…')
+    : queued ? 'Waiting to start…' : job.status === 'pending' ? 'Starting…' : 'Reconciling changes…'
+  const pct = !job && upload && upload.total > 0 ? Math.round((100 * upload.sent) / upload.total) : null
   return (
     <div className="px-8 py-16 flex flex-col items-center gap-5">
       <div className="relative w-16 h-16">
@@ -405,9 +422,17 @@ function RunningStep({ job, fileName }: { job: Job | null; fileName?: string }) 
         <p className="text-[11px] text-ink-muted mt-1 truncate max-w-[24rem]">{fileName}</p>
       </div>
       <div className="w-full max-w-sm h-1 rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">
-        <div className="h-full w-2/3 rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 animate-pulse" />
+        {pct != null
+          ? <div role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
+              className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 transition-[width]"
+              style={{ width: `${pct}%` }} />
+          : <div className="h-full w-2/3 rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 animate-pulse" />}
       </div>
-      <p className="text-[11px] text-ink-muted">You can keep working — this runs in the background.</p>
+      <p className="text-[11px] text-ink-muted">
+        {job
+          ? 'You can keep working — this runs in the background.'
+          : 'Keep this open while the file uploads. If it stops, choose the same file again to pick up where it left off.'}
+      </p>
     </div>
   )
 }

@@ -1,7 +1,8 @@
 /**
  * ImportDialog pins:
- *   - a file larger than one import can take is refused before any upload, saying how to split it
- *     (the proxy would otherwise answer an opaque 413 after sending it);
+ *   - a file larger than one import can take is refused before any upload, saying how to split it:
+ *     10 GB for a file read a row at a time, 100 MB for a JSON or Excel file (read whole);
+ *   - while the file uploads, the dialog says how much of it is up;
  *   - an import job that failed or was cancelled on the server ends as a failure that says why,
  *     never as a finished import;
  *   - an import queued for the server's workers says it is waiting, and how many are ahead of it.
@@ -13,12 +14,12 @@ import type { Job } from '@/services/importExportApiService'
 
 vi.mock('@/services/importExportApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/importExportApiService')>(),
-  createImport: vi.fn(),
+  importInParts: vi.fn(),
   getImport: vi.fn(),
   pollJob: vi.fn(),
 }))
 
-import { createImport, pollJob } from '@/services/importExportApiService'
+import { importInParts, pollJob } from '@/services/importExportApiService'
 import { ImportDialog } from '../ImportDialog'
 
 function open() {
@@ -26,31 +27,53 @@ function open() {
   return container.querySelector('input[type="file"]') as HTMLInputElement
 }
 
-function file(name: string, size: number): File {
-  const f = new File(['kind,urn\n'], name, { type: 'text/csv' })
+function file(name: string, size: number, content = 'kind,urn\n'): File {
+  const f = new File([content], name, { type: name.endsWith('.json') ? 'application/json' : 'text/csv' })
   Object.defineProperty(f, 'size', { value: size })
   return f
 }
 
 beforeEach(() => {
-  vi.mocked(createImport).mockReset()
+  vi.mocked(importInParts).mockReset()
   vi.mocked(pollJob).mockReset()
 })
 
 describe('ImportDialog', () => {
   it('refuses a file over the upload limit before sending it', async () => {
-    await userEvent.upload(open(), file('graph.csv', 4.2 * 1024 ** 3))
+    await userEvent.upload(open(), file('graph.csv', 10.5 * 1024 ** 3))
 
-    expect(await screen.findByText(/This file is 4\.2 GB, and one import can be at most 100\.0 MB/)).toBeInTheDocument()
+    expect(await screen.findByText(/This file is 10\.5 GB, and one import can be at most 10\.0 GB/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Import$/ })).toBeDisabled()
-    expect(createImport).not.toHaveBeenCalled()
+    expect(importInParts).not.toHaveBeenCalled()
+  })
+
+  it('takes a multi-GB CSV, but refuses a JSON file it would have to read whole', async () => {
+    await userEvent.upload(open(), file('graph.csv', 4.2 * 1024 ** 3))
+    expect(await screen.findByRole('button', { name: /^Import$/ })).toBeEnabled()
+
+    await userEvent.upload(open(), file('graph.json', 150 * 1024 ** 2, '[{"kind":"node"}]'))
+    expect(await screen.findByText(/A JSON file is read whole, so one import of it can be at most 100\.0 MB/))
+      .toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^Import$/ }).at(-1)).toBeDisabled()
+  })
+
+  it('says how much of the file is up while it uploads', async () => {
+    vi.mocked(importInParts).mockImplementation(async (_ws, _g, _file, opts) => {
+      opts?.onProgress?.(512 * 1024, 2 * 1024 * 1024)
+      return new Promise(() => {})   // still uploading
+    })
+    await userEvent.upload(open(), file('graph.csv', 2 * 1024 * 1024))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText('Uploading… 512.0 KB of 2.0 MB')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '25')
   })
 
   it.each([
     ['failed', 'The job stopped before it finished. Start it again.', /The job stopped before it finished/],
     ['cancelled', null, /The import was cancelled/],
   ] as const)('ends a %s job as a failure that says why', async (status, message, shown) => {
-    vi.mocked(createImport).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'running' })
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'running' })
     vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status, errorMessage: message } as Job)
     await userEvent.upload(open(), file('graph.csv', 2048))
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
@@ -60,7 +83,7 @@ describe('ImportDialog', () => {
   })
 
   it('says when the import waits its turn, and how many are ahead of it', async () => {
-    vi.mocked(createImport).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockImplementation(async (_fetcher, opts) => {
       opts?.onTick?.({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'pending', queuedAhead: 2 } as Job)
       return new Promise<Job>(() => {})   // still waiting

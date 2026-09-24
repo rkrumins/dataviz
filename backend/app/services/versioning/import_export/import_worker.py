@@ -33,6 +33,7 @@ from .resolve import resolve_rows
 from .rowmodel import normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
+from .uploads import WHOLE_FILE_FORMATS, open_source, source_size, too_large
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ class ImportWorker:
         workbook (.xlsx/.xls) instead of CSV is a common mistake that would otherwise parse into
         meaningless rows. Raised in the normal flow (not inside a generator) so the message
         surfaces on the job. Returns the first chunk for the format sniff."""
-        async for chunk in self._store.open_stream(source_uri):
+        async for chunk in open_source(self._store, source_uri):
             if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
                 raise ValueError(
                     "This looks like an Excel workbook (.xlsx). Please open it and 'Save As' "
@@ -236,10 +237,14 @@ class ImportWorker:
                 logger.info("import job %s: declared format %r overridden to %r by the content sniff",
                             job_id, fmt, sniffed)
                 fmt = sniffed
+        if (fmt or "").lower() in WHOLE_FILE_FORMATS:     # read whole: refuse one too large to hold
+            reason = too_large(await source_size(self._store, source_uri), fmt)
+            if reason:
+                raise ValueError(reason)
         adapter = get_adapter(fmt)
         batch: List[Dict[str, Any]] = []
         idx = 0
-        async for raw in adapter.parse(self._store.open_stream(source_uri)):
+        async for raw in adapter.parse(open_source(self._store, source_uri)):
             kind = raw.get("kind")
             if kind not in ("node", "edge"):
                 continue  # tallied as skipped; a malformed record never aborts the parse

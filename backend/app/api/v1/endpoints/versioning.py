@@ -2500,6 +2500,122 @@ async def create_import(
             "sourceUri": created["source_uri"], "status": status}
 
 
+# Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
+# (import_export/uploads.py). The single-request POST /imports above stays for scripts.
+
+class CreateUploadRequest(_ApiModel):
+    fileName: str = Field(..., max_length=500)
+    size: int = Field(..., gt=0)
+    format: str = Field("ndjson", max_length=16)
+
+
+@contextmanager
+def _upload_errors():
+    from backend.app.services.versioning.import_export.uploads import UploadError
+    try:
+        yield
+    except UploadError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+def _upload_view(record: dict, received: List[int]) -> dict:
+    return {"uploadId": record["uploadId"], "fileName": record["fileName"], "size": record["size"],
+            "format": record["format"], "partBytes": record["partBytes"], "parts": record["parts"],
+            "received": received, "jobId": record.get("jobId")}
+
+
+async def _load_upload(ie, ws_id: str, graph_id: str, meta: dict, upload_id: str, user: User) -> dict:
+    from backend.app.services.versioning.import_export import uploads
+    with _upload_errors():
+        return await uploads.load(ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
+                                  graph_id=graph_id, upload_id=upload_id, owner=user.id)
+
+
+@router.post("/graphs/{graph_id}/imports/uploads", status_code=201)
+async def create_import_upload(
+    ws_id: str, graph_id: str, body: CreateUploadRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Start a resumable upload of a file to import: how it is to be split, and where its parts go.
+    A file too large for its format is refused here, before any of it is sent (413)."""
+    from backend.app.services.versioning.import_export import uploads
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    try:
+        get_adapter(body.format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    with _upload_errors():
+        record = await uploads.create(
+            ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower())
+    return _upload_view(record, [])
+
+
+@router.get("/graphs/{graph_id}/imports/uploads/{upload_id}")
+async def get_import_upload(
+    ws_id: str, graph_id: str, upload_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Which of the upload's parts arrived whole: what to send again to resume it."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    return _upload_view(record, await uploads.received(ie.store, record))
+
+
+@router.put("/graphs/{graph_id}/imports/uploads/{upload_id}/parts/{part}")
+async def put_import_upload_part(
+    ws_id: str, graph_id: str, upload_id: str, part: int, request: Request,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """One part of the file, the raw request body. Sending a part again replaces it."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    with _upload_errors():
+        size = await uploads.put_part(ie.store, record, part, request.stream())
+    return {"part": part, "size": size}
+
+
+@router.post("/graphs/{graph_id}/imports/uploads/{upload_id}/complete", response_model=CreateImportResponse,
+             status_code=202)
+async def complete_import_upload(
+    ws_id: str, graph_id: str, upload_id: str,
+    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Import the uploaded file, once every part is in: as ``POST /imports`` does with a request
+    body. Asking again answers with the import already started."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    if record.get("jobId"):
+        job = await ie.get_job(record["jobId"]) or {}
+        return {"jobId": record["jobId"], "branchId": record.get("branchId"),
+                "sourceUri": uploads.record_key(record), "status": job.get("status") or "pending"}
+    missing = record["parts"] - len(await uploads.received(ie.store, record))
+    if missing:
+        raise HTTPException(status_code=409, detail=f"{missing} of the file's {record['parts']} parts haven't "
+                                                    "arrived yet. Send them, then complete the upload.")
+    with _domain_errors():
+        created = await ie.create_import_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
+            source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
+            scope_view_id=view_id)
+    await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
+    status = await ie.start_import(created["job_id"])
+    return {"jobId": created["job_id"], "branchId": created["branch_id"],
+            "sourceUri": created["source_uri"], "status": status}
+
+
 @router.get("/graphs/{graph_id}/imports")
 async def list_imports(
     ws_id: str, graph_id: str,

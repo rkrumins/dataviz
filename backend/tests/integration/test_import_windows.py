@@ -8,7 +8,8 @@ files that span several windows:
   matched, not duplicated; the tally is what the rows did;
 * replace deletes every entity no row matched (edges first) and nothing else;
 * a view-scoped replace deletes only the view's own entities;
-* a finished import's staged rows are swept once they are old enough.
+* a finished import's staged rows are swept once they are old enough;
+* a file uploaded in parts imports as the one file it is.
 """
 import asyncio
 import json
@@ -160,6 +161,27 @@ async def _sweep(svc, ie, store) -> None:
     assert [await staged(j) for j in jobs] == [0, 5, 5]
 
 
+async def _parts(svc, ie, store) -> None:
+    """A file uploaded in parts (resumable upload) is imported as the one file it is, even with
+    rows split across parts."""
+    from backend.app.services.versioning.import_export import uploads
+
+    gid = await _graph(svc, [_node("ent_A", "urn:A", "a")])
+    data = ("\n".join(json.dumps({"kind": "node", "urn": f"urn:p{i}", "entityType": "Table",
+                                   "displayName": f"p{i}"}) for i in range(9)) + "\n").encode()
+    record = await uploads.create(store, workspace_id="ws1", data_source_id=gid, graph_id=gid, owner="u",
+                                  file_name="parts.ndjson", size=len(data), fmt="ndjson")
+    step = record["partBytes"]
+    for n in reversed(range(record["parts"])):
+        async def body(n=n):
+            yield data[n * step:(n + 1) * step]
+        await uploads.put_part(store, record, n, body())
+    job = await ie.create_import_job(workspace_id="ws1", data_source_id=gid, graph_id=gid, actor="u",
+                                     import_format="ndjson", source_uri=uploads.record_key(record))
+    summary = await ImportWorker(ie._svc, store).run(job["job_id"])
+    assert record["parts"] > 3 and summary["new"] == 9 and summary["invalid"] == 0, (record["parts"], summary)
+
+
 async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
@@ -171,11 +193,15 @@ async def _run() -> None:
         await _replace(svc, ie, store)
         await _view_replace(svc, ie, store)
         await _sweep(svc, ie, store)
+        await _parts(svc, ie, store)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
 def test_import_windows_e2e(monkeypatch):
+    from backend.app.services.versioning.import_export import uploads
+
     monkeypatch.setattr(config, "IMPORT_COMMIT_WINDOW", 2)
+    monkeypatch.setattr(uploads, "PART_BYTES", 100)          # rows straddle the parts
     asyncio.run(_run())
