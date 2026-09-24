@@ -2,13 +2,14 @@
 
 Pins: a data source is exported only through its own workspace; the plan counts entities without
 the platform's own bookkeeping and says when there is nothing to export; every format downloads
-with its name, its type and nothing cached; csv starts with a byte-order mark; exports take turns
-(429 with Retry-After when every turn is taken, and a turn always comes back); an Excel export a
-sheet can't hold is refused before its first byte. The versioned routes share these helpers; their
+with its name, its type and nothing cached; csv starts with a byte-order mark; exports take turns,
+shared by every worker process of a pod (429 with Retry-After when none frees up in time, and a
+turn always comes back); an Excel export a sheet can't hold is refused before its first byte. The versioned routes share these helpers; their
 reads are proven against Postgres in tests/integration/test_export_stream.py.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from types import SimpleNamespace
@@ -50,7 +51,7 @@ class _Provider:
 
 
 @pytest.fixture
-async def source(test_client, db_session: AsyncSession, monkeypatch):
+async def source(test_client, db_session: AsyncSession, monkeypatch, tmp_path):
     """A workspace with a data source (and a second workspace), served by a fake provider."""
     from backend.app.main import app
 
@@ -73,7 +74,7 @@ async def source(test_client, db_session: AsyncSession, monkeypatch):
         return SimpleNamespace(provider=provider)
 
     monkeypatch.setattr(graph_export.ContextEngine, "for_workspace", staticmethod(_for_workspace))
-    monkeypatch.setattr(stream, "slots", stream.Slots(1))
+    monkeypatch.setattr(stream, "slots", stream.Slots(1, str(tmp_path)))
     yield SimpleNamespace(ws=ws.id, other=other.id, ds=ds.id, provider=provider)
     app.dependency_overrides.pop(get_graph_read_db_session, None)
 
@@ -127,16 +128,51 @@ async def test_spreadsheets_add_the_property_columns_asked_for(test_client: Asyn
     assert "prop.steward" in header and "prop.pii" in header and "prop.owner" in header
 
 
+async def _turn_comes_back():
+    turn = await stream.slots.acquire(0)
+    assert turn is not None, "the export gave its turn back"
+    stream.slots.release(turn)
+
+
 async def test_exports_take_turns_and_always_give_them_back(test_client: AsyncClient, source, monkeypatch):
     monkeypatch.setattr(stream, "SLOT_WAIT_S", 0.3)
-    assert await stream.slots.acquire(0)                        # someone else's export holds the turn
+    held = await stream.slots.acquire(0)                        # someone else's export holds the turn
     busy = await test_client.get(f"/api/v1/{source.ws}/graph/export/stream", params={"dataSourceId": source.ds})
-    assert busy.status_code == 429 and busy.headers["retry-after"] == "30"
+    assert busy.status_code == 429 and busy.headers["retry-after"] == "120"
     assert busy.json()["detail"]["code"] == "EXPORTS_BUSY"
-    stream.slots.release()
 
-    ok = await test_client.get(f"/api/v1/{source.ws}/graph/export/stream", params={"dataSourceId": source.ds})
-    assert ok.status_code == 200 and stream.slots.used == 0, "a finished export gives its turn back"
+    monkeypatch.setattr(stream, "SLOT_WAIT_S", 10)
+    waiting = asyncio.create_task(test_client.get(f"/api/v1/{source.ws}/graph/export/stream",
+                                                  params={"dataSourceId": source.ds}))
+    await asyncio.sleep(0.3)
+    assert not waiting.done(), "it waits for a turn"
+    stream.slots.release(held)                                  # a turn frees up: the waiting one goes
+    ok = await waiting
+    assert ok.status_code == 200 and len(ok.content.splitlines()) == 5
+    await _turn_comes_back()
+
+
+async def test_an_export_job_takes_its_turn_too(source, monkeypatch):
+    async def body():
+        yield b"rows"
+
+    monkeypatch.setattr(stream, "SLOT_WAIT_S", 0.3)
+    held = await stream.slots.acquire(0)
+    with pytest.raises(stream.ExportsBusy):
+        [c async for c in stream.in_turn(body())]
+    stream.slots.release(held)
+    assert [c async for c in stream.in_turn(body())] == [b"rows"]
+    await _turn_comes_back()
+
+
+async def test_a_turn_is_shared_by_every_worker_process_of_a_pod(tmp_path):
+    first, second = stream.Slots(1, str(tmp_path)), stream.Slots(1, str(tmp_path))   # two workers' own
+    turn = await first.acquire(0)
+    assert turn is not None and await second.acquire(0.3) is None, "the pod's only turn is taken"
+    first.release(turn)
+    turn = await second.acquire(0)
+    assert turn is not None, "and it frees up for any worker"
+    second.release(turn)
 
 
 async def test_an_excel_export_a_sheet_cannot_hold_is_refused_before_it_starts(
@@ -146,7 +182,7 @@ async def test_an_excel_export_a_sheet_cannot_hold_is_refused_before_it_starts(
                                  params={"dataSourceId": source.ds, "format": "xlsx"})
     assert resp.status_code == 422 and resp.json()["detail"]["code"] == "EXCEL_ROW_LIMIT"
     assert "CSV or NDJSON" in resp.json()["detail"]["message"]
-    assert stream.slots.used == 0, "a refused export gives its turn back"
+    await _turn_comes_back()
     plan = (await test_client.get(f"/api/v1/{source.ws}/graph/export/plan",
                                   params={"dataSourceId": source.ds, "format": "xlsx"})).json()
     assert plan["formatLimit"] and "3 nodes" in plan["formatLimit"]

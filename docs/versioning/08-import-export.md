@@ -290,6 +290,13 @@ Three ways out, one pipeline:
 - **`POST /exports`** — the job (`ExportWorker.run`), for API clients: the same stream written to
   the `result_uri` artifact, then a `{nodes, edges, bytes}` summary.
 
+All three take turns (`stream.Slots`). An export keeps about one CPU core busy, so a pod streams
+`GRAPH_EXPORT_CONCURRENCY` (2) at once, whichever of its worker processes serve them. A turn is an
+exclusive `flock` on one of that many files in the temp directory, which the kernel drops when its
+holder exits. Another export waits for a turn, before its response starts, for up to
+`GRAPH_EXPORT_SLOT_WAIT_SECS` (15 minutes); then a download gets 429 with `Retry-After`, and a job
+fails.
+
 - **Branch vs published.** A `branch_id` (a working draft) exports the draft's **composed state**
   (main + committed + staged draft changes); omitting it defaults to **published `main`**. A draft
   must be readable by the caller. This is what lets a user export their in-progress branch, edit it

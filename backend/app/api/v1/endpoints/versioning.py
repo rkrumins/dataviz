@@ -2701,8 +2701,8 @@ async def stream_export(
 ):
     """Download an export as it is produced: the same records as the export job, streamed from
     one pinned snapshot, in flat memory at any size. A plain GET so the browser downloads it
-    natively. Exports take turns (a few per server process); a request that waits too long for
-    one gets 429 with ``Retry-After``."""
+    natively. Exports take turns (``GRAPH_EXPORT_CONCURRENCY`` per server): one waits for a turn,
+    and gets 429 with ``Retry-After`` if none frees up in time."""
     from backend.app.api.v1.endpoints.graph_export import (
         ExportStreamResponse, export_format, take_turn, xlsx_columns,
     )
@@ -2711,15 +2711,15 @@ async def stream_export(
     snap, selection, _view = await _export_selection(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
         types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
-    await take_turn()
+    turn = await take_turn()
     try:
         columns = await xlsx_columns(stream.record_pages(snap, selection), fmt, _split_list(props))
     except BaseException:
-        stream.slots.release()
+        stream.slots.release(turn)
         raise
     return ExportStreamResponse(
         stream.write_export(lambda: stream.record_pages(snap, selection), fmt=fmt, columns=columns,
-                            props=_split_list(props)), fmt=fmt,
+                            props=_split_list(props)), turn=turn, fmt=fmt,
         filename=filename or f"{meta.get('data_source_id') or graph_id}-export",
         headers={"X-Export-As-Of": "" if snap.as_of_seq is None else str(snap.as_of_seq)})
 

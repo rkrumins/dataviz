@@ -96,7 +96,7 @@ Changes made to the graph while the file downloads may or may not be in it.
 | --- | --- |
 | **Excel**: 1,048,575 rows per sheet (Nodes and Edges) | Excel's own limit. A larger export offers CSV instead, before anything downloads. |
 | **Import**: 100 MB per file | Uploads pass through the same proxies as every request. |
-| **Several exports at once** | Each server runs a few exports at a time; beyond that a new one waits up to 30 seconds, then asks you to try again in a minute. |
+| **Several exports at once** | Each server runs two exports at a time. Another waits for its turn, for up to 15 minutes: your browser shows the download once it begins. If no turn frees up, the download fails; try again later. |
 
 CSV and TSV exports start with a UTF-8 byte-order mark, so Excel reads names
 with accents and other non-ASCII characters correctly. Import handles files

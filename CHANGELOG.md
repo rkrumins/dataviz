@@ -91,11 +91,12 @@ hold, then the browser downloads the file while the server writes it: the first 
 once and nothing is built or stored first. The server reads the graph a page at a time from one
 pinned commit, so memory stays flat whatever the size, and any pod can serve the download. A
 3-million-node, 3-million-edge graph exported as 4.5 GB of NDJSON in under six minutes, with the
-server at about 200 MB throughout. Each server process streams a few exports at a time
-(`GRAPH_EXPORT_CONCURRENCY`, default 2); a request beyond that waits up to 30 seconds for a turn,
-then gets 429 with `Retry-After`. An export that would hold nothing says why instead of
-downloading an empty file, and one too large for Excel's 1,048,575 rows per sheet offers CSV
-before anything downloads.
+server at about 200 MB throughout. An export keeps about one CPU core busy while it runs, so each
+server (a pod, across all of its worker processes) streams two at a time
+(`GRAPH_EXPORT_CONCURRENCY`). Another waits for a turn, for up to 15 minutes, then gets 429 with
+`Retry-After`; an export job waits its turn the same way. An export that would hold nothing says
+why instead of downloading an empty file, and one too large for Excel's 1,048,575 rows per sheet
+offers CSV before anything downloads.
 
 **A data source without version control can be exported**, in View mode as in Edit mode: a cold
 copy of its live graph, in any of the five formats. Its rows carry URNs, so importing it into a
@@ -195,9 +196,10 @@ every other API route keeps its 180 s. The GKE BackendConfigs' `timeoutSec` goes
 (frontend and viz-service), and the Helm ingress's `proxy-read-timeout` from 180 to 3600: the app's
 own tiers still end every other request first. The export stream routes are exempt from the
 request timeout, like server-sent events. New settings, all optional: `GRAPH_EXPORT_CONCURRENCY`
-(2 per process), `GRAPH_EXPORT_SLOT_WAIT_SECS` (30), `GRAPH_EXPORT_MAX_BYTES` (20 GiB, the most one
-export may stream), `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20, how long a plan counts before answering
-without exact counts) and `GRAPH_EXPORT_PAGE_SIZE` (2,000 rows per read).
+(2 per pod, shared by its worker processes through lock files in the temp directory; size it to
+the CPU cores a pod can spare), `GRAPH_EXPORT_SLOT_WAIT_SECS` (900), `GRAPH_EXPORT_MAX_BYTES`
+(20 GiB, the most one export may stream), `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20, how long a plan
+counts before answering without exact counts) and `GRAPH_EXPORT_PAGE_SIZE` (2,000 rows per read).
 
 ### Known limitations
 

@@ -159,7 +159,8 @@ export function ExportDialog({
                   ? <>holds {plan.exact ? '' : 'about '}{count(plan.nodes)} entities and {count(plan.edges)} relationships.</>
                   : <>is a large export, too large to count up front.</>}
                 {' '}Your browser shows its progress; a large one takes a few minutes, and you can close this
-                dialog while it downloads.
+                dialog while it downloads. If other exports are running, it waits for its turn first: your
+                browser shows it once it begins.
               </p>
               {inView && plan.view?.placements === 0 && (
                 <p className="mt-2">This view places no entities of its own, so the export covers the whole data source.</p>

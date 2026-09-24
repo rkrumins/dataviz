@@ -14,9 +14,11 @@ to a commit, so an edit landing between the two passes can add a property the he
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Set
@@ -32,9 +34,10 @@ logger = logging.getLogger(__name__)
 #: The largest export one request may stream; beyond it the download is cut off. A guard against a
 #: runaway, not a size anyone should reach: a whole data source with every property fits well under.
 MAX_BYTES = int(os.getenv("GRAPH_EXPORT_MAX_BYTES", str(20 * 1024 ** 3)))
-#: Exports one server process streams at once, and how long a request waits for a turn.
+#: Exports one server streams at once: one pod, across all of its worker processes (an export keeps
+#: about one CPU core busy). Another waits its turn for up to SLOT_WAIT_S, then fails.
 CONCURRENCY = int(os.getenv("GRAPH_EXPORT_CONCURRENCY", "2"))
-SLOT_WAIT_S = float(os.getenv("GRAPH_EXPORT_SLOT_WAIT_SECS", "30"))
+SLOT_WAIT_S = float(os.getenv("GRAPH_EXPORT_SLOT_WAIT_SECS", "900"))
 #: How long a plan may spend counting before it answers without exact counts.
 PLAN_BUDGET_S = float(os.getenv("GRAPH_EXPORT_PLAN_BUDGET_SECS", "20"))
 
@@ -51,6 +54,10 @@ MEDIA_TYPES = {
 
 class ExportTooLarge(Exception):
     """The export passed :data:`MAX_BYTES`."""
+
+
+class ExportsBusy(Exception):
+    """No turn for the export came up within :data:`SLOT_WAIT_S`."""
 
 
 class ExcelRowLimit(ValueError):
@@ -274,24 +281,51 @@ async def count(snap: Snapshot, sel: Selection, *, budget_s: float = PLAN_BUDGET
 
 
 class Slots:
-    """At most ``limit`` exports streaming at once in this process; a request waits its turn for
-    up to ``wait_s``. Loop-agnostic (a counter and a short poll), so it holds across event loops."""
+    """At most ``limit`` exports streaming at once on this server. A turn is an exclusive lock on
+    one of ``limit`` files in ``directory``, which every worker process of a pod shares, so the
+    limit holds for the pod rather than for each of its workers; and the kernel drops a lock when
+    its holder exits, so a worker that dies never keeps its turn."""
 
-    def __init__(self, limit: int) -> None:
-        self.limit = max(1, limit)
-        self.used = 0
+    def __init__(self, limit: int, directory: Optional[str] = None) -> None:
+        directory = directory or tempfile.gettempdir()
+        self.paths = [os.path.join(directory, f"graph-export-turn-{i}.lock") for i in range(max(1, limit))]
 
-    async def acquire(self, wait_s: float) -> bool:
+    def _take(self) -> Optional[int]:
+        for path in self.paths:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                os.close(fd)
+        return None
+
+    async def acquire(self, wait_s: float) -> Optional[int]:
+        """A turn, to hand back with :meth:`release`; ``None`` when none frees up in ``wait_s``."""
         deadline = time.monotonic() + wait_s
-        while self.used >= self.limit:
+        while (turn := self._take()) is None:
             if time.monotonic() >= deadline:
-                return False
+                return None
             await asyncio.sleep(0.25)
-        self.used += 1
-        return True
+        return turn
 
-    def release(self) -> None:
-        self.used = max(0, self.used - 1)
+    @staticmethod
+    def release(turn: int) -> None:
+        os.close(turn)                              # closing the file drops its lock
 
 
 slots = Slots(CONCURRENCY)
+
+
+async def in_turn(body: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """An export job's ``body``, once its turn comes, or :class:`ExportsBusy` if none does within
+    :data:`SLOT_WAIT_S`. The turn goes back when the export ends or is closed. (A download takes
+    its turn before its response starts, in ``graph_export.take_turn``.)"""
+    turn = await slots.acquire(SLOT_WAIT_S)
+    if turn is None:
+        raise ExportsBusy("Too many exports are running right now. Try again in a few minutes.")
+    try:
+        async for chunk in body:
+            yield chunk
+    finally:
+        slots.release(turn)

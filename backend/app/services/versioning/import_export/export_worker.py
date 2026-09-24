@@ -12,6 +12,7 @@ so an export of any size runs in flat memory; this module keeps the row shape bo
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -135,11 +136,13 @@ class ExportWorker:
         # A spreadsheet makes every property its own column: existing ones + any the user asked to
         # add, so a brand-new property is an empty column ready to fill.
         tally = {"node": 0, "edge": 0}
-        body = stream.write_export(lambda: stream.record_pages(snap, selection, tally=tally), fmt=fmt,
-                                   props=self._extra_props)
+        # It takes its turn with the streamed exports; the heartbeat keeps it alive while it waits.
+        body = stream.in_turn(stream.write_export(lambda: stream.record_pages(snap, selection, tally=tally),
+                                                  fmt=fmt, props=self._extra_props))
         beat = asyncio.create_task(heartbeat(job_id))   # a large export writes for many minutes
         try:
-            stat = await self._store.put_stream(result_uri, body)
+            async with contextlib.aclosing(body):       # its turn goes back even if the store fails
+                stat = await self._store.put_stream(result_uri, body)
         finally:
             beat.cancel()
 

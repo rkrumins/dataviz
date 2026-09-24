@@ -53,11 +53,13 @@ def excel_limit(fmt: str, counts: dict) -> Optional[str]:
     return None
 
 
-async def take_turn() -> None:
-    """Wait for this process's export slot, or 429 when none frees up in time."""
-    if not await stream.slots.acquire(stream.SLOT_WAIT_S):
-        raise HTTPException(status_code=429, headers={"Retry-After": "30"}, detail={
-            "code": "EXPORTS_BUSY", "message": "Too many exports are running right now. Try again in a minute."})
+async def take_turn() -> int:
+    """This export's turn on the server, once one frees up; 429 when none does in time."""
+    turn = await stream.slots.acquire(stream.SLOT_WAIT_S)
+    if turn is None:
+        raise HTTPException(status_code=429, headers={"Retry-After": "120"}, detail={
+            "code": "EXPORTS_BUSY", "message": "Too many exports are running right now. Try again in a few minutes."})
+    return turn
 
 
 async def xlsx_columns(pages, fmt: str, props=()) -> Optional[stream.Columns]:
@@ -81,13 +83,14 @@ def download_name(stem: str, fmt: str) -> str:
 
 
 class ExportStreamResponse(StreamingResponse):
-    """A streamed export that gives its slot back however the response ends: finished, failed,
+    """A streamed export that gives its turn back however the response ends: finished, failed,
     or the client gone."""
 
-    def __init__(self, content, *, fmt: str, filename: str, headers: Optional[dict] = None) -> None:
+    def __init__(self, content, *, turn: int, fmt: str, filename: str, headers: Optional[dict] = None) -> None:
         super().__init__(content, media_type=stream.MEDIA_TYPES[fmt], headers={
             "Content-Disposition": f'attachment; filename="{download_name(filename, fmt)}"',
             "Cache-Control": "no-store", **(headers or {})})
+        self.turn = turn
 
     async def __call__(self, scope, receive, send) -> None:
         try:
@@ -96,7 +99,7 @@ class ExportStreamResponse(StreamingResponse):
             logger.exception("streamed export failed after it started")
             raise
         finally:
-            stream.slots.release()
+            stream.slots.release(self.turn)
 
 
 async def _provider(ws_id: str, data_source_id: str, session: AsyncSession, user: User):
@@ -142,17 +145,17 @@ async def stream_live_export(
     session: AsyncSession = Depends(get_graph_read_db_session, scope="function"),
 ):
     """Download the data source's whole graph as it is read, in any format: a cold copy whose
-    rows re-import by URN. Exports take turns (a few per server process); a request that waits
-    too long for one gets 429 with ``Retry-After``."""
+    rows re-import by URN. Exports take turns (``GRAPH_EXPORT_CONCURRENCY`` per server): one
+    waits for a turn, and gets 429 with ``Retry-After`` if none frees up in time."""
     fmt = export_format(format)
     extra = [p.strip() for p in (props or "").split(",") if p.strip()]
     provider = await _provider(ws_id, data_source_id, session, user)
-    await take_turn()
+    turn = await take_turn()
     try:
         columns = await xlsx_columns(live.record_pages(provider), fmt, extra)
     except BaseException:
-        stream.slots.release()
+        stream.slots.release(turn)
         raise
     return ExportStreamResponse(
         stream.write_export(lambda: live.record_pages(provider), fmt=fmt, columns=columns, props=extra),
-        fmt=fmt, filename=filename or f"{data_source_id}-export")
+        turn=turn, fmt=fmt, filename=filename or f"{data_source_id}-export")
