@@ -7,9 +7,10 @@
  *
  *   Mine       — user-saved queries (promoted from Recent via "Save as…")
  *                + pinned recents. Per-user, localStorage-backed.
- *   Shared     — team-shared queries (backend follow-up). Empty state
- *                today with a permission-gated "Suggest a query" CTA
- *                so the UX is ready when the backend lands.
+ *   This view  — the queries saved in the view's library, on the server,
+ *                for everyone who can open the view. Someone who can
+ *                edit the view saves and removes them (and shares one
+ *                of their own from Mine).
  *   Templates  — built-in starter queries. The "Featured" subset
  *                (previously "Quick starts") shows as chips at the top;
  *                the full TemplatePicker sits below.
@@ -22,17 +23,20 @@
 import * as Popover from '@radix-ui/react-popover'
 import { motion } from 'framer-motion'
 import {
-    BookmarkPlus, Pin, PinOff, Search as SearchIcon, Sparkles,
+    BookmarkPlus, Loader2, Pin, PinOff, Search as SearchIcon,
     Star, Trash2, Users, X,
 } from 'lucide-react'
 import { type FC, type ReactNode, useMemo, useState } from 'react'
 
+import { useAppNotifications } from '@/components/ui/notifications'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
+import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { RecentQueryEntry } from '@/store/searchStore'
-import { useAuthStore } from '@/store/auth'
+import { useLibraryCanEdit, useSavedViewQueries, useViewLibraryStore } from '@/store/viewLibraryStore'
 
 import { TemplatePicker } from '../TemplatePicker'
+import { stringifyPredicate } from './predicateDsl'
 import {
     featuredTemplates,
     type SearchTemplate,
@@ -60,15 +64,15 @@ export interface LibraryPopoverProps {
     onTogglePinRecent: (timestamp: number) => void
     /** Remove a recent entry. */
     onRemoveRecent: (timestamp: number) => void
-    /** Open the Save-as dialog for the given recent entry. The dialog
-     *  itself is owned by SearchMapPanel so it survives popover close
-     *  — when the dialog mounts, the popover dismisses naturally
-     *  (and the dialog keeps rendering at viewport level via its own
-     *  portal). */
+    /** Open the Save-as dialog for the given recent entry — to name it,
+     *  or to share it with the view. The dialog itself is owned by
+     *  SearchMapPanel so it survives popover close — when the dialog
+     *  mounts, the popover dismisses naturally (and the dialog keeps
+     *  rendering at viewport level via its own portal). */
     onSaveAs: (entry: RecentQueryEntry) => void
-    /** The view this panel is bound to. Used for the Shared tab's
-     *  permission gate. */
-    viewId: string
+    /** Load one of the view's saved queries into the QueryCard. Closes
+     *  the popover. */
+    onLoadSaved: (query: SavedViewQuery) => void
     /** Whether the active draft has filters — affects template-seed
      *  copy ("template will REPLACE current filters"). */
     activeDraft: boolean
@@ -78,12 +82,13 @@ export interface LibraryPopoverProps {
 export const LibraryPopover: FC<LibraryPopoverProps> = ({
     children, open, onOpenChange,
     recentQueries, onSeedTemplate, onLoadRecent, onTogglePinRecent,
-    onRemoveRecent, onSaveAs, viewId, activeDraft,
+    onRemoveRecent, onSaveAs, onLoadSaved, activeDraft,
 }) => {
-    // Default to Mine when the user has anything saved/pinned; fall
-    // back to Templates on first session so the popover isn't empty.
+    const savedQueries = useSavedViewQueries()
+    // Open on what the view keeps, then on the user's own; fall back to
+    // Templates on a first session so the popover isn't empty.
     const [tab, setTab] = useState<LibraryTab>(
-        recentQueries.length > 0 ? 'mine' : 'templates',
+        savedQueries.length > 0 ? 'shared' : recentQueries.length > 0 ? 'mine' : 'templates',
     )
     const [filter, setFilter] = useState('')
 
@@ -116,6 +121,7 @@ export const LibraryPopover: FC<LibraryPopoverProps> = ({
                         tab={tab}
                         onChange={setTab}
                         mineCount={recentQueries.length}
+                        sharedCount={savedQueries.length}
                     />
                     <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-3">
                         {tab === 'mine' && (
@@ -137,7 +143,11 @@ export const LibraryPopover: FC<LibraryPopoverProps> = ({
                             />
                         )}
                         {tab === 'shared' && (
-                            <SharedTab viewId={viewId} />
+                            <SharedTab
+                                queries={savedQueries}
+                                filter={filter}
+                                onLoad={(q) => { onLoadSaved(q); onOpenChange(false) }}
+                            />
                         )}
                         {tab === 'templates' && (
                             <TemplatesTab
@@ -211,11 +221,12 @@ function Header({
 // ---------------------------------------------------------------------------
 
 function Tabs({
-    tab, onChange, mineCount,
+    tab, onChange, mineCount, sharedCount,
 }: {
     tab: LibraryTab
     onChange: (t: LibraryTab) => void
     mineCount: number
+    sharedCount: number
 }) {
     return (
         <div className="flex items-center gap-1 px-3 pt-2 pb-1 border-b border-glass-border/40">
@@ -224,7 +235,8 @@ function Tabs({
                 {mineCount > 0 && <CountPill value={mineCount} />}
             </TabButton>
             <TabButton active={tab === 'shared'} onClick={() => onChange('shared')}>
-                Shared
+                This view
+                {sharedCount > 0 && <CountPill value={sharedCount} />}
             </TabButton>
             <TabButton active={tab === 'templates'} onClick={() => onChange('templates')}>
                 Templates
@@ -335,6 +347,7 @@ function MineRow({
     onSaveAs: () => void
 }) {
     const isNamed = entry.source === 'mine' && Boolean(entry.name)
+    const canShare = useLibraryCanEdit()
     const displayLabel = isNamed ? entry.name! : entry.label || '(empty)'
     const truncated = displayLabel.length > 80
         ? displayLabel.slice(0, 77) + '…'
@@ -398,6 +411,20 @@ function MineRow({
                         <BookmarkPlus className="w-3.5 h-3.5" />
                     </button>
                 )}
+                {isNamed && canShare && (
+                    <button
+                        type="button"
+                        onClick={onSaveAs}
+                        title="Share with everyone on this view"
+                        className={cn(
+                            'inline-flex items-center justify-center w-7',
+                            'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
+                        )}
+                        aria-label="Share with everyone on this view"
+                    >
+                        <Users className="w-3.5 h-3.5" />
+                    </button>
+                )}
                 <button
                     type="button"
                     onClick={onTogglePin}
@@ -431,62 +458,142 @@ function MineRow({
 
 
 // ---------------------------------------------------------------------------
-// Shared tab (empty state — backend follow-up)
+// This view's saved queries (the view's library, on the server)
 // ---------------------------------------------------------------------------
 
-function SharedTab({ viewId }: { viewId: string }) {
-    // Permission gate is informational today — the backend doesn't
-    // exist yet. When it lands, this exact check decides who can
-    // promote a Mine entry into the team library. Using ``can()``
-    // directly with the view's workspace context would require a
-    // viewId → workspaceId lookup; for the empty-state CTA the
-    // current-workspace check is a reasonable proxy.
-    const can = useAuthStore((s) => s.can)
-    // ``workspace:view:edit`` is the seed permission the backend
-    // task will read from. We pass ``undefined`` for workspaceId
-    // here so the check is global-scoped — wired properly when the
-    // backend resource arrives. (See `view_execution_context`
-    // memory for the view-vs-workspace decoupling rationale.)
-    void viewId  // intentionally unused until backend lands
-    const canSuggest = can('workspace:view:edit')
+function SharedTab({
+    queries, filter, onLoad,
+}: {
+    queries: ReadonlyArray<SavedViewQuery>
+    filter: string
+    onLoad: (query: SavedViewQuery) => void
+}) {
+    const loading = useViewLibraryStore((s) => s.status === 'loading')
+    const canEdit = useLibraryCanEdit()
+    const removeQuery = useViewLibraryStore((s) => s.removeQuery)
+    const { notify } = useAppNotifications()
 
+    const filtered = useMemo(() => {
+        const q = filter.trim().toLowerCase()
+        if (!q) return queries
+        return queries.filter((e) => `${e.name} ${e.description ?? ''}`.toLowerCase().includes(q))
+    }, [queries, filter])
+
+    if (queries.length === 0 && loading) {
+        return (
+            <div className="flex items-center justify-center gap-2 py-10 text-[12px] text-ink-muted">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading this view's queries…
+            </div>
+        )
+    }
+    if (queries.length === 0) {
+        return (
+            <EmptyState
+                Icon={Users}
+                title="No queries saved in this view yet"
+                description={canEdit
+                    ? 'Save a query for everyone who opens this view: use Save on the query card, or share one of yours from Mine.'
+                    : 'People who can edit this view can save queries here for everyone who opens it.'}
+            />
+        )
+    }
+    if (filtered.length === 0) {
+        return (
+            <div className="text-center text-[12px] text-ink-muted italic py-6">
+                No saved queries match "{filter}".
+            </div>
+        )
+    }
     return (
-        <div className="flex flex-col items-center justify-center gap-3 py-10 px-6 text-center">
-            <div className={cn(
-                'w-12 h-12 rounded-2xl flex items-center justify-center',
-                'bg-gradient-to-br from-accent-lineage/20 to-cyan-500/15',
-                'border border-glass-border/40',
-            )}>
-                <Users className="w-5 h-5 text-accent-lineage" />
-            </div>
-            <div className="space-y-1">
-                <div className="text-[13px] font-display font-semibold text-ink">
-                    Team-shared queries coming soon
-                </div>
-                <p className="text-[11.5px] text-ink-muted max-w-[280px]">
-                    Once enabled, queries saved to the shared library will be
-                    discoverable by everyone on this view — with author and
-                    editor permissions kept in sync with the rest of the
-                    workspace.
-                </p>
-            </div>
+        <div className="flex flex-col gap-1">
+            {filtered.map((query) => (
+                <SavedRow
+                    key={query.id}
+                    query={query}
+                    canEdit={canEdit}
+                    onLoad={() => onLoad(query)}
+                    onRemove={() => {
+                        removeQuery(query.id).catch((e: Error) =>
+                            notify('error', `Couldn't remove “${query.name}” — ${e.message}`))
+                    }}
+                />
+            ))}
+        </div>
+    )
+}
+
+
+function SavedRow({
+    query, canEdit, onLoad, onRemove,
+}: {
+    query: SavedViewQuery
+    canEdit: boolean
+    onLoad: () => void
+    onRemove: () => void
+}) {
+    // Removing a query removes it for everyone: the first click asks.
+    const [confirming, setConfirming] = useState(false)
+    const dsl = useMemo(() => stringifyPredicate(query.predicate), [query.predicate])
+    return (
+        <div
+            className={cn(
+                'group/row flex items-stretch gap-0 rounded-lg overflow-hidden',
+                'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
+                'border border-glass-border hover:border-accent-lineage/40',
+                'transition-colors',
+            )}
+            onMouseLeave={() => setConfirming(false)}
+        >
             <button
                 type="button"
-                disabled={!canSuggest}
-                title={canSuggest
-                    ? 'Submit feedback for the team-shared queries feature'
-                    : 'You need edit permission on this view to suggest queries'}
-                className={cn(
-                    'inline-flex items-center gap-1.5 px-3 h-7 rounded-md',
-                    'text-[11.5px] font-medium transition-colors',
-                    canSuggest
-                        ? 'bg-accent-lineage/15 text-accent-lineage hover:bg-accent-lineage/25'
-                        : 'bg-glass/40 text-ink-muted/60 cursor-not-allowed',
-                )}
+                onClick={onLoad}
+                title={`Load: ${query.name}`}
+                className="flex-1 min-w-0 flex flex-col items-start gap-0.5 px-3 py-2 text-left"
             >
-                <Sparkles className="w-3 h-3" />
-                Suggest a query
+                <div className="flex items-center gap-1.5 w-full min-w-0">
+                    <Users className="w-3 h-3 text-accent-lineage shrink-0" />
+                    <span className="text-[12px] truncate font-display font-semibold text-ink">
+                        {query.name}
+                    </span>
+                </div>
+                {query.description && (
+                    <span className="text-[10.5px] text-ink-muted truncate w-full pl-[18px]">
+                        {query.description}
+                    </span>
+                )}
+                <span className="text-[10px] font-mono text-ink-muted truncate w-full pl-[18px]">
+                    {dsl}
+                </span>
             </button>
+            {canEdit && (
+                <div className={cn(
+                    'flex items-stretch shrink-0 transition-opacity',
+                    confirming ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100 focus-within:opacity-100',
+                )}>
+                    {confirming ? (
+                        <button
+                            type="button"
+                            onClick={onRemove}
+                            className="px-2 text-[10.5px] font-semibold text-rose-400 hover:bg-rose-500/10"
+                        >
+                            Remove for everyone
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={() => setConfirming(true)}
+                            title="Remove from this view"
+                            aria-label={`Remove “${query.name}” from this view`}
+                            className={cn(
+                                'inline-flex items-center justify-center w-7',
+                                'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10',
+                            )}
+                        >
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    )}
+                </div>
+            )}
         </div>
     )
 }

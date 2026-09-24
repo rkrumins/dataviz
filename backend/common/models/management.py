@@ -1121,6 +1121,8 @@ class ViewLayoutUpdateRequest(BaseModel):
     """
     reference_layout: Dict[str, Any] = Field(alias="referenceLayout")
     entity_scope: Optional[str] = Field(None, alias="entityScope")
+    # Accepted from older clients and ignored: a view's display rules are
+    # written through its library (PUT /views/{id}/library/rules/{ruleId}).
     display_rules: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRules")
 
     class Config:

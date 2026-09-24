@@ -56,6 +56,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { useActiveView, useSchemaStore } from '@/store/schema'
+import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import {
     useCanRedo,
     useCanUndo,
@@ -116,6 +117,8 @@ export const QueryCard: FC<QueryCardProps> = ({
     const canUndo = useCanUndo()
     const canRedo = useCanRedo()
     const saveDraftAsMineEntry = useSearchStore((s) => s.saveDraftAsMineEntry)
+    const saveViewQuery = useViewLibraryStore((s) => s.saveQuery)
+    const canSaveToView = useLibraryCanEdit()
     // clearSearchResults wipes match URNs / ancestor maps but leaves
     // draft + history alone — needed by the auto-run effect so an
     // empty draft doesn't destroy the history stack the user just
@@ -484,15 +487,20 @@ export const QueryCard: FC<QueryCardProps> = ({
             {saveTargetEntry && (
                 <SaveQueryDialog
                     entry={saveTargetEntry}
+                    canSaveToView={canSaveToView}
                     onCancel={() => setSaveTargetEntry(null)}
-                    onSave={(name, description) => {
-                        saveDraftAsMineEntry({
-                            viewId: saveTargetEntry.viewId,
-                            predicate: saveTargetEntry.predicate,
-                            label: saveTargetEntry.label,
-                            name,
-                            description,
-                        })
+                    onSave={async (name, description, destination) => {
+                        if (destination === 'view') {
+                            await saveViewQuery({ name, description, predicate: saveTargetEntry.predicate })
+                        } else {
+                            saveDraftAsMineEntry({
+                                viewId: saveTargetEntry.viewId,
+                                predicate: saveTargetEntry.predicate,
+                                label: saveTargetEntry.label,
+                                name,
+                                description,
+                            })
+                        }
                         setSaveTargetEntry(null)
                     }}
                 />
@@ -1234,22 +1242,27 @@ function SaveQueryButton({
  * "Create rule" — turn the current query into a Property Manager
  * display rule (tags every match with a colored chip on the canvas).
  * Opens the shared DisplayRuleEditor seeded with the query. Disabled
- * when there's no runnable draft (same gate as Save).
+ * when there's no runnable draft (same gate as Save), and for someone who
+ * can't edit the view: its rules are the view's.
  */
 function CreateRuleButton({
-    onCreateRule, disabled,
+    onCreateRule, disabled: noQuery,
 }: {
     onCreateRule: () => void
     disabled?: boolean
 }) {
+    const canEditView = useLibraryCanEdit()
+    const disabled = noQuery || !canEditView
     return (
         <button
             type="button"
             onClick={onCreateRule}
             disabled={disabled}
-            title={disabled
-                ? 'Add at least one complete filter to tag matches'
-                : 'Create a display rule from this query'}
+            title={!canEditView
+                ? 'Only people who can edit this view can add display rules'
+                : disabled
+                    ? 'Add at least one complete filter to tag matches'
+                    : 'Create a display rule from this query'}
             aria-label="Create display rule"
             className={cn(
                 'inline-flex items-center gap-1 px-2 h-7 rounded-md',

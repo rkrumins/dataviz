@@ -6,6 +6,9 @@
  *
  * Reorder is exposed as up/down affordances (keyboard-friendly, no DnD
  * dependency) — chip stacking order on the canvas follows rule order.
+ *
+ * Someone who can't edit the view sees its rules and their counts, and can
+ * reveal their matches, but not change them.
  */
 import { motion } from 'framer-motion'
 import {
@@ -28,11 +31,13 @@ export interface DisplayRuleListProps {
     onReorder: (orderedIds: string[]) => void
     /** Show every match of a rule (runs its criteria as a search). */
     onReveal: (rule: DisplayRuleConfig) => void
+    /** The caller can't change the view's rules: show them, don't offer edits. */
+    readOnly?: boolean
 }
 
 
 export function DisplayRuleList({
-    rules, onNew, onEdit, onToggle, onDelete, onReorder, onReveal,
+    rules, onNew, onEdit, onToggle, onDelete, onReorder, onReveal, readOnly = false,
 }: DisplayRuleListProps) {
     const move = (index: number, dir: -1 | 1) => {
         const next = [...rules]
@@ -40,6 +45,20 @@ export function DisplayRuleList({
         if (target < 0 || target >= next.length) return
         ;[next[index], next[target]] = [next[target], next[index]]
         onReorder(next.map((r) => r.id))
+    }
+
+    if (rules.length === 0 && readOnly) {
+        return (
+            <div className="rounded-2xl p-5 text-center border border-glass-border bg-black/[0.02] dark:bg-white/[0.03]">
+                <div className="mx-auto w-11 h-11 rounded-2xl bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center mb-3">
+                    <Tags className="w-5 h-5 text-ink-muted" strokeWidth={1.8} />
+                </div>
+                <div className="text-sm font-display font-semibold text-ink">No display rules yet</div>
+                <p className="mt-1.5 text-xs text-ink-muted leading-snug max-w-[34ch] mx-auto">
+                    People who can edit this view can add rules that tag matching entities.
+                </p>
+            </div>
+        )
     }
 
     if (rules.length === 0) {
@@ -80,6 +99,12 @@ export function DisplayRuleList({
 
     return (
         <div className="flex flex-col gap-3">
+            {readOnly ? (
+                <p className="text-[11px] text-ink-muted leading-snug">
+                    Rules tag matched entities on the canvas. Only people who can edit this
+                    view can change them.
+                </p>
+            ) : (
             <div className="flex items-center justify-between">
                 <p className="text-[11px] text-ink-muted leading-snug max-w-[70%]">
                     Rules tag matched entities on the canvas. Drag order sets chip stacking.
@@ -92,6 +117,7 @@ export function DisplayRuleList({
                     <Plus className="w-3.5 h-3.5" strokeWidth={2.5} /> New rule
                 </button>
             </div>
+            )}
 
             <div className="flex flex-col gap-2">
                 {rules.map((rule, index) => (
@@ -100,6 +126,7 @@ export function DisplayRuleList({
                         rule={rule}
                         isFirst={index === 0}
                         isLast={index === rules.length - 1}
+                        readOnly={readOnly}
                         onEdit={() => onEdit(rule)}
                         onToggle={() => onToggle(rule.id)}
                         onDelete={() => onDelete(rule.id)}
@@ -135,11 +162,12 @@ function RuleCountLine({ enabled, count }: {
 
 
 function RuleCard({
-    rule, isFirst, isLast, onEdit, onToggle, onDelete, onReveal, onMoveUp, onMoveDown,
+    rule, isFirst, isLast, readOnly, onEdit, onToggle, onDelete, onReveal, onMoveUp, onMoveDown,
 }: {
     rule: DisplayRuleConfig
     isFirst: boolean
     isLast: boolean
+    readOnly: boolean
     onEdit: () => void
     onToggle: () => void
     onDelete: () => void
@@ -162,6 +190,7 @@ function RuleCard({
         >
             <div className="flex items-center gap-2.5">
                 {/* Reorder handles */}
+                {!readOnly && (
                 <div className="flex flex-col -my-1 shrink-0">
                     <button
                         type="button"
@@ -184,6 +213,7 @@ function RuleCard({
                         <ArrowDown className="w-3 h-3" />
                     </button>
                 </div>
+                )}
 
                 {/* Enable toggle */}
                 <button
@@ -191,10 +221,13 @@ function RuleCard({
                     onClick={onToggle}
                     role="switch"
                     aria-checked={rule.enabled}
-                    title={rule.enabled ? 'Disable rule' : 'Enable rule'}
+                    disabled={readOnly}
+                    title={readOnly ? (rule.enabled ? 'On' : 'Off')
+                        : rule.enabled ? 'Disable rule' : 'Enable rule'}
                     className={cn(
                         'relative w-9 h-5 rounded-full transition-colors shrink-0',
                         rule.enabled ? 'bg-accent-lineage/80' : 'bg-glass/60',
+                        readOnly && 'cursor-default opacity-70',
                     )}
                 >
                     <span className={cn(
@@ -232,6 +265,7 @@ function RuleCard({
                     >
                         <Crosshair className="w-3.5 h-3.5" />
                     </button>
+                    {!readOnly && (<>
                     <button
                         type="button"
                         onClick={onEdit}
@@ -248,6 +282,7 @@ function RuleCard({
                     >
                         <Trash2 className="w-3.5 h-3.5" />
                     </button>
+                    </>)}
                 </div>
             </div>
         </motion.div>

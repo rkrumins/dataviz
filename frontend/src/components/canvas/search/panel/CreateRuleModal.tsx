@@ -21,8 +21,9 @@ import { createPortal } from 'react-dom'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { DisplayRuleEditor } from '@/components/canvas/property-manager/DisplayRuleEditor'
-import { cn, generateId } from '@/lib/utils'
-import { useDisplayRules, useReferenceModelStore } from '@/store/referenceModelStore'
+import { cn } from '@/lib/utils'
+import { useDisplayRules } from '@/store/referenceModelStore'
+import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
@@ -41,17 +42,19 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
     viewId, seedPredicate, knownEntityTypes, knownLayers, onClose,
 }) => {
     const rules = useDisplayRules()
-    const addDisplayRule = useReferenceModelStore((s) => s.addDisplayRule)
+    const saveRule = useViewLibraryStore((s) => s.saveRule)
     const { notify } = useAppNotifications()
 
-    const handleSave = useCallback((rule: DisplayRuleConfig) => {
-        addDisplayRule({ ...rule, id: rule.id || generateId('rule') })
+    // Saved to the view's library; a refusal (a taken name, no right to
+    // edit the view) stays in the editor with its reason.
+    const handleSave = useCallback(async (rule: DisplayRuleConfig) => {
+        await saveRule(rule)
         onClose()
-        // Optimistic confirmation — the rule engine recomputes the match
-        // set asynchronously, so we reassure the user the tag is now live
-        // (matching the Property Manager drawer's wording).
+        // The rule engine recomputes the match set asynchronously, so we
+        // reassure the user the tag is now live (matching the Property
+        // Manager drawer's wording).
         notify('success', `“${rule.name}” applied — tagging matched entities`)
-    }, [addDisplayRule, onClose, notify])
+    }, [saveRule, onClose, notify])
 
     // Seed the editor with the current query as a brand-new (id-less)
     // rule. The editor mints a real id on save via its own logic.

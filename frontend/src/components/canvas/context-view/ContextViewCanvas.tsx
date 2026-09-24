@@ -105,7 +105,7 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
-import type { ViewLayerConfig, DisplayRuleConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
+import type { ViewLayerConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
@@ -261,6 +261,7 @@ import {
 } from '../search/session/useViewSearchSessionController'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
@@ -813,10 +814,6 @@ export function ContextViewCanvas({
   const resetAssignmentStatus = useReferenceModelStore(s => s.resetAssignmentStatus)
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
-  // Display rules are session state on the store, edited via the Property Manager. The canvas
-  // owns their persistence: seed from the view on open (hydrate effect) + write them into the
-  // debounced updateViewLayout payload on change (persist effect) — see below.
-  const displayRules = useReferenceModelStore(s => s.displayRules)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
   const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
@@ -957,15 +954,12 @@ export function ContextViewCanvas({
       await updateViewLayout(pending.viewId, {
         referenceLayout: pending.referenceLayout,
         entityScope: pending.entityScope,
-        // Always send the live display rules so a layer-only save never wipes them (the endpoint
-        // replaces referenceLayout wholesale, then re-nests displayRules only when supplied).
-        displayRules: useReferenceModelStore.getState().displayRules,
       }, pending.branchId ?? undefined)
       setLayoutSyncStatus('idle')
     } catch (err) {
-      // NOT swallowed. Layer create/rename/reorder, entity placement and display rules are all
-      // durable work that only travels this path, and UnsavedWorkGuard cannot see any of it (it
-      // keys off staged changes; none of these are staged).
+      // NOT swallowed. Layer create/rename/reorder and entity placement are durable work that
+      // only travels this path, and UnsavedWorkGuard cannot see any of it (it keys off staged
+      // changes; none of these are staged).
       // The edit stays PENDING: the branch-switch effect guards its re-fetch with this exact ref,
       // so clearing it let the server's stale layout overwrite the user's edits. Restored only if
       // no newer edit claimed the single slot while this one was in flight.
@@ -1081,15 +1075,8 @@ export function ContextViewCanvas({
       assignments: next.assignments,
       ...(next.defaultNodeSortMode ? { defaultNodeSortMode: next.defaultNodeSortMode } : {}),
     }
-    // The LOCAL copy keeps the view's display rules. Written without them, a
-    // later return to this view in the same session hydrated an empty rule set,
-    // and the next layout save sent that empty set to the server — the rules
-    // were gone after one layer gesture and one view switch.
     useSchemaStore.getState().updateView(view.id, {
-      layout: {
-        ...(view.layout ?? {}),
-        referenceLayout: { ...referenceLayout, displayRules: useReferenceModelStore.getState().displayRules },
-      },
+      layout: { ...(view.layout ?? {}), referenceLayout },
       content: { ...view.content, entityScope },
     })
     // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
@@ -1120,45 +1107,6 @@ export function ContextViewCanvas({
       setLayers(viewLayers)
     }
   }, [activeView?.id, activeView?.layout?.referenceLayout?.layers, setLayers, storeLayers])
-
-  // Step 1b — HYDRATE display rules from the view on open. Display rules are view-scoped session
-  // state on the store, edited via the Property Manager; seeding them here (they no longer arrive via
-  // a context-model load) is what makes a view's saved tags appear, and re-seeding on every view
-  // switch prevents one view's rules leaking into another. Defined BEFORE the persist effect so on a
-  // switch the store is updated first and the persist effect's stale-guard catches the transition.
-  useEffect(() => {
-    const view = useSchemaStore.getState().getActiveView()
-    const raw = view?.layout?.referenceLayout?.displayRules
-    useReferenceModelStore.getState().setDisplayRules(Array.isArray(raw) ? (raw as DisplayRuleConfig[]) : [])
-  }, [activeView?.id])
-
-  // Step 1c — PERSIST display-rule edits. When the store's rules diverge from the active view's saved
-  // rules, fold them into the LOCAL view (so an in-session view switch re-hydrates them) and arm the
-  // debounced durable save — which always sends the live displayRules (see doLayoutSave), so a
-  // layer-only save never wipes them. Guards: ignore a stale render whose captured rules the store
-  // has already moved past (e.g. a switch just re-hydrated), and skip when the view already carries
-  // these rules (the hydration seed / no net change). Gated on canEdit, the same
-  // VIEW capability the endpoint checks (can_edit_view): gating on datasource-manage
-  // let a view editor author rules that were silently never saved.
-  useEffect(() => {
-    if (useReferenceModelStore.getState().displayRules !== displayRules) return
-    if (!viewCaps.canEdit) return
-    const view = useSchemaStore.getState().getActiveView()
-    if (!view?.id) return
-    const savedRaw = view.layout?.referenceLayout?.displayRules
-    const saved = Array.isArray(savedRaw) ? savedRaw : []
-    if (JSON.stringify(saved) === JSON.stringify(displayRules)) return
-    const norm = normalizeReferenceLayout(view.layout?.referenceLayout)
-    const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
-    useSchemaStore.getState().updateView(view.id, {
-      layout: {
-        ...(view.layout ?? {}),
-        referenceLayout: { layers: norm.layers, assignments: norm.assignments, displayRules },
-      },
-    })
-    pendingLayoutSave.current = { viewId: view.id, referenceLayout: norm, entityScope, branchId: effectiveBranchId }
-    armLayoutSave()
-  }, [displayRules, viewCaps.canEdit, armLayoutSave, effectiveBranchId])
 
   // Step 2: Load assignments from backend when layers are synced and nodes are available
   // Uses a ref to track what we've computed for, preventing cascading re-fetches.
@@ -1324,6 +1272,8 @@ export function ContextViewCanvas({
   // rule matches and publishes them so FlatTreeItem can render chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   useDisplayRuleEngine(activeView?.id ?? null)
+  // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
+  useViewLibrary(activeView?.id ?? null, effectiveBranchId)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).

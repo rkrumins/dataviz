@@ -60,6 +60,8 @@ import {
     useSearchStore,
     type RecentQueryEntry,
 } from '@/store/searchStore'
+import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
+import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
@@ -223,6 +225,8 @@ function PanelInner({
     const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
     const removeRecent = useSearchStore((s) => s.removeRecent)
     const promoteToMine = useSearchStore((s) => s.promoteToMine)
+    const saveViewQuery = useViewLibraryStore((s) => s.saveQuery)
+    const canSaveToView = useLibraryCanEdit()
     const stepFocus = useSearchStore((s) => s.stepFocus)
     const setCanvasFilterMode = useSearchStore((s) => s.setCanvasFilterMode)
 
@@ -333,6 +337,11 @@ function PanelInner({
 
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
+        setLibraryOpen(false)
+    }, [commitDraft])
+
+    const handleLoadSaved = useCallback((query: SavedViewQuery) => {
+        commitDraft(query.predicate)
         setLibraryOpen(false)
     }, [commitDraft])
 
@@ -474,7 +483,7 @@ function PanelInner({
                 onTogglePinRecent={togglePinRecent}
                 onRemoveRecent={removeRecent}
                 onSaveAs={setSaveTarget}
-                viewId={viewId}
+                onLoadSaved={handleLoadSaved}
                 activeDraft={Boolean(draftPredicate)}
             >
                 <div>
@@ -503,9 +512,14 @@ function PanelInner({
             {saveTarget && (
                 <SaveQueryDialog
                     entry={saveTarget}
+                    canSaveToView={canSaveToView}
                     onCancel={() => setSaveTarget(null)}
-                    onSave={(name, description) => {
-                        promoteToMine(saveTarget.timestamp, name, description)
+                    onSave={async (name, description, destination) => {
+                        if (destination === 'view') {
+                            await saveViewQuery({ name, description, predicate: saveTarget.predicate })
+                        } else {
+                            promoteToMine(saveTarget.timestamp, name, description)
+                        }
                         setSaveTarget(null)
                     }}
                 />
