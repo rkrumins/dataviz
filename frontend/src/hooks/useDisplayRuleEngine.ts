@@ -60,6 +60,7 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
     }, [rules, setRuleMeta, retainRules])
 
     const enabled = useMemo(() => rules.filter((r) => r.enabled), [rules])
+    const askable = useMemo(() => enabled.filter(canAsk), [enabled])
     // What the answers depend on: which rules, with which criteria, in which
     // view (and its layers) — not a rule's name, colour or icon.
     const signature = useMemo(
@@ -74,7 +75,7 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
 
     // Membership: every loaded entity, once; later ones as they load.
     useEffect(() => {
-        if (!viewId || !(provider instanceof RemoteGraphProvider) || enabled.length === 0) return
+        if (!viewId || !(provider instanceof RemoteGraphProvider) || askable.length === 0) return
         if (answered.current.signature !== signature) {
             answered.current = { signature, urns: new Set() }
         }
@@ -87,8 +88,8 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
             void (async () => {
                 for (let i = 0; i < pending.length; i += URNS_PER_REQUEST) {
                     const batch = pending.slice(i, i + URNS_PER_REQUEST)
-                    for (let j = 0; j < enabled.length; j += RULES_PER_REQUEST) {
-                        const group = enabled.slice(j, j + RULES_PER_REQUEST)
+                    for (let j = 0; j < askable.length; j += RULES_PER_REQUEST) {
+                        const group = askable.slice(j, j + RULES_PER_REQUEST)
                         try {
                             const answer = await provider.searchMembership({
                                 scope: { viewId, scopeMode: 'view' },
@@ -113,17 +114,26 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
             controller.abort()
             clearTimeout(timer)
         }
-    }, [viewId, provider, signature, enabled, nodes, applyMembership])
+    }, [viewId, provider, signature, askable, nodes, applyMembership])
 
-    // Counts: each rule's exact total in the view.
+    // Counts: each rule's exact total in the view. A rule that can't be asked
+    // about reads as one that can't be counted, and why.
     useEffect(() => {
         if (!viewId || !(provider instanceof RemoteGraphProvider) || enabled.length === 0) return
+        const refused = new Map(enabled.filter((r) => !canAsk(r)).map((r) => [r.id, {
+            count: 0, complete: true, percent: 100,
+            error: r.invalid ?? 'This rule has no criteria to match.',
+        }]))
+        if (askable.length === 0) {
+            setCounts(refused)
+            return
+        }
         const controller = new AbortController()
         const timer = setTimeout(() => {
-            countRules(provider, viewId, enabled.map(asItem), {
+            countRules(provider, viewId, askable.map(asItem), {
                 signal: controller.signal,
                 onUpdate: (counts) => {
-                    if (!controller.signal.aborted) setCounts(counts)
+                    if (!controller.signal.aborted) setCounts(new Map([...counts, ...refused]))
                 },
             }).catch((err) => {
                 if (controller.signal.aborted) return
@@ -143,6 +153,15 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
         clearRef.current = clear
     }, [clear])
     useEffect(() => () => clearRef.current(), [])
+}
+
+
+/** Whether a rule can be asked about at all: not one the library flagged
+ *  (``invalid`` — stored as given by a bundle import or a version restore),
+ *  and one with criteria. Sent with the others, either would fail the whole
+ *  batch it is asked in. */
+function canAsk(rule: DisplayRuleConfig): boolean {
+    return !rule.invalid && typeof rule.predicate === 'object' && rule.predicate !== null
 }
 
 

@@ -162,6 +162,43 @@ describe('useDisplayRuleEngine', () => {
         expect(rules.map((r) => r.id)).toEqual(['pii'])
     })
 
+    it("never sends a rule the library flagged, or one without criteria, and says why it can't be counted", async () => {
+        // A bundle import or a version restore stores rules as given: sent
+        // with the others, one bad predicate would fail their whole batch.
+        vi.mocked(countRules).mockImplementation(async (_p, _v, _rules, opts) => {
+            const counts = new Map([['pii', { count: 7, complete: true, percent: 100 }]])
+            opts?.onUpdate?.(counts)
+            return counts
+        })
+        useReferenceModelStore.setState({ displayRules: [
+            rule('pii'),
+            rule('near', { invalid: "A rule can't use 'within hops' or a path." }),
+            rule('bare', { predicate: undefined }),
+        ] })
+        useCanvasStore.setState({ nodes: nodes(10) })
+        renderHook(() => useDisplayRuleEngine('view-1'))
+
+        await waitFor(() => expect(membership()).toHaveBeenCalledTimes(1))
+        expect(asked()[0].items.map((i) => i.id)).toEqual(['pii'])
+        await waitFor(() => expect(useDisplayRuleMatchStore.getState().countsByRule.size).toBe(3))
+        expect(vi.mocked(countRules).mock.calls[0][2].map((r) => r.id)).toEqual(['pii'])
+        const counts = useDisplayRuleMatchStore.getState().countsByRule
+        expect(counts.get('pii')).toEqual({ count: 7, complete: true, percent: 100 })
+        expect(counts.get('near')).toMatchObject({ complete: true, error: expect.stringContaining('within hops') })
+        expect(counts.get('bare')).toMatchObject({ complete: true, error: expect.any(String) })
+    })
+
+    it("says why a rule can't be counted even when no rule can be", async () => {
+        useReferenceModelStore.setState({ displayRules: [rule('bare', { predicate: null })] })
+        renderHook(() => useDisplayRuleEngine('view-1'))
+
+        await waitFor(() => expect(
+            useDisplayRuleMatchStore.getState().countsByRule.get('bare')?.error,
+        ).toBeTruthy())
+        expect(countRules).not.toHaveBeenCalled()
+        expect(membership()).not.toHaveBeenCalled()
+    })
+
     it('wipes the match store on unmount', async () => {
         useReferenceModelStore.setState({ displayRules: [rule('pii')] })
         useCanvasStore.setState({ nodes: nodes(10) })

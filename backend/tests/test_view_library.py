@@ -123,6 +123,29 @@ async def test_a_rule_is_checked_as_a_search_is(test_client: AsyncClient):
     assert (await _library(test_client, view_id))["displayRules"] == []
 
 
+async def test_a_stored_rule_a_rule_may_not_be_is_flagged_when_read(test_client: AsyncClient):
+    """A bundle import or a version restore stores a view's rules as given,
+    and rules saved before the library checked them never were. One a rule
+    may not be comes flagged, with why, so the canvas shows it as one that
+    can't be counted instead of sending it with the others. What is stored
+    is left as it is."""
+    view_id = await _view(test_client, config={"layout": {"type": "reference", "referenceLayout": {
+        "displayRules": [
+            _rule("ok", "Owned"),
+            {"id": "bare", "name": "No predicate", "color": "#ff0000", "enabled": True},
+            _rule("near", "Near", predicate={"kind": "withinHops", "urns": ["urn:a"], "hops": 2}),
+        ]}}})
+    rules = (await _library(test_client, view_id))["displayRules"]
+    assert [r["id"] for r in rules if r.get("invalid")] == ["bare", "near"]
+    assert "within hops" in rules[2]["invalid"]
+    written = await test_client.put(f"/api/v1/views/{view_id}/library/rules/new",
+                                    json=_rule("new", "New"))
+    assert [r["id"] for r in written.json() if r.get("invalid")] == ["bare", "near"]
+    stored = (await test_client.get(f"/api/v1/views/{view_id}")).json()
+    assert not any("invalid" in r
+                   for r in stored["config"]["layout"]["referenceLayout"]["displayRules"])
+
+
 async def test_a_view_holds_a_bounded_number_of_rules(test_client: AsyncClient, monkeypatch):
     monkeypatch.setattr(view_library, "LIBRARY_RULES_MAX", 2)
     view_id = await _view(test_client)

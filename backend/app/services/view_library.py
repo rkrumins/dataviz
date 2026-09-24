@@ -95,6 +95,23 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
     return model
 
 
+def _flag_invalid(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """``rules`` as a client is given them. A bundle import or a version
+    restore stores a view's rules as given, and rules saved before this
+    library checked them never were: one a rule may not be comes with
+    ``invalid`` saying why, so it is shown as a rule that can't be counted
+    rather than sent with the others (one bad predicate fails the batch it
+    is counted in). What is stored is not changed."""
+    out = []
+    for rule in rules:
+        try:
+            _check_predicate(rule.get("predicate"), rule=True)
+            out.append(rule)
+        except LibraryError as exc:
+            out.append({**rule, "invalid": exc.detail})
+    return out
+
+
 def _has_route(model: Any) -> bool:
     if getattr(model, "kind", None) in ("withinHops", "path"):
         return True
@@ -199,7 +216,7 @@ async def _write_rules(session: AsyncSession, view_id: str, branch_id: Optional[
         )
         set_committed_value(row, "config", text)
     await session.flush()
-    return rules
+    return _flag_invalid(rules)
 
 
 async def put_rule(session: AsyncSession, view_id: str, branch_id: Optional[str],
@@ -325,7 +342,7 @@ async def read_library(session: AsyncSession, view: ViewORM, branch_id: Optional
                        *, can_edit: bool) -> ViewLibrary:
     return ViewLibrary(
         view_id=view.id, branch_id=branch_id or None,
-        display_rules=await read_rules(session, view, branch_id),
+        display_rules=_flag_invalid(await read_rules(session, view, branch_id)),
         saved_queries=await read_queries(session, view.id),
         can_edit=can_edit,
     )
