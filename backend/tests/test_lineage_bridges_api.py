@@ -88,17 +88,10 @@ class _FastPathProvider(_ChainProvider):
 
 
 def _flag(on: bool) -> None:
-    """``viewSubsetsEnabled`` is experimental and seeded OFF; primed in the
-    cache, which is the path the gate reads in production."""
+    """``viewSubsetsEnabled`` ships ON (conftest primes the seeded defaults);
+    switched in the cache, which is the path the gate reads in production."""
     feature_flags._cache = {**(feature_flags._cache or {}), "viewSubsetsEnabled": on}
     feature_flags._cache_ts = time.monotonic()
-
-
-@pytest.fixture(autouse=True)
-def subsets_on():
-    _flag(True)
-    yield
-    _flag(False)
 
 
 async def _post(client: AsyncClient, engine: ContextEngine, path: str, body):

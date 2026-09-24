@@ -208,6 +208,8 @@ graph LR
 | `/{ws_id}/graph/edges/aggregated` | POST | Aggregated edges between containers |
 | `/{ws_id}/graph/edges/aggregated/materialize` | POST | Batch-create AGGREGATED edges |
 | `/{ws_id}/graph/nodes/degree` | POST | Total lineage degree (in/out) per URN over the full graph — powers the curated-view "lineage outside this view" chip. Response-cached; a URN absent from the result is UNKNOWN (never zero). Body: `{ urns[], edge_types? }` |
+| `/{ws_id}/graph/lineage/bridges` | POST | Virtual hops: which members of a curated view reach which through raw lineage the view leaves out, with the hop count of the shortest such route. Body: `{ members[{urn, inheritsChildren}] (≤2,000), origins?, direction, maxHops (1–20, default 10), maxNodes? }`. Anything the budget could not finish is named in `incomplete` — never passed off as complete. Gated by `viewSubsetsEnabled`; response-cached per graph generation |
+| `/{ws_id}/graph/lineage/bridges/path` | POST | The hidden steps behind one virtual hop: the nodes and edges on its shortest routes (≤300 nodes) with their containment, for the canvas's path popover. Gated by `viewSubsetsEnabled` |
 
 ### Graph Versioning & Change Control
 
@@ -240,6 +242,7 @@ Graph versioning (drafts, review & merge, publish, revert, restore) is **shipped
 | `/api/v1/views` | GET, POST | List/create saved views |
 | `/api/v1/views/{id}` | GET, PUT, DELETE | View CRUD |
 | `/api/v1/views/{id}/favourite` | POST | Toggle favourite |
+| `/api/v1/views/{id}/subsets` | POST | Carve a subset Context View out of this one (201). Reading the source is required — an unreadable source is a 404. `GET /api/v1/views?derivedFrom={id}` lists the subsets made from a view that the caller can read. Gated by `viewSubsetsEnabled` |
 | `/api/v1/views/popular` | GET | Most-favourited views |
 | `/api/v1/admin/features` | GET, PATCH | Feature flag management (optimistic concurrency) |
 | `/api/v1/features/values` | GET | **Public**, read-only flag values (no auth, no schema/categories overhead) for client bootstrapping |
@@ -507,6 +510,18 @@ Located in `backend/graph/adapters/`:
 **File:** `backend/app/services/lineage_aggregator.py`
 
 Handles lineage edge aggregation logic -- collapsing fine-grained column-level edges into coarser table/domain-level aggregated edges.
+
+### Lineage Bridges (virtual hops)
+
+**Files:** `backend/common/providers/lineage_bridges.py` (walker), `backend/app/providers/falkordb_bridges.py` (FalkorDB callbacks), `backend/common/providers/lineage_bridges_generic.py` (every other provider, drafts and branches)
+
+Answers `POST /graph/lineage/bridges`: for a set of view members, the shortest raw-lineage route from each member to the next member it reaches, through nodes no member owns. A member owns itself and — when it comes with what sits inside it — its descendants. A route stops at the first member it reaches, so keeping A, C and F of `A→…→G` gives `A⇢C` and `C⇢F` but no `A⇢F`. The walk explores from both ends, one level at a time on whichever side is cheaper, records every edge it reads, then attributes links exactly over the recorded edges. Synthetic `AGGREGATED` roll-ups are never walked — roll-up transitivity is not leaf transitivity. Hubs, the node budget (`LINEAGE_BRIDGES_MAX_NODES`, 20,000; hard 50,000) and the 25 s deadline (`LINEAGE_BRIDGES_TIMEOUT_SECS`) cut the walk; each cut names the members whose links may be missing.
+
+### View Subsets
+
+**File:** `backend/app/services/view_subset.py`
+
+`build_subset_config` turns a Context View's config and the picked members into the subset's config for `POST /views/{id}/subsets`: only the layers and groups the members use, one assignment per member, and no exact-URN layer rules — those would re-admit entities the subset left out. The subset records `content.connectivity` (virtual hops on, and their reach) and `derived_from_view_id`.
 
 ### AssignmentEngine
 

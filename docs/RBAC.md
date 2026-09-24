@@ -197,6 +197,39 @@ claims and would pass a publish check until the session refreshes
 (bounded by the access-token TTL). Force re-login via the revocation
 service if that window matters.
 
+### Subset views
+
+`POST /views/{id}/subsets` makes a new Context View from part of an
+existing one ([Subset Views](/guide/subset-views)). The subset is born in
+the **source's** workspace, over the source's data source, so the rule
+is the one for any create there, plus reading the source:
+
+| Check | Outcome when it fails |
+|-------|-----------------------|
+| `can_read_view` on the source | **404**, never 403 — refusing with 403 would confirm a private view exists |
+| `workspace:view:create` in the source's workspace | 403 |
+| Creating straight to `enterprise` | The publish ladder above, exactly as `POST /views` (`_enforce_create_gates` is shared by both) |
+| Source is a Context View; `reference` is in `allowedViewModes`; `viewSubsetsEnabled` | 422 / 403 / 403 |
+
+The access envelope's `canCreateSubset` is the same rule for the view
+being read: a signed-in caller, a Context View, and
+`workspace:view:create` in its workspace.
+
+Provenance never leaks. A subset's `derivedFrom.name` is filled only
+when the caller can read the source; otherwise `derivedFrom` carries the
+source's id alone, with `accessible: false`. `GET /views?derivedFrom=` lists only
+the subsets the caller can read. Nothing is written to the **source's**
+activity timeline — a line there would tell its audience that a subset,
+possibly private, exists.
+
+A subset narrows what people **see**, not what they can **open**:
+reading any view grants read-only access to its data source through the
+`?viewId=` capability, so the entities a subset leaves out are one
+search away. Restrict the data source or the workspace to restrict the
+data. The virtual-hop routes (`POST /graph/lineage/bridges`, `/path`)
+accept the same `?viewId=` context, so a reader who can only open the
+view still sees its hops.
+
 ## Resolver behaviour
 
 A permission check resolves through a fixed short-circuit ladder — the two global

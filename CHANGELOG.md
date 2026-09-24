@@ -9,6 +9,85 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Subset views, and lineage that survives what a view leaves out
+
+### Added
+
+**Subset views.** A builder can carve a smaller Context View out of a larger one for a
+narrower audience, and the source stays exactly as it was. `POST /api/v1/views/{id}/subsets`
+builds the subset server-side in one write from the source's own config: only the layers and
+groups the picks sit in, one assignment per pick, and the source's display settings. Exact-URN
+layer rules are stripped, because left in, the layout normaliser would re-admit the entities
+the subset left out. The new view records where it came from (`views.derived_from_view_id`,
+`derivedFromViewId` on every view payload, `derivedFrom` on a single read,
+`GET /views?derivedFrom=`), and its header reads *Subset of ‹source›*. A source the reader
+cannot open is never named.
+
+**Virtual hops: dropping the middle of a chain no longer drops the lineage.** Keep A, C and F
+out of `A→B→C→D→E→F→G` and the subset draws `A⇢C` *via 1* and `C⇢F` *via 2*, but not `A⇢F`,
+because every route from A to F runs through C. Before this, a curated view drew a line only
+where both ends were loaded, so leaving B out silently cut A from C.
+`POST /graph/lineage/bridges` walks raw lineage between a view's entities from both ends at
+once, and credits each route to the first entity it reaches. It never walks the synthetic
+`AGGREGATED` roll-ups, because roll-up transitivity is not leaf transitivity. Hops are
+**live**: they are worked out when the view opens and cached per graph generation, never
+frozen into the view. Whatever the budget could not finish is named in `incomplete`, and the
+canvas then says *may be incomplete* instead of passing off a partial answer as the whole
+one. `POST /graph/lineage/bridges/path` returns the hidden steps behind one hop, shown at the
+view's grain and walkable in the Lens.
+
+**The Subset Studio, on the source canvas.** While it is open, a click on a card picks it. You
+can also add a whole layer or type, and grow along lineage upstream or downstream (one step or
+all the way, at the view's own grain). A grow can reach one step beyond the view: each entity
+it brings in lands where the source's layer rules put it, or beside the entity it grew from.
+*Connect* counts what is joined directly, what is joined through virtual hops and what is
+isolated, beside a live diagram. *Shape* sets layers, containers' contents, groups and hop
+reach (1–20 steps). A grow of more than 50 entities asks first. The Studio can be started from the view header (**Subset**), a
+selection (**Keep as a subset…**), a card's menu (**Start a subset from here**) or the
+Explorer (**Make a subset…**). A two-step wizard names the subset and sets its audience, with
+the same publish rules as any view.
+
+**`viewSubsetsEnabled`** (Admin → Features › View Modes), on by default. It gates the three
+routes. With it off, subsets already made still open and draw their direct lines. Guide:
+[Subset Views](/guide/subset-views).
+
+### Upgrading
+
+**One migration.** `20260924_1000_view_derived_from` adds `views.derived_from_view_id`
+(nullable, `ON DELETE SET NULL`) and its index. Both statements are guarded, and the downgrade
+drops both.
+
+**Tunables, all with working defaults.** The walk: `LINEAGE_BRIDGES_TIMEOUT_SECS` (25),
+`LINEAGE_BRIDGES_MAX_NODES` (20,000, hard ceiling `LINEAGE_BRIDGES_MAX_NODES_HARD` 50,000),
+`LINEAGE_BRIDGES_SEED_CAP` (50,000) and `LINEAGE_BRIDGES_HUB_DEGREE` (5,000). The cache:
+`GRAPH_CACHE_LINEAGE_BRIDGES_TTL_S` (3,600; any graph write invalidates it sooner), with
+`GRAPH_CACHE_ENABLED_LINEAGE_BRIDGES` / `_PATH` to switch it off. Fair share:
+`FAIR_SHARE_LINEAGE_BRIDGES_RATE` / `_BURST` (2 / 6) and `FAIR_SHARE_LINEAGE_BRIDGE_PATH_RATE` /
+`_BURST` (5 / 10).
+
+### Known limitations
+
+- **A subset narrows what people see, not what they can open.** Reading any view grants
+  read-only reach into its data source, so what a subset leaves out is one search away.
+  Restrict the data source or the workspace to restrict the data.
+- Hops are drawn between the cards a view shows. Inside an expanded card, a hop between two
+  columns is drawn card to card, not column to column.
+- A subset is made from the published view only, and the Studio closes when a draft opens
+  (the picks are kept). A subset is not kept in step with its source afterwards; only its
+  virtual hops, which come from the graph, stay live.
+- Only views that ask for virtual hops (`content.connectivity`) draw them, and in this release
+  that is only subsets. There is no switch to turn them on for other views. They are not drawn
+  while a trace is open or when lineage lines are hidden.
+- Very coarse picks (a whole domain, a container holding a warehouse) can exceed the seed or
+  node budgets, and the answer is then partial and flagged as partial. Subsets work best at
+  table or dataset grain.
+- Neo4j, Spanner, drafts and versioned branches use the generic walk over `get_edges`, which
+  is slower than FalkorDB's. DataHub answers 501, and the canvas draws direct lines only.
+- On a draft over FalkorDB, `get_edges` drops a failed label bucket with a warning instead of
+  raising, so a hop through that bucket can be missed without being flagged.
+
+---
+
 ## [Unreleased] — The cluster window, and the names a graph can hold
 
 ### Fixed

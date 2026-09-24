@@ -122,5 +122,6 @@ Before you call a View "done":
 ## Where to next
 
 - Maintain, share, and co-own Views → [Managing Views](/guide/managing-views)
+- Carve a smaller View out of a bigger one, lineage intact → [Subset Views](/guide/subset-views)
 - Shape the colours, types, and meaning → [The Semantic Layer](/guide/semantic-layer)
 - Team conventions for names and tags → [Ways of Working](/guide/ways-of-working)

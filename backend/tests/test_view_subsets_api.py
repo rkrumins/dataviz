@@ -42,13 +42,6 @@ def _flag(on: bool) -> None:
     feature_flags._cache_ts = time.monotonic()
 
 
-@pytest.fixture(autouse=True)
-def subsets_on():
-    _flag(True)
-    yield
-    _flag(False)
-
-
 def _config() -> dict:
     return {
         "content": {"visibleEntityTypes": ["table"], "entityScope": "curated"},

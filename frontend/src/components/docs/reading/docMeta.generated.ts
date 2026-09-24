@@ -189,6 +189,10 @@ export const guideMeta: Record<string, DocMeta> = {
     "updated": "2026-08-18",
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
+  "subset-views": {
+    "updated": "2026-09-24",
+    "path": "docs/guide/SUBSET_VIEWS.md"
+  },
   "semantic-layer": {
     "updated": "2026-08-18",
     "path": "docs/guide/SEMANTIC_LAYER.md"

@@ -42,6 +42,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     graphExportEnabled: true,
     blankModelsEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
+    viewSubsetsEnabled: true,
     // Fail OPEN to "workspaces decide". Guessing the strictest value on a
     // slow network would hide the Enterprise tier for a deployment nobody
     // had restricted — and the server refuses regardless, so the client's
@@ -75,7 +76,6 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     toursEnabled: false,                  // experimental preview — ships OFF
     canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
     canvasLineageRollupEnabled: false,    // experimental preview — ships OFF
-    viewSubsetsEnabled: false,            // experimental preview — ships OFF
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the

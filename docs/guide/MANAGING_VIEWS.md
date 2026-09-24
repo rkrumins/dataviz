@@ -105,6 +105,7 @@ More in [Troubleshooting](/guide/troubleshooting).
 
 ## Where to next
 
+- Give a narrower audience just the part of a View they need → [Subset Views](/guide/subset-views)
 - Shape what nodes *mean* across all Views → [The Semantic Layer](/guide/semantic-layer)
 - Understand roles, groups, and grants → [Users & Access](/guide/users-access)
 - Team conventions → [Ways of Working](/guide/ways-of-working)

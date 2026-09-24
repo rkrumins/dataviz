@@ -259,6 +259,15 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/MANAGING_VIEWS.md?raw'),
   },
   {
+    slug: 'subset-views',
+    section: 'builder',
+    persona: 'builder',
+    title: 'Subset Views',
+    description: 'Carve a smaller view out of a bigger one — lineage stays connected',
+    readingTime: '8 min',
+    importFn: () => import('@docs/guide/SUBSET_VIEWS.md?raw'),
+  },
+  {
     slug: 'semantic-layer',
     section: 'builder',
     persona: 'builder',

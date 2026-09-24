@@ -145,6 +145,31 @@ async def test_enterprise_view_capability_passes_every_gate(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path,body", [
+    ("lineage/bridges", {"members": [{"urn": "a"}, {"urn": "b"}]}),
+    ("lineage/bridges/path", {"members": [{"urn": "a"}, {"urn": "b"}], "source": "a", "target": "b"}),
+])
+async def test_virtual_hops_load_for_a_reader_of_the_view_alone(
+    test_client: AsyncClient, db_session, path, body,
+):
+    """A subset view is made for a narrower audience — often people who can
+    open the view and nothing else. Its virtual hops are theirs too; a view
+    they cannot open unlocks nothing."""
+    ids = await _seed(db_session)
+    with _auth(user=OUTSIDER, claims=EMPTY_CLAIMS):
+        r = await test_client.post(
+            f"/api/v1/{WS_A}/graph/{path}", json=body,
+            params={"viewId": ids["enterprise"], "dataSourceId": DS_A1},
+        )
+        hidden = await test_client.post(
+            f"/api/v1/{WS_A}/graph/{path}", json=body,
+            params={"viewId": ids["private"], "dataSourceId": DS_A1},
+        )
+    assert r.status_code not in (401, 403), r.text
+    assert hidden.status_code == 404, hidden.text
+
+
+@pytest.mark.asyncio
 async def test_member_reads_unchanged(test_client: AsyncClient, db_session):
     """The membership path must be byte-identical to before — no viewId
     needed, same statuses."""

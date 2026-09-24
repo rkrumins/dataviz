@@ -264,6 +264,27 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "withdrawn from NEW views, not deleted",
         ),
     ),
+    "viewSubsetsEnabled": FeatureWiring(
+        key="viewSubsetsEnabled",
+        posture="capability",
+        server_gates=(
+            "POST /graph/lineage/bridges — virtual hops between the entities of a curated view",
+            "POST /graph/lineage/bridges/path — the hidden steps behind one virtual hop",
+            "POST /views/{id}/subsets — carving a subset view out of a Context View",
+        ),
+        ui_surfaces=(
+            "Subset button in a Context View's header, and the Subset Studio it opens",
+            "'Keep as a subset…' on a canvas selection and 'Start a subset from here' on a card",
+            "'Make a subset…' on a view card in the Explorer",
+            "Virtual hops — stitched lines through lineage a subset leaves out",
+        ),
+        still_allowed=(
+            "Views already made as subsets keep opening, with the direct lines between what "
+            "they hold",
+            "Every view opens and draws its direct lines exactly as before",
+            "Tracing lineage, and bringing in what a row's lineage reaches outside the view",
+        ),
+    ),
     # ── Sharing reach ──────────────────────────────────────────────────────────
     "enterpriseViewPolicy": FeatureWiring(
         key="enterpriseViewPolicy",
@@ -521,23 +542,6 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Every line between entities on the canvas is drawn exactly as before",
             "A row whose lineage reaches entities that are not loaded says how many, and brings "
             "them in on a click",
-        ),
-    ),
-    "viewSubsetsEnabled": FeatureWiring(
-        key="viewSubsetsEnabled",
-        posture="capability",
-        # Preview while it is being built: subset views and the virtual hops
-        # that keep a subset's lineage connected. Ships OFF until the whole
-        # flow — studio, creation, provenance — is in.
-        stage="experimental",
-        server_gates=(
-            "POST /graph/lineage/bridges — virtual hops between the entities of a curated view",
-            "POST /graph/lineage/bridges/path — the hidden steps behind one virtual hop",
-            "POST /views/{id}/subsets — carving a subset view out of a Context View",
-        ),
-        still_allowed=(
-            "Every view opens and draws its direct lines exactly as before",
-            "Tracing lineage, and bringing in what a row's lineage reaches outside the view",
         ),
     ),
 }

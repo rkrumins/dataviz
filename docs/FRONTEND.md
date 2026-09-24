@@ -592,6 +592,21 @@ The **Context View** (a.k.a. the Lineage Lens experience) is **shipped**. It pro
 
 **Curated-view "lineage outside this view" cue:** the canvas fetches total lineage degree per URN via `useExternalDegrees` (backed by `POST /{ws_id}/graph/nodes/degree`) and subtracts each node's loaded (internal) degree, surfacing a chip when a node has links beyond the current view.
 
+### Subset views & virtual hops
+
+A **subset view** is a Context View carved out of a larger one (user guide: [Subset Views](/guide/subset-views)). Everything lives in `features/view-subset/`, gated by `viewSubsetsEnabled` and `access.canCreateSubset`.
+
+| Piece | File | Purpose |
+|-------|------|---------|
+| `useLineageBridges`, `useBridgePath` | `features/view-subset/hooks/` | React Query over `POST /graph/lineage/bridges` and `/bridges/path`, keyed by the member set, direction, reach and the graph's head sequence. Status `idle · loading · ready · partial · error · disabled · oversized`; `partial` carries the members whose links may be missing |
+| Virtual hop lines | `hooks/useEdgeProjection.ts`, `LineageFlowOverlay.tsx`, `edgeDash.ts` | A final pass after projection turns bridge links into `bridge-` lines between the visible cards (min hops per pair, drawn only where no line already runs that way). Drawn as a stitched accent line (`VIRTUAL_HOP_DASH`) with a **via N** chip; never mirrored into the canvas store or the connection model |
+| `BridgePathPopover`, `VirtualHopsChip` | `features/view-subset/components/` | The hidden steps behind a hop, grouped at the view's grain (walk them in the Lens; in the Studio, include them), and the status chip: count, stitching, may be incomplete, try again |
+| `useSubsetCanvas`, `SubsetMarks` | `features/view-subset/canvas/` | While the Studio is open, a card click toggles a pick instead of selecting; covered rows stay lit through the canvas highlight channel, and the preview hops settle 600 ms after the last pick. The Studio never writes the canvas store |
+| `studioStore`, `grow`, `coverage`, `placement`, `connectivity`, `subsetRequest` | `features/view-subset/model/` | Picks keyed by URN with their layer, group, origin and whether they come with their contents (kept in `sessionStorage` per source view); grow along lineage at the view's grain; placement of entities reached beyond the view by the source's layer rules; the direct / virtual / isolated summary; the create payload |
+| `SubsetStudioPanel` | `features/view-subset/components/` | The right rail: Pick · Connect · Shape tabs, grow review above 50 additions, cancel confirm |
+| `SubsetCreateWizard` | `features/view-subset/components/` | Details & audience, then Review, on `WizardShell`; calls `viewApiService.createSubsetView` and opens the new view |
+| `SubsetEntryButton`, `SubsetProvenance`, `SubsetFamily`, `useSubsetDeepLink` | `features/view-subset/` | Entry points (header, selection bar, card menu, Explorer `?subset=1`), the "Subset of ‹source›" line, and the subsets of a view in Details › About |
+
 ---
 
 ## 11. Additional Custom Hooks

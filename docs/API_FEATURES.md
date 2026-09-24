@@ -244,6 +244,7 @@ the steady state), `deprecated` (on its way out; gates being removed). All flags
 | `traceEnabled` | boolean | capability | — | `POST /graph/trace` — upstream/downstream lineage traversal |
 | `editModeEnabled` | boolean | capability | — | Graph mutation routes — node/edge create, update, delete |
 | `allowedViewModes` | string[] | capability | — | `POST/PUT /views` — refuses a view whose type is not in the list |
+| `viewSubsetsEnabled` | boolean | capability | — | `POST /graph/lineage/bridges` and `/bridges/path` (virtual hops), `POST /views/{id}/subsets` (carving a subset). Existing subsets keep opening, with direct lines only |
 | `signupEnabled` | boolean | **security** (default OFF) | — | `POST /auth/register` — refuses strangers without an invite |
 | `inviteLinksEnabled` | boolean | capability (default ON) | — | `POST /admin/users/invite` refuses to mint; `GET /auth/verify-invite` and `POST /auth/signup` refuse links already in circulation |
 | `announcementsEnabled` | boolean | capability | — | `GET /announcements` — serves an empty list when off |
