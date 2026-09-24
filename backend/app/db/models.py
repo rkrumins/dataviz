@@ -888,6 +888,14 @@ class ViewORM(Base):
     # attribution. Stamped by the versioning endpoints' view fan-out.
     data_updated_at = Column(Text, nullable=True)
     data_updated_by = Column(Text, nullable=True)
+    # The view this one was carved out of as a SUBSET (POST /views/{id}/subsets).
+    # SET NULL: a subset outlives its source, and a hard delete of the source
+    # only forgets where it came from. NULL on every view made any other way.
+    derived_from_view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
@@ -906,6 +914,7 @@ class ViewORM(Base):
         Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        Index("idx_view_derived_from", "derived_from_view_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",

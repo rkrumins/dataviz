@@ -3,7 +3,7 @@ Pydantic models for the management database layer.
 Covers: graph connections, ontology configs, assignment rule sets, saved views.
 """
 import json
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
@@ -1141,6 +1141,65 @@ class ViewLayoutUpdateRequest(BaseModel):
         return self
 
 
+#: Entities one subset may keep. A subset is meant to be the SMALLER view; a
+#: pick larger than this is a copy, and its virtual hops a walk over most of
+#: the source.
+VIEW_SUBSET_MAX_MEMBERS = 1000
+
+
+class ViewSubsetMember(BaseModel):
+    """One entity a subset keeps, and where it sits: the layer (and group) it
+    occupies in the source view — or, for an entity from outside the source,
+    the layer the builder chose — and whether its contents come with it."""
+    urn: str = Field(min_length=1)
+    layer_id: str = Field(alias="layerId", min_length=1)
+    logical_node_id: Optional[str] = Field(None, alias="logicalNodeId")
+    inherits_children: bool = Field(True, alias="inheritsChildren")
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewConnectivity(BaseModel):
+    """How a curated view joins two of its entities whose lineage runs through
+    entities it does not hold. ``bridged`` draws a virtual hop over the hidden
+    steps, computed live from the graph (``POST /graph/lineage/bridges``);
+    ``direct`` draws only lines between entities the view holds. Stored as
+    ``config.content.connectivity``."""
+    mode: Literal["bridged", "direct"] = "bridged"
+    max_hops: int = Field(10, alias="maxHops", ge=1, le=20)
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewSubsetCreateRequest(BaseModel):
+    """Body for ``POST /views/{id}/subsets`` — a smaller view carved out of a
+    Context View. Everything else (layers, groups, display rules, filters,
+    the data source) comes from the source view, server-side, in one write."""
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    tags: Optional[List[str]] = Field(None, max_length=50)
+    visibility: Literal["private", "workspace", "enterprise"] = "private"
+    members: List[ViewSubsetMember] = Field(min_length=1, max_length=VIEW_SUBSET_MAX_MEMBERS)
+    connectivity: ViewConnectivity = Field(default_factory=ViewConnectivity)
+
+    class Config:
+        populate_by_name = True
+
+
+class ViewDerivedFrom(BaseModel):
+    """Where a subset came from — as far as the caller may know. ``name`` is
+    set only when they can open the source: a private view's name is not
+    something a subset of it may disclose."""
+    id: str
+    name: Optional[str] = None
+    accessible: bool = False
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewAudience(BaseModel):
     """How far this view currently reaches, in people.
 
@@ -1222,6 +1281,9 @@ class ViewAccessInfo(BaseModel):
     # the option rather than disabling it: a choice nobody here can ever
     # make is noise, not information.
     enterprise_available: bool = Field(True, alias="enterpriseAvailable")
+    # May carve a subset view out of this one: it is a Context View and the
+    # caller may create views in its workspace.
+    can_create_subset: bool = Field(False, alias="canCreateSubset")
     # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     access_via: str = Field(alias="accessVia")
     # 'full' | 'readonly'
@@ -1282,6 +1344,12 @@ class ViewResponse(BaseModel):
     # knows some entity classifications may have changed since creation.
     # NULL on legacy rows → wizard treats as "drift check unavailable".
     ontology_digest: Optional[str] = Field(None, alias="ontologyDigest")
+    # The view this one was carved out of as a subset — every payload, so a
+    # card can say "Subset" without a second read. ``derived_from`` resolves
+    # it for the single-view read only, and names the source only when the
+    # caller may open it.
+    derived_from_view_id: Optional[str] = Field(None, alias="derivedFromViewId")
+    derived_from: Optional[ViewDerivedFrom] = Field(None, alias="derivedFrom")
     # Provider backing the view's (resolved) data source. Populated by
     # the single-view read so the canvas can boot without the
     # membership-gated workspace list; None in list payloads.

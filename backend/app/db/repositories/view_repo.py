@@ -306,6 +306,7 @@ def _to_response(
         updatedAt=row.updated_at,
         deletedAt=getattr(row, 'deleted_at', None),
         ontologyDigest=getattr(row, 'ontology_digest', None),
+        derivedFromViewId=getattr(row, 'derived_from_view_id', None),
     )
 
 
@@ -516,6 +517,7 @@ async def create_view(
     *,
     ontology_digest: Optional[str] = None,
     user_id: Optional[str] = None,
+    derived_from_view_id: Optional[str] = None,
 ) -> ViewResponse:
     """Persist a new view.
 
@@ -528,6 +530,9 @@ async def create_view(
     ``user_id`` is stored in ``created_by`` so the Explorer can filter
     views by creator ("My Views"). Legacy rows created before this
     parameter existed have NULL ``created_by``.
+
+    ``derived_from_view_id`` names the view this one was carved out of as
+    a subset (``POST /views/{id}/subsets``); None for every other creation.
     """
     logger.info(
         "create_view: name=%s workspace_id=%s data_source_id=%s digest=%s",
@@ -568,6 +573,7 @@ async def create_view(
         tags=json.dumps(req.tags) if req.tags else None,
         is_pinned=req.is_pinned,
         ontology_digest=ontology_digest,
+        derived_from_view_id=derived_from_view_id,
     )
     session.add(row)
     await session.flush()
@@ -1096,6 +1102,7 @@ def _apply_view_filters(
     deleted_only: bool = False,
     attention_only: bool = False,
     readable=None,
+    derived_from: Optional[str] = None,
 ):
     """Apply all filter predicates to a query on ``ViewORM``.
 
@@ -1145,6 +1152,10 @@ def _apply_view_filters(
         query = query.where(ViewORM.context_model_id == context_model_id)
     if data_source_id:
         query = query.where(ViewORM.data_source_id == data_source_id)
+    if derived_from:
+        # The subsets of one view. Scoped by ``readable`` like every other
+        # predicate, so a private subset never shows on its source's list.
+        query = query.where(ViewORM.derived_from_view_id == derived_from)
 
     # View type: multi wins over single.
     if view_types:
@@ -1404,6 +1415,7 @@ async def list_views_filtered(
     deleted_only: bool = False,
     attention_only: bool = False,
     readable=None,
+    derived_from: Optional[str] = None,
 ) -> ViewListResponse:
     """Return a paginated envelope of views matching the given filters.
 
@@ -1435,6 +1447,7 @@ async def list_views_filtered(
         deleted_only=deleted_only,
         attention_only=attention_only,
         readable=readable,
+        derived_from=derived_from,
     )
 
     select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)

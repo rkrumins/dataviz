@@ -519,6 +519,14 @@ async def compute_access_envelope(
         "publishBlockedBy": gate.blocked_by,
         "enterpriseAvailable": gate.enterprise_available or already_published,
         "canAnswerPublishRequest": can_answer_publish_request(ctx, view),
+        # A subset is a new view in the SOURCE's workspace, made from what the
+        # caller can already read: the create permission there is the whole
+        # rule. Only a Context View has the curated membership a subset is.
+        "canCreateSubset": (
+            not ctx.is_anonymous
+            and (view.view_type or "graph") == "reference"
+            and has_permission(claims, "workspace:view:create", workspace_id=view.workspace_id)
+        ),
         "accessVia": via,
         "dataAccess": (
             "full"

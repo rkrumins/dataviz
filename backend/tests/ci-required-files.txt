@@ -90,3 +90,5 @@ tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_top_level_provider_kwargs.py
 tests/test_versioning_read_only_queries.py
+tests/test_view_subset_config.py
+tests/test_view_subsets_api.py

@@ -13,6 +13,7 @@ post-filtering); transitions to/from ``enterprise`` require
 ``workspace:view:publish``. The kill-switch ``RBAC_ENFORCE_VIEWS=false``
 reverts scoping to legacy behaviour (auth requirements stay).
 """
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.feature_gate import (
     ensure_view_mode_allowed,
     feature_disabled,
+    require_feature,
     resolve_enterprise_view_policy,
 )
 from backend.app.auth.dependencies import (
@@ -43,6 +45,7 @@ from backend.app.providers.manager import provider_manager as provider_registry 
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services import view_access
+from backend.app.services.view_subset import SubsetConfigError, SubsetMember, build_subset_config
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
@@ -57,10 +60,16 @@ from backend.common.models.management import (
     ViewListResponse,
     ViewFacetsResponse,
     ViewCatalogStats,
+    ViewDerivedFrom,
+    ViewSubsetCreateRequest,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Subset views are a preview behind their own flag; the server refuses the
+# create while it is off, not just the button.
+require_view_subsets = require_feature("viewSubsetsEnabled")
 
 
 async def _viewer_context(
@@ -323,6 +332,68 @@ async def _source_is_restricted(
 
 
 
+async def _enforce_create_gates(
+    session: AsyncSession,
+    claims: PermissionClaims,
+    *,
+    workspace_id: str,
+    data_source_id: Optional[str],
+    visibility: Optional[str],
+) -> None:
+    """The gates on MAKING a view, shared by the plain create and the subset
+    create — a subset is a view like any other: ``workspace:view:create`` in
+    the target workspace, and creating straight to ``enterprise``
+    additionally passes the publish gate (a birth certificate is not a
+    bypass)."""
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return
+    from backend.app.services.permission_service import has_permission
+    if not has_permission(
+        claims, "workspace:view:create", workspace_id=workspace_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing permission: workspace:view:create",
+        )
+    if visibility == "enterprise":
+        # The platform ceiling binds everyone, including the people who
+        # hold the publish permission — a limit only non-admins obey is
+        # not a limit. Below it, an 'open' workspace lets any creator
+        # publish, unless the source itself is restricted.
+        platform = await resolve_enterprise_view_policy(session)
+        if platform == "off":
+            raise feature_disabled("enterpriseViewPolicy")
+        has_perm = view_access.can_publish_in_workspace(claims, workspace_id)
+        if not has_perm:
+            open_ws = await _publish_policy(session, workspace_id) == "open"
+            restricted = await _source_is_restricted(
+                session, workspace_id, data_source_id,
+            )
+            if platform == "request" or not open_ws or restricted:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Missing permission: workspace:view:publish",
+                )
+
+
+async def _derived_from(
+    session: AsyncSession, ctx: view_access.ViewerContext, source_id: str,
+) -> ViewDerivedFrom:
+    """Where a subset came from, as far as this caller may know: the source's
+    name only when they can open it. A private view's name is not something a
+    subset of it — shared further than its source — may disclose."""
+    source = (await session.execute(
+        select(ViewORM).where(ViewORM.id == source_id)
+    )).scalar_one_or_none()
+    if source is None or source.deleted_at is not None:
+        return ViewDerivedFrom(id=source_id, accessible=False)
+    readable = (
+        await view_access.can_read_view(session, ctx, source)
+        if rbac_flag("RBAC_ENFORCE_VIEWS") else True
+    )
+    return ViewDerivedFrom(id=source_id, name=source.name if readable else None, accessible=readable)
+
+
 @router.get("/popular", response_model=List[ViewResponse])
 async def list_popular_views(
     limit: int = Query(20, le=100),
@@ -494,6 +565,7 @@ async def list_views(
     include_deleted: bool = Query(False, alias="includeDeleted"),
     deleted_only: bool = Query(False, alias="deletedOnly"),
     attention_only: bool = Query(False, alias="attentionOnly"),
+    derived_from: Optional[str] = Query(None, alias="derivedFrom"),
     include: List[str] = Query(
         default_factory=list,
         description=(
@@ -543,6 +615,8 @@ async def list_views(
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
     - ``category=shared-with-me`` — explicit-grant shares only.
+    - ``derivedFrom`` — the subsets made from one view (only those the
+      caller can read, like everything else here).
     """
     clause, scope = await _readable_clause(session, user, claims)
     ids_in, created_by_not = _category_filters(category, scope, user)
@@ -572,6 +646,7 @@ async def list_views(
         deleted_only=deleted_only,
         attention_only=attention_only,
         readable=clause,
+        derived_from=derived_from,
     )
 
     # Optional ?include=popular: fold the trending strip into the same
@@ -613,34 +688,10 @@ async def create_view(
             detail="visibility must be one of: private, workspace, enterprise",
         )
 
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        from backend.app.services.permission_service import has_permission
-        if not has_permission(
-            claims, "workspace:view:create", workspace_id=req.workspace_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="Missing permission: workspace:view:create",
-            )
-        if req.visibility == "enterprise":
-            # The platform ceiling binds everyone, including the people who
-            # hold the publish permission — a limit only non-admins obey is
-            # not a limit. Below it, an 'open' workspace lets any creator
-            # publish, unless the source itself is restricted.
-            platform = await resolve_enterprise_view_policy(session)
-            if platform == "off":
-                raise feature_disabled("enterpriseViewPolicy")
-            has_perm = view_access.can_publish_in_workspace(claims, req.workspace_id)
-            if not has_perm:
-                open_ws = await _publish_policy(session, req.workspace_id) == "open"
-                restricted = await _source_is_restricted(
-                    session, req.workspace_id, req.data_source_id,
-                )
-                if platform == "request" or not open_ws or restricted:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Missing permission: workspace:view:publish",
-                    )
+    await _enforce_create_gates(
+        session, claims, workspace_id=req.workspace_id,
+        data_source_id=req.data_source_id, visibility=req.visibility,
+    )
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
@@ -655,6 +706,108 @@ async def create_view(
     await view_activity_repo.record_view_activity(
         session, view_id=view.id, workspace_id=view.workspace_id,
         action="created", actor=_user_id(user), summary=f'Created "{view.name}"',
+    )
+    return view
+
+
+@router.post(
+    "/{view_id}/subsets", response_model=ViewResponse, status_code=201,
+    dependencies=[Depends(require_view_subsets)],
+)
+async def create_subset_view(
+    view_id: str = Path(...),
+    req: ViewSubsetCreateRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Carve a SUBSET out of a Context View: a new, smaller, curated view that
+    holds only the picked entities — in the source's own layers and groups,
+    with its display settings — for a narrower audience.
+
+    Built server-side in ONE write (``services/view_subset.py``): the source's
+    layers pruned to those the picks sit in, exact-urn layer rules stripped so
+    nothing un-picked comes back, the scope stamped ``curated``, and
+    ``content.connectivity`` set so the canvas draws VIRTUAL HOPS where the
+    subset leaves the steps between two of its entities out. The data source
+    is the source's, stored resolved; ``derivedFromViewId`` records where it
+    came from.
+
+    Authorization: the caller must be able to READ the source (404 otherwise,
+    so a private view's existence stays private) and hold
+    ``workspace:view:create`` in its workspace; creating straight to
+    ``enterprise`` passes the publish gate like any create. A subset narrows
+    what people see, not what they can open — a view is not a data boundary.
+    """
+    source = await _load_view_orm(session, view_id)
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_read_view(session, ctx, source):
+            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    if (source.view_type or "graph") != "reference":
+        raise HTTPException(
+            status_code=422,
+            detail="Only a Context View can be subset — its entities are what a subset picks from.",
+        )
+
+    # The subset reads what its source reads. Stored RESOLVED (never NULL), so
+    # the data-freshness stamp — which matches on data_source_id — reaches it.
+    data_source_id = source.data_source_id
+    if not data_source_id:
+        primary = await data_source_repo.get_primary_data_source(session, source.workspace_id)
+        data_source_id = primary.id if primary is not None else None
+
+    await _enforce_create_gates(
+        session, claims, workspace_id=source.workspace_id,
+        data_source_id=data_source_id, visibility=req.visibility,
+    )
+    await ensure_view_mode_allowed("reference", session)
+
+    try:
+        config = build_subset_config(
+            json.loads(source.config or "{}"),
+            [
+                SubsetMember(
+                    urn=m.urn, layer_id=m.layer_id,
+                    logical_node_id=m.logical_node_id, inherits_children=m.inherits_children,
+                )
+                for m in req.members
+            ],
+            connectivity=req.connectivity.model_dump(by_alias=True),
+            now=datetime.now(timezone.utc).isoformat(),
+        )
+    except SubsetConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    config["layout"]["referenceLayout"] = await view_repo._gate_node_ordering(
+        session, config["layout"]["referenceLayout"],
+    )
+
+    digest = await _compute_ontology_digest(session, source.workspace_id, data_source_id)
+    view = await view_repo.create_view(
+        session,
+        ViewCreateRequest(
+            name=req.name,
+            description=req.description,
+            contextModelId=source.context_model_id,
+            workspaceId=source.workspace_id,
+            dataSourceId=data_source_id,
+            viewType="reference",
+            config=config,
+            visibility=req.visibility,
+            tags=req.tags,
+        ),
+        ontology_digest=digest, user_id=_user_id(user), derived_from_view_id=source.id,
+    )
+    # On the NEW view's timeline only: a line on the source's would tell its
+    # audience that a (possibly private) subset of it exists.
+    await view_activity_repo.record_view_activity(
+        session, view_id=view.id, workspace_id=view.workspace_id,
+        action="created", actor=_user_id(user),
+        summary=f'Created "{view.name}" as a subset of another view',
+        changes={
+            "derivedFrom": source.id,
+            "members": len(config["layout"]["referenceLayout"]["assignments"]),
+        },
     )
     return view
 
@@ -718,6 +871,8 @@ async def get_view(
         )),
         platformUserCount=await notification_repo.platform_user_count(session),
     )
+    if view_orm.derived_from_view_id:
+        view.derived_from = await _derived_from(session, ctx, view_orm.derived_from_view_id)
     view.access = ViewAccessInfo(**await view_access.compute_access_envelope(
         session, ctx, view_orm,
         workspace_policy=await _publish_policy(session, view_orm.workspace_id),

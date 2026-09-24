@@ -533,6 +533,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "POST /graph/lineage/bridges — virtual hops between the entities of a curated view",
             "POST /graph/lineage/bridges/path — the hidden steps behind one virtual hop",
+            "POST /views/{id}/subsets — carving a subset view out of a Context View",
         ),
         still_allowed=(
             "Every view opens and draws its direct lines exactly as before",
