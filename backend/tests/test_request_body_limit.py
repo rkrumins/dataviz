@@ -78,11 +78,15 @@ def test_import_routes_get_the_larger_cap():
     # import path carries a workspace segment the prefix has to see past.
     assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports") == 100_000
     assert mw._cap_for("/api/v1/views/transfer/packages/inspect") == 100_000
-    assert mw._cap_for("/api/v1/views/transfer/inspect") == 1_000
+    # A view file is up to 64 MB, and its designs travel on to reconcile and import.
+    for route in ("inspect", "reconcile", "import"):
+        assert mw._cap_for(f"/api/v1/views/transfer/{route}") == 100_000
+    assert mw._cap_for("/api/v1/views/transfer/export") == 1_000, "a list of view ids is small"
 
 
 @pytest.mark.parametrize("path", [
     "/api/v1/ws_1/versioning/graphs/g1/imports",
+    "/api/v1/views/transfer/inspect",
     "/api/v1/views/transfer/packages/inspect",
 ])
 async def test_upload_routes_take_up_to_100_mib(csrf_client: AsyncClient, path):

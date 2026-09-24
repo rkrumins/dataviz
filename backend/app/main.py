@@ -2407,12 +2407,17 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """
 
     #: Routes that legitimately take large payloads (bulk import, graph
-    #: save, a view package). Everything else gets the ordinary cap.
+    #: save, a view file or package and the designs checked and imported
+    #: from it). Everything else gets the ordinary cap; these routes still
+    #: hold a body to their own, smaller limits (a view file is 64 MB).
     #: Matched with the workspace segment collapsed too, so the bulk
     #: import at /api/v1/{ws_id}/versioning/graphs/{gid}/imports counts.
     _LARGE_BODY_PREFIXES = (
         "/api/v1/import",
         "/api/v1/versioning",
+        "/api/v1/views/transfer/inspect",
+        "/api/v1/views/transfer/reconcile",
+        "/api/v1/views/transfer/import",
         "/api/v1/views/transfer/packages/inspect",
     )
 
