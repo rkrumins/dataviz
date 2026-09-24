@@ -31,6 +31,7 @@ from .rowmodel import normalize
 logger = logging.getLogger(__name__)
 
 _PARSE_BATCH = 2000
+_PERSIST_BATCH = 5000
 # How often a running import or export touches its job's ``updated_at``. ``get_job`` reports a job
 # silent for JOB_STALE_AFTER_SECS as failed, and a long parse or apply window says nothing on its own.
 _HEARTBEAT_SECS = 15
@@ -341,12 +342,12 @@ class ImportWorker:
         return summary
 
     async def _persist_resolutions(self, job_id: str, resolutions) -> None:
+        """Record each row's resolution: a bulk UPDATE by primary key, a few thousand rows a
+        statement, rather than a round trip per row (which took over a third of an import)."""
+        values = [{"job_id": job_id, "row_index": res["_row_index"],
+                   "matched_entity_id": res["matched_entity_id"], "resolved_op": res["resolved_op"],
+                   "status": res["status"], "reasons": res["reasons"] or None}
+                  for res in resolutions]
         async with db.graphver_session() as s:
-            for res in resolutions:
-                await s.execute(
-                    update(ImportRowORM)
-                    .where(ImportRowORM.job_id == job_id,
-                           ImportRowORM.row_index == res["_row_index"])
-                    .values(matched_entity_id=res["matched_entity_id"],
-                            resolved_op=res["resolved_op"], status=res["status"],
-                            reasons=res["reasons"] or None))
+            for chunk in _chunks(values, _PERSIST_BATCH):
+                await s.execute(update(ImportRowORM), chunk)

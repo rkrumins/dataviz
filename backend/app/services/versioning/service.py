@@ -29,7 +29,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func, delete, update, or_, tuple_
+from sqlalchemy import Boolean, Text, bindparam, insert, select, func, delete, text, update, or_, tuple_
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -76,6 +77,37 @@ _NODE_DENORM = {
 # content_hash of the empty/absent state — exactly what a tombstone (deleted) head row stores, and
 # the pre-image a "create" logically reads (the entity was absent). Used by the head CAS below.
 _HASH_NONE = content_hash(None)
+# Entity heads written per statement. Each column goes as one array parameter (unnest), so the
+# statements' text never changes: compiled and prepared once, whatever the batch.
+_HEAD_BATCH = 5000
+
+
+def _head_arrays():
+    return [bindparam(name, type_=ARRAY(Boolean if name == "tombs" else Text))
+            for name in ("eids", "vids", "hashes", "tombs", "kinds")]
+
+
+_INSERT_HEADS = (
+    f"INSERT INTO {EntityHeadORM.__table__.fullname} (graph_id, branch_id, entity_id, entity_kind, "
+    "head_version_id, content_hash, is_tombstone, updated_at) "
+    "SELECT :graph_id, :branch_id, v.entity_id, v.kind, v.vid, v.hash, v.tomb, :now "
+    "FROM unnest(:eids, :vids, :hashes, :tombs, :kinds) AS v(entity_id, vid, hash, tomb, kind) "
+    "ON CONFLICT (graph_id, branch_id, entity_id) ")
+# Point every head at its new version, whatever it was.
+_UPSERT_HEADS = text(
+    _INSERT_HEADS + "DO UPDATE SET head_version_id = EXCLUDED.head_version_id, "
+    "content_hash = EXCLUDED.content_hash, is_tombstone = EXCLUDED.is_tombstone, "
+    "entity_kind = EXCLUDED.entity_kind, updated_at = EXCLUDED.updated_at").bindparams(*_head_arrays())
+# Add the heads of entities that have none on the branch yet; returns the ones added.
+_ADD_HEADS = text(_INSERT_HEADS + "DO NOTHING RETURNING entity_id").bindparams(*_head_arrays())
+# Advance the heads still at their pre-image (the CAS); returns the ones advanced.
+_ADVANCE_HEADS = text(
+    f"UPDATE {EntityHeadORM.__table__.fullname} AS h SET head_version_id = v.vid, "
+    "content_hash = v.hash, is_tombstone = v.tomb, entity_kind = v.kind, updated_at = :now "
+    "FROM unnest(:eids, :vids, :hashes, :tombs, :kinds, :pres) AS v(entity_id, vid, hash, tomb, kind, pre) "
+    "WHERE h.graph_id = :graph_id AND h.branch_id = :branch_id AND h.entity_id = v.entity_id "
+    "AND h.content_hash = v.pre RETURNING h.entity_id",
+).bindparams(*_head_arrays(), bindparam("pres", type_=ARRAY(Text)))
 
 
 class _StaleHead(Exception):
@@ -5489,56 +5521,78 @@ class GraphVersioningService:
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor,
         *, occ_guard: bool = False,
     ) -> None:
+        now = _now()
+        node_rows: List[dict] = []
+        edge_rows: List[dict] = []
+        heads: List[dict] = []
         for d in deltas:
             kind = kind_by_entity.get(d.entity_id, "node")
+            p = d.payload or {}
             if kind == "node":
                 vid = prefixed_id("nv")
-                p = d.payload or {}
-                s.add(NodeVersionORM(
+                node_rows.append(dict(
                     graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
                     commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
                     content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor,
+                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
                     urn=p.get("urn"), entity_type=p.get("entityType"),
                     display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"),
                 ))
             else:
                 vid = prefixed_id("ev")
-                p = d.payload or {}
-                s.add(EdgeVersionORM(
+                edge_rows.append(dict(
                     graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
                     commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
                     content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor,
+                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
                     source_entity_id=p.get("sourceEntityId") or p.get("source_entity_id") or "",
                     target_entity_id=p.get("targetEntityId") or p.get("target_entity_id") or "",
                     edge_type=p.get("edgeType"), confidence=p.get("confidence"),
                     discriminator=p.get("discriminator"),
                 ))
-            # Upsert the head pointer (keeps version tables append-only).
-            stmt = pg_insert(EntityHeadORM).values(
-                graph_id=graph_id, branch_id=branch_id, entity_id=d.entity_id,
-                entity_kind=kind, head_version_id=vid, content_hash=d.content_hash,
-                is_tombstone=(d.op == "delete"), updated_at=_now(),
-            ).on_conflict_do_update(
-                index_elements=["graph_id", "branch_id", "entity_id"],
-                set_={"head_version_id": vid, "content_hash": d.content_hash,
-                      "is_tombstone": (d.op == "delete"), "entity_kind": kind,
-                      "updated_at": _now()},
-                # Per-entity compare-and-swap (when occ_guard): advance the head ONLY if it is still
-                # the pre-image this commit read. Under concurrent same-branch writes a
-                # stale-read-then-write becomes a no-op we detect below and retry — closing the
-                # lost-update window without a coarse lock. Versions are append-only; the mutable
-                # head pointer is the only contended resource, and this is its CAS. A create reads the
-                # entity as absent, so its pre-image is the empty-state hash (content_hash(None)) —
-                # which is exactly what a tombstone head stores, so a legit delete→re-create
-                # (resurrect) MATCHES, while a concurrent LIVE create (different hash) correctly misses.
-                where=(EntityHeadORM.content_hash == (d.prev_content_hash or _HASH_NONE)
-                       if occ_guard else None),
-            )
-            res = await s.execute(stmt)
-            if occ_guard and res.rowcount == 0:
-                raise _StaleHead(d.entity_id)
+            heads.append({"entity_id": d.entity_id, "entity_kind": kind, "head_version_id": vid,
+                          "content_hash": d.content_hash, "is_tombstone": d.op == "delete",
+                          "pre_image": d.prev_content_hash or _HASH_NONE})
+        # The version rows, as batched multi-row INSERTs (executemany) rather than an ORM object
+        # each: a large commit (an import window) spent most of its time building them.
+        if node_rows:
+            await s.execute(insert(NodeVersionORM.__table__), node_rows)
+        if edge_rows:
+            await s.execute(insert(EdgeVersionORM.__table__), edge_rows)
+        # Upsert the head pointers (keeps version tables append-only), a batch per statement.
+        for i in range(0, len(heads), _HEAD_BATCH):
+            await self._upsert_heads(s, graph_id, branch_id, heads[i:i + _HEAD_BATCH], occ_guard)
+
+    async def _upsert_heads(self, s, graph_id, branch_id, heads: List[dict], occ_guard: bool) -> None:
+        """Point each entity's head at its new version. ``deltas`` hold one change per entity
+        (``net_delta``), so no statement names an entity twice.
+
+        With ``occ_guard`` it is a per-entity compare-and-swap: a head advances ONLY if it is still
+        the pre-image this commit read. Under concurrent same-branch writes a stale-read-then-write
+        becomes a no-op we detect and retry (``_StaleHead``) — closing the lost-update window
+        without a coarse lock. Versions are append-only; the mutable head pointer is the only
+        contended resource, and this is its CAS. A create reads the entity as absent, so its
+        pre-image is the empty-state hash (content_hash(None)) — which is exactly what a tombstone
+        head stores, so a legit delete→re-create (resurrect) MATCHES, while a concurrent LIVE
+        create (different hash) correctly misses. Two statements a batch, not one per entity: an
+        UPDATE advances the heads still at their pre-image, then an INSERT adds the entities with
+        no head yet. An entity advanced by neither lost the race."""
+        arrays = {"eids": [h["entity_id"] for h in heads], "vids": [h["head_version_id"] for h in heads],
+                  "hashes": [h["content_hash"] for h in heads], "tombs": [h["is_tombstone"] for h in heads],
+                  "kinds": [h["entity_kind"] for h in heads]}
+        scalars = {"graph_id": graph_id, "branch_id": branch_id, "now": _now()}
+        if not occ_guard:
+            await s.execute(_UPSERT_HEADS, {**arrays, **scalars})
+            return
+        advanced = set((await s.execute(
+            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads]})).scalars())
+        fresh = [i for i, h in enumerate(heads) if h["entity_id"] not in advanced]
+        if fresh:
+            rest = {k: [v[i] for i in fresh] for k, v in arrays.items()}
+            advanced.update((await s.execute(_ADD_HEADS, {**rest, **scalars})).scalars())
+        for h in heads:
+            if h["entity_id"] not in advanced:
+                raise _StaleHead(h["entity_id"])
 
     async def _branch_contributors(self, s, graph_id, branch_id) -> List[str]:
         rows = (await s.execute(
