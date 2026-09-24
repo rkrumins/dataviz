@@ -559,6 +559,12 @@ class DraftOverlayProvider:
         """Rule membership — the base's, like :meth:`deep_search`."""
         return await self._base.deep_search_membership(scope, items, urns, context=context)
 
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """The property catalog — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
+                                                    session_id=session_id, refresh=refresh)
+
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """Container counts from a search session — the base's, like
         :meth:`deep_search_session`."""

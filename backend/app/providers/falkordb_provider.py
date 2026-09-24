@@ -6383,6 +6383,15 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0)
 
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """Every property in ``scope``, exactly, in as many requests as the
+        scan takes. See ``falkordb_search/catalog.py``."""
+        from .falkordb_search.catalog import execute_catalog_session
+        await self._ensure_connected()
+        return await execute_catalog_session(self, scope, context=context, wait_ms=wait_ms,
+                                             session_id=session_id, refresh=refresh)
+
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """How many of a search's matches each container holds, from the
         session's tally. See ``falkordb_search/engine.py``."""

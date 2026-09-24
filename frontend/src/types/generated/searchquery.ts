@@ -74,6 +74,91 @@ export type Entitytype = string
  * ``complete``: exact. ``running``: the search is still scanning; counts so far. ``expired``: the session is gone — run the search again.
  */
 export type Status = 'complete' | 'running' | 'expired'
+/**
+ * Read the view again, even when a recent catalog of it is at hand.
+ */
+export type Refresh = boolean
+export type Sessionid1 = string | null
+export type Waitms = number
+/**
+ * When the read began (UTC).
+ */
+export type Asof = string | null
+export type Dataversion = string | null
+/**
+ * Entities in the view's scope read so far.
+ */
+export type Entities = number
+export type Count1 = number
+export type Type = string
+export type Entitytypes1 = SearchCatalogEntityType[]
+export type Notes1 = string[]
+/**
+ * Matches found so far — exact for the parts scanned.
+ */
+export type Matched = number
+/**
+ * Nodes in the parts already scanned.
+ */
+export type Scanned = number
+/**
+ * Nodes in every part the search scans.
+ */
+export type Total = number
+/**
+ * Entities carrying the key.
+ */
+export type Count2 = number
+/**
+ * Distinct values — a floor unless ``distinctExact``.
+ */
+export type Distinct = number
+export type Distinctexact = boolean
+export type Key = string
+/**
+ * Greatest numeric value, exact.
+ */
+export type Max = number | null
+/**
+ * Least numeric value, exact.
+ */
+export type Min = number | null
+/**
+ * Entities holding it in propertiesRaw, past the native-key budget.
+ */
+export type Residual = number
+/**
+ * Entities holding it.
+ */
+export type Count3 = number
+/**
+ * Integer, Float, String, Boolean or List.
+ */
+export type Kind = string
+/**
+ * The values most held, with their exact counts — while the key has at most 1,000 distinct values; past that it is high-cardinality and none are listed.
+ */
+export type Values = SearchCatalogValue[]
+export type Properties = SearchCatalogProperty[]
+export type Sessionid2 = string
+/**
+ * Read before the data last changed — see ``asOf``.
+ */
+export type Stale = boolean
+export type Status1 = 'running' | 'complete'
+/**
+ * Entities carrying any tag — null when a unit held too many distinct tag sets to count them.
+ */
+export type Tagged = number | null
+/**
+ * Entities carrying the tag.
+ */
+export type Count4 = number
+export type Tag = string
+/**
+ * Every tag, with the entities carrying it.
+ */
+export type Tags = SearchCatalogTag[]
 export type Id = string
 export type Predicate =
     | TextPredicate
@@ -98,7 +183,7 @@ export type Predicate =
  */
 export type Boost = number
 export type Casesensitive = boolean
-export type Kind = 'text'
+export type Kind1 = 'text'
 export type Match = 'exact' | 'prefix' | 'suffix' | 'substring' | 'fulltext' | 'regex'
 /**
  * Required when ``target='property'``; ignored otherwise.
@@ -108,8 +193,8 @@ export type Target = 'name' | 'qualifiedName' | 'description' | 'tags' | 'proper
 export type Value = string
 export type Casesensitive1 = boolean
 export type Includemissing = boolean
-export type Key = string
-export type Kind1 = 'property'
+export type Key1 = string
+export type Kind2 = 'property'
 export type Op =
     | 'eq'
     | 'neq'
@@ -131,14 +216,14 @@ export type Op =
     | 'isEmpty'
     | 'isNotEmpty'
 export type Valuetype = 'auto' | 'string' | 'number' | 'boolean' | 'date'
-export type Kind2 = 'tag'
+export type Kind3 = 'tag'
 export type Op1 = 'has' | 'hasAll' | 'hasAny' | 'notHas'
-export type Values = string[]
-export type Key1 = string
+export type Values1 = string[]
+export type Key2 = string
 export type Keymatch = 'exact' | 'prefix' | 'contains'
-export type Kind3 = 'hasProperty'
+export type Kind4 = 'hasProperty'
 export type Negate = boolean
-export type Kind4 = 'descendantOf'
+export type Kind5 = 'descendantOf'
 export type Maxdepth1 = number | null
 export type Urns1 = string[]
 export type Direction = 'out' | 'in' | 'both'
@@ -153,8 +238,8 @@ export type Edgepredicate =
     (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
 export type Casesensitive2 = boolean
 export type Includemissing1 = boolean
-export type Key2 = string
-export type Kind5 = 'edgeProperty'
+export type Key3 = string
+export type Kind6 = 'edgeProperty'
 export type Op2 =
     | 'eq'
     | 'neq'
@@ -176,20 +261,20 @@ export type Op2 =
     | 'isEmpty'
     | 'isNotEmpty'
 export type Valuetype1 = 'auto' | 'string' | 'number' | 'boolean' | 'date'
-export type Key3 = string
-export type Kind6 = 'edgeHasProperty'
+export type Key4 = string
+export type Kind7 = 'edgeHasProperty'
 export type Negate1 = boolean
 export type Children = (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate)[]
-export type Kind7 = 'edgeGroup'
+export type Kind8 = 'edgeGroup'
 export type Op3 = 'and' | 'or' | 'not'
 export type Edgetypes = string[] | null
 export type Hops = number
-export type Kind8 = 'withinHops'
+export type Kind9 = 'withinHops'
 export type Urns2 = string[]
-export type Kind9 = 'entityType'
+export type Kind10 = 'entityType'
 export type Op4 = 'in' | 'notIn'
-export type Values1 = string[]
-export type Kind10 = 'layer'
+export type Values2 = string[]
+export type Kind11 = 'layer'
 export type Layerassignment1 = string
 export type Direction1 = 'in' | 'out' | 'both'
 export type Edgeclass1 = 'lineage' | 'containment' | 'any'
@@ -197,24 +282,24 @@ export type Edgeclass1 = 'lineage' | 'containment' | 'any'
  * Optional explicit edge-type list. When provided, overrides the default set resolved from ``edge_class``.
  */
 export type Edgetypes1 = string[] | null
-export type Kind11 = 'degree'
+export type Kind12 = 'degree'
 export type Op5 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
 export type Value1 = number
 export type Edgeclass2 = 'lineage' | 'containment' | 'any'
 export type Edgetypes2 = string[] | null
-export type Kind12 = 'isOrphan'
+export type Kind13 = 'isOrphan'
 export type Edgeclass3 = 'lineage' | 'containment' | 'any'
 export type Edgetypes3 = string[] | null
-export type Kind13 = 'isLeaf'
+export type Kind14 = 'isLeaf'
 export type Edgeclass4 = 'lineage' | 'containment' | 'any'
 export type Edgetypes4 = string[] | null
-export type Kind14 = 'isRoot'
+export type Kind15 = 'isRoot'
 export type Edgeclass5 = 'lineage' | 'containment' | 'any'
 export type Edgetypes5 = string[] | null
-export type Kind15 = 'hasIncoming'
+export type Kind16 = 'hasIncoming'
 export type Edgeclass6 = 'lineage' | 'containment' | 'any'
 export type Edgetypes6 = string[] | null
-export type Kind16 = 'hasOutgoing'
+export type Kind17 = 'hasOutgoing'
 /**
  * ``outgoing`` walks source → target along edge direction; ``incoming`` walks against direction; ``any`` is undirected.
  */
@@ -229,7 +314,7 @@ export type Edgepredicate1 =
  * Optional explicit edge-type list; overrides ``edge_class``'s resolved set.
  */
 export type Edgetypes7 = string[] | null
-export type Kind17 = 'path'
+export type Kind18 = 'path'
 /**
  * Maximum path length in edge hops.
  */
@@ -246,7 +331,7 @@ export type Sourceurns = string[]
  * Endpoint nodes. Paths terminate here.
  */
 export type Targeturns = string[]
-export type Kind18 = 'all'
+export type Kind19 = 'all'
 export type Children1 = (
     | TextPredicate
     | PropertyPredicate
@@ -266,30 +351,18 @@ export type Children1 = (
     | MatchAllPredicate
     | GroupPredicate
 )[]
-export type Kind19 = 'group'
+export type Kind20 = 'group'
 export type Op6 = 'and' | 'or' | 'not'
 export type Items = SearchRuleItem[]
-export type Waitms = number
+export type Waitms1 = number
 /**
  * Matches found so far — exact once complete.
  */
-export type Count1 = number
+export type Count5 = number
 export type Error = string | null
-/**
- * Matches found so far — exact for the parts scanned.
- */
-export type Matched = number
-/**
- * Nodes in the parts already scanned.
- */
-export type Scanned = number
-/**
- * Nodes in every part the search scans.
- */
-export type Total = number
-export type Sessionid1 = string | null
-export type Status1 = 'running' | 'complete'
-export type Dataversion = string | null
+export type Sessionid3 = string | null
+export type Status2 = 'running' | 'complete'
+export type Dataversion1 = string | null
 export type Elapsedms = number
 /**
  * Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.
@@ -362,7 +435,7 @@ export type HoistedRootUrns = string[][]
 /**
  * Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').
  */
-export type Notes1 = string[]
+export type Notes2 = string[]
 /**
  * Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.
  */
@@ -371,7 +444,7 @@ export type Resolvedscope = {
 } | null
 export type Items1 = SearchRuleItem[]
 export type Urns3 = string[]
-export type Dataversion1 = string | null
+export type Dataversion2 = string | null
 export type Elapsedms2 = number
 export type $Schemaversion = '1'
 /**
@@ -418,7 +491,7 @@ export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
 /**
  * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
  */
-export type Sessionid2 = string | null
+export type Sessionid4 = string | null
 /**
  * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
  */
@@ -432,7 +505,7 @@ export type Sortproperty = string | null
 /**
  * Progressive mode (uncapped engine). Answer after this long with what the scan has found so far — ``status: 'running'``, provisional hits in their final order, a ``progress`` block — and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.
  */
-export type Waitms1 = number | null
+export type Waitms2 = number | null
 export type Predicate1 =
     | TextPredicate
     | PropertyPredicate
@@ -481,7 +554,7 @@ export type Lastsyncedat = string | null
 export type Layerassignment2 = string | null
 export type Qualifiedname = string | null
 export type Sourcesystem = string | null
-export type Tags = string[]
+export type Tags1 = string[]
 export type Urn1 = string
 export type Version = string | null
 export type Score1 = number
@@ -509,7 +582,7 @@ export type Cursor1 = string | null
 /**
  * The graph data the session read. Opaque.
  */
-export type Dataversion2 = string | null
+export type Dataversion3 = string | null
 export type Deadlineexceeded = boolean
 export type Elapsedms3 = number
 /**
@@ -535,19 +608,19 @@ export type Estimatedrows = number | null
 /**
  * Diagnostic hints — e.g. 'no index on properties.foo'.
  */
-export type Notes2 = string[]
+export type Notes3 = string[]
 /**
  * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
  */
-export type Sessionid3 = string | null
+export type Sessionid5 = string | null
 /**
  * The graph changed after this session started; run the search again for an answer on the current data.
  */
-export type Stale = boolean
+export type Stale1 = boolean
 /**
  * ``running``: the scan is not finished — the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.
  */
-export type Status2 = ('running' | 'complete') | null
+export type Status3 = ('running' | 'complete') | null
 /**
  * Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).
  */
@@ -561,13 +634,13 @@ export type Truncated = boolean
  */
 export type Complete = boolean
 export type Elapsedms4 = number
-export type Key4 = string
+export type Key5 = string
 /**
  * A type had more distinct values than listed.
  */
 export type Truncated1 = boolean
-export type Count2 = number
-export type Values2 = SearchValueSuggestion[]
+export type Count6 = number
+export type Values3 = SearchValueSuggestion[]
 
 /**
  * Bundle root that wraps every API-surface shape in one model.
@@ -586,6 +659,8 @@ export interface SearchApiContract {
     scopeDiagnostics?: ScopeDiagnostics | null
     searchAncestorCountsRequest?: SearchAncestorCountsRequest | null
     searchAncestorCountsResult?: SearchAncestorCountsResult | null
+    searchCatalogRequest?: SearchCatalogRequest | null
+    searchCatalogResult?: SearchCatalogResult | null
     searchCountsRequest?: SearchCountsRequest | null
     searchCountsResult?: SearchCountsResult | null
     searchDiscoverResult?: SearchDiscoverResult | null
@@ -685,6 +760,77 @@ export interface Typecounts {
     [k: string]: number
 }
 /**
+ * ``POST /search/catalog``: every property the view's entities carry —
+ * on how many, stored as which kinds, with which values — read from every
+ * entity in its scope, not a sample. A large view takes more than one
+ * request: send it again with the returned ``sessionId`` until ``status``
+ * is ``complete``.
+ */
+export interface SearchCatalogRequest {
+    refresh?: Refresh
+    scope: SearchScope
+    sessionId?: Sessionid1
+    waitMs?: Waitms
+}
+export interface SearchCatalogResult {
+    asOf?: Asof
+    dataVersion?: Dataversion
+    entities?: Entities
+    entityTypes?: Entitytypes1
+    notes?: Notes1
+    progress?: SearchProgress | null
+    properties?: Properties
+    sessionId: Sessionid2
+    stale?: Stale
+    status: Status1
+    tagged?: Tagged
+    tags?: Tags
+}
+export interface SearchCatalogEntityType {
+    count: Count1
+    type: Type
+}
+/**
+ * How far a running search has got. Node counts are the scan's
+ * estimate of what each part of the graph holds, so ``scanned / total``
+ * is a fraction to draw, not a count to report.
+ */
+export interface SearchProgress {
+    matched: Matched
+    scanned: Scanned
+    total: Total
+}
+export interface SearchCatalogProperty {
+    byEntityType?: Byentitytype
+    count: Count2
+    distinct: Distinct
+    distinctExact: Distinctexact
+    key: Key
+    kinds?: Kinds
+    max?: Max
+    min?: Min
+    residual?: Residual
+    values?: Values
+}
+export interface Byentitytype {
+    [k: string]: number
+}
+/**
+ * Entities per kind the value is stored as. Two kinds compare as two.
+ */
+export interface Kinds {
+    [k: string]: number
+}
+export interface SearchCatalogValue {
+    count: Count3
+    kind: Kind
+    value: unknown
+}
+export interface SearchCatalogTag {
+    count: Count4
+    tag: Tag
+}
+/**
  * ``POST /search/counts``: how many entities in the view match each
  * rule — exactly, however many. A count over a large view takes more than
  * one request: send the same request again with the returned ``sessions``
@@ -694,7 +840,7 @@ export interface SearchCountsRequest {
     items: Items
     scope: SearchScope
     sessions?: Sessions
-    waitMs?: Waitms
+    waitMs?: Waitms1
 }
 /**
  * One rule (or saved query) to evaluate: an id the caller chose, and
@@ -710,7 +856,7 @@ export interface SearchRuleItem {
 export interface TextPredicate {
     boost?: Boost
     caseSensitive?: Casesensitive
-    kind?: Kind
+    kind?: Kind1
     match?: Match
     propertyKey?: Propertykey
     target?: Target
@@ -735,8 +881,8 @@ export interface TextPredicate {
 export interface PropertyPredicate {
     caseSensitive?: Casesensitive1
     includeMissing?: Includemissing
-    key: Key
-    kind?: Kind1
+    key: Key1
+    kind?: Kind2
     op?: Op
     value?: unknown
     valueType?: Valuetype
@@ -749,9 +895,9 @@ export interface PropertyPredicate {
  * composed by ``op``.
  */
 export interface TagPredicate {
-    kind?: Kind2
+    kind?: Kind3
     op?: Op1
-    values: Values
+    values: Values1
 }
 /**
  * "Does this node have a property named X" — key presence only.
@@ -765,9 +911,9 @@ export interface TagPredicate {
  * case-insensitively ("a property whose name contains 'owner'").
  */
 export interface HasPropertyPredicate {
-    key: Key1
+    key: Key2
     keyMatch?: Keymatch
-    kind?: Kind3
+    kind?: Kind4
     negate?: Negate
 }
 /**
@@ -779,7 +925,7 @@ export interface HasPropertyPredicate {
  * which the provider may push down as a tighter Cypher anchor.
  */
 export interface DescendantOfPredicate {
-    kind?: Kind4
+    kind?: Kind5
     maxDepth?: Maxdepth1
     urns: Urns1
 }
@@ -797,7 +943,7 @@ export interface WithinHopsPredicate {
     edgePredicate?: Edgepredicate
     edgeTypes?: Edgetypes
     hops: Hops
-    kind?: Kind8
+    kind?: Kind9
     urns: Urns2
 }
 /**
@@ -811,8 +957,8 @@ export interface WithinHopsPredicate {
 export interface EdgePropertyPredicate {
     caseSensitive?: Casesensitive2
     includeMissing?: Includemissing1
-    key: Key2
-    kind?: Kind5
+    key: Key3
+    kind?: Kind6
     op?: Op2
     value?: unknown
     valueType?: Valuetype1
@@ -822,8 +968,8 @@ export interface EdgePropertyPredicate {
  * ``EXISTS(rel.<key>)`` (or ``NOT EXISTS`` when ``negate``).
  */
 export interface EdgeHasPropertyPredicate {
-    key: Key3
-    kind?: Kind6
+    key: Key4
+    kind?: Kind7
     negate?: Negate1
 }
 /**
@@ -835,7 +981,7 @@ export interface EdgeHasPropertyPredicate {
  */
 export interface EdgeGroupPredicate {
     children: Children
-    kind?: Kind7
+    kind?: Kind8
     op?: Op3
 }
 /**
@@ -845,15 +991,15 @@ export interface EdgeGroupPredicate {
  * inside OR groups.
  */
 export interface EntityTypePredicate {
-    kind?: Kind9
+    kind?: Kind10
     op?: Op4
-    values: Values1
+    values: Values2
 }
 /**
  * Match the view's layer assignment (Source / Staging / Refinery / …).
  */
 export interface LayerPredicate {
-    kind?: Kind10
+    kind?: Kind11
     layerAssignment: Layerassignment1
 }
 /**
@@ -874,7 +1020,7 @@ export interface DegreePredicate {
     direction?: Direction1
     edgeClass?: Edgeclass1
     edgeTypes?: Edgetypes1
-    kind?: Kind11
+    kind?: Kind12
     op?: Op5
     value: Value1
 }
@@ -885,7 +1031,7 @@ export interface DegreePredicate {
 export interface IsOrphanPredicate {
     edgeClass?: Edgeclass2
     edgeTypes?: Edgetypes2
-    kind?: Kind12
+    kind?: Kind13
 }
 /**
  * Sugar: nodes with zero outgoing edges of the given class
@@ -895,7 +1041,7 @@ export interface IsOrphanPredicate {
 export interface IsLeafPredicate {
     edgeClass?: Edgeclass3
     edgeTypes?: Edgetypes3
-    kind?: Kind13
+    kind?: Kind14
 }
 /**
  * Sugar: nodes with zero incoming edges of the given class
@@ -905,7 +1051,7 @@ export interface IsLeafPredicate {
 export interface IsRootPredicate {
     edgeClass?: Edgeclass4
     edgeTypes?: Edgetypes4
-    kind?: Kind14
+    kind?: Kind15
 }
 /**
  * Sugar: nodes with at least one incoming edge of the given class.
@@ -914,7 +1060,7 @@ export interface IsRootPredicate {
 export interface HasIncomingPredicate {
     edgeClass?: Edgeclass5
     edgeTypes?: Edgetypes5
-    kind?: Kind15
+    kind?: Kind16
 }
 /**
  * Sugar: nodes with at least one outgoing edge of the given class.
@@ -923,7 +1069,7 @@ export interface HasIncomingPredicate {
 export interface HasOutgoingPredicate {
     edgeClass?: Edgeclass6
     edgeTypes?: Edgetypes6
-    kind?: Kind16
+    kind?: Kind17
 }
 /**
  * Find paths between source and target nodes.
@@ -941,7 +1087,7 @@ export interface PathPredicate {
     edgeClass?: Edgeclass7
     edgePredicate?: Edgepredicate1
     edgeTypes?: Edgetypes7
-    kind?: Kind17
+    kind?: Kind18
     maxHops?: Maxhops
     maxPaths?: Maxpaths
     sourceUrns: Sourceurns
@@ -955,7 +1101,7 @@ export interface PathPredicate {
  * not quietly match the whole view. Asking for everything is spelled out.
  */
 export interface MatchAllPredicate {
-    kind?: Kind18
+    kind?: Kind19
 }
 /**
  * Boolean composition of child predicates.
@@ -966,7 +1112,7 @@ export interface MatchAllPredicate {
  */
 export interface GroupPredicate {
     children: Children1
-    kind?: Kind19
+    kind?: Kind20
     op?: Op6
 }
 /**
@@ -977,28 +1123,18 @@ export interface Sessions {
 }
 export interface SearchCountsResult {
     counts?: Counts1
-    dataVersion?: Dataversion
+    dataVersion?: Dataversion1
     elapsedMs?: Elapsedms
 }
 export interface Counts1 {
     [k: string]: SearchRuleCount
 }
 export interface SearchRuleCount {
-    count: Count1
+    count: Count5
     error?: Error
     progress?: SearchProgress | null
-    sessionId?: Sessionid1
-    status: Status1
-}
-/**
- * How far a running search has got. Node counts are the scan's
- * estimate of what each part of the graph holds, so ``scanned / total``
- * is a fraction to draw, not a count to report.
- */
-export interface SearchProgress {
-    matched: Matched
-    scanned: Scanned
-    total: Total
+    sessionId?: Sessionid3
+    status: Status2
 }
 /**
  * Response shape for ``GET /search/discover``.
@@ -1064,7 +1200,7 @@ export interface SearchExplainResult {
     effective_root_urns?: EffectiveRootUrns
     hits_cypher: HitsCypher
     hoisted_root_urns?: HoistedRootUrns
-    notes?: Notes1
+    notes?: Notes2
     params?: Params
     resolvedScope?: Resolvedscope
 }
@@ -1085,7 +1221,7 @@ export interface SearchMembershipRequest {
     urns: Urns3
 }
 export interface SearchMembershipResult {
-    dataVersion?: Dataversion1
+    dataVersion?: Dataversion2
     elapsedMs?: Elapsedms2
     errors?: Errors
     matches?: Matches
@@ -1134,12 +1270,12 @@ export interface SearchOptions {
     includeAncestorPath?: Includeancestorpath
     pageSize?: Pagesize
     results?: Results
-    sessionId?: Sessionid2
+    sessionId?: Sessionid4
     softDeadlineMs?: Softdeadlinems
     sort?: Sort
     sortDir?: Sortdir
     sortProperty?: Sortproperty
-    waitMs?: Waitms1
+    waitMs?: Waitms2
 }
 /**
  * Roll matches up to ancestors (or facets) for orient-before-drill UX.
@@ -1172,7 +1308,7 @@ export interface SearchResultPage {
     candidateCount?: Candidatecount
     countStatus?: Countstatus
     cursor?: Cursor1
-    dataVersion?: Dataversion2
+    dataVersion?: Dataversion3
     deadlineExceeded?: Deadlineexceeded
     elapsedMs: Elapsedms3
     hits?: Hits
@@ -1183,9 +1319,9 @@ export interface SearchResultPage {
      * Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain.
      */
     scopeDiagnostics?: ScopeDiagnostics | null
-    sessionId?: Sessionid3
-    stale?: Stale
-    status?: Status2
+    sessionId?: Sessionid5
+    stale?: Stale1
+    status?: Status3
     totalCount?: Totalcount
     truncated?: Truncated
 }
@@ -1241,14 +1377,14 @@ export interface GraphNode {
     entityType: Entitytype2
     lastSyncedAt?: Lastsyncedat
     layerAssignment?: Layerassignment2
-    properties?: Properties
+    properties?: Properties1
     qualifiedName?: Qualifiedname
     sourceSystem?: Sourcesystem
-    tags?: Tags
+    tags?: Tags1
     urn: Urn1
     version?: Version
 }
-export interface Properties {
+export interface Properties1 {
     [k: string]: unknown
 }
 /**
@@ -1273,11 +1409,11 @@ export interface PathHit {
  */
 export interface EdgeRef {
     edgeType: Edgetype
-    properties?: Properties1
+    properties?: Properties2
     sourceUrn: Sourceurn
     targetUrn: Targeturn
 }
-export interface Properties1 {
+export interface Properties2 {
     [k: string]: unknown
 }
 /**
@@ -1290,7 +1426,7 @@ export interface QueryExplain {
     costScore?: Costscore
     cypher: Cypher1
     estimatedRows?: Estimatedrows
-    notes?: Notes2
+    notes?: Notes3
 }
 /**
  * Response shape for ``GET /search/values``: a property's most common
@@ -1303,15 +1439,15 @@ export interface QueryExplain {
 export interface SearchValuesResult {
     complete?: Complete
     elapsedMs?: Elapsedms4
-    key: Key4
+    key: Key5
     truncated?: Truncated1
-    values?: Values2
+    values?: Values3
 }
 /**
  * One distinct value of a property and how many times it is stored.
  * ``value`` keeps its stored kind — a 19-digit id is that integer.
  */
 export interface SearchValueSuggestion {
-    count?: Count2
+    count?: Count6
     value?: unknown
 }

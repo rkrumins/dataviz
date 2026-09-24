@@ -1266,6 +1266,78 @@ class SearchAncestorCountsResult(_Base):
                     "gone — run the search again.")
 
 
+# ---------------------------------------------------------------------------
+# The view's properties, exactly
+# ---------------------------------------------------------------------------
+
+class SearchCatalogRequest(_Base):
+    """``POST /search/catalog``: every property the view's entities carry —
+    on how many, stored as which kinds, with which values — read from every
+    entity in its scope, not a sample. A large view takes more than one
+    request: send it again with the returned ``sessionId`` until ``status``
+    is ``complete``."""
+    scope: SearchScope
+    wait_ms: int = Field(800, alias="waitMs", ge=0, le=60000)
+    session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
+    refresh: bool = Field(
+        False, description="Read the view again, even when a recent catalog of it is at hand.")
+
+
+class SearchCatalogValue(_Base):
+    value: Any = Field(description="As stored — a list's elements count one by one.")
+    kind: str = Field(description="Integer, Float, String, Boolean or List.")
+    count: int = Field(description="Entities holding it.")
+
+
+class SearchCatalogProperty(_Base):
+    key: str
+    count: int = Field(description="Entities carrying the key.")
+    by_entity_type: Dict[str, int] = Field(default_factory=dict, alias="byEntityType")
+    kinds: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Entities per kind the value is stored as. Two kinds compare as two.")
+    min: Optional[Union[int, float]] = Field(None, description="Least numeric value, exact.")
+    max: Optional[Union[int, float]] = Field(None, description="Greatest numeric value, exact.")
+    distinct: int = Field(description="Distinct values — a floor unless ``distinctExact``.")
+    distinct_exact: bool = Field(alias="distinctExact")
+    values: List[SearchCatalogValue] = Field(
+        default_factory=list,
+        description="The values most held, with their exact counts — while the key has at "
+                    "most 1,000 distinct values; past that it is high-cardinality and none "
+                    "are listed.")
+    residual: int = Field(
+        0, description="Entities holding it in propertiesRaw, past the native-key budget.")
+
+
+class SearchCatalogEntityType(_Base):
+    type: str
+    count: int
+
+
+class SearchCatalogTag(_Base):
+    tag: str
+    count: int = Field(description="Entities carrying the tag.")
+
+
+class SearchCatalogResult(_Base):
+    session_id: str = Field(alias="sessionId")
+    status: Literal["running", "complete"]
+    progress: Optional[SearchProgress] = None
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    stale: bool = Field(
+        False, description="Read before the data last changed — see ``asOf``.")
+    as_of: Optional[str] = Field(None, alias="asOf", description="When the read began (UTC).")
+    entities: int = Field(0, description="Entities in the view's scope read so far.")
+    entity_types: List[SearchCatalogEntityType] = Field(default_factory=list, alias="entityTypes")
+    properties: List[SearchCatalogProperty] = Field(default_factory=list)
+    tags: List[SearchCatalogTag] = Field(
+        default_factory=list, description="Every tag, with the entities carrying it.")
+    tagged: Optional[int] = Field(
+        None, description="Entities carrying any tag — null when a unit held too many "
+                          "distinct tag sets to count them.")
+    notes: List[str] = Field(default_factory=list)
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1294,6 +1366,10 @@ class SearchApiContract(_Base):
         None, alias="searchAncestorCountsRequest")
     search_ancestor_counts_result: Optional[SearchAncestorCountsResult] = Field(
         None, alias="searchAncestorCountsResult")
+    search_catalog_request: Optional[SearchCatalogRequest] = Field(
+        None, alias="searchCatalogRequest")
+    search_catalog_result: Optional[SearchCatalogResult] = Field(
+        None, alias="searchCatalogResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

@@ -562,3 +562,62 @@ canvas reads share.
 Walking pages past the rows a session holds costs one full scan each:
 about 1.2 s per page for 100k broad matches on 200k nodes. Taking every
 match out of a large result is the export job's task (P6).
+
+## 13. The property catalog (P3)
+
+`POST /search/catalog` reads every entity in a view's scope. It uses the
+same units, sessions and leases as a search. For each key it keeps:
+
+- how many entities carry it, per entity type and per stored kind
+  (`typeOf`);
+- its exact numeric bounds, split by sign as in §3;
+- its values with exact counts, up to 1,000 distinct values;
+- keys demoted to `propertiesRaw`, counted as `residual`;
+- tags, counted per tag. Each distinct stored tag set is parsed once and
+  counted for every entity that holds it.
+
+**Why read it on demand rather than in a background job.** The plan
+first had an insights job writing Postgres. That design would describe
+the data source, not the view. It would need its own schedule and
+tables, and it would still be stale between runs. A catalog read on
+demand is exact for the view's own scope. It is kept per scope and data
+version:
+
+- For `catalog_reuse_seconds` (10 minutes) after the data changes, the
+  last complete catalog is served, marked `stale` with its `asOf` time.
+- `refresh` reads the view again.
+
+**Per unit.** Four statements run together: entity counts, keys and
+kinds, residual keys, and tag sets. Then two more run together: value
+counts for the keys still under the cap, and bounds for the keys that
+hold numbers.
+
+A key seen for the first time is probed on 2,000 entities. If it has
+more than 1,000 distinct values there, it is high-cardinality straight
+away and its values are never counted across a whole unit.
+
+Measured on `bench_1m` (2 units in flight, 4 engine threads):
+
+| | |
+|---|---:|
+| First answer | 3.4 s |
+| Complete | 22.2 s, 11 requests |
+| Opened again (served from the scope's pointer) | 1 ms |
+| Answer size | 5 KB |
+
+Per 50k chunk:
+
+| Statement | Time |
+|---|---:|
+| Keys and kinds | about 620 ms |
+| Value counts for the tracked keys | about 500 ms |
+| Numeric bounds | 70–140 ms |
+| Entity counts | 70 ms |
+| Residual keys | 46 ms |
+
+Two costs changed the design:
+
+- Computing the four sign-split bounds on every key row made the key scan
+  2–3× slower. They now run only for keys that hold numbers.
+- Filtering out the 40 platform keys in Cypher (`NOT _k IN $_skip`) cost
+  another 10%. They are dropped in Python instead.

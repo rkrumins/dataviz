@@ -61,6 +61,8 @@ async def provider():
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
     rng = random.Random(7)
+    # Its own generator, so adding a property leaves every other value as it was.
+    big_rng = random.Random(13)
 
     def node(label, i, parent):
         name = f"{rng.choice(NAMES)} {i}" if rng.random() < 0.7 else rng.choice(NAMES)
@@ -76,6 +78,9 @@ async def provider():
             "score": rng.random(),
             "owner": rng.choice(OWNERS) if rng.random() < 0.85 else None,
             "mixed": rng.choice([7, "7", 7.5, "seven", True, ["a", "b"]]),
+            # A user's int64 — at the extremes FalkorDB's min/max wrap.
+            "big": big_rng.choice([2 ** 63 - 1, -(2 ** 63),
+                                   big_rng.randint(-(2 ** 63), 2 ** 63 - 1)]),
         }
 
     async def seed():
@@ -468,3 +473,82 @@ async def test_the_ancestor_facet_is_the_tally_of_every_match(provider, predicat
     assert read["status"] == "complete"
     assert {u: c["count"] for u, c in read["counts"].items()} == {
         u: want.get(u, (0, {}))[0] for u in sample}
+
+
+@pytest.mark.parametrize("scope_name", ["data-source", "domain"])
+async def test_the_catalog_is_every_property_exactly(provider, scope_name):
+    """The catalog, followed across requests, against every in-scope
+    entity's own properties: entities per type, each key's entities per type
+    and per kind, its exact numeric bounds (int64 extremes included), its
+    values and distinct count, and the tags."""
+    from collections import Counter
+
+    from backend.app.providers.falkordb_search import catalog as catalog_mod
+    from backend.app.services.deep_search import SearchRunContext
+
+    scope = _scopes()[scope_name]
+    context = SearchRunContext(data_version="1", scope_hash=f"catalog-{scope_name}")
+    out, sid = None, None
+    for _ in range(200):
+        out = await catalog_mod.execute_catalog_session(
+            provider, scope, context=context, wait_ms=0, session_id=sid)
+        sid = out["sessionId"]
+        if out["status"] == "complete":
+            break
+    assert out["status"] == "complete"
+
+    head, params = "MATCH (n) WITH n", {}
+    if scope.root_urns:
+        head = ("MATCH (r) WHERE r.urn IN $_r MATCH (r)-[:CONTAINS*0..12]->(n) "
+                "WITH DISTINCT n")
+        params["_r"] = scope.root_urns
+    rows = (await provider._ro_query(
+        f"{head} WHERE n.urn IS NOT NULL RETURN labels(n)[0], properties(n)",
+        params=params, timeout=60)).result_set
+    skip = catalog_mod._skipped_keys()
+    entities = Counter(label for label, _ in rows)
+    assert out["entities"] == len(rows)
+    assert {e["type"]: e["count"] for e in out["entityTypes"]} == dict(entities)
+
+    want: dict = {}
+    for label, props in rows:
+        for key, value in props.items():
+            if key in skip or value is None:
+                continue
+            w = want.setdefault(key, {"labels": Counter(), "kinds": Counter(),
+                                      "values": Counter(), "numbers": []})
+            kind = catalog_mod._kind_of(value)
+            w["labels"][label] += 1
+            w["kinds"][kind] += 1
+            if kind in ("Integer", "Float"):
+                w["numbers"].append(value)
+            for element in {catalog_mod._slot(catalog_mod._kind_of(e), e)
+                            for e in (value if kind == "List" else [value])}:
+                w["values"][element] += 1
+    got = {p["key"]: p for p in out["properties"]}
+    assert set(got) == set(want) and {"owner", "mixed", "big", "score"} <= set(got)
+    for key, w in want.items():
+        p = got[key]
+        assert p["count"] == sum(w["labels"].values()), key
+        assert p["byEntityType"] == dict(w["labels"]), key
+        assert p["kinds"] == dict(w["kinds"]), key
+        if w["numbers"]:
+            assert (p["min"], p["max"]) == (min(w["numbers"]), max(w["numbers"])), key
+        distinct = len(w["values"])
+        if distinct <= catalog_mod.VALUES_MAX:
+            assert p["distinctExact"] and p["distinct"] == distinct, key
+            listed = {catalog_mod._slot(v["kind"], v["value"]): v["count"] for v in p["values"]}
+            assert all(w["values"][slot] == n for slot, n in listed.items()), key
+            assert len(listed) == min(distinct, catalog_mod.VALUES_SHOWN), key
+        else:
+            assert not p["distinctExact"] and p["values"] == [], key
+            assert catalog_mod.VALUES_MAX < p["distinct"] <= distinct, key
+    assert got["big"]["min"] == -(2 ** 63) and got["big"]["max"] == 2 ** 63 - 1
+
+    tags, tagged = Counter(), 0
+    for _, props in rows:
+        entity_tags = set(json.loads(props.get("tags") or "[]"))
+        tagged += bool(entity_tags)
+        tags.update(entity_tags)
+    assert out["tagged"] == tagged
+    assert {t["tag"]: t["count"] for t in out["tags"]} == dict(tags)

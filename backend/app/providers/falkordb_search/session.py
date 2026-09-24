@@ -136,12 +136,25 @@ class SessionStore:
         raise NotImplementedError
 
     async def save(self, session: Session, token: Optional[str], ttl_s: int,
-                   tallies: Optional[Dict[str, Tally]] = None) -> bool:
+                   tallies: Optional[Dict[str, Tally]] = None,
+                   accumulator: Optional[str] = None) -> bool:
         """Store the session. With a lease ``token``, only while that lease
         is still held — a holder that outlived its lease must not overwrite
         the request that took over. ``tallies`` (the ancestor counts of the
-        units this commit folds in) are added to the session's in the same
-        transaction: a unit's counts land exactly when the unit does."""
+        units this commit folds in) are added to the session's, and
+        ``accumulator`` (whatever else a scan keeps — a catalog's statistics)
+        replaces the session's, in the same transaction: a unit's counts
+        land exactly when the unit does."""
+        raise NotImplementedError
+
+    async def load_accumulator(self, sid: str) -> Optional[str]:
+        raise NotImplementedError
+
+    async def point(self, name: str, sid: str, ttl_s: int) -> None:
+        """Name a session — e.g. the latest complete catalog of a scope."""
+        raise NotImplementedError
+
+    async def pointed(self, name: str) -> Optional[str]:
         raise NotImplementedError
 
     async def top_tallies(self, sid: str, n: int) -> List[Tuple[str, Tally]]:
@@ -195,12 +208,16 @@ class RedisSessionStore(SessionStore):
     def _rank_key(self, sid: str) -> str:
         return f"{self._ns}:dss:{sid}:ancz"
 
+    def _acc_key(self, sid: str) -> str:
+        return f"{self._ns}:dss:{sid}:acc"
+
     async def load(self, sid: str) -> Optional[Session]:
         raw = await self._redis.get(self._key(sid))
         return Session.from_json(raw) if raw else None
 
     async def save(self, session: Session, token: Optional[str], ttl_s: int,
-                   tallies: Optional[Dict[str, Tally]] = None) -> bool:
+                   tallies: Optional[Dict[str, Tally]] = None,
+                   accumulator: Optional[str] = None) -> bool:
         sid = session.sid
         async with self._redis.pipeline(transaction=True) as pipe:
             try:
@@ -220,6 +237,8 @@ class RedisSessionStore(SessionStore):
                         add_tally(merged, urn, tallies[urn])
                 pipe.multi()
                 pipe.set(self._key(sid), session.to_json(), ex=ttl_s)
+                if accumulator is not None:
+                    pipe.set(self._acc_key(sid), accumulator, ex=ttl_s)
                 if merged:
                     pipe.hset(self._tally_key(sid), mapping={
                         urn: json.dumps(entry, separators=(",", ":"))
@@ -232,6 +251,15 @@ class RedisSessionStore(SessionStore):
             except WatchError:
                 return False
         return True
+
+    async def load_accumulator(self, sid: str) -> Optional[str]:
+        return _text(await self._redis.get(self._acc_key(sid)))
+
+    async def point(self, name: str, sid: str, ttl_s: int) -> None:
+        await self._redis.set(f"{self._ns}:dsp:{name}", sid, ex=ttl_s)
+
+    async def pointed(self, name: str) -> Optional[str]:
+        return _text(await self._redis.get(f"{self._ns}:dsp:{name}"))
 
     async def top_tallies(self, sid: str, n: int) -> List[Tuple[str, Tally]]:
         if n <= 0:
@@ -259,7 +287,7 @@ class RedisSessionStore(SessionStore):
     async def delete(self, sid: str) -> None:
         await self._redis.delete(self._key(sid), self._lease_key(sid),
                                  f"{self._key(sid)}:facets", f"{self._key(sid)}:facets:claim",
-                                 self._tally_key(sid), self._rank_key(sid))
+                                 self._tally_key(sid), self._rank_key(sid), self._acc_key(sid))
 
     async def claim_facets(self, sid: str, ttl_s: int) -> bool:
         return bool(await self._redis.set(f"{self._key(sid)}:facets:claim", "1",
@@ -288,17 +316,21 @@ class MemorySessionStore(SessionStore):
         self._facets: Dict[str, tuple] = {}       # sid -> (expires_at, facets)
         self._claims: Dict[str, float] = {}       # sid -> expires_at
         self._tallies: Dict[str, Dict[str, Tally]] = {}   # sid -> its session's tally
+        self._accumulators: Dict[str, str] = {}           # sid -> its session's accumulator
+        self._pointers: Dict[str, tuple] = {}             # name -> (expires_at, sid)
 
     async def load(self, sid: str) -> Optional[Session]:
         entry = self._sessions.get(sid)
         if entry is None or entry[0] < time.monotonic():
             self._sessions.pop(sid, None)
             self._tallies.pop(sid, None)
+            self._accumulators.pop(sid, None)
             return None
         return Session.from_json(entry[1])
 
     async def save(self, session: Session, token: Optional[str], ttl_s: int,
-                   tallies: Optional[Dict[str, Tally]] = None) -> bool:
+                   tallies: Optional[Dict[str, Tally]] = None,
+                   accumulator: Optional[str] = None) -> bool:
         if token is not None and self._holder(session.sid) != token:
             return False
         self._sessions.pop(session.sid, None)
@@ -306,11 +338,32 @@ class MemorySessionStore(SessionStore):
         held = self._tallies.setdefault(session.sid, {})
         for urn, entry in (tallies or {}).items():
             add_tally(held, urn, entry)
+        if accumulator is not None:
+            self._accumulators[session.sid] = accumulator
         while len(self._sessions) > self._max:
             evicted = next(iter(self._sessions))
             self._sessions.pop(evicted)
             self._tallies.pop(evicted, None)
+            self._accumulators.pop(evicted, None)
         return True
+
+    async def load_accumulator(self, sid: str) -> Optional[str]:
+        entry = self._sessions.get(sid)
+        if entry is None or entry[0] < time.monotonic():
+            return None
+        return self._accumulators.get(sid)
+
+    async def point(self, name: str, sid: str, ttl_s: int) -> None:
+        self._pointers[name] = (time.monotonic() + ttl_s, sid)
+        while len(self._pointers) > self._max:
+            self._pointers.pop(next(iter(self._pointers)))
+
+    async def pointed(self, name: str) -> Optional[str]:
+        entry = self._pointers.get(name)
+        if entry is None or entry[0] < time.monotonic():
+            self._pointers.pop(name, None)
+            return None
+        return entry[1]
 
     async def top_tallies(self, sid: str, n: int) -> List[Tuple[str, Tally]]:
         ranked = sorted(self._live_tallies(sid).items(),
@@ -339,7 +392,8 @@ class MemorySessionStore(SessionStore):
             self._leases.pop(sid, None)
 
     async def delete(self, sid: str) -> None:
-        for held in (self._sessions, self._leases, self._facets, self._claims, self._tallies):
+        for held in (self._sessions, self._leases, self._facets, self._claims, self._tallies,
+                     self._accumulators):
             held.pop(sid, None)
 
     async def claim_facets(self, sid: str, ttl_s: int) -> bool:

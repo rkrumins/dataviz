@@ -766,6 +766,9 @@ class TestLeaseHandover:
         class _Work:
             ran: list = []
 
+            async def begin(self, store):
+                pass
+
             async def unit(self, unit, timeout_s):
                 self.ran.append(unit.label)
                 return 5

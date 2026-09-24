@@ -1448,6 +1448,310 @@
       "title": "SearchAncestorCountsResult",
       "type": "object"
     },
+    "SearchCatalogEntityType": {
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "count"
+      ],
+      "title": "SearchCatalogEntityType",
+      "type": "object"
+    },
+    "SearchCatalogProperty": {
+      "properties": {
+        "byEntityType": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Byentitytype",
+          "type": "object"
+        },
+        "count": {
+          "description": "Entities carrying the key.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "distinct": {
+          "description": "Distinct values \u2014 a floor unless ``distinctExact``.",
+          "title": "Distinct",
+          "type": "integer"
+        },
+        "distinctExact": {
+          "title": "Distinctexact",
+          "type": "boolean"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "kinds": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "Entities per kind the value is stored as. Two kinds compare as two.",
+          "title": "Kinds",
+          "type": "object"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Greatest numeric value, exact.",
+          "title": "Max"
+        },
+        "min": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Least numeric value, exact.",
+          "title": "Min"
+        },
+        "residual": {
+          "default": 0,
+          "description": "Entities holding it in propertiesRaw, past the native-key budget.",
+          "title": "Residual",
+          "type": "integer"
+        },
+        "values": {
+          "description": "The values most held, with their exact counts \u2014 while the key has at most 1,000 distinct values; past that it is high-cardinality and none are listed.",
+          "items": {
+            "$ref": "#/$defs/SearchCatalogValue"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "count",
+        "distinct",
+        "distinctExact"
+      ],
+      "title": "SearchCatalogProperty",
+      "type": "object"
+    },
+    "SearchCatalogRequest": {
+      "description": "``POST /search/catalog``: every property the view's entities carry \u2014\non how many, stored as which kinds, with which values \u2014 read from every\nentity in its scope, not a sample. A large view takes more than one\nrequest: send it again with the returned ``sessionId`` until ``status``\nis ``complete``.",
+      "properties": {
+        "refresh": {
+          "default": false,
+          "description": "Read the view again, even when a recent catalog of it is at hand.",
+          "title": "Refresh",
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessionid"
+        },
+        "waitMs": {
+          "default": 800,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Waitms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "title": "SearchCatalogRequest",
+      "type": "object"
+    },
+    "SearchCatalogResult": {
+      "properties": {
+        "asOf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the read began (UTC).",
+          "title": "Asof"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "entities": {
+          "default": 0,
+          "description": "Entities in the view's scope read so far.",
+          "title": "Entities",
+          "type": "integer"
+        },
+        "entityTypes": {
+          "items": {
+            "$ref": "#/$defs/SearchCatalogEntityType"
+          },
+          "title": "Entitytypes",
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "properties": {
+          "items": {
+            "$ref": "#/$defs/SearchCatalogProperty"
+          },
+          "title": "Properties",
+          "type": "array"
+        },
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "stale": {
+          "default": false,
+          "description": "Read before the data last changed \u2014 see ``asOf``.",
+          "title": "Stale",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "complete"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tagged": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Entities carrying any tag \u2014 null when a unit held too many distinct tag sets to count them.",
+          "title": "Tagged"
+        },
+        "tags": {
+          "description": "Every tag, with the entities carrying it.",
+          "items": {
+            "$ref": "#/$defs/SearchCatalogTag"
+          },
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessionId",
+        "status"
+      ],
+      "title": "SearchCatalogResult",
+      "type": "object"
+    },
+    "SearchCatalogTag": {
+      "properties": {
+        "count": {
+          "description": "Entities carrying the tag.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "tag": {
+          "title": "Tag",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag",
+        "count"
+      ],
+      "title": "SearchCatalogTag",
+      "type": "object"
+    },
+    "SearchCatalogValue": {
+      "properties": {
+        "count": {
+          "description": "Entities holding it.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "kind": {
+          "description": "Integer, Float, String, Boolean or List.",
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "description": "As stored \u2014 a list's elements count one by one.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value",
+        "kind",
+        "count"
+      ],
+      "title": "SearchCatalogValue",
+      "type": "object"
+    },
     "SearchCountsRequest": {
       "description": "``POST /search/counts``: how many entities in the view match each\nrule \u2014 exactly, however many. A count over a large view takes more than\none request: send the same request again with the returned ``sessions``\nuntil every count is complete.",
       "properties": {
@@ -2939,6 +3243,28 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SearchAncestorCountsResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCatalogRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCatalogRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCatalogResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCatalogResult"
         },
         {
           "type": "null"

@@ -275,6 +275,9 @@ class _SearchWork:
         self.session, self.ctx, self.run = session, ctx, run
         self.tally: Dict[str, Tally] = {}
 
+    async def begin(self, store: SessionStore) -> None:
+        """Called once the lease is held; a search keeps nothing to load."""
+
     async def unit(self, unit: Unit, timeout_s: float):
         return await _run_unit(unit, self.session, self.ctx, self.run, timeout_s)
 
@@ -316,6 +319,7 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
     latest = await store.load(session.sid)
     if latest is not None:
         session.adopt(latest)
+    await work.begin(store)
     try:
         await _hop(session, work, deadline, settings)
     finally:

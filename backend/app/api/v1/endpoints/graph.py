@@ -32,6 +32,7 @@ from backend.app.providers.falkordb_provider import (
 )
 from backend.common.models.search import (
     SearchAncestorCountsRequest,
+    SearchCatalogRequest,
     SearchCountsRequest,
     SearchMembershipRequest,
     SearchQuery,
@@ -2049,6 +2050,34 @@ async def search_counts(
         ))
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/catalog", response_model_by_alias=True)
+async def search_catalog(
+    body: SearchCatalogRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Every property the view's entities carry — on how many, stored as
+    which kinds, with which values — read from every entity in the view's
+    scope rather than a sample. A large view takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``. A complete catalog is kept, and served for a while after
+    the data changes (``stale`` + ``asOf``); ``refresh`` reads the view
+    again.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.catalog(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
 

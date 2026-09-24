@@ -76,6 +76,12 @@ class DeepSearchSettings:
     session_ttl_seconds: int
     # Largest view subtree answered by walking it rather than chunking.
     walk_max: int
+    # A view's property catalog, once complete, is kept this long ...
+    catalog_ttl_seconds: int
+    # ... and served for this long after the data changes, marked "as of"
+    # (a fresh one on request) — so a busy graph is not rescanned on every
+    # open of the Property Manager.
+    catalog_reuse_seconds: int
 
     @classmethod
     def from_env(cls) -> "DeepSearchSettings":
@@ -127,6 +133,8 @@ class DeepSearchSettings:
             session_rows=max(50, _read_int("DEEP_SEARCH_SESSION_ROWS", 1000)),
             session_ttl_seconds=max(60, _read_int("DEEP_SEARCH_SESSION_TTL", 900)),
             walk_max=max(0, _read_int("DEEP_SEARCH_WALK_MAX", 300_000)),
+            catalog_ttl_seconds=max(60, _read_int("DEEP_SEARCH_CATALOG_TTL", 3600)),
+            catalog_reuse_seconds=max(0, _read_int("DEEP_SEARCH_CATALOG_REUSE", 600)),
         )
 
 

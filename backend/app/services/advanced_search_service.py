@@ -53,6 +53,8 @@ from backend.common.models.search import (
     ScopeDiagnostics,
     SearchAncestorCountsRequest,
     SearchAncestorCountsResult,
+    SearchCatalogRequest,
+    SearchCatalogResult,
     SearchCountsRequest,
     SearchCountsResult,
     SearchMembershipRequest,
@@ -631,6 +633,23 @@ class AdvancedSearchService:
             )
         return SearchCountsResult(counts=counts, data_version=context.data_version or None,
                                   elapsed_ms=int((time.monotonic() - started) * 1000))
+
+    async def catalog(
+        self,
+        request: SearchCatalogRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchCatalogResult:
+        """Every property the view's entities carry, exactly — in the view's
+        scope, resolved here as a search's is."""
+        scope, eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchCatalogResult(session_id="", status="complete")
+        op = self._provider_op("deep_search_catalog")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        out = await op(scope, context=context, wait_ms=request.wait_ms,
+                       session_id=request.session_id, refresh=request.refresh)
+        return SearchCatalogResult.model_validate(out)
 
     async def ancestor_counts(
         self,
