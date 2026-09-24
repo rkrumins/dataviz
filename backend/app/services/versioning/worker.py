@@ -58,7 +58,7 @@ class ProjectionWorker:
         bootstrap: Optional["BootstrapRunner"] = None,
         purge: Optional["PurgeRunner"] = None,
         reaper: Optional["Reaper"] = None,
-        transfers: Optional["TransferRunner"] = None,
+        transfers: Optional[TransferRunner] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -240,7 +240,7 @@ class ProjectionWorker:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.TRANSFER_POLL_SECS)
             except asyncio.TimeoutError:
-                pass
+                pass                                    # not stopping: look for queued jobs again
         running = {t for t in running if not t.done()}
         if running:
             _, late = await asyncio.wait(running, timeout=_TRANSFER_DRAIN_SECS)
