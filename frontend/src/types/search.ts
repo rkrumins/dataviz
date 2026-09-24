@@ -62,6 +62,8 @@ import type {
     Predicate as GenPredicate,
     SearchExplainResult as GenSearchExplainResult,
     SearchDiscoverResult as GenSearchDiscoverResult,
+    SearchValuesResult as GenSearchValuesResult,
+    SearchValueSuggestion as GenSearchValueSuggestion,
     ScopeDiagnostics as GenScopeDiagnostics,
 } from './generated/searchquery'
 
@@ -197,6 +199,15 @@ export type SearchDiscoverResult = RequireKeys<
 // ---------------------------------------------------------------------------
 
 export type SearchDiscoverLabel = SearchDiscoverLabelInfo
+
+
+/** `GET /search/values` — a property's most common values in a view. The
+ *  server always sends every field. */
+export type SearchValueSuggestion = RequireKeys<GenSearchValueSuggestion, 'count'>
+export type SearchValuesResult = RequireKeys<
+    Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },
+    'values' | 'complete' | 'truncated'
+>
 
 
 // ---------------------------------------------------------------------------

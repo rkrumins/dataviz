@@ -449,6 +449,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     keysByEntityType: discovery.keysByEntityType,
                                     tagValues: discovery.tagValues,
                                     getValueSamples: discovery.getValueSamples,
+                                    suggestValues: discovery.suggestValues,
                                 }}
                                 knownEntityTypes={knownEntityTypes}
                                 discoveredLayers={discoveredLayers}

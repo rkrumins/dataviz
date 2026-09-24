@@ -91,7 +91,7 @@ export function DisplayRuleEditor({
     )
 
     const {
-        allKeys, keysByEntityType, tagValues, getValueSamples,
+        allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues,
     } = useDiscovery(viewId)
 
     // Layer names → picker options. Memoised so the builder's row props stay
@@ -267,7 +267,7 @@ export function DisplayRuleEditor({
                     predicate={predicate}
                     onSeed={setPredicate}
                     onCommit={setPredicate}
-                    discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples }}
+                    discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues }}
                     knownEntityTypes={knownEntityTypes}
                     discoveredLayers={layerOptions}
                     onSubmit={() => void runPreview()}

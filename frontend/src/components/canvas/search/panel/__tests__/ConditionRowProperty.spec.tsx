@@ -7,12 +7,13 @@
  * `between` had one scalar input, so they could not be used at all.
  */
 import React, { useState } from 'react'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { Predicate, PropertyPredicate } from '@/types/search'
 
+import type { ValueSuggester } from '../../builder/useDiscovery'
 import { ConditionRow, isRowIncomplete } from '../ConditionRow'
 
 
@@ -41,10 +42,11 @@ const prop = (over: Partial<PropertyPredicate>): PropertyPredicate => ({
     kind: 'property', key: 'sourceId', op: 'eq', value: '', caseSensitive: false, ...over,
 })
 
-function Harness({ initial, samples, onChange }: {
+function Harness({ initial, samples, onChange, suggestValues }: {
     initial: PropertyPredicate
     samples: unknown[]
     onChange: (p: Predicate) => void
+    suggestValues?: ValueSuggester
 }) {
     const [value, setValue] = useState<Predicate>(initial)
     return (
@@ -52,7 +54,7 @@ function Harness({ initial, samples, onChange }: {
             value={value}
             discovery={{
                 allKeys: ['sourceId'], keysByEntityType: {}, tagValues: [],
-                getValueSamples: () => samples,
+                getValueSamples: () => samples, suggestValues,
             }}
             knownEntityTypes={[]}
             activeEntityTypes={[]}
@@ -125,5 +127,142 @@ describe('property row values', () => {
         await userEvent.type(screen.getByLabelText('Range from'), '10')
         await userEvent.type(screen.getByLabelText('Range to'), '20')
         expect(last(onChange).value).toEqual([10, 20])
+    })
+})
+
+
+describe('property row types', () => {
+    it('compares as the type its values have, and stamps it', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({})} samples={['15', '200']} onChange={onChange} />)
+        expect(screen.getByRole('button', { name: 'Compare as' })).toHaveTextContent('Number')
+        await userEvent.type(valueCombobox(), '15{Enter}')
+        expect(last(onChange)).toMatchObject({ value: 15, valueType: 'number' })
+    })
+
+    it('switching the type re-reads the value', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({ value: 15, valueType: 'number' })} samples={[10]} onChange={onChange} />)
+        await userEvent.click(screen.getByRole('button', { name: 'Compare as' }))
+        await userEvent.click(await screen.findByRole('option', { name: /^Text/ }))
+        expect(last(onChange)).toMatchObject({ value: '15', valueType: 'string', op: 'eq' })
+    })
+
+    it('true / false is a toggle', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({})} samples={[true, false]} onChange={onChange} />)
+        await userEvent.click(screen.getByRole('radio', { name: 'False' }))
+        expect(last(onChange)).toMatchObject({ value: false, valueType: 'boolean' })
+    })
+
+    it('a date property takes a date', () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({})} samples={['2024-05-01']} onChange={onChange} />)
+        fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2024-05-02' } })
+        expect(last(onChange)).toMatchObject({ value: '2024-05-02', valueType: 'date' })
+    })
+
+    it('"within the last" takes an amount and a unit', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({ op: 'withinLast', value: '', valueType: 'date' })}
+            samples={['2024-05-01']} onChange={onChange} />)
+        await userEvent.type(screen.getByLabelText('How many'), '30')
+        expect(last(onChange)).toMatchObject({ op: 'withinLast', value: 'P30D' })
+    })
+
+    it('presence operators need no value and run at once', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({ value: 'x' })} samples={[]} onChange={onChange} />)
+        await userEvent.click(screen.getByRole('button', { name: 'Property operator' }))
+        await userEvent.click(await screen.findByRole('option', { name: /^is not set/i }))
+        expect(last(onChange)).toMatchObject({ op: 'isNotSet' })
+        expect(last(onChange).value).toBeUndefined()
+        expect(isRowIncomplete(last(onChange))).toBe(false)
+        expect(screen.queryByPlaceholderText('type a value…')).toBeNull()
+    })
+
+    it('a negative operator offers to include entities without the key', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({ op: 'neq', value: 'a' })} samples={[]} onChange={onChange} />)
+        await userEvent.click(screen.getByRole('checkbox', { name: /include entities without/i }))
+        expect(last(onChange)).toMatchObject({ op: 'neq', includeMissing: true })
+    })
+
+    it('a value that is not of the type is not applied, and says why', async () => {
+        const onChange = vi.fn()
+        render(<Harness initial={prop({})} samples={[1, 2]} onChange={onChange} />)
+        await userEvent.type(valueCombobox(), 'abc{Enter}')
+        expect(await screen.findByText(/not applied yet — "abc" is not a number/i)).toBeInTheDocument()
+        expect(isRowIncomplete(last(onChange))).toBe(true)
+    })
+})
+
+
+describe('has-property row by name', () => {
+    it('matches property names and previews which ones', async () => {
+        const onChange = vi.fn()
+        function NameHarness() {
+            const [value, setValue] = useState<Predicate>({ kind: 'hasProperty', key: '', negate: false })
+            return (
+                <ConditionRow
+                    value={value}
+                    discovery={{
+                        allKeys: ['owner', 'ownerTeam', 'dataOwner', 'tier'],
+                        keysByEntityType: {}, tagValues: [], getValueSamples: () => [],
+                    }}
+                    knownEntityTypes={[]}
+                    activeEntityTypes={[]}
+                    discoveredLayers={[]}
+                    isRunning={false}
+                    onChange={(p) => { setValue(p); onChange(p) }}
+                    onRemove={vi.fn()}
+                    onOpenAdvanced={vi.fn()}
+                />
+            )
+        }
+        render(<NameHarness />)
+        await userEvent.click(screen.getByRole('button', { name: 'Match property names' }))
+        await userEvent.click(await screen.findByRole('option', { name: /^Name contains/ }))
+        await userEvent.type(screen.getByPlaceholderText('e.g. owner'), 'own')
+        expect(onChange).toHaveBeenLastCalledWith(
+            { kind: 'hasProperty', key: 'own', negate: false, keyMatch: 'contains' })
+        expect(screen.getByText(/Matches 3 known properties/)).toBeInTheDocument()
+    })
+})
+
+
+describe('property row suggestions', () => {
+    it('lists the most common values across the view, with counts, and asks again while typing', async () => {
+        const suggestValues = vi.fn<ValueSuggester>(async (_key, q) => ({
+            key: 'sourceId',
+            values: q ? [{ value: 'gold-2', count: 3 }] : [{ value: 'gold', count: 12 }, { value: 'silver', count: 4 }],
+            complete: true, truncated: false,
+        }))
+        render(<Harness initial={prop({})} samples={['sampled']} onChange={vi.fn()} suggestValues={suggestValues} />)
+        await userEvent.click(valueCombobox())
+        expect(await screen.findByRole('option', { name: /^gold/ })).toHaveTextContent('12')
+        expect(screen.queryByRole('option', { name: /sampled/ })).toBeNull()
+        await userEvent.type(valueCombobox(), 'go')
+        await waitFor(() => expect(suggestValues).toHaveBeenLastCalledWith('sourceId', 'go'))
+    })
+
+    it('one number and its text are one suggestion', async () => {
+        const suggestValues = vi.fn<ValueSuggester>(async () => ({
+            key: 'sourceId', values: [{ value: 15, count: 2 }, { value: '15', count: 1 }],
+            complete: true, truncated: false,
+        }))
+        render(<Harness initial={prop({})} samples={[]} onChange={vi.fn()} suggestValues={suggestValues} />)
+        await userEvent.click(valueCombobox())
+        const options = await screen.findAllByRole('option', { name: /^15/ })
+        expect(options).toHaveLength(1)
+        expect(options[0]).toHaveTextContent('3')
+    })
+
+    it('says so when the list comes from part of a large view', async () => {
+        const suggestValues = vi.fn<ValueSuggester>(async () => ({
+            key: 'sourceId', values: [{ value: 'x', count: 1 }], complete: false, truncated: true,
+        }))
+        render(<Harness initial={prop({})} samples={[]} onChange={vi.fn()} suggestValues={suggestValues} />)
+        expect(await screen.findByText(/Values listed from part of this view/)).toBeInTheDocument()
     })
 })

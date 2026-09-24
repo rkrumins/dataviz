@@ -23,6 +23,8 @@ import { cn } from '@/lib/utils'
 import { useSearchStore } from '@/store/searchStore'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
+import type { ValueSuggester } from '../builder/useDiscovery'
+
 import { AddRowButton } from './builder-atoms/AddRowButton'
 import { OperatorPill } from './builder-atoms/OperatorPill'
 import { RowCard } from './builder-atoms/RowCard'
@@ -65,6 +67,7 @@ export interface NestedGroupCardProps {
         keysByEntityType: Record<string, string[]>
         tagValues: string[]
         getValueSamples: (key: string) => unknown[]
+        suggestValues?: ValueSuggester
     }
     knownEntityTypes: string[]
     activeEntityTypes: string[]

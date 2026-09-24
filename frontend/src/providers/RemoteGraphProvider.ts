@@ -57,6 +57,7 @@ import type {
     SearchResultPage,
     SearchExplainResult,
     SearchDiscoverResult,
+    SearchValuesResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -599,6 +600,23 @@ export class RemoteGraphProvider implements GraphDataProvider {
             '/search/discover',
             { extraParams: { samplePerLabel: String(samplePerLabel) } },
         )
+    }
+
+    /**
+     * A property's most common values in a view — the value picker's
+     * suggestions, counted over every entity of the view's types (the
+     * discover sample above sees 200 nodes per type, so a property's
+     * values showed up by accident). Narrowed to values whose text contains
+     * `q`. Time-bounded server-side: `complete` / `truncated` say how far
+     * the count got.
+     */
+    async searchPropertyValues(
+        viewId: string, key: string, q = '', limit = 25, signal?: AbortSignal,
+    ): Promise<SearchValuesResult> {
+        return await this.fetch<SearchValuesResult>('/search/values', {
+            extraParams: { viewId, key, q, limit: String(limit) },
+            signal,
+        })
     }
 
     // ==========================================

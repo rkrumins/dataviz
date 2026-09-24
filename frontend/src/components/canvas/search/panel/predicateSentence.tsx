@@ -27,6 +27,9 @@ import { cn } from '@/lib/utils'
 import { formatUrnLabel } from '@/lib/urnLabels'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
+import { arityOf, isNegative, operatorLabel, predicateType } from '../typed/operators'
+import { describeDuration } from '../typed/valueCodec'
+
 
 // ---------------------------------------------------------------------------
 // Public entrypoint
@@ -270,30 +273,26 @@ function leafSentence(p: Predicate): ReactNode {
         }
         case 'layer':
             return <>layer is <Value>{p.layerAssignment}</Value></>
-        case 'hasProperty':
-            return p.negate
-                ? <>does not have a <Value>{p.key}</Value> property</>
-                : <>has a <Value>{p.key}</Value> property</>
+        case 'hasProperty': {
+            const has = p.negate ? 'does not have' : 'has'
+            if (p.keyMatch === 'prefix' || p.keyMatch === 'contains') {
+                return <>{has} a property whose name {p.keyMatch === 'prefix' ? 'starts with' : 'contains'} <Value>{p.key}</Value></>
+            }
+            return <>{has} a <Value>{p.key}</Value> property</>
+        }
         case 'property': {
             const op = p.op ?? 'eq'
-            const verb =
-                op === 'eq' ? 'equals'
-                    : op === 'neq' ? 'does not equal'
-                        : op === 'gt' ? 'is greater than'
-                            : op === 'gte' ? 'is at least'
-                                : op === 'lt' ? 'is less than'
-                                    : op === 'lte' ? 'is at most'
-                                        : op === 'in' ? 'is one of'
-                                            : op === 'notIn' ? 'is not one of'
-                                                : op === 'contains' ? 'contains'
-                                                    : op === 'startsWith' ? 'starts with'
-                                                        : op === 'endsWith' ? 'ends with'
-                                                            : op === 'between' ? 'is between'
-                                                                : op
+            const arity = arityOf(op)
+            const type = predicateType(p)
             return (
                 <>
-                    <Value>{p.key}</Value> {verb}{' '}
-                    <PropertyValue value={p.value} between={op === 'between'} />
+                    <Value>{p.key}</Value> {operatorLabel(op, type)}
+                    {arity === 'duration' && <> <Value quoted={false}>{describeDuration(p.value) ?? '…'}</Value></>}
+                    {arity !== 'none' && arity !== 'duration' && (
+                        <>{' '}<PropertyValue value={p.value} between={op === 'between'} /></>
+                    )}
+                    {p.caseSensitive && arity !== 'none' && <span className="text-ink-muted"> (match case)</span>}
+                    {p.includeMissing && isNegative(op) && <span className="text-ink-muted"> (or not set)</span>}
                 </>
             )
         }

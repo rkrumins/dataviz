@@ -6,7 +6,12 @@ import {
     setRootGroupOp,
     wrapConditionAt,
 } from '../predicateComposition'
-import type { Predicate } from '@/types/search'
+import fc from 'fast-check'
+
+import type { Predicate, PropertyPredicate } from '@/types/search'
+import { OPERATOR_TABLE, type PropertyOperator } from '@/types/generated/searchOperators'
+
+import { arityOf, isNegative, predicateType } from '../../typed/operators'
 
 describe('predicateDsl — boolean grammar', () => {
     it('parses bareword as substring text', () => {
@@ -301,5 +306,130 @@ describe('predicateDsl — property operators round-trip', () => {
             expect(r.error).toBeUndefined()
             expect(JSON.stringify(r.predicate)).not.toContain('"kind":"property"')
         }
+    })
+})
+
+
+// ---------------------------------------------------------------------------
+// Typed comparisons in Code mode — a row must mean the same thing after
+// Visual → Code → Visual: the operator, the value, the type it compares as,
+// and its case / missing-key flags.
+// ---------------------------------------------------------------------------
+
+describe('predicateDsl — typed comparisons', () => {
+    const roundTrip = (p: Predicate) => parsePredicate(stringifyPredicate(p)).predicate
+
+    it.each([
+        ['owner IS SET', { op: 'isSet' }],
+        ['owner IS NOT SET', { op: 'isNotSet' }],
+        ['owner IS EMPTY', { op: 'isEmpty' }],
+        ['owner IS NOT EMPTY', { op: 'isNotEmpty' }],
+        ['owner NOT CONTAINS test', { op: 'notContains', value: 'test' }],
+        ['owner CONTAINS ALL (pii, gold)', { op: 'containsAll', value: ['pii', 'gold'] }],
+        ['owner WITHIN LAST 30 days', { op: 'withinLast', value: 'P30D' }],
+        ['owner WITHIN LAST 12 HOURS', { op: 'withinLast', value: 'PT12H' }],
+        ['owner WITHIN LAST P1DT6H', { op: 'withinLast', value: 'P1DT6H' }],
+    ])('parses %s', (text, expected) => {
+        expect(parsePredicate(text).predicate).toEqual({ kind: 'property', key: 'owner', ...expected })
+    })
+
+    it('reads the suffixes', () => {
+        expect(parsePredicate('created = "2024-05-01" AS DATE').predicate).toEqual({
+            kind: 'property', key: 'created', op: 'eq', value: '2024-05-01', valueType: 'date',
+        })
+        expect(parsePredicate('owner != Bob MATCH CASE INCLUDING MISSING').predicate).toEqual({
+            kind: 'property', key: 'owner', op: 'neq', value: 'Bob',
+            caseSensitive: true, includeMissing: true,
+        })
+    })
+
+    it('writes a type only where the value alone would read as another', () => {
+        const p = (op: string, value: unknown, valueType: string) =>
+            ({ kind: 'property', key: 'k', op, value, valueType } as Predicate)
+        expect(stringifyPredicate(p('gt', 10, 'number'))).toBe('k > 10')
+        expect(stringifyPredicate(p('eq', '2024-05-01', 'date'))).toBe('k = 2024-05-01 AS DATE')
+        expect(stringifyPredicate(p('gt', '15', 'string'))).toBe('k > "15" AS TEXT')
+        expect(stringifyPredicate(p('eq', '-3746471915534727923', 'number')))
+            .toBe('k = "-3746471915534727923" AS NUMBER')
+        expect(stringifyPredicate(p('contains', '74', 'number'))).toBe('k CONTAINS "74"')
+    })
+
+    it('NOT CONTAINS on a name field is NOT of the text match', () => {
+        expect(parsePredicate('name NOT CONTAINS temp').predicate).toMatchObject({
+            kind: 'group', op: 'not',
+            children: [{ kind: 'text', target: 'name', match: 'substring', value: 'temp' }],
+        })
+    })
+
+    it('searches property names with a glob', () => {
+        for (const [text, keyMatch, key] of [
+            ['has:owner*', 'prefix', 'owner'], ['has:*owner*', 'contains', 'owner'],
+        ] as const) {
+            const p = parsePredicate(text).predicate
+            expect(p).toEqual({ kind: 'hasProperty', key, negate: false, keyMatch })
+            expect(roundTrip(p!)).toEqual(p)
+        }
+    })
+
+    it('plain words still read as a text search', () => {
+        for (const q of ['is set', 'within last', 'contains all']) {
+            const r = parsePredicate(q)
+            expect(r.error).toBeUndefined()
+            expect(JSON.stringify(r.predicate)).not.toContain('"kind":"property"')
+        }
+    })
+
+    // Any typed comparison survives Visual → Code → Visual with its meaning.
+    const KEYWORDS = /^(and|or|not|as|is|in|all|set|empty|match|case|including|missing|within|last|contains|between|starts|ends|with|null|true|false)$/i
+    const word = fc.stringMatching(/^[a-z][a-z0-9_-]{0,8}$/).filter((w) => !KEYWORDS.test(w))
+    const text = fc.oneof(word, fc.tuple(word, word).map(([a, b]) => `${a} ${b}`),
+        fc.constantFrom('15', '007', 'true', '2024-05-01'))
+    const valueOf: Record<string, fc.Arbitrary<unknown>> = {
+        string: text,
+        number: fc.oneof(fc.integer({ min: -1e9, max: 1e9 }), fc.constantFrom(1.5, -0.25),
+            fc.constantFrom('-3746471915534727923', '9223372036854775807')),
+        boolean: fc.boolean(),
+        date: fc.constantFrom('2024-05-01', '2024-05-01T10:00:00Z'),
+    }
+    const comparison = fc.constantFrom(...(Object.keys(OPERATOR_TABLE) as PropertyOperator[]))
+        .chain((op) => {
+            const spec = OPERATOR_TABLE[op]
+            const types = spec.types.length ? [...spec.types] : ['string']
+            return fc.record({
+                op: fc.constant(op),
+                key: fc.constantFrom('owner', 'Asset Owner', 'gvHash'),
+                valueType: fc.constantFrom(...types, 'auto'),
+                caseSensitive: fc.boolean(),
+                includeMissing: fc.boolean(),
+            }).chain((c) => {
+                const t = c.valueType === 'auto' ? types[0] : c.valueType
+                const one = valueOf[spec.types.length === 1 ? spec.types[0] : t]
+                const value = spec.arity === 'none' ? fc.constant(undefined)
+                    : spec.arity === 'duration' ? fc.constantFrom('P30D', 'PT12H', 'P1Y', 'P1DT6H')
+                        : spec.arity === 'pair' ? fc.tuple(one, one)
+                            : spec.arity === 'many' ? fc.array(one, { minLength: 1, maxLength: 3 })
+                                : one
+                return value.map((v) => ({ kind: 'property', ...c, value: v } as PropertyPredicate))
+            })
+        })
+
+    const meaning = (p: Predicate | null) => {
+        const q = p as PropertyPredicate
+        const op = q.op ?? 'eq'
+        const arity = arityOf(op)
+        return {
+            key: q.key, op,
+            value: arity === 'none' ? undefined
+                : arity === 'duration' ? String(q.value).toUpperCase() : q.value,
+            type: arity === 'none' || OPERATOR_TABLE[op].types.length === 1 ? null : predicateType(q),
+            caseSensitive: arity !== 'none' && !!q.caseSensitive,
+            includeMissing: isNegative(op) && !!q.includeMissing,
+        }
+    }
+
+    it('any typed comparison survives a round trip', () => {
+        fc.assert(fc.property(comparison, (p) => {
+            expect(meaning(roundTrip(p))).toEqual(meaning(p))
+        }), { numRuns: 400 })
     })
 })

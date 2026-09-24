@@ -199,6 +199,7 @@ export type Propertykey1 = string | null
 export type Target = 'name' | 'qualifiedName' | 'description' | 'tags' | 'property' | 'any'
 export type Value = string
 export type Casesensitive1 = boolean
+export type Includemissing = boolean
 export type Key = string
 export type Kind1 = 'property'
 export type Op =
@@ -214,10 +215,19 @@ export type Op =
     | 'startsWith'
     | 'endsWith'
     | 'between'
+    | 'notContains'
+    | 'containsAll'
+    | 'withinLast'
+    | 'isSet'
+    | 'isNotSet'
+    | 'isEmpty'
+    | 'isNotEmpty'
+export type Valuetype = 'auto' | 'string' | 'number' | 'boolean' | 'date'
 export type Kind2 = 'tag'
 export type Op1 = 'has' | 'hasAll' | 'hasAny' | 'notHas'
 export type Values = string[]
 export type Key1 = string
+export type Keymatch = 'exact' | 'prefix' | 'contains'
 export type Kind3 = 'hasProperty'
 export type Negate = boolean
 export type Kind4 = 'descendantOf'
@@ -233,6 +243,8 @@ export type Edgeclass = 'lineage' | 'containment' | 'any'
  */
 export type Edgepredicate =
     (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
+export type Casesensitive2 = boolean
+export type Includemissing1 = boolean
 export type Key2 = string
 export type Kind5 = 'edgeProperty'
 export type Op2 =
@@ -248,6 +260,14 @@ export type Op2 =
     | 'startsWith'
     | 'endsWith'
     | 'between'
+    | 'notContains'
+    | 'containsAll'
+    | 'withinLast'
+    | 'isSet'
+    | 'isNotSet'
+    | 'isEmpty'
+    | 'isNotEmpty'
+export type Valuetype1 = 'auto' | 'string' | 'number' | 'boolean' | 'date'
 export type Key3 = string
 export type Kind6 = 'edgeHasProperty'
 export type Negate1 = boolean
@@ -450,6 +470,18 @@ export type Totalcount = number | null
  * True when the provider hit its candidate cap or soft deadline before exhausting the candidate set.
  */
 export type Truncated = boolean
+/**
+ * Every entity type was read within the time budget.
+ */
+export type Complete = boolean
+export type Elapsedms2 = number
+export type Key4 = string
+/**
+ * A type had more distinct values than listed.
+ */
+export type Truncated1 = boolean
+export type Count = number
+export type Values2 = SearchValueSuggestion[]
 
 /**
  * Bundle root that wraps every API-surface shape in one model.
@@ -470,6 +502,7 @@ export interface SearchApiContract {
     searchExplainResult?: SearchExplainResult | null
     searchQuery?: SearchQuery | null
     searchResultPage?: SearchResultPage | null
+    searchValuesResult?: SearchValuesResult | null
 }
 /**
  * Resolved-scope information returned on every search response.
@@ -639,20 +672,27 @@ export interface TextPredicate {
 /**
  * Typed comparison against a single user-property.
  *
- * After the storage refactor, user properties are native FalkorDB
- * fields, so these compile to ``WHERE n.<key> <op> $val`` — no Python
- * post-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))
- * <op> toLower($val)``) when ``value`` is a string and
- * ``case_sensitive`` is false; a non-string value (or
- * ``case_sensitive=True``) keeps the raw, indexed column comparison.
- * ``between`` expects ``value`` to be a two-element list ``[lo, hi]``.
+ * ``value_type`` says how stored values are read — under ``number`` a
+ * stored "15" is 15, under ``string`` a stored 15 is "15" — and the
+ * comparison holds for any stored kind, a list included (it matches when
+ * an element does). ``value`` is shaped by ``op``: one value, a list
+ * (``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an
+ * ISO duration such as ``"P30D"`` (``withinLast``) or nothing (``isSet``,
+ * ``isEmpty`` and their negations). An integer beyond 2^53 is best sent
+ * as its digits in a string with ``value_type='number'``: it is compared
+ * exactly. Text comparisons are case-insensitive unless
+ * ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
+ * ``notContains`` match entities without the key. The full contract is
+ * ``backend/common/search_semantics``.
  */
 export interface PropertyPredicate {
     caseSensitive?: Casesensitive1
+    includeMissing?: Includemissing
     key: Key
     kind?: Kind1
     op?: Op
     value?: unknown
+    valueType?: Valuetype
 }
 /**
  * Match against the (currently JSON-stringified) ``n.tags`` field.
@@ -672,9 +712,14 @@ export interface TagPredicate {
  * Compiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).
  * Native-property storage makes this cheap; pre-refactor this required
  * parsing the blob in Python for every node.
+ *
+ * ``key_match`` searches by the NAME instead: ``prefix`` / ``contains``
+ * match any user property whose name starts with / contains ``key``,
+ * case-insensitively ("a property whose name contains 'owner'").
  */
 export interface HasPropertyPredicate {
     key: Key1
+    keyMatch?: Keymatch
     kind?: Kind3
     negate?: Negate
 }
@@ -712,16 +757,18 @@ export interface WithinHopsPredicate {
  * Typed comparison against a single edge property.
  *
  * Evaluated against each traversed relationship inside a
- * ``PathPredicate`` or ``WithinHopsPredicate``. Compiles to
- * ``rel.<key> <op> $val`` inside an ``ALL(rel IN relationships(p) …)``
- * block. ``between`` expects ``value`` to be a two-element list
- * ``[lo, hi]``.
+ * ``PathPredicate`` or ``WithinHopsPredicate``, inside an
+ * ``ALL(rel IN relationships(p) …)`` block. The comparison itself is
+ * ``PropertyPredicate``'s — same operators, value shapes and types.
  */
 export interface EdgePropertyPredicate {
+    caseSensitive?: Casesensitive2
+    includeMissing?: Includemissing1
     key: Key2
     kind?: Kind5
     op?: Op2
     value?: unknown
+    valueType?: Valuetype1
 }
 /**
  * Key-presence predicate against an edge. Compiles to
@@ -1032,4 +1079,27 @@ export interface QueryExplain {
     cypher: Cypher1
     estimatedRows?: Estimatedrows
     notes?: Notes2
+}
+/**
+ * Response shape for ``GET /search/values``: a property's most common
+ * values across the view's entity types — the value picker's list.
+ *
+ * Suggestions, not statistics: the scan is time-bounded, so ``complete``
+ * says whether every type was read and ``truncated`` whether a type had
+ * more distinct values than listed (a count may then be an undercount).
+ */
+export interface SearchValuesResult {
+    complete?: Complete
+    elapsedMs?: Elapsedms2
+    key: Key4
+    truncated?: Truncated1
+    values?: Values2
+}
+/**
+ * One distinct value of a property and how many times it is stored.
+ * ``value`` keeps its stored kind — a 19-digit id is that integer.
+ */
+export interface SearchValueSuggestion {
+    count?: Count
+    value?: unknown
 }

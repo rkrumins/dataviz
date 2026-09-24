@@ -107,6 +107,9 @@ interface BaseProps {
      *  inline dropdown gets clipped against panel edges. Defaults
      *  off for backward compatibility with the existing builder. */
     portal?: boolean
+    /** Called with the text being typed — for a caller that fetches
+     *  suggestions for it (the options are still filtered locally). */
+    onQueryChange?: (query: string) => void
 }
 
 interface SingleProps extends BaseProps {
@@ -155,6 +158,8 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
 
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
+    const { onQueryChange } = props
+    useEffect(() => { onQueryChange?.(query) }, [query, onQueryChange])
     const [highlightIndex, setHighlightIndex] = useState(0)
     const inputRef = useRef<HTMLInputElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)

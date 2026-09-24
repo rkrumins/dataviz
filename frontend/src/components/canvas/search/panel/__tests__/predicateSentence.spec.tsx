@@ -144,9 +144,29 @@ describe('predicateSentence — property values read as what they are', () => {
         ({ kind: 'property', key: 'gvHash', op, value } as Predicate)
 
     it('quotes text and leaves numbers bare', () => {
-        expect(rendered(prop('eq', 'gold'))).toContain('"gvHash" equals "gold"')
+        expect(rendered(prop('eq', 'gold'))).toContain('"gvHash" is "gold"')
+        expect(rendered(prop('eq', 15))).toContain('"gvHash" equals 15')
         expect(rendered(prop('gt', 15))).toContain('"gvHash" is greater than 15')
-        expect(rendered(prop('eq', true))).toContain('"gvHash" equals true')
+        expect(rendered(prop('eq', true))).toContain('"gvHash" is true')
+    })
+
+    it('says each operator the way its type reads', () => {
+        const typed = (op: string, value: unknown, valueType: string, extra = {}): Predicate =>
+            ({ kind: 'property', key: 'updated', op, value, valueType, ...extra } as Predicate)
+        expect(rendered(typed('gte', '2024-05-01', 'date'))).toContain('"updated" is on or after "2024-05-01"')
+        expect(rendered(typed('withinLast', 'P30D', 'date'))).toContain('"updated" is within the last 30 days')
+        expect(rendered(typed('isNotSet', undefined, 'string'))).toMatch(/"updated" is not set\.$/)
+        expect(rendered(typed('neq', 'x', 'string', { includeMissing: true })))
+            .toContain('"updated" is not "x" (or not set)')
+        expect(rendered(typed('contains', 'Ab', 'string', { caseSensitive: true })))
+            .toContain('contains "Ab" (match case)')
+    })
+
+    it('reads a search by property name', () => {
+        expect(rendered({ kind: 'hasProperty', key: 'owner', keyMatch: 'contains' } as Predicate))
+            .toContain('has a property whose name contains "owner"')
+        expect(rendered({ kind: 'hasProperty', key: 'pii', keyMatch: 'prefix', negate: true } as Predicate))
+            .toContain('does not have a property whose name starts with "pii"')
     })
 
     it('shows a range as both ends and a list as its items', () => {
