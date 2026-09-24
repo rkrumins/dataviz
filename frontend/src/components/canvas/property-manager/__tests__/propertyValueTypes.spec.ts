@@ -1,21 +1,23 @@
 import { describe, expect, it } from 'vitest'
 
-import { inferType } from '../propertyValueTypes'
+import { storedType } from '../propertyValueTypes'
 
 
-describe('inferType', () => {
-    it('takes the kind most samples have, not the first one', () => {
-        expect(inferType(['n/a', 3, 4, 5])).toBe('number')
-        expect(inferType([true, 'yes', 'no'])).toBe('string')
+describe('storedType', () => {
+    it('is the kind most entities store the key as', () => {
+        expect(storedType({ String: 3, Integer: 40 })).toEqual({ type: 'number', mixed: true })
+        expect(storedType({ Boolean: 799448, String: 200552 })).toEqual({ type: 'boolean', mixed: true })
     })
 
-    it('reads an integer too long for a double (sent as its digits) as a number', () => {
-        expect(inferType(['-3746471915534727923', '-4274918641463862057'])).toBe('number')
-        expect(inferType(['02134', '10001'])).toBe('string')
+    it('counts integers and decimals as one type: they compare as numbers', () => {
+        expect(storedType({ Integer: 5, Float: 2 })).toEqual({ type: 'number', mixed: false })
+    })
+
+    it('knows lists', () => {
+        expect(storedType({ List: 10 })).toEqual({ type: 'list', mixed: false })
     })
 
     it('is null when nothing is known', () => {
-        expect(inferType([])).toBeNull()
-        expect(inferType([null, undefined])).toBeNull()
+        expect(storedType({})).toEqual({ type: null, mixed: false })
     })
 })

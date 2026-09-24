@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import {
-    countMatches, countPropertyUsage, countPropertyUsageWithinTarget,
-    getAffectedSample, getCatalogOverview, getValueDistribution,
+    countMatches, countPropertyUsageWithinTarget,
+    getAffectedSample, getValueDistribution,
 } from '../propertyInsights'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
@@ -33,12 +33,13 @@ beforeEach(() => {
 
 
 describe('propertyInsights', () => {
-    it('returns empty usage for a non-remote provider', async () => {
-        const usage = await countPropertyUsage({ name: 'fake' } as never, 'view-1', 'owner')
-        expect(usage).toEqual({ total: 0, byEntityType: [], atLeast: false })
+    const HAS_OWNER = { kind: 'hasProperty', key: 'owner', negate: false } as Predicate
+
+    it('counts nothing for a non-remote provider', async () => {
+        expect(await countMatches({ name: 'fake' } as never, 'view-1', HAS_OWNER)).toBe(0)
     })
 
-    it('builds a hasProperty + entityType-aggregation query and parses buckets', async () => {
+    it('builds an entityType-aggregation query and sums its buckets', async () => {
         const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
         let captured: SearchQuery | null = null
         vi.spyOn(provider, 'searchAdvanced').mockImplementation(async (q: SearchQuery) => {
@@ -46,7 +47,7 @@ describe('propertyInsights', () => {
             return makeResult({ aggregates: [[bucket('dataset', 7), bucket('container', 3)]] })
         })
 
-        const usage = await countPropertyUsage(provider, 'view-1', 'owner')
+        const total = await countMatches(provider, 'view-1', HAS_OWNER)
 
         // Query shape: aggregate-only, faceted by entityType, view-scoped.
         expect(captured!.options?.results).toBe('aggregates')
@@ -54,13 +55,7 @@ describe('propertyInsights', () => {
         expect(captured!.scope.viewId).toBe('view-1')
         const group = captured!.predicate as GroupPredicate
         expect(group.children[0]).toMatchObject({ kind: 'hasProperty', key: 'owner' })
-
-        // Parsed: total = sum of buckets, sorted descending.
-        expect(usage.total).toBe(10)
-        expect(usage.byEntityType).toEqual([
-            { type: 'dataset', count: 7 },
-            { type: 'container', count: 3 },
-        ])
+        expect(total).toBe(10)
     })
 
     it('falls back to candidateCount when there are no aggregate buckets', async () => {
@@ -68,9 +63,7 @@ describe('propertyInsights', () => {
         vi.spyOn(provider, 'searchAdvanced').mockResolvedValue(
             makeResult({ candidateCount: 42, aggregates: [[]] }),
         )
-        const usage = await countPropertyUsage(provider, 'view-1', 'owner')
-        expect(usage.total).toBe(42)
-        expect(usage.byEntityType).toEqual([])
+        expect(await countMatches(provider, 'view-1', HAS_OWNER)).toBe(42)
     })
 
     it('countMatches returns the summed total for an arbitrary predicate', async () => {
@@ -122,41 +115,12 @@ describe('propertyInsights', () => {
         expect(s.truncated).toBe(false)
     })
 
-    it('getCatalogOverview asks for everything in the view and returns total + per-type', async () => {
-        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
-        let captured: SearchQuery | null = null
-        vi.spyOn(provider, 'searchAdvanced').mockImplementation(async (q: SearchQuery) => {
-            captured = q
-            return makeResult({ aggregates: [[bucket('dataset', 30), bucket('report', 10)]] })
-        })
-        const o = await getCatalogOverview(provider, 'view-1')
-        // "Everything" is spelled out: the empty AND group this used to send
-        // is rejected by the model (422), which the header showed as 0.
-        const group = captured!.predicate as GroupPredicate
-        expect(group.op).toBe('and')
-        expect(group.children).toEqual([{ kind: 'all' }])
-        expect(o.totalEntities).toBe(40)
-        expect(o.byEntityType).toEqual([{ type: 'dataset', count: 30 }, { type: 'report', count: 10 }])
-        expect(o.atLeast).toBe(false)
-    })
-
     it('uses the exact totalCount over the capped facet buckets', async () => {
         const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
         vi.spyOn(provider, 'searchAdvanced').mockResolvedValue(makeResult({
             aggregates: [[bucket('dataset', 10000)]], truncated: true, totalCount: 1234567,
         }))
-        const usage = await countPropertyUsage(provider, 'view-1', 'owner')
-        expect(usage.total).toBe(1234567)
-        expect(usage.atLeast).toBe(false)
-    })
-
-    it('marks a count that stopped short as a floor', async () => {
-        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
-        vi.spyOn(provider, 'searchAdvanced').mockResolvedValue(makeResult({
-            aggregates: [[bucket('dataset', 10000)]], truncated: true,
-        }))
-        const usage = await countPropertyUsage(provider, 'view-1', 'owner')
-        expect(usage).toMatchObject({ total: 10000, atLeast: true })
+        expect(await countMatches(provider, 'view-1', HAS_OWNER)).toBe(1234567)
     })
 
     it('never sends the canvas root guess as a scope narrowing', async () => {
@@ -169,7 +133,7 @@ describe('propertyInsights', () => {
             captured = q
             return makeResult({ aggregates: [[]] })
         })
-        await countPropertyUsage(provider, 'view-1', 'owner')
+        await countMatches(provider, 'view-1', HAS_OWNER)
         expect(captured!.scope).toEqual({ viewId: 'view-1', scopeMode: 'view' })
     })
 

@@ -101,4 +101,20 @@ describe('RemoteGraphProvider display-rule reads', () => {
     expect(JSON.parse(String(init?.body))).toEqual(body)
     expect(init?.signal).toBe(controller.signal)
   })
+
+  it('searchCatalog POSTs the scope and session to /search/catalog with the search timeout', async () => {
+    mockFetch.mockResolvedValue(okJson({
+      sessionId: 's', status: 'complete', entities: 3, entityTypes: [], properties: [], tags: [],
+    }))
+    const provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
+    const body = { scope: { viewId: 'v1', scopeMode: 'view' as const }, waitMs: 800, sessionId: 's' }
+
+    const answer = await provider.searchCatalog(body)
+
+    expect(answer.entities).toBe(3)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(String(url)).toContain('/graph/search/catalog')
+    expect(JSON.parse(String(init?.body))).toEqual(body)
+    expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_ADVANCED_MS)
+  })
 })

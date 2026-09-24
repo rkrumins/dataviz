@@ -1,13 +1,9 @@
 /**
- * propertyInsights — read-only usage analytics for entity properties.
- *
- * Discovery (``useDiscovery``) tells us WHICH keys exist and a few sample
- * values, but not HOW MANY entities carry a key. This service answers
- * that with a single ``searchAdvanced`` call per key: a view-scoped
- * ``hasProperty`` query aggregated ``by: 'entityType'``. Summing the
- * facet buckets' ``matchCount`` gives the exact total + a per-type
- * breakdown in one round-trip (``candidateCount`` is used as a fallback
- * total when the aggregation comes back empty).
+ * propertyInsights — the reads the bulk-property dialog makes about the
+ * entities an operation would touch: how many a target set holds, how many
+ * of them already carry a key, which values a key holds, and a sample of
+ * the entities themselves. (The Properties tab reads the view's exact
+ * property catalog instead — ``services/propertyCatalog``.)
  *
  * It is purely a READ — writes (bulk property apply) are deferred; only
  * persistence is gated, reads work against the live backend today.
@@ -15,21 +11,6 @@
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import type { Predicate, SearchQuery, SearchScope } from '@/types/search'
-
-
-export interface PropertyUsage {
-    /** Total entities in the view that match the predicate. */
-    total: number
-    /** Per-entity-type breakdown, descending by count. */
-    byEntityType: { type: string; count: number }[]
-    /** True when ``total`` is a floor, not the answer: the backend stopped
-     *  short (candidate cap, deadline) without an exact count. Show it as
-     *  "≥ N", never as N. */
-    atLeast: boolean
-}
-
-
-const EMPTY_USAGE: PropertyUsage = { total: 0, byEntityType: [], atLeast: false }
 
 
 /**
@@ -60,74 +41,6 @@ function buildViewScopedQuery(
 
 
 /**
- * Run a view-scoped aggregate-only search and parse the entity-type
- * facet into a usage breakdown. Shared by ``countPropertyUsage`` (which
- * targets a single ``hasProperty`` key) and ``countMatches`` (arbitrary
- * predicate, total only).
- */
-async function aggregateByEntityType(
-    provider: GraphDataProvider,
-    viewId: string,
-    predicate: Predicate,
-    signal?: AbortSignal,
-): Promise<PropertyUsage> {
-    if (!(provider instanceof RemoteGraphProvider) || !viewId) return EMPTY_USAGE
-    const query = buildViewScopedQuery(viewId, predicate, {
-        results: 'aggregates',
-        // We only need the counts, not hit rows.
-        pageSize: 1,
-        aggregations: [{ by: 'entityType', maxBuckets: 50 }],
-    })
-    const result = await provider.searchAdvanced(query)
-    if (signal?.aborted) return EMPTY_USAGE
-
-    const buckets = result.aggregates?.[0] ?? []
-    const byEntityType = buckets
-        .map((b) => ({
-            type: b.ancestorDisplayName || b.ancestorEntityType || 'unknown',
-            count: b.matchCount ?? 0,
-        }))
-        .filter((x) => x.count > 0)
-        .sort((a, b) => b.count - a.count)
-
-    // An aggregates-only request makes the backend run the uncapped count
-    // beside the (capped) facet, and ``totalCount`` is that answer. Summing
-    // the facet buckets instead topped out at the candidate cap on any view
-    // bigger than it.
-    if (typeof result.totalCount === 'number') {
-        return { total: result.totalCount, byEntityType, atLeast: false }
-    }
-    const summed = byEntityType.reduce((s, x) => s + x.count, 0)
-    const total = summed > 0 ? summed : (result.candidateCount ?? 0)
-    return {
-        total,
-        byEntityType,
-        atLeast: Boolean(result.truncated || result.deadlineExceeded),
-    }
-}
-
-
-/**
- * Exact usage of a single property key across the view: total entities
- * carrying the key + a per-entity-type breakdown.
- */
-export function countPropertyUsage(
-    provider: GraphDataProvider,
-    viewId: string,
-    key: string,
-    signal?: AbortSignal,
-): Promise<PropertyUsage> {
-    if (!key) return Promise.resolve(EMPTY_USAGE)
-    return aggregateByEntityType(
-        provider,
-        viewId,
-        { kind: 'hasProperty', key, negate: false } as Predicate,
-        signal,
-    )
-}
-
-
-/**
  * Total count of entities matching an arbitrary predicate (the target
  * set for a bulk property operation). Uses the same aggregate trick so
  * the count is exact (not capped at the hits page size).
@@ -138,8 +51,22 @@ export async function countMatches(
     predicate: Predicate,
     signal?: AbortSignal,
 ): Promise<number> {
-    const usage = await aggregateByEntityType(provider, viewId, predicate, signal)
-    return usage.total
+    if (!(provider instanceof RemoteGraphProvider) || !viewId) return 0
+    const query = buildViewScopedQuery(viewId, predicate, {
+        results: 'aggregates',
+        // We only need the count, not hit rows.
+        pageSize: 1,
+        aggregations: [{ by: 'entityType', maxBuckets: 50 }],
+    })
+    const result = await provider.searchAdvanced(query)
+    if (signal?.aborted) return 0
+    // An aggregates-only request makes the backend run the uncapped count
+    // beside the (capped) facet, and ``totalCount`` is that answer. Summing
+    // the facet buckets instead topped out at the candidate cap on any view
+    // bigger than it.
+    if (typeof result.totalCount === 'number') return result.totalCount
+    const summed = (result.aggregates?.[0] ?? []).reduce((n, b) => n + (b.matchCount ?? 0), 0)
+    return summed > 0 ? summed : (result.candidateCount ?? 0)
 }
 
 
@@ -225,36 +152,6 @@ export async function getAffectedSample(
         entityType: h.node?.entityType ?? '',
     }))
     return { entities, truncated: hits.length > limit }
-}
-
-
-// ---------------------------------------------------------------------------
-// Catalogue overview — eager, one call for the insights header
-// ---------------------------------------------------------------------------
-
-export interface CatalogOverview {
-    totalEntities: number
-    byEntityType: { type: string; count: number }[]
-    /** ``totalEntities`` is a floor — see ``PropertyUsage.atLeast``. */
-    atLeast: boolean
-}
-
-/** Total entity count + per-entity-type breakdown for the whole view. */
-export async function getCatalogOverview(
-    provider: GraphDataProvider,
-    viewId: string,
-    signal?: AbortSignal,
-): Promise<CatalogOverview> {
-    // "Everything in the view" is its own predicate: the empty AND group this
-    // used to send is rejected by the model (422), and the header showed the
-    // failure as "0 entities".
-    const usage = await aggregateByEntityType(
-        provider,
-        viewId,
-        { kind: 'all' } as Predicate,
-        signal,
-    )
-    return { totalEntities: usage.total, byEntityType: usage.byEntityType, atLeast: usage.atLeast }
 }
 
 

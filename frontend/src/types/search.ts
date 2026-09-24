@@ -72,6 +72,11 @@ import type {
     SearchAncestorCountsRequest as GenSearchAncestorCountsRequest,
     SearchAncestorCountsResult as GenSearchAncestorCountsResult,
     SearchAncestorCount as GenSearchAncestorCount,
+    SearchCatalogRequest as GenSearchCatalogRequest,
+    SearchCatalogResult as GenSearchCatalogResult,
+    SearchCatalogProperty as GenSearchCatalogProperty,
+    SearchCatalogValue as GenSearchCatalogValue,
+    SearchCatalogTag as GenSearchCatalogTag,
     SearchRuleCount as GenSearchRuleCount,
 } from './generated/searchquery'
 
@@ -225,6 +230,26 @@ export type SearchAncestorCount = RequireKeys<GenSearchAncestorCount, 'typeCount
 export type SearchAncestorCountsResult = Omit<GenSearchAncestorCountsResult, 'counts'> & {
     counts: Record<string, SearchAncestorCount>
 }
+export type SearchCatalogRequest = GenSearchCatalogRequest
+export type SearchCatalogValue = GenSearchCatalogValue
+export type SearchCatalogTag = GenSearchCatalogTag
+export type SearchCatalogProperty = RequireKeys<
+    Omit<GenSearchCatalogProperty, 'values' | 'min' | 'max'> & {
+        values: SearchCatalogValue[]
+        // An integer too large for a double arrives as its exact digits
+        // (lib/losslessJson), so a bound can be a string.
+        min?: number | string | null
+        max?: number | string | null
+    },
+    'byEntityType' | 'kinds' | 'values' | 'residual'
+>
+export type SearchCatalogResult = RequireKeys<
+    Omit<GenSearchCatalogResult, 'properties' | 'tags'> & {
+        properties: SearchCatalogProperty[]
+        tags: SearchCatalogTag[]
+    },
+    'entities' | 'entityTypes' | 'properties' | 'tags' | 'stale'
+>
 
 export type SearchValuesResult = RequireKeys<
     Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },

@@ -64,6 +64,8 @@ import type {
     SearchCountsResult,
     SearchAncestorCountsRequest,
     SearchAncestorCountsResult,
+    SearchCatalogRequest,
+    SearchCatalogResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -581,6 +583,23 @@ export class RemoteGraphProvider implements GraphDataProvider {
         body: SearchCountsRequest, opts?: { signal?: AbortSignal },
     ): Promise<SearchCountsResult> {
         return await this.fetch<SearchCountsResult>('/search/counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * Every property the view's entities carry — on how many, stored as
+     * which kinds, with which values — read from every entity in the view
+     * (POST /search/catalog). A large view takes several calls: send the
+     * returned session back until it is complete (``services/propertyCatalog``).
+     */
+    async searchCatalog(
+        body: SearchCatalogRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchCatalogResult> {
+        return await this.fetch<SearchCatalogResult>('/search/catalog', {
             method: 'POST',
             body: JSON.stringify(body),
             signal: opts?.signal,
