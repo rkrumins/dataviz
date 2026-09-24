@@ -126,8 +126,10 @@ jobs:
       # uncapped ORDER BY, row for row, under every scope shape — and a
       # property kept raw (propertiesRaw) must be searched as exactly as one
       # kept natively. An export of a search's matches must hold each one
-      # once, every value exactly as the graph keeps it.
+      # once, every value exactly as the graph keeps it. Run whatever the
+      # rebuild pipeline step above did: its result says nothing about these.
       - name: Search comparison semantics and the uncapped engine, against the real engine
+        if: ${{ !cancelled() }}
         working-directory: backend
         env:
           RUN_FALKOR_LIVE: "1"
