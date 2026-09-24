@@ -43,10 +43,12 @@ from backend.app.providers.falkordb_deep_search import (
     encode_cursor,
 )
 from backend.app.providers.falkordb_search.keys import build_sort_spec
+from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
 from backend.app.providers.falkordb_search.plan import (
     Context,
     Unit,
     after_statement,
+    count_statement,
     make_plan,
     page_statements,
     within_hops,
@@ -139,20 +141,8 @@ async def execute_session_search(
                                  progressive=progressive, facets=None, wants_facets=False)
 
     after = cursor.get("after") if cursor is not None else None
-    created = False
-    session = await _find(store, options.session_id, query_id, after)
-    if session is None:
-        sid = session_id(query_id, context.data_version, after)
-        session = await store.load(sid)
-        if session is None or session.status == FAILED:
-            created = True
-            plan = await make_plan(
-                provider, query, compiler,
-                run=lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0)),
-                width=settings.chunk_width, walk_max=settings.walk_max,
-                timeout_s=max(0.5, deadline - time.monotonic()),
-            )
-            session = Session.start(sid, query_id, context.data_version, after, k, plan)
+    session, created = await _session_for(provider, query, compiler, store, run, query_id,
+                                          k, after, context, deadline, settings)
 
     facets = None
     wants_facets = (after is None and options.results == "both"
@@ -160,24 +150,7 @@ async def execute_session_search(
     if wants_facets:
         facets = await _facets(provider, query, session.sid, store, run, settings)
 
-    if session.status == RUNNING:
-        lease_ms = int((budget_s + _GRACE_S + settings.chunk_timeout_ms / 1000.0) * 1000)
-        token = await store.lease(session.sid, lease_ms)
-        if token is None:
-            session = await wait_for_commit(store, session.sid, session, deadline) or session
-        else:
-            try:
-                await _hop(session, ctx, run, deadline, settings)
-            finally:
-                if session.status == FAILED:
-                    await store.delete(session.sid)
-                else:
-                    await store.save(session, token, settings.session_ttl_seconds)
-                await store.release(session.sid, token)
-    elif created:
-        # Nothing to run (an empty scope): keep the answer all the same.
-        await store.save(session, None, settings.session_ttl_seconds)
-
+    session = await _advance(session, created, ctx, store, run, deadline, settings)
     if session.status == FAILED:
         raise RuntimeError(f"search failed: {session.error}")
     if wants_facets and facets is None:
@@ -185,6 +158,122 @@ async def execute_session_search(
     return await _answer(provider, query, session, 0, context, started, deadline,
                          total=cursor.get("t") if cursor else None, cache_hit=False,
                          progressive=progressive, facets=facets, wants_facets=wants_facets)
+
+
+async def execute_count_session(
+    provider, query: SearchQuery, *, context: SearchRunContext, advance: bool = True,
+) -> Dict[str, Any]:
+    """How many entities in scope match ``query.predicate`` — exactly, in
+    as many requests as the scan takes. The count's own session: the same
+    units a search reads, each only counted (no ordering, no rows), so a
+    rule's total costs a fraction of a search. ``options.waitMs`` bounds
+    this request; ``options.sessionId`` continues a count.
+
+    ``advance=False`` only reads where the count has got to — no planning,
+    no scanning — so a caller with many counts can decide which to move on."""
+    if not advance:
+        query_id = query_identity(query, context.scope_hash, 0)
+        store = store_for(provider)
+        session = (await _find(store, query.options.session_id, query_id, None)
+                   or await store.load(session_id(query_id, context.data_version, None)))
+        if session is None or session.status == FAILED:
+            return {"count": 0, "status": "running", "sessionId": None, "progress": None,
+                    "dataVersion": context.data_version, "notes": []}
+        return _count_answer(session)
+    settings = get_deep_search_settings()
+    started = time.monotonic()
+    options = query.options
+    deadline = started + (options.wait_ms if options.wait_ms is not None
+                          else options.soft_deadline_ms) / 1000.0
+    admit = context.admit
+
+    compiler = _build_compiler_for_provider(provider)
+    where = compiler.compile(query.predicate)
+    if compiler.hoisted_path is not None:
+        raise CompileError("a path search has no count")
+    hops, hop_params = within_hops(compiler)
+    ctx = Context(
+        where=where, params={**compiler.params, **hop_params},
+        sort=SortSpec((SortKey("n.urn"),)), containment=_containment(provider),
+        max_depth=int(query.scope.max_depth or 12),
+        visible=(list(query.scope.visible_urns or [])
+                 if query.scope.scope_mode == "visible" else None),
+        within_hops=hops,
+    )
+    query_id = query_identity(query, context.scope_hash, 0)
+    store = store_for(provider)
+
+    async def run(cypher: str, params: Dict[str, Any], timeout_s: float):
+        async with (admit() if admit else contextlib.nullcontext()):
+            return await provider._ro_query(cypher, params=params, timeout=timeout_s)
+
+    session, created = await _session_for(provider, query, compiler, store, run, query_id,
+                                          0, None, context, deadline, settings)
+    session = await _advance(session, created, ctx, store, run, deadline, settings)
+    if session.status == FAILED:
+        raise RuntimeError(f"count failed: {session.error}")
+    return _count_answer(session)
+
+
+def _count_answer(session: Session) -> Dict[str, Any]:
+    return {
+        "count": session.count,
+        "status": "complete" if session.status == COMPLETE else "running",
+        "sessionId": session.sid,
+        "progress": {"scanned": session.scanned,
+                     "total": max(session.total, session.scanned),
+                     "matched": session.count},
+        "dataVersion": session.data_version,
+        "notes": list(session.notes),
+    }
+
+
+async def _session_for(provider, query, compiler, store, run, query_id: str, k: int,
+                       after, context: SearchRunContext, deadline: float, settings
+                       ) -> Tuple[Session, bool]:
+    """The session this request continues — the one the client named, if it
+    answers this query, else this data version's — or a newly planned one.
+    Also whether it was just created."""
+    session = await _find(store, query.options.session_id, query_id, after)
+    if session is not None:
+        return session, False
+    sid = session_id(query_id, context.data_version, after)
+    session = await store.load(sid)
+    if session is not None and session.status != FAILED:
+        return session, False
+    plan = await make_plan(
+        provider, query, compiler,
+        run=lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0)),
+        width=settings.chunk_width, walk_max=settings.walk_max,
+        timeout_s=max(0.5, deadline - time.monotonic()),
+    )
+    return Session.start(sid, query_id, context.data_version, after, k, plan), True
+
+
+async def _advance(session: Session, created: bool, ctx: Context, store: SessionStore,
+                   run, deadline: float, settings) -> Session:
+    """This request's share of the scan: under the session's lease, run
+    what is pending until ``deadline`` and commit it; or, when another
+    request holds the lease, answer with its next commit."""
+    if session.status != RUNNING:
+        if created:
+            # Nothing to run (an empty scope): keep the answer all the same.
+            await store.save(session, None, settings.session_ttl_seconds)
+        return session
+    budget_s = max(0.0, deadline - time.monotonic())
+    lease_ms = int((budget_s + _GRACE_S + settings.chunk_timeout_ms / 1000.0) * 1000)
+    token = await store.lease(session.sid, lease_ms)
+    if token is None:
+        return await wait_for_commit(store, session.sid, session, deadline) or session
+    try:
+        await _hop(session, ctx, run, deadline, settings)
+    finally:
+        if session.status == FAILED:
+            await store.delete(session.sid)
+        else:
+            await store.save(session, token, settings.session_ttl_seconds)
+        await store.release(session.sid, token)
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +410,13 @@ async def _hop(session: Session, ctx: Context, run, deadline: float, settings) -
 async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: float
                     ) -> Tuple[int, List[List[Any]]]:
     """One unit's exact count and ordered first rows (a later page's
-    session counts nothing — the total is page 1's)."""
+    session counts nothing — the total is page 1's; a count session keeps
+    no rows)."""
+    if session.k == 0:
+        cypher, params = count_statement(unit, ctx, session.clamps)
+        res = await run(cypher, params, timeout_s)
+        rs = res.result_set or []
+        return (int(rs[0][0]) if rs else 0), []
     if session.after is not None:
         cypher, params = after_statement(unit, ctx, session.clamps, session.k, session.after)
         res = await run(cypher, params, timeout_s)

@@ -30,7 +30,11 @@ from backend.app.providers.falkordb_provider import (
     _FAILOVER_RETRY_AFTER_S,
     CursorMismatchError,
 )
-from backend.common.models.search import SearchQuery
+from backend.common.models.search import (
+    SearchCountsRequest,
+    SearchMembershipRequest,
+    SearchQuery,
+)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
@@ -1986,6 +1990,86 @@ async def search_values(
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/membership", response_model_by_alias=True)
+async def search_membership(
+    body: SearchMembershipRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Which of the entities on screen (at most 1,000 urns) match which
+    rules (at most 32) — what display rules paint, without downloading every
+    entity a rule matches. Only entities inside the view's scope ever match;
+    the scope is resolved here from ``scope.viewId``, like a search's.
+
+    A rule using ``withinHops`` or a path is refused in ``errors``: those
+    describe a route, not an entity.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.membership(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/counts", response_model_by_alias=True)
+async def search_counts(
+    body: SearchCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many entities in the view match each rule — exactly, however
+    many. A count over a large view takes more than one request: send the
+    same body again with the returned ``sessions`` (rule id → sessionId)
+    until every count reads ``complete``. Each request runs about
+    ``waitMs``, sharing it among the counts that have got least far.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.counts(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
+                  engine: ContextEngine, session: AsyncSession):
+    """The search service for a rules request, after the checks a search
+    makes: a workspace, and a share link kept inside its own view."""
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request, body)
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    return AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=data_source_id,
+        branch_id=branch_id,
+    )
 
 
 # Process-level cache of the SearchQuery JSON Schema. It's static

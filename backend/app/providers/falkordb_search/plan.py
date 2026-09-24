@@ -406,6 +406,13 @@ def page_statements(unit: Unit, ctx: Context, clamps: List[List[int]], k: int
              "RETURN _c, _rows[..$_k]", params, "both")]
 
 
+def count_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
+                    ) -> Tuple[str, Dict[str, Any]]:
+    """This unit's exact count, and nothing else — a rule's total."""
+    head, params = match_statement(unit, ctx, clamps)
+    return f"{head} RETURN count(n)", params
+
+
 def after_statement(unit: Unit, ctx: Context, clamps: List[List[int]], k: int,
                     after: Sequence[Any]) -> Tuple[str, Dict[str, Any]]:
     """This unit's first ``k`` rows strictly after ``after`` — a later page."""

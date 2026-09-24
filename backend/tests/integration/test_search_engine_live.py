@@ -323,3 +323,97 @@ async def test_each_unit_is_the_seek_it_means_to_be(provider):
     clamped = await plan_of(Unit("range", "Column", 100, 900), clamps=[[0]])
     assert "Conditional Variable Length Traverse" in clamped
     assert "All Node Scan" not in clamped
+
+
+# ---------------------------------------------------------------------------
+# Rules: membership for what is on screen, exact counts for the whole view
+# ---------------------------------------------------------------------------
+
+def _scopes():
+    from backend.common.models.search import SearchScope
+    return {
+        "data-source": SearchScope(view_id="v", scope_mode="data_source"),
+        "domain": SearchScope(view_id="v", scope_mode="view", root_urns=[URNS["Domain"][0]]),
+        "containers": SearchScope(view_id="v", scope_mode="view",
+                                  root_urns=URNS["Container"][2:5]),
+    }
+
+
+async def _in_scope_matching(provider, scope, predicate, urns=None):
+    """The URNs a rule matches in scope, by one direct statement."""
+    from backend.app.providers.falkordb_deep_search import _build_compiler_for_provider
+    compiler = _build_compiler_for_provider(provider)
+    where = compiler.compile(predicate)
+    params = dict(compiler.params)
+    head = "MATCH (n) WITH n"
+    if scope.root_urns:
+        head = ("MATCH (r) WHERE r.urn IN $_r MATCH (r)-[:CONTAINS*0..12]->(n) "
+                "WITH DISTINCT n")
+        params["_r"] = scope.root_urns
+    conds = [f"({where})"]
+    for i, urn_set in enumerate(compiler.hoisted_root_urns):
+        conds.append(f"ANY(_x IN _anc WHERE _x IN $_h{i})")
+        params[f"_h{i}"] = urn_set
+    if urns is not None:
+        conds.append("n.urn IN $_u")
+        params["_u"] = urns
+    # A pattern comprehension can't sit in a WHERE beside a MATCH
+    # (S0_FINDINGS §3): project the ancestors first.
+    rows = (await provider._ro_query(
+        f"{head} WITH n, [(n)<-[:CONTAINS*0..12]-(_a) | _a.urn] AS _anc "
+        f"WHERE {' AND '.join(conds)} RETURN n.urn", params=params, timeout=60)).result_set
+    return {r[0] for r in rows}
+
+
+RULES = {
+    "owner-in": PREDICATES["owner-in"],
+    "not-pii": PREDICATES["not-pii"],
+    "or": PREDICATES["or"],
+    "under-a-container": {"kind": "group", "op": "and", "children": [
+        {"kind": "descendantOf", "urns": ["urn:container:3", "urn:container:7"]},
+        {"kind": "text", "value": "orders", "target": "name"}]},
+}
+
+
+@pytest.mark.parametrize("scope_name", ["data-source", "domain", "containers"])
+async def test_membership_is_each_rule_on_each_urn_in_scope(provider, scope_name):
+    from pydantic import TypeAdapter
+
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.common.models.search import Predicate
+
+    scope = _scopes()[scope_name]
+    rng = random.Random(11)
+    urns = (rng.sample(URNS["Column"], 700) + rng.sample(URNS["Dataset"], 60)
+            + URNS["Container"] + ["urn:column:missing"])
+    items = [(name, TypeAdapter(Predicate).validate_python(p)) for name, p in RULES.items()]
+    out = await provider.deep_search_membership(scope, items, urns, context=SearchRunContext())
+    assert out["errors"] == {}
+    for name, predicate in items:
+        want = await _in_scope_matching(provider, scope, predicate, urns)
+        assert set(out["matches"][name]) == want, name
+
+
+@pytest.mark.parametrize("scope_name", ["data-source", "domain", "containers"])
+@pytest.mark.parametrize("rule", ["owner-in", "not-pii", "under-a-container"])
+async def test_a_rule_count_is_exact_across_requests(provider, rule, scope_name):
+    from pydantic import TypeAdapter
+
+    from backend.app.providers.falkordb_search.engine import execute_count_session
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.common.models.search import Predicate, SearchOptions, SearchQuery
+
+    scope = _scopes()[scope_name]
+    predicate = TypeAdapter(Predicate).validate_python(RULES[rule])
+    want = len(await _in_scope_matching(provider, scope, predicate))
+    session, requests, answer = None, 0, None
+    for requests in range(1, 50):
+        q = SearchQuery(predicate=predicate, scope=scope,
+                        options=SearchOptions(results="hits", wait_ms=0, session_id=session))
+        answer = await execute_count_session(provider, q, context=SearchRunContext(
+            data_version="1", scope_hash=scope_name))
+        session = answer["sessionId"]
+        if answer["status"] == "complete":
+            break
+    assert answer["status"] == "complete"
+    assert answer["count"] == want

@@ -142,6 +142,40 @@ class StubDeepSearchProvider:
             cache_hit=False,
         )
 
+    async def deep_search_count(self, query: SearchQuery, *, context=None,
+                                advance: bool = True) -> Dict[str, Any]:
+        """A rule's total over the fixture — complete in one answer."""
+        count = sum(1 for n in self._in_scope(query.scope) if _matches(n, query.predicate))
+        return {"count": count, "status": "complete", "sessionId": None,
+                "progress": {"scanned": 1, "total": 1, "matched": count},
+                "dataVersion": None, "notes": []}
+
+    async def deep_search_membership(self, scope, items, urns, *, context=None) -> Dict[str, Any]:
+        """Which of ``urns`` match each rule, inside ``scope``."""
+        wanted = set(urns)
+        nodes = [n for n in self._in_scope(scope) if n.get("urn") in wanted]
+        matches: Dict[str, List[str]] = {}
+        errors: Dict[str, str] = {}
+        for item_id, predicate in items:
+            try:
+                matches[item_id] = [n["urn"] for n in nodes if _matches(n, predicate)]
+            except CompileError as exc:
+                errors[item_id] = str(exc)
+        return {"matches": matches, "errors": errors, "elapsedMs": 0}
+
+    def _in_scope(self, scope) -> List[Dict[str, Any]]:
+        """The fixture nodes inside a resolved scope, as ``deep_search``
+        clamps them."""
+        nodes = list(self._nodes)
+        if scope.root_urns:
+            roots = set(scope.root_urns)
+            nodes = [n for n in nodes if n.get("urn") in roots
+                     or any(a in roots for a in n.get("ancestorUrns", []))]
+        elif scope.entity_types:
+            allowed = set(scope.entity_types)
+            nodes = [n for n in nodes if n.get("entityType") in allowed]
+        return nodes
+
     async def deep_search_explain(self, query: SearchQuery) -> Dict[str, Any]:
         # The stub doesn't emit Cypher; it returns a diagnostic dict
         # whose shape matches ``explain_deep_search`` enough for the

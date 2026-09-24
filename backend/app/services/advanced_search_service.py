@@ -21,6 +21,7 @@ and that's enforced here — before any Cypher is generated.
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import nullcontext
 from dataclasses import replace
 from typing import Optional, Tuple
@@ -45,11 +46,20 @@ from backend.common.models.search import (
     EdgeGroupPredicate,
     EdgePropertyPredicate,
     GroupPredicate,
+    MatchAllPredicate,
     PathPredicate,
     PropertyPredicate,
     ScopeDiagnostics,
+    SearchCountsRequest,
+    SearchCountsResult,
+    SearchMembershipRequest,
+    SearchMembershipResult,
+    SearchOptions,
+    SearchProgress,
     SearchQuery,
     SearchResultPage,
+    SearchRuleCount,
+    SearchRuleItem,
     SearchScope,
     TextPredicate,
     WithinHopsPredicate,
@@ -269,6 +279,17 @@ def _reject_unbounded_text_any(
         "entities to the view, or narrow the search by entity type, "
         "tag, property, layer, or path."
     )
+
+
+def _validate_items(items) -> None:
+    """Each rule's predicate, held to the same caps and typed checks as a
+    search's — with the path naming the rule."""
+    max_leaves = get_deep_search_settings().max_leaf_count
+    for i, item in enumerate(items):
+        leaves = _validate_predicate(item.predicate, path=f"$.items[{i}].predicate")
+        if leaves > max_leaves:
+            raise ValidationError(
+                f"$.items[{i}].predicate has {leaves} leaves (max {max_leaves})")
 
 
 def _returns_hits(query: SearchQuery) -> bool:
@@ -515,6 +536,110 @@ class AdvancedSearchService:
         admit = run_context.admit if run_context is not None else None
         async with (admit() if admit is not None else nullcontext()):
             return await op(query, deadline_ms=deadline_ms)
+
+    async def membership(
+        self,
+        request: SearchMembershipRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchMembershipResult:
+        """Which of the requested (on-screen) entities match which rules,
+        inside the view's scope — resolved here, never taken from the
+        client."""
+        _validate_items(request.items)
+        scope, _eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchMembershipResult(matches={item.id: [] for item in request.items})
+        op = self._provider_op("deep_search_membership")
+        context = run_context or SearchRunContext()
+        out = await op(scope, [(item.id, item.predicate) for item in request.items],
+                       request.urns, context=context)
+        return SearchMembershipResult(
+            matches=out["matches"], errors=out["errors"],
+            data_version=context.data_version or None, elapsed_ms=out["elapsedMs"],
+        )
+
+    async def counts(
+        self,
+        request: SearchCountsRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchCountsResult:
+        """Each rule's exact total in the view. A large view takes several
+        requests; each one first reads where every count has got to (no
+        work), then moves on the least advanced counts until its wait is
+        spent — so many rules all progress, none starve."""
+        started = time.monotonic()
+        _validate_items(request.items)
+        scope, eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchCountsResult(counts={
+                item.id: SearchRuleCount(count=0, status="complete") for item in request.items})
+        op = self._provider_op("deep_search_count")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        deadline = started + request.wait_ms / 1000.0
+
+        def query_of(item: SearchRuleItem, wait_ms: int, session: Optional[str]) -> SearchQuery:
+            return SearchQuery(predicate=item.predicate, scope=scope,
+                               options=SearchOptions(results="hits", wait_ms=wait_ms,
+                                                     session_id=session))
+
+        answers: dict = {}
+        errors: dict = {}
+        for item in request.items:
+            try:
+                answers[item.id] = await op(
+                    query_of(item, 0, request.sessions.get(item.id)),
+                    context=context, advance=False)
+            except CompileError as exc:
+                errors[item.id] = str(exc)
+
+        def done(item: SearchRuleItem) -> float:
+            progress = answers[item.id].get("progress") or {}
+            total = progress.get("total") or 0
+            return (progress.get("scanned") or 0) / total if total else 0.0
+
+        pending = sorted((i for i in request.items
+                          if i.id in answers and answers[i.id]["status"] != "complete"),
+                         key=done)
+        for n, item in enumerate(pending):
+            wait_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if n and not wait_ms:
+                break        # the first always moves; the rest wait their turn
+            session = answers[item.id]["sessionId"] or request.sessions.get(item.id)
+            try:
+                answers[item.id] = await op(query_of(item, wait_ms, session), context=context)
+            except CompileError as exc:
+                errors[item.id] = str(exc)
+
+        counts = {}
+        for item in request.items:
+            if item.id in errors:
+                counts[item.id] = SearchRuleCount(count=0, status="complete",
+                                                  error=errors[item.id])
+                continue
+            answer = answers[item.id]
+            counts[item.id] = SearchRuleCount(
+                count=answer["count"], status=answer["status"],
+                session_id=answer["sessionId"],
+                progress=(SearchProgress(**answer["progress"])
+                          if answer.get("progress") else None),
+            )
+        return SearchCountsResult(counts=counts, data_version=context.data_version or None,
+                                  elapsed_ms=int((time.monotonic() - started) * 1000))
+
+    async def _rule_scope(self, requested: SearchScope):
+        """The resolved scope a rule is evaluated in, or None when every root
+        the client named lies outside the view (then nothing matches —
+        never a widened search)."""
+        client_requested_urns = bool(requested.root_urns)
+        eff_scope = await self._resolve_scope(requested)
+        await self._guard_view_data_source(eff_scope)
+        stamped, _note = _stamp_resolved_scope(
+            SearchQuery(predicate=MatchAllPredicate(), scope=requested), eff_scope)
+        if client_requested_urns and not eff_scope.root_urns:
+            return None, eff_scope
+        return stamped.scope, eff_scope
 
     async def explain(self, query: SearchQuery):
         """Compile-only path. Returns the generated Cypher + bound params

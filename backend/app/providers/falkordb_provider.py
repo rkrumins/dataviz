@@ -6361,6 +6361,28 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await execute_session_search(self, query, context=context)
 
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's exact total, in as many requests as the scan takes.
+        See ``falkordb_search/engine.py``."""
+        from .falkordb_search.engine import execute_count_session
+        await self._ensure_connected()
+        return await execute_count_session(self, query, context=context, advance=advance)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Which of ``urns`` match which rule, inside ``scope``. See
+        ``falkordb_search/membership.py``."""
+        from .falkordb_search.membership import evaluate_membership
+        await self._ensure_connected()
+        admit = context.admit
+
+        async def run(cypher, params):
+            if admit is None:
+                return await self._ro_query(cypher, params=params)
+            async with admit():
+                return await self._ro_query(cypher, params=params)
+
+        return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
         avoid the circular load order)."""

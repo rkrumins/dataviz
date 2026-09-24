@@ -1165,6 +1165,72 @@ class SearchValuesResult(_Base):
     elapsed_ms: int = Field(0, alias="elapsedMs")
 
 
+# ---------------------------------------------------------------------------
+# Rules: which on-screen entities match, and how many match in all
+# ---------------------------------------------------------------------------
+
+SEARCH_RULE_ITEMS_MAX = 32
+SEARCH_MEMBERSHIP_URNS_MAX = 1000
+
+
+class SearchRuleItem(_Base):
+    """One rule (or saved query) to evaluate: an id the caller chose, and
+    its predicate."""
+    id: str = Field(min_length=1, max_length=128)
+    predicate: Predicate
+
+
+class SearchMembershipRequest(_Base):
+    """``POST /search/membership``: which of these entities — the ones on
+    screen — match which rules. Answers only for entities inside the view's
+    scope; one outside it never matches, whatever it holds."""
+    scope: SearchScope
+    items: List[SearchRuleItem] = Field(min_length=1, max_length=SEARCH_RULE_ITEMS_MAX)
+    urns: List[str] = Field(max_length=SEARCH_MEMBERSHIP_URNS_MAX)
+
+
+class SearchMembershipResult(_Base):
+    matches: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Rule id → the requested urns it matches (in scope).",
+    )
+    errors: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Rule id → why it could not be evaluated. Such a rule "
+                    "matches nothing here.",
+    )
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+
+class SearchCountsRequest(_Base):
+    """``POST /search/counts``: how many entities in the view match each
+    rule — exactly, however many. A count over a large view takes more than
+    one request: send the same request again with the returned ``sessions``
+    until every count is complete."""
+    scope: SearchScope
+    items: List[SearchRuleItem] = Field(min_length=1, max_length=SEARCH_RULE_ITEMS_MAX)
+    wait_ms: int = Field(1000, alias="waitMs", ge=0, le=60000)
+    sessions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Rule id → the session a previous answer returned.",
+    )
+
+
+class SearchRuleCount(_Base):
+    count: int = Field(description="Matches found so far — exact once complete.")
+    status: Literal["running", "complete"]
+    session_id: Optional[str] = Field(None, alias="sessionId")
+    progress: Optional[SearchProgress] = None
+    error: Optional[str] = None
+
+
+class SearchCountsResult(_Base):
+    counts: Dict[str, SearchRuleCount] = Field(default_factory=dict)
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1183,6 +1249,12 @@ class SearchApiContract(_Base):
     search_explain_result: Optional[SearchExplainResult] = Field(None, alias="searchExplainResult")
     search_discover_result: Optional[SearchDiscoverResult] = Field(None, alias="searchDiscoverResult")
     search_values_result: Optional[SearchValuesResult] = Field(None, alias="searchValuesResult")
+    search_membership_request: Optional[SearchMembershipRequest] = Field(
+        None, alias="searchMembershipRequest")
+    search_membership_result: Optional[SearchMembershipResult] = Field(
+        None, alias="searchMembershipResult")
+    search_counts_request: Optional[SearchCountsRequest] = Field(None, alias="searchCountsRequest")
+    search_counts_result: Optional[SearchCountsResult] = Field(None, alias="searchCountsResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

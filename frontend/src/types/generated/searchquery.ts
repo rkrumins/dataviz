@@ -37,144 +37,7 @@ export type Lineageedgetypes = string[]
  * Human-readable diagnostic notes — e.g. 'view has no rootUrns configured; search ran unclamped'.
  */
 export type Notes = string[]
-/**
- * Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.
- */
-export type Blobonlylabels = string[]
-/**
- * Property keys found on at least one sampled edge.
- */
-export type Keys = string[]
-/**
- * How many edges of this type were sampled.
- */
-export type Sampled = number
-/**
- * Distinct values per edge property key. Powers the edge-predicate editor's value autocomplete in W2.
- */
-export type Valuesamplesbykey = {
-    [k: string]: unknown[]
-} | null
-/**
- * Discovery query duration in milliseconds.
- */
-export type Elapsedms = number
-/**
- * Native property keys found on at least one sampled node, capped at the top N by frequency in the sample (see ``truncatedProperties``).
- */
-export type Keys1 = string[]
-/**
- * How many nodes were sampled for this label.
- */
-export type Sampled1 = number
-/**
- * True when the sample yielded more property keys than the configured per-label cap (DEEP_SEARCH_DISCOVER_KEY_CAP). FE shows a 'X of ~N properties — narrow the sample to see rare keys' hint.
- */
-export type Truncatedproperties = boolean
-/**
- * Distinct values seen for each property key in the sample (capped at ~20 per key, ~64 keys per label). Powers the FE's property-value picker so users can choose from known values instead of typing blind. Absent when value-sample collection is disabled via the request flag.
- */
-export type Valuesamplesbykey1 = {
-    [k: string]: unknown[]
-} | null
-/**
- * True when the provider has no containment edge types configured — ancestor-based queries will return empty.
- */
-export type Missingcontainment = boolean
-/**
- * Sampled nodes with no n.searchableText — run `python -m backend.scripts.migrate_native_properties --searchable-text`.
- */
-export type Missingsearchabletext = number
-/**
- * Hard cap on the candidate set the provider walks.
- */
-export type CandidateCap = number
-/**
- * Full candidate Cypher (ends with `WITH n`).
- */
-export type Cypher = string
-/**
- * Final root URNs after intersecting scope + hoisted (null = no scope).
- */
-export type EffectiveRootUrns = string[] | null
-/**
- * `cypher` plus `RETURN n` — what a hits query would actually run.
- */
-export type HitsCypher = string
-/**
- * URN sets hoisted out of top-level DescendantOf predicates.
- */
-export type HoistedRootUrns = string[][]
-/**
- * Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').
- */
-export type Notes1 = string[]
-/**
- * Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.
- */
-export type Resolvedscope = {
-    [k: string]: unknown
-} | null
-export type $Schemaversion = '1'
-/**
- * Parallel facets — each spec produces its own bucket list in the response. Omit for hits-only requests.
- */
-export type Aggregations = AggregationSpec[] | null
-/**
- * Required when by='ancestorType'.
- */
-export type Ancestorentitytypes = string[] | null
-/**
- * Required when by='ancestorLevel'.
- */
-export type Ancestorlevel = number | null
-export type By =
-    'ancestorType' | 'ancestorLevel' | 'ancestor' | 'parent' | 'tag' | 'entityType' | 'property'
-/**
- * Bucket ceiling. The headroom above a facet-sized list is for by='ancestor', which needs one bucket per container the canvas can collapse.
- */
-export type Maxbuckets = number
-/**
- * Required when by='property'. The native node property whose values become the bucket keys (e.g. 'layer' → one bucket per layer value).
- */
-export type Propertykey = string | null
-/**
- * Tiny preview list shown next to each bucket — for the UI's hover-card and the AI-agent's at-a-glance context.
- */
-export type Samplehitsperbucket = number
-/**
- * Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max. The uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or counts; it applies only to the facets that still pivot on a capped candidate set.
- */
-export type Candidatecap = number | null
-/**
- * Opaque pagination cursor. When set, hits start from the cursor's recorded offset within the candidate set. The response echoes a new cursor when more rows are available (``hits.length == pageSize`` AND the slice didn't exhaust the candidate set).
- */
-export type Cursor = string | null
-export type Highlights = boolean
-export type Includeancestorpath = boolean
-/**
- * Number of hits returned per page. Default 50 (sane for browsing); the panel sets it to the candidate cap (5000) when it wants the full match set in one round-trip so canvas highlighting can cover every match without paginating. Bounded at 5000 (matches CANDIDATE_CAP) — larger pages require cursor pagination.
- */
-export type Pagesize = number
-export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
-/**
- * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
- */
-export type Sessionid = string | null
-/**
- * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
- */
-export type Softdeadlinems = number
-export type Sort = 'relevance' | 'displayName' | 'qualifiedName' | 'depth' | 'matchCount'
-export type Sortdir = 'asc' | 'desc'
-/**
- * When set, hits are ordered by this native node property (e.g. 'rowCount') instead of by `sort`. Useful for 'biggest first' / 'newest first' UX.
- */
-export type Sortproperty = string | null
-/**
- * Progressive mode (uncapped engine). Answer after this long with what the scan has found so far — ``status: 'running'``, provisional hits in their final order, a ``progress`` block — and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.
- */
-export type Waitms = number | null
+export type Id = string
 export type Predicate =
     | TextPredicate
     | PropertyPredicate
@@ -203,7 +66,7 @@ export type Match = 'exact' | 'prefix' | 'suffix' | 'substring' | 'fulltext' | '
 /**
  * Required when ``target='property'``; ignored otherwise.
  */
-export type Propertykey1 = string | null
+export type Propertykey = string | null
 export type Target = 'name' | 'qualifiedName' | 'description' | 'tags' | 'property' | 'any'
 export type Value = string
 export type Casesensitive1 = boolean
@@ -368,6 +231,7 @@ export type Children1 = (
 )[]
 export type Kind19 = 'group'
 export type Op6 = 'and' | 'or' | 'not'
+export type Items = SearchRuleItem[]
 /**
  * Optional. Must be ⊆ view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.
  */
@@ -393,6 +257,188 @@ export type Viewid = string
  * URNs currently rendered in the canvas. Required when scope_mode='visible'. Ignored in other modes. Capped at DEEP_SEARCH_VISIBLE_URNS_CAP entries (default 20000).
  */
 export type Visibleurns = string[] | null
+export type Waitms = number
+/**
+ * Matches found so far — exact once complete.
+ */
+export type Count = number
+export type Error = string | null
+/**
+ * Matches found so far — exact for the parts scanned.
+ */
+export type Matched = number
+/**
+ * Nodes in the parts already scanned.
+ */
+export type Scanned = number
+/**
+ * Nodes in every part the search scans.
+ */
+export type Total = number
+export type Sessionid = string | null
+export type Status = 'running' | 'complete'
+export type Dataversion = string | null
+export type Elapsedms = number
+/**
+ * Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.
+ */
+export type Blobonlylabels = string[]
+/**
+ * Property keys found on at least one sampled edge.
+ */
+export type Keys = string[]
+/**
+ * How many edges of this type were sampled.
+ */
+export type Sampled = number
+/**
+ * Distinct values per edge property key. Powers the edge-predicate editor's value autocomplete in W2.
+ */
+export type Valuesamplesbykey = {
+    [k: string]: unknown[]
+} | null
+/**
+ * Discovery query duration in milliseconds.
+ */
+export type Elapsedms1 = number
+/**
+ * Native property keys found on at least one sampled node, capped at the top N by frequency in the sample (see ``truncatedProperties``).
+ */
+export type Keys1 = string[]
+/**
+ * How many nodes were sampled for this label.
+ */
+export type Sampled1 = number
+/**
+ * True when the sample yielded more property keys than the configured per-label cap (DEEP_SEARCH_DISCOVER_KEY_CAP). FE shows a 'X of ~N properties — narrow the sample to see rare keys' hint.
+ */
+export type Truncatedproperties = boolean
+/**
+ * Distinct values seen for each property key in the sample (capped at ~20 per key, ~64 keys per label). Powers the FE's property-value picker so users can choose from known values instead of typing blind. Absent when value-sample collection is disabled via the request flag.
+ */
+export type Valuesamplesbykey1 = {
+    [k: string]: unknown[]
+} | null
+/**
+ * True when the provider has no containment edge types configured — ancestor-based queries will return empty.
+ */
+export type Missingcontainment = boolean
+/**
+ * Sampled nodes with no n.searchableText — run `python -m backend.scripts.migrate_native_properties --searchable-text`.
+ */
+export type Missingsearchabletext = number
+/**
+ * Hard cap on the candidate set the provider walks.
+ */
+export type CandidateCap = number
+/**
+ * Full candidate Cypher (ends with `WITH n`).
+ */
+export type Cypher = string
+/**
+ * Final root URNs after intersecting scope + hoisted (null = no scope).
+ */
+export type EffectiveRootUrns = string[] | null
+/**
+ * `cypher` plus `RETURN n` — what a hits query would actually run.
+ */
+export type HitsCypher = string
+/**
+ * URN sets hoisted out of top-level DescendantOf predicates.
+ */
+export type HoistedRootUrns = string[][]
+/**
+ * Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').
+ */
+export type Notes1 = string[]
+/**
+ * Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.
+ */
+export type Resolvedscope = {
+    [k: string]: unknown
+} | null
+export type Items1 = SearchRuleItem[]
+export type Urns2 = string[]
+export type Dataversion1 = string | null
+export type Elapsedms2 = number
+export type $Schemaversion = '1'
+/**
+ * Parallel facets — each spec produces its own bucket list in the response. Omit for hits-only requests.
+ */
+export type Aggregations = AggregationSpec[] | null
+/**
+ * Required when by='ancestorType'.
+ */
+export type Ancestorentitytypes = string[] | null
+/**
+ * Required when by='ancestorLevel'.
+ */
+export type Ancestorlevel = number | null
+export type By =
+    'ancestorType' | 'ancestorLevel' | 'ancestor' | 'parent' | 'tag' | 'entityType' | 'property'
+/**
+ * Bucket ceiling. The headroom above a facet-sized list is for by='ancestor', which needs one bucket per container the canvas can collapse.
+ */
+export type Maxbuckets = number
+/**
+ * Required when by='property'. The native node property whose values become the bucket keys (e.g. 'layer' → one bucket per layer value).
+ */
+export type Propertykey1 = string | null
+/**
+ * Tiny preview list shown next to each bucket — for the UI's hover-card and the AI-agent's at-a-glance context.
+ */
+export type Samplehitsperbucket = number
+/**
+ * Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max. The uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or counts; it applies only to the facets that still pivot on a capped candidate set.
+ */
+export type Candidatecap = number | null
+/**
+ * Opaque pagination cursor. When set, hits start from the cursor's recorded offset within the candidate set. The response echoes a new cursor when more rows are available (``hits.length == pageSize`` AND the slice didn't exhaust the candidate set).
+ */
+export type Cursor = string | null
+export type Highlights = boolean
+export type Includeancestorpath = boolean
+/**
+ * Number of hits returned per page. Default 50 (sane for browsing); the panel sets it to the candidate cap (5000) when it wants the full match set in one round-trip so canvas highlighting can cover every match without paginating. Bounded at 5000 (matches CANDIDATE_CAP) — larger pages require cursor pagination.
+ */
+export type Pagesize = number
+export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
+/**
+ * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
+ */
+export type Sessionid1 = string | null
+/**
+ * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
+ */
+export type Softdeadlinems = number
+export type Sort = 'relevance' | 'displayName' | 'qualifiedName' | 'depth' | 'matchCount'
+export type Sortdir = 'asc' | 'desc'
+/**
+ * When set, hits are ordered by this native node property (e.g. 'rowCount') instead of by `sort`. Useful for 'biggest first' / 'newest first' UX.
+ */
+export type Sortproperty = string | null
+/**
+ * Progressive mode (uncapped engine). Answer after this long with what the scan has found so far — ``status: 'running'``, provisional hits in their final order, a ``progress`` block — and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.
+ */
+export type Waitms1 = number | null
+export type Predicate1 =
+    | TextPredicate
+    | PropertyPredicate
+    | TagPredicate
+    | HasPropertyPredicate
+    | DescendantOfPredicate
+    | WithinHopsPredicate
+    | EntityTypePredicate
+    | LayerPredicate
+    | DegreePredicate
+    | IsOrphanPredicate
+    | IsLeafPredicate
+    | IsRootPredicate
+    | HasIncomingPredicate
+    | HasOutgoingPredicate
+    | PathPredicate
+    | MatchAllPredicate
+    | GroupPredicate
 export type Aggregates = SearchAggregateBucket[][] | null
 export type Ancestordepthfromscoperoot = number
 export type Ancestordisplayname = string
@@ -451,9 +497,9 @@ export type Cursor1 = string | null
 /**
  * The graph data the session read. Opaque.
  */
-export type Dataversion = string | null
+export type Dataversion2 = string | null
 export type Deadlineexceeded = boolean
-export type Elapsedms1 = number
+export type Elapsedms3 = number
 /**
  * Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.
  */
@@ -471,18 +517,6 @@ export type Hopcount = number
  * Ordered list — first is source endpoint, last is target endpoint.
  */
 export type Nodes = AncestorRef[]
-/**
- * Matches found so far — exact for the parts scanned.
- */
-export type Matched = number
-/**
- * Nodes in the parts already scanned.
- */
-export type Scanned = number
-/**
- * Nodes in every part the search scans.
- */
-export type Total = number
 export type Costscore = number
 export type Cypher1 = string
 export type Estimatedrows = number | null
@@ -493,7 +527,7 @@ export type Notes2 = string[]
 /**
  * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
  */
-export type Sessionid1 = string | null
+export type Sessionid2 = string | null
 /**
  * The graph changed after this session started; run the search again for an answer on the current data.
  */
@@ -501,7 +535,7 @@ export type Stale = boolean
 /**
  * ``running``: the scan is not finished — the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.
  */
-export type Status = ('running' | 'complete') | null
+export type Status1 = ('running' | 'complete') | null
 /**
  * Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).
  */
@@ -514,13 +548,13 @@ export type Truncated = boolean
  * Every entity type was read within the time budget.
  */
 export type Complete = boolean
-export type Elapsedms2 = number
+export type Elapsedms4 = number
 export type Key4 = string
 /**
  * A type had more distinct values than listed.
  */
 export type Truncated1 = boolean
-export type Count = number
+export type Count1 = number
 export type Values2 = SearchValueSuggestion[]
 
 /**
@@ -538,8 +572,12 @@ export type Values2 = SearchValueSuggestion[]
  */
 export interface SearchApiContract {
     scopeDiagnostics?: ScopeDiagnostics | null
+    searchCountsRequest?: SearchCountsRequest | null
+    searchCountsResult?: SearchCountsResult | null
     searchDiscoverResult?: SearchDiscoverResult | null
     searchExplainResult?: SearchExplainResult | null
+    searchMembershipRequest?: SearchMembershipRequest | null
+    searchMembershipResult?: SearchMembershipResult | null
     searchQuery?: SearchQuery | null
     searchResultPage?: SearchResultPage | null
     searchValuesResult?: SearchValuesResult | null
@@ -566,138 +604,24 @@ export interface ScopeDiagnostics {
     notes?: Notes
 }
 /**
- * Response shape for ``GET /search/discover``.
- *
- * Tells the FE/AI-agent what's actually queryable in the current view:
- * which entity-type labels exist, which native property keys + value
- * samples are present on them, what tag values exist across the
- * sample, and what edge types + properties traversal can filter on.
- * Used to populate every autocomplete picker in the visual builder.
+ * ``POST /search/counts``: how many entities in the view match each
+ * rule — exactly, however many. A count over a large view takes more than
+ * one request: send the same request again with the returned ``sessions``
+ * until every count is complete.
  */
-export interface SearchDiscoverResult {
-    blobOnlyLabels?: Blobonlylabels
-    edges?: Edges
-    elapsedMs?: Elapsedms
-    labels?: Labels
-    missingContainment?: Missingcontainment
-    missingSearchableText?: Missingsearchabletext
-    tagValues?: Tagvalues
-}
-/**
- * Per-edge-type discovery payload. Mirrors `labels` but for relationships — surfaces the edge types present in the sample plus the property keys + value samples each one carries. Powers the W2 edge-predicate editor and the edge-aware path-query value pickers.
- */
-export interface Edges {
-    [k: string]: SearchDiscoverEdgeInfo
-}
-/**
- * Per-edge-type discovery payload from ``GET /search/discover``.
- */
-export interface SearchDiscoverEdgeInfo {
-    keys?: Keys
-    sampled: Sampled
-    valueSamplesByKey?: Valuesamplesbykey
-}
-export interface Labels {
-    [k: string]: SearchDiscoverLabelInfo
-}
-/**
- * Per-label discovery payload from ``GET /search/discover``.
- */
-export interface SearchDiscoverLabelInfo {
-    keys?: Keys1
-    sampled: Sampled1
-    truncatedProperties?: Truncatedproperties
-    valueSamplesByKey?: Valuesamplesbykey1
-}
-/**
- * Map of tag name → occurrence count across the sample. Tags live as JSON-stringified arrays on `n.tags` in v1 (graph-relationship normalisation is deferred); the discovery handler parses them in Python and aggregates counts. Trimmed to the top N by count.
- */
-export interface Tagvalues {
-    [k: string]: number
-}
-/**
- * Response shape for ``POST /search/explain``.
- *
- * Mirrors what ``backend.app.providers.falkordb_deep_search.explain_deep_search``
- * returns, plus the ``resolvedScope`` block added by the service layer.
- * Used by the FE's "Show Cypher" surface and by AI agents that want to
- * inspect what would run before committing.
- */
-export interface SearchExplainResult {
-    candidate_cap: CandidateCap
-    cypher: Cypher
-    effective_root_urns?: EffectiveRootUrns
-    hits_cypher: HitsCypher
-    hoisted_root_urns?: HoistedRootUrns
-    notes?: Notes1
-    params?: Params
-    resolvedScope?: Resolvedscope
-}
-/**
- * Bound parameters, keyed by the parameter name used in ``cypher``.
- */
-export interface Params {
-    [k: string]: unknown
-}
-/**
- * The request body for POST /search/advanced.
- *
- * ``scope`` is required — every search must be bound to a view via
- * ``scope.view_id``. There is no global / cross-view default.
- *
- * ``schema_version`` carries the wire-format version. Clients omit it
- * on outgoing requests (the default fills it in); the server echoes it
- * on every response so clients can fail loud on a mismatch.
- */
-export interface SearchQuery {
-    $schemaVersion?: $Schemaversion
-    options?: SearchOptions
-    predicate: Predicate
+export interface SearchCountsRequest {
+    items: Items
     scope: SearchScope
-}
-/**
- * Per-request shape / pagination / deadline controls.
- *
- * Defaults are tuned for the UI's Map-mode-first experience:
- * ``results='aggregates'`` returns just buckets, ``page_size=50`` is
- * used only when hits are requested, and a 3-second soft deadline
- * keeps the UI responsive (partial results returned on timeout).
- */
-export interface SearchOptions {
-    aggregations?: Aggregations
-    candidateCap?: Candidatecap
-    cursor?: Cursor
-    highlights?: Highlights
-    includeAncestorPath?: Includeancestorpath
-    pageSize?: Pagesize
-    results?: Results
-    sessionId?: Sessionid
-    softDeadlineMs?: Softdeadlinems
-    sort?: Sort
-    sortDir?: Sortdir
-    sortProperty?: Sortproperty
+    sessions?: Sessions
     waitMs?: Waitms
 }
 /**
- * Roll matches up to ancestors (or facets) for orient-before-drill UX.
- *
- * Pure-aggregate responses skip the result-row ordering + ancestor-
- * hydration steps and are accordingly the cheapest mode the provider
- * can run. One level of ``sub_aggregation`` is permitted; deeper
- * drilling is meant to be done by re-issuing a scoped request — that
- * iteration is also the AI-agent facet-discovery pattern.
+ * One rule (or saved query) to evaluate: an id the caller chose, and
+ * its predicate.
  */
-export interface AggregationSpec {
-    ancestorEntityTypes?: Ancestorentitytypes
-    ancestorLevel?: Ancestorlevel
-    by?: By
-    maxBuckets?: Maxbuckets
-    propertyKey?: Propertykey
-    sampleHitsPerBucket?: Samplehitsperbucket
-    /**
-     * One-level nested drill. Deeper levels require a follow-up scoped search (see module docstring).
-     */
-    subAggregation?: AggregationSpec | null
+export interface SearchRuleItem {
+    id: Id
+    predicate: Predicate
 }
 /**
  * Free-form text match against a single field (or ``any``).
@@ -707,7 +631,7 @@ export interface TextPredicate {
     caseSensitive?: Casesensitive
     kind?: Kind
     match?: Match
-    propertyKey?: Propertykey1
+    propertyKey?: Propertykey
     target?: Target
     value: Value
 }
@@ -999,6 +923,199 @@ export interface SearchScope {
     visibleUrns?: Visibleurns
 }
 /**
+ * Rule id → the session a previous answer returned.
+ */
+export interface Sessions {
+    [k: string]: string
+}
+export interface SearchCountsResult {
+    counts?: Counts
+    dataVersion?: Dataversion
+    elapsedMs?: Elapsedms
+}
+export interface Counts {
+    [k: string]: SearchRuleCount
+}
+export interface SearchRuleCount {
+    count: Count
+    error?: Error
+    progress?: SearchProgress | null
+    sessionId?: Sessionid
+    status: Status
+}
+/**
+ * How far a running search has got. Node counts are the scan's
+ * estimate of what each part of the graph holds, so ``scanned / total``
+ * is a fraction to draw, not a count to report.
+ */
+export interface SearchProgress {
+    matched: Matched
+    scanned: Scanned
+    total: Total
+}
+/**
+ * Response shape for ``GET /search/discover``.
+ *
+ * Tells the FE/AI-agent what's actually queryable in the current view:
+ * which entity-type labels exist, which native property keys + value
+ * samples are present on them, what tag values exist across the
+ * sample, and what edge types + properties traversal can filter on.
+ * Used to populate every autocomplete picker in the visual builder.
+ */
+export interface SearchDiscoverResult {
+    blobOnlyLabels?: Blobonlylabels
+    edges?: Edges
+    elapsedMs?: Elapsedms1
+    labels?: Labels
+    missingContainment?: Missingcontainment
+    missingSearchableText?: Missingsearchabletext
+    tagValues?: Tagvalues
+}
+/**
+ * Per-edge-type discovery payload. Mirrors `labels` but for relationships — surfaces the edge types present in the sample plus the property keys + value samples each one carries. Powers the W2 edge-predicate editor and the edge-aware path-query value pickers.
+ */
+export interface Edges {
+    [k: string]: SearchDiscoverEdgeInfo
+}
+/**
+ * Per-edge-type discovery payload from ``GET /search/discover``.
+ */
+export interface SearchDiscoverEdgeInfo {
+    keys?: Keys
+    sampled: Sampled
+    valueSamplesByKey?: Valuesamplesbykey
+}
+export interface Labels {
+    [k: string]: SearchDiscoverLabelInfo
+}
+/**
+ * Per-label discovery payload from ``GET /search/discover``.
+ */
+export interface SearchDiscoverLabelInfo {
+    keys?: Keys1
+    sampled: Sampled1
+    truncatedProperties?: Truncatedproperties
+    valueSamplesByKey?: Valuesamplesbykey1
+}
+/**
+ * Map of tag name → occurrence count across the sample. Tags live as JSON-stringified arrays on `n.tags` in v1 (graph-relationship normalisation is deferred); the discovery handler parses them in Python and aggregates counts. Trimmed to the top N by count.
+ */
+export interface Tagvalues {
+    [k: string]: number
+}
+/**
+ * Response shape for ``POST /search/explain``.
+ *
+ * Mirrors what ``backend.app.providers.falkordb_deep_search.explain_deep_search``
+ * returns, plus the ``resolvedScope`` block added by the service layer.
+ * Used by the FE's "Show Cypher" surface and by AI agents that want to
+ * inspect what would run before committing.
+ */
+export interface SearchExplainResult {
+    candidate_cap: CandidateCap
+    cypher: Cypher
+    effective_root_urns?: EffectiveRootUrns
+    hits_cypher: HitsCypher
+    hoisted_root_urns?: HoistedRootUrns
+    notes?: Notes1
+    params?: Params
+    resolvedScope?: Resolvedscope
+}
+/**
+ * Bound parameters, keyed by the parameter name used in ``cypher``.
+ */
+export interface Params {
+    [k: string]: unknown
+}
+/**
+ * ``POST /search/membership``: which of these entities — the ones on
+ * screen — match which rules. Answers only for entities inside the view's
+ * scope; one outside it never matches, whatever it holds.
+ */
+export interface SearchMembershipRequest {
+    items: Items1
+    scope: SearchScope
+    urns: Urns2
+}
+export interface SearchMembershipResult {
+    dataVersion?: Dataversion1
+    elapsedMs?: Elapsedms2
+    errors?: Errors
+    matches?: Matches
+}
+/**
+ * Rule id → why it could not be evaluated. Such a rule matches nothing here.
+ */
+export interface Errors {
+    [k: string]: string
+}
+/**
+ * Rule id → the requested urns it matches (in scope).
+ */
+export interface Matches {
+    [k: string]: string[]
+}
+/**
+ * The request body for POST /search/advanced.
+ *
+ * ``scope`` is required — every search must be bound to a view via
+ * ``scope.view_id``. There is no global / cross-view default.
+ *
+ * ``schema_version`` carries the wire-format version. Clients omit it
+ * on outgoing requests (the default fills it in); the server echoes it
+ * on every response so clients can fail loud on a mismatch.
+ */
+export interface SearchQuery {
+    $schemaVersion?: $Schemaversion
+    options?: SearchOptions
+    predicate: Predicate1
+    scope: SearchScope
+}
+/**
+ * Per-request shape / pagination / deadline controls.
+ *
+ * Defaults are tuned for the UI's Map-mode-first experience:
+ * ``results='aggregates'`` returns just buckets, ``page_size=50`` is
+ * used only when hits are requested, and a 3-second soft deadline
+ * keeps the UI responsive (partial results returned on timeout).
+ */
+export interface SearchOptions {
+    aggregations?: Aggregations
+    candidateCap?: Candidatecap
+    cursor?: Cursor
+    highlights?: Highlights
+    includeAncestorPath?: Includeancestorpath
+    pageSize?: Pagesize
+    results?: Results
+    sessionId?: Sessionid1
+    softDeadlineMs?: Softdeadlinems
+    sort?: Sort
+    sortDir?: Sortdir
+    sortProperty?: Sortproperty
+    waitMs?: Waitms1
+}
+/**
+ * Roll matches up to ancestors (or facets) for orient-before-drill UX.
+ *
+ * Pure-aggregate responses skip the result-row ordering + ancestor-
+ * hydration steps and are accordingly the cheapest mode the provider
+ * can run. One level of ``sub_aggregation`` is permitted; deeper
+ * drilling is meant to be done by re-issuing a scoped request — that
+ * iteration is also the AI-agent facet-discovery pattern.
+ */
+export interface AggregationSpec {
+    ancestorEntityTypes?: Ancestorentitytypes
+    ancestorLevel?: Ancestorlevel
+    by?: By
+    maxBuckets?: Maxbuckets
+    propertyKey?: Propertykey1
+    sampleHitsPerBucket?: Samplehitsperbucket
+    /**
+     * One-level nested drill. Deeper levels require a follow-up scoped search (see module docstring).
+     */
+    subAggregation?: AggregationSpec | null
+}
+/**
  * Provider + service response. One inner list in ``aggregates`` per
  * requested AggregationSpec.
  */
@@ -1008,9 +1125,9 @@ export interface SearchResultPage {
     candidateCount?: Candidatecount
     countStatus?: Countstatus
     cursor?: Cursor1
-    dataVersion?: Dataversion
+    dataVersion?: Dataversion2
     deadlineExceeded?: Deadlineexceeded
-    elapsedMs: Elapsedms1
+    elapsedMs: Elapsedms3
     hits?: Hits
     paths?: Paths
     progress?: SearchProgress | null
@@ -1019,9 +1136,9 @@ export interface SearchResultPage {
      * Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain.
      */
     scopeDiagnostics?: ScopeDiagnostics | null
-    sessionId?: Sessionid1
+    sessionId?: Sessionid2
     stale?: Stale
-    status?: Status
+    status?: Status1
     totalCount?: Totalcount
     truncated?: Truncated
 }
@@ -1117,16 +1234,6 @@ export interface Properties1 {
     [k: string]: unknown
 }
 /**
- * How far a running search has got. Node counts are the scan's
- * estimate of what each part of the graph holds, so ``scanned / total``
- * is a fraction to draw, not a count to report.
- */
-export interface SearchProgress {
-    matched: Matched
-    scanned: Scanned
-    total: Total
-}
-/**
  * Compiled-query metadata. Returned by POST /search/explain (dry-run)
  * and optionally inlined on the main search response when the caller
  * asked for it. Useful for support + the FE's 'show generated query'
@@ -1148,7 +1255,7 @@ export interface QueryExplain {
  */
 export interface SearchValuesResult {
     complete?: Complete
-    elapsedMs?: Elapsedms2
+    elapsedMs?: Elapsedms4
     key: Key4
     truncated?: Truncated1
     values?: Values2
@@ -1158,6 +1265,6 @@ export interface SearchValuesResult {
  * ``value`` keeps its stored kind — a 19-digit id is that integer.
  */
 export interface SearchValueSuggestion {
-    count?: Count
+    count?: Count1
     value?: unknown
 }

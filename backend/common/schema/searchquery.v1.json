@@ -1360,6 +1360,74 @@
       "title": "SearchAggregateBucket",
       "type": "object"
     },
+    "SearchCountsRequest": {
+      "description": "``POST /search/counts``: how many entities in the view match each\nrule \u2014 exactly, however many. A count over a large view takes more than\none request: send the same request again with the returned ``sessions``\nuntil every count is complete.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SearchRuleItem"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Rule id \u2192 the session a previous answer returned.",
+          "title": "Sessions",
+          "type": "object"
+        },
+        "waitMs": {
+          "default": 1000,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Waitms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "items"
+      ],
+      "title": "SearchCountsRequest",
+      "type": "object"
+    },
+    "SearchCountsResult": {
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SearchRuleCount"
+          },
+          "title": "Counts",
+          "type": "object"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        }
+      },
+      "title": "SearchCountsResult",
+      "type": "object"
+    },
     "SearchDiscoverEdgeInfo": {
       "description": "Per-edge-type discovery payload from ``GET /search/discover``.",
       "properties": {
@@ -1665,6 +1733,80 @@
         "node"
       ],
       "title": "SearchHit",
+      "type": "object"
+    },
+    "SearchMembershipRequest": {
+      "description": "``POST /search/membership``: which of these entities \u2014 the ones on\nscreen \u2014 match which rules. Answers only for entities inside the view's\nscope; one outside it never matches, whatever it holds.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SearchRuleItem"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "urns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "title": "Urns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scope",
+        "items",
+        "urns"
+      ],
+      "title": "SearchMembershipRequest",
+      "type": "object"
+    },
+    "SearchMembershipResult": {
+      "properties": {
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "errors": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Rule id \u2192 why it could not be evaluated. Such a rule matches nothing here.",
+          "title": "Errors",
+          "type": "object"
+        },
+        "matches": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Rule id \u2192 the requested urns it matches (in scope).",
+          "title": "Matches",
+          "type": "object"
+        }
+      },
+      "title": "SearchMembershipResult",
       "type": "object"
     },
     "SearchOptions": {
@@ -2159,6 +2301,159 @@
       "title": "SearchResultPage",
       "type": "object"
     },
+    "SearchRuleCount": {
+      "properties": {
+        "count": {
+          "description": "Matches found so far \u2014 exact once complete.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessionid"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "complete"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "count",
+        "status"
+      ],
+      "title": "SearchRuleCount",
+      "type": "object"
+    },
+    "SearchRuleItem": {
+      "description": "One rule (or saved query) to evaluate: an id the caller chose, and\nits predicate.",
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/MatchAllPredicate",
+              "degree": "#/$defs/DegreePredicate",
+              "descendantOf": "#/$defs/DescendantOfPredicate",
+              "entityType": "#/$defs/EntityTypePredicate",
+              "group": "#/$defs/GroupPredicate",
+              "hasIncoming": "#/$defs/HasIncomingPredicate",
+              "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+              "hasProperty": "#/$defs/HasPropertyPredicate",
+              "isLeaf": "#/$defs/IsLeafPredicate",
+              "isOrphan": "#/$defs/IsOrphanPredicate",
+              "isRoot": "#/$defs/IsRootPredicate",
+              "layer": "#/$defs/LayerPredicate",
+              "path": "#/$defs/PathPredicate",
+              "property": "#/$defs/PropertyPredicate",
+              "tag": "#/$defs/TagPredicate",
+              "text": "#/$defs/TextPredicate",
+              "withinHops": "#/$defs/WithinHopsPredicate"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TextPredicate"
+            },
+            {
+              "$ref": "#/$defs/PropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/TagPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasPropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/DescendantOfPredicate"
+            },
+            {
+              "$ref": "#/$defs/WithinHopsPredicate"
+            },
+            {
+              "$ref": "#/$defs/EntityTypePredicate"
+            },
+            {
+              "$ref": "#/$defs/LayerPredicate"
+            },
+            {
+              "$ref": "#/$defs/DegreePredicate"
+            },
+            {
+              "$ref": "#/$defs/IsOrphanPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsLeafPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsRootPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasIncomingPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasOutgoingPredicate"
+            },
+            {
+              "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
+              "$ref": "#/$defs/GroupPredicate"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "id",
+        "predicate"
+      ],
+      "title": "SearchRuleItem",
+      "type": "object"
+    },
     "SearchScope": {
       "description": "Bounds the search.\n\n``view_id`` is **required** \u2014 every search must be bound to a view\n(for security + telemetry), but the *scope* of the search is now\ncontrolled by ``scope_mode``:\n\n  * ``visible`` (default UI mode): only the URNs the user can\n    actually see right now on the canvas (passed in\n    ``visible_urns``). This is the \"fast feedback\" mode that\n    matches the user's mental model of \"search what's in front of\n    me.\" Falls back to ``view`` mode when ``visible_urns`` is\n    empty.\n\n  * ``view``: classic behaviour \u2014 the view's authorised roots,\n    expanded via containment, then narrowed by client hints.\n\n  * ``data_source``: power-user override. Searches the entire data\n    source (no view containment clamp). Results may include URNs\n    that are not in this view; the FE surfaces a disclaimer.\n\n``root_urns`` / ``entity_types`` / ``layer_assignment`` / ``max_depth``\nare **narrowing hints** that always apply (regardless of mode).\nThe resolver intersects them with the view's authorised scope.",
       "properties": {
@@ -2541,6 +2836,28 @@
       ],
       "default": null
     },
+    "searchCountsRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCountsRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCountsResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCountsResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "searchDiscoverResult": {
       "anyOf": [
         {
@@ -2556,6 +2873,28 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SearchExplainResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchMembershipRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchMembershipRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchMembershipResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchMembershipResult"
         },
         {
           "type": "null"

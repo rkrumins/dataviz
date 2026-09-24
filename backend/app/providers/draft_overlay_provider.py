@@ -551,6 +551,14 @@ class DraftOverlayProvider:
         searched, for the reason :meth:`deep_search` gives."""
         return await self._base.deep_search_session(query, context=context)
 
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's total — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_count(query, context=context, advance=advance)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Rule membership — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_membership(scope, items, urns, context=context)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Delegated for the same reason as
         :meth:`deep_search` — the Cypher explained is the one that would
