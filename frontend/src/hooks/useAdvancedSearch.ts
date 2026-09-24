@@ -255,6 +255,25 @@ function fullAncestorFacet(query: SearchQuery, result: SearchResultPage): number
     return facet.length >= (specs[i].maxBuckets ?? DEFAULT_MAX_BUCKETS) ? i : -1
 }
 
+/** ``result`` with the containers read from its session that its full
+ *  ``ancestor`` facet doesn't list appended to it — the same object when it
+ *  lacks none. */
+function withContainers(
+    query: SearchQuery,
+    result: SearchResultPage,
+    found: ReadonlyMap<string, SearchAggregateBucket> | undefined,
+): SearchResultPage {
+    const index = fullAncestorFacet(query, result)
+    if (index < 0 || !found || found.size === 0) return result
+    const listed = new Set((result.aggregates?.[index] ?? []).map((b) => b.ancestorUrn))
+    const missing = [...found.values()].filter((b) => !listed.has(b.ancestorUrn))
+    if (missing.length === 0) return result
+    return {
+        ...result,
+        aggregates: result.aggregates?.map((f, i) => (i === index ? [...f, ...missing] : f)),
+    }
+}
+
 /** The containers the canvas has loaded — nodes with children, expanded
  *  or not. */
 function loadedContainerUrns(): string[] {
@@ -438,8 +457,14 @@ export function useAdvancedSearch(
     // the ``ancestor`` facet lists: once a search has finished with a full
     // facet, the containers it left out are read from the search's session
     // — each once, and later-loaded ones as they arrive — and added to the
-    // facet, so every publish (and every later page) carries them.
-    const containersAsked = useRef<{ sessionId: string; urns: Set<string> } | null>(null)
+    // facet, so every publish (and every later page) carries them. What was
+    // read is kept per session: a later page is built from the result as
+    // it rendered, which may not have them yet.
+    const containersAsked = useRef<{
+        sessionId: string
+        urns: Set<string>
+        found: Map<string, SearchAggregateBucket>
+    } | null>(null)
     useEffect(() => {
         if (view.kind !== 'results' || !(provider instanceof RemoteGraphProvider)) return
         const { query, result } = view
@@ -447,9 +472,9 @@ export function useAdvancedSearch(
         const sessionId = result.sessionId
         if (index < 0 || !sessionId) return
         if (containersAsked.current?.sessionId !== sessionId) {
-            containersAsked.current = { sessionId, urns: new Set() }
+            containersAsked.current = { sessionId, urns: new Set(), found: new Map() }
         }
-        const asked = containersAsked.current.urns
+        const { urns: asked, found } = containersAsked.current
         // The scope the search resolved (its hash binds the session);
         // the visible-URN list plays no part in it and can be long.
         const scope: SearchScope = { ...query.scope, visibleUrns: undefined }
@@ -460,7 +485,6 @@ export function useAdvancedSearch(
             const facet = result.aggregates?.[index] ?? []
             const listed = new Set(facet.map((b) => b.ancestorUrn))
             const pending = loadedContainerUrns().filter((u) => !listed.has(u) && !asked.has(u))
-            const found: SearchAggregateBucket[] = []
             for (let i = 0; i < pending.length; i += ANCESTOR_URNS_PER_REQUEST) {
                 const batch = pending.slice(i, i + ANCESTOR_URNS_PER_REQUEST)
                 try {
@@ -472,7 +496,7 @@ export function useAdvancedSearch(
                     if (answer.status !== 'complete') break
                     for (const [urn, c] of Object.entries(answer.counts)) {
                         if (c.count <= 0) continue
-                        found.push({
+                        found.set(urn, {
                             ancestorUrn: urn,
                             ancestorDisplayName: c.displayName ?? '',
                             ancestorEntityType: c.entityType ?? '',
@@ -489,11 +513,8 @@ export function useAdvancedSearch(
                     break
                 }
             }
-            if (found.length === 0) return
-            const augmented: SearchResultPage = {
-                ...result,
-                aggregates: result.aggregates?.map((f, i) => (i === index ? [...f, ...found] : f)),
-            }
+            const augmented = withContainers(query, result, found)
+            if (augmented === result) return
             setView((v) => (v.kind === 'results' && v.result === result
                 ? { ...v, result: augmented } : v))
             useSearchStore.getState().setResult({
@@ -857,13 +878,14 @@ export function useAdvancedSearch(
                 ...(view.result.hits ?? []),
                 ...(nextPage.hits ?? []),
             ]
-            const merged: SearchResultPage = {
+            const asked = containersAsked.current
+            const merged = withContainers(view.query, {
                 ...view.result,
                 hits: mergedHits,
                 cursor: nextPage.cursor ?? undefined,
                 candidateCount: nextPage.candidateCount
                     ?? view.result.candidateCount,
-            }
+            }, asked?.sessionId === view.result.sessionId ? asked?.found : undefined)
             setView({
                 ...view,
                 result: merged,

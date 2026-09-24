@@ -278,6 +278,26 @@ describe('useAdvancedSearch — exact counts for every loaded container', () => 
         expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBe(7)
     })
 
+    it('keeps a container count read after the page it builds on rendered', async () => {
+        useCanvasStore.setState({ nodes: [container('A'), container('B')] })
+        searchAdvanced.mockResolvedValueOnce(finished({ cursor: 'cursor-1' }))
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [] }))
+        searchAncestorCounts.mockResolvedValue(counts({ B: 7 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, OPTIONS)
+        })
+        // "Load more" as the panel had it before B's count arrived: it builds
+        // the next page on the result without it, and B is not asked again.
+        const loadMore = result.current.loadMore
+        await waitFor(() => expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBe(7))
+        await act(async () => {
+            await loadMore()
+        })
+        expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBe(7)
+    })
+
     it('stops asking once the session has expired', async () => {
         useCanvasStore.setState({ nodes: [container('A'), container('B')] })
         searchAdvanced.mockResolvedValue(finished())
