@@ -1,22 +1,26 @@
 /**
- * displayRuleMatchStore — computed (non-persisted) match sets for the
- * Property Manager's display-rule tag overlay.
+ * displayRuleMatchStore — computed (non-persisted) display-rule results:
+ * which on-screen entities each rule tags, and how many entities it
+ * matches in the whole view.
  *
  * The persisted rules themselves live in the view blueprint
- * (referenceModelStore.displayRules). This store holds only the
- * *derived* "which URNs does each enabled rule currently match?" map,
- * recomputed by ``useDisplayRuleEngine`` whenever the rules or the
- * canvas data change. Keeping it separate from the blueprint mirrors how
- * ``searchStore`` keeps live match results out of the authoring state.
+ * (referenceModelStore.displayRules). ``useDisplayRuleEngine`` fills this
+ * store from the server, two ways:
+ *
+ *   - membership — for the entities the canvas has loaded, which rules
+ *     match them (``POST /search/membership``); a chip only ever needs
+ *     the answer for its own row, never every entity a rule matches;
+ *   - counts — each rule's exact total in the view (``POST
+ *     /search/counts``), however many entities that is.
  *
  * Consumers (FlatTreeItem and other canvas rows) subscribe via
- * ``useDisplayRuleTags(urn)`` to get the chips for one node; the
- * selector re-renders a row only when THAT node's tag set changes —
- * cheap enough to call inside a virtualized list of hundreds of rows.
+ * ``useDisplayRuleTags(urn)``; a row re-renders only when THAT entity's
+ * tags change — cheap inside a virtualized list of hundreds of rows.
  */
-import { useMemo } from 'react'
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 
+import type { RuleCount } from '@/services/ruleCounts'
 import type { DisplayRuleConfig } from '@/types/schema'
 
 
@@ -31,21 +35,31 @@ export interface DisplayRuleTag {
 
 
 interface DisplayRuleMatchState {
-    /** ruleId → set of node URNs that rule currently matches. */
+    /** ruleId → the loaded entities that rule matches. */
     matchUrnsByRule: ReadonlyMap<string, ReadonlySet<string>>
+    /** ruleId → how many entities it matches in the whole view (exact
+     *  once ``complete``). */
+    countsByRule: ReadonlyMap<string, RuleCount>
     /** Snapshot of the enabled rules' visual metadata, kept here so the
      *  per-URN selector can build chips without reading the blueprint
      *  store (avoids cross-store subscription churn). Ordered for stable
      *  chip rendering. */
     ruleMeta: ReadonlyArray<DisplayRuleTag>
 
-    /** Replace one rule's match set (called per-rule by the engine). */
-    setRuleMatches: (ruleId: string, urns: Iterable<string>) => void
+    /** Fold in one membership answer: for each rule asked about, the
+     *  evaluated URNs it matches now — and no longer the others. */
+    applyMembership: (
+        ruleIds: ReadonlyArray<string>,
+        evaluated: ReadonlyArray<string>,
+        matches: Readonly<Record<string, ReadonlyArray<string>>>,
+    ) => void
+    /** Publish the rules' totals. */
+    setCounts: (counts: ReadonlyMap<string, RuleCount>) => void
     /** Drop a rule's matches entirely (rule deleted / disabled). */
     clearRule: (ruleId: string) => void
     /** Publish the current enabled-rule visual metadata snapshot. */
     setRuleMeta: (rules: ReadonlyArray<DisplayRuleConfig>) => void
-    /** Prune any match sets / meta whose ruleId is not in the keep-set. */
+    /** Prune any match sets / counts whose ruleId is not in the keep-set. */
     retainRules: (keepIds: Iterable<string>) => void
     /** Wipe everything (view switch / unmount). */
     clear: () => void
@@ -53,21 +67,30 @@ interface DisplayRuleMatchState {
 
 
 const EMPTY_MATCHES: ReadonlyMap<string, ReadonlySet<string>> = new Map()
+const EMPTY_COUNTS: ReadonlyMap<string, RuleCount> = new Map()
 const EMPTY_META: ReadonlyArray<DisplayRuleTag> = Object.freeze([])
 const EMPTY_TAGS: ReadonlyArray<DisplayRuleTag> = Object.freeze([])
 
 
 export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => ({
     matchUrnsByRule: EMPTY_MATCHES,
+    countsByRule: EMPTY_COUNTS,
     ruleMeta: EMPTY_META,
 
-    setRuleMatches: (ruleId, urns) => {
+    applyMembership: (ruleIds, evaluated, matches) => {
         set((s) => {
             const next = new Map(s.matchUrnsByRule)
-            next.set(ruleId, new Set(urns))
+            for (const id of ruleIds) {
+                const updated = new Set(next.get(id) ?? [])
+                for (const urn of evaluated) updated.delete(urn)
+                for (const urn of matches[id] ?? []) updated.add(urn)
+                next.set(id, updated)
+            }
             return { matchUrnsByRule: next }
         })
     },
+
+    setCounts: (counts) => set({ countsByRule: counts }),
 
     clearRule: (ruleId) => {
         set((s) => {
@@ -89,49 +112,41 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
     retainRules: (keepIds) => {
         const keep = new Set(keepIds)
         set((s) => {
-            let changed = false
-            const next = new Map(s.matchUrnsByRule)
-            for (const id of next.keys()) {
-                if (!keep.has(id)) {
-                    next.delete(id)
-                    changed = true
-                }
-            }
-            return changed ? { matchUrnsByRule: next } : {}
+            const matches = new Map([...s.matchUrnsByRule].filter(([id]) => keep.has(id)))
+            const counts = new Map([...s.countsByRule].filter(([id]) => keep.has(id)))
+            const changed = matches.size !== s.matchUrnsByRule.size
+                || counts.size !== s.countsByRule.size
+            return changed ? { matchUrnsByRule: matches, countsByRule: counts } : {}
         })
     },
 
-    clear: () => set({ matchUrnsByRule: EMPTY_MATCHES, ruleMeta: EMPTY_META }),
+    clear: () => set({
+        matchUrnsByRule: EMPTY_MATCHES, countsByRule: EMPTY_COUNTS, ruleMeta: EMPTY_META,
+    }),
 }))
 
 
 /**
- * Subscribe to the display-rule chips for a single node URN. Returns a
- * stable empty array when the node matches no enabled rule (so rows that
- * never match don't re-render on unrelated updates).
- *
- * The membership test runs against every enabled rule's match set; with
- * a handful of rules and Set lookups this is O(rules) per row, which is
- * negligible versus the row's own render cost.
+ * Subscribe to the display-rule chips for a single node URN. The tags are
+ * compared element by element, so a row re-renders only when its own tags
+ * change — not whenever any rule's answer for any other row lands.
  */
 export function useDisplayRuleTags(urn: string | undefined): ReadonlyArray<DisplayRuleTag> {
-    const matchUrnsByRule = useDisplayRuleMatchStore((s) => s.matchUrnsByRule)
-    const ruleMeta = useDisplayRuleMatchStore((s) => s.ruleMeta)
-    return useMemo(() => {
-        if (!urn || ruleMeta.length === 0) return EMPTY_TAGS
-        const tags: DisplayRuleTag[] = []
-        for (const meta of ruleMeta) {
-            const set = matchUrnsByRule.get(meta.id)
-            if (set && set.has(urn)) tags.push(meta)
-        }
-        return tags.length === 0 ? EMPTY_TAGS : tags
-    }, [urn, ruleMeta, matchUrnsByRule])
+    return useDisplayRuleMatchStore(useShallow((s) => tagsOf(s, urn)))
 }
 
 
-/** Total matched-node count for one rule (drives the rule-card count). */
-export function useRuleMatchCount(ruleId: string | undefined): number {
-    return useDisplayRuleMatchStore((s) =>
-        ruleId ? s.matchUrnsByRule.get(ruleId)?.size ?? 0 : 0,
-    )
+function tagsOf(s: DisplayRuleMatchState, urn: string | undefined): ReadonlyArray<DisplayRuleTag> {
+    if (!urn || s.ruleMeta.length === 0) return EMPTY_TAGS
+    const tags: DisplayRuleTag[] = []
+    for (const meta of s.ruleMeta) {
+        if (s.matchUrnsByRule.get(meta.id)?.has(urn)) tags.push(meta)
+    }
+    return tags.length === 0 ? EMPTY_TAGS : tags
+}
+
+
+/** One rule's total in the view — undefined until its count starts. */
+export function useRuleCount(ruleId: string | undefined): RuleCount | undefined {
+    return useDisplayRuleMatchStore((s) => (ruleId ? s.countsByRule.get(ruleId) : undefined))
 }

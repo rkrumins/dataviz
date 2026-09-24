@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { LineageEdge, LineageNode } from '@/store/canvas'
 
-import { computeViewRoots, computeViewRootUrns } from '../useCanvasViewRoots'
+import { computeViewRoots } from '../useCanvasViewRoots'
 
 
 function node(
@@ -108,17 +108,5 @@ describe('computeViewRoots — finds top-level containers in the canvas', () => 
     it('returns empty array when canvas is empty', () => {
         const roots = computeViewRoots([], [], ['CONTAINS'], ['container'])
         expect(roots).toEqual([])
-    })
-
-    it('computeViewRootUrns wraps the same logic and returns URNs', () => {
-        const nodes = [
-            node('silver', 'container', 'SILVER'),
-            node('gold', 'container', 'GOLD'),
-            node('child', 'dataset', 'child'),
-        ]
-        const edges = [containment('silver', 'child')]
-        const urns = computeViewRootUrns(nodes, edges, ['CONTAINS'], ['container'])
-        // Sorted by display name → GOLD before SILVER
-        expect(urns).toEqual(['gold', 'silver'])
     })
 })

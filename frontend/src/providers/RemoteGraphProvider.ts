@@ -58,6 +58,10 @@ import type {
     SearchExplainResult,
     SearchDiscoverResult,
     SearchValuesResult,
+    SearchMembershipRequest,
+    SearchMembershipResult,
+    SearchCountsRequest,
+    SearchCountsResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -546,6 +550,37 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<SearchResultPage>('/search/advanced', {
             method: 'POST',
             body: JSON.stringify(query),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * Which of these entities (the ones on screen, ≤ 1,000) match which
+     * display rules (≤ 32) — POST /search/membership. The server resolves
+     * the view's scope; an entity outside it never matches.
+     */
+    async searchMembership(
+        body: SearchMembershipRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchMembershipResult> {
+        return await this.fetch<SearchMembershipResult>('/search/membership', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * Each display rule's exact total in the view — POST /search/counts.
+     * A large view takes several calls: send the returned sessions back
+     * until every count is complete (``services/ruleCounts.ts``).
+     */
+    async searchCounts(
+        body: SearchCountsRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchCountsResult> {
+        return await this.fetch<SearchCountsResult>('/search/counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
             signal: opts?.signal,
             timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
         })

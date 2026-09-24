@@ -65,6 +65,7 @@ from backend.app.providers.falkordb_search.session import (
 )
 from backend.app.services.deep_search import (
     CompileError,
+    SearchFailed,
     SearchRunContext,
     get_deep_search_settings,
 )
@@ -152,7 +153,7 @@ async def execute_session_search(
 
     session = await _advance(session, created, ctx, store, run, deadline, settings)
     if session.status == FAILED:
-        raise RuntimeError(f"search failed: {session.error}")
+        raise SearchFailed(f"search failed: {session.error}")
     if wants_facets and facets is None:
         facets = await _await_facets(store, session.sid, deadline)
     return await _answer(provider, query, session, 0, context, started, deadline,
@@ -211,7 +212,7 @@ async def execute_count_session(
                                           0, None, context, deadline, settings)
     session = await _advance(session, created, ctx, store, run, deadline, settings)
     if session.status == FAILED:
-        raise RuntimeError(f"count failed: {session.error}")
+        raise SearchFailed(f"count failed: {session.error}")
     return _count_answer(session)
 
 

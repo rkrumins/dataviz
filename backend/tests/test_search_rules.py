@@ -154,6 +154,29 @@ class TestService:
         out = await _service(_Counts()).counts(request)
         assert out.counts["p"].error == "path search has no count"
 
+    async def test_a_count_that_fails_is_that_rules_error_alone(self):
+        from backend.app.services.deep_search import SearchFailed
+
+        class _Counts:
+            async def deep_search_count(self, query, *, context, advance=True):
+                name = query.predicate.value
+                if not advance:
+                    return {"count": 0, "status": "running", "sessionId": None,
+                            "progress": None}
+                if name == "broken":
+                    raise SearchFailed("count failed: the graph refused a read")
+                return {"count": 7, "status": "complete", "sessionId": "s",
+                        "progress": {"scanned": 10, "total": 10, "matched": 7}}
+
+        request = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "waitMs": 5000,
+            "items": [{"id": n, "predicate": {"kind": "text", "value": n}}
+                      for n in ("broken", "fine")]})
+        out = await _service(_Counts()).counts(request)
+        assert out.counts["broken"].status == "complete"
+        assert out.counts["broken"].error == "count failed: the graph refused a read"
+        assert out.counts["fine"].count == 7 and out.counts["fine"].error is None
+
     async def test_a_provider_without_rules_is_a_501(self):
         request = SearchCountsRequest.model_validate({
             "scope": {"viewId": "v"},

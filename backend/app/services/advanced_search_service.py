@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
     CompileError,
+    SearchFailed,
     SearchRunContext,
     get_deep_search_settings,
 )
@@ -609,7 +610,8 @@ class AdvancedSearchService:
             session = answers[item.id]["sessionId"] or request.sessions.get(item.id)
             try:
                 answers[item.id] = await op(query_of(item, wait_ms, session), context=context)
-            except CompileError as exc:
+            except (CompileError, SearchFailed) as exc:
+                # One rule's failure is its own: the others count on.
                 errors[item.id] = str(exc)
 
         counts = {}

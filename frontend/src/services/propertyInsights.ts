@@ -14,9 +14,7 @@
  */
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import type { Predicate } from '@/types/search'
-
-import { buildViewScopedQuery } from './displayRuleEval'
+import type { Predicate, SearchQuery, SearchScope } from '@/types/search'
 
 
 export interface PropertyUsage {
@@ -32,6 +30,33 @@ export interface PropertyUsage {
 
 
 const EMPTY_USAGE: PropertyUsage = { total: 0, byEntityType: [], atLeast: false }
+
+
+/**
+ * A view-scoped SearchQuery for an arbitrary predicate + options, shared
+ * by every read below so they all scope identically.
+ */
+function buildViewScopedQuery(
+    viewId: string,
+    predicate: Predicate,
+    options: SearchQuery['options'],
+): SearchQuery {
+    // No rootUrns: the backend resolves the view's own boundary from
+    // ``viewId`` on every request and only ever NARROWS by a client hint.
+    // The hint this sent was the canvas's guess at the roots, capped at 256,
+    // so on a larger view it hid every match under root #257 — the reason
+    // Advanced Search stopped sending one (see useAdvancedSearch).
+    const scope: SearchScope = { viewId, scopeMode: 'view' }
+
+    // The backend predicate compiler mishandles bare top-level leaf
+    // predicates — wrap leaves in a single-child AND group (mirrors
+    // stampScope's defensive normalisation).
+    const wrapped: Predicate = predicate.kind === 'group'
+        ? predicate
+        : { kind: 'group', op: 'and', children: [predicate] }
+
+    return { predicate: wrapped, scope, options }
+}
 
 
 /**

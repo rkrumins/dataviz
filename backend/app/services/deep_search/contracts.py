@@ -48,6 +48,13 @@ class CompileError(ValueError):
     """
 
 
+class SearchFailed(RuntimeError):
+    """A search or count stopped on a read the engine could not recover
+    from (a part that ran out of time or memory is split first). Rule
+    counts report it as that rule's error; the other rules in the
+    request count on."""
+
+
 @dataclass(frozen=True)
 class SearchRunContext:
     """What the uncapped engine needs from the request around it.

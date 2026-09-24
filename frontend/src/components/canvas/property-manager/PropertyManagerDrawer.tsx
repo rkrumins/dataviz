@@ -24,8 +24,6 @@ import {
     useDisplayRules,
     useReferenceModelStore,
 } from '@/store/referenceModelStore'
-import { useSearchStore } from '@/store/searchStore'
-import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
@@ -87,22 +85,14 @@ export function PropertyManagerDrawer({
         notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
     }
 
-    /** Reveal a rule's matched nodes on the canvas by publishing them
-     *  through the shared search-highlight channel (same mechanism the
-     *  Advanced Search panel uses). Spotlights the matches; the user can
-     *  clear via the canvas's existing search-clear affordance. */
+    /** Reveal a rule's matches by running its criteria as a search: the
+     *  search panel lists every match in the view with its exact count,
+     *  lights them up on the canvas and badges the containers they sit
+     *  in — the same answer, and the same controls, as any search. */
     const handleRevealRule = (rule: DisplayRuleConfig) => {
-        const urns = useDisplayRuleMatchStore.getState().matchUrnsByRule.get(rule.id)
-        if (!urns || urns.size === 0) {
-            notify('info', `“${rule.name}” has no matches on the canvas yet`)
-            return
-        }
-        useSearchStore.getState().setResult({
-            viewId,
-            matchUrns: urns,
-            queryHash: `display-rule:${rule.id}`,
-        })
-        notify('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
+        if (!onSearchPredicate) return
+        onSearchPredicate(rule.predicate as Predicate)
+        notify('info', `Showing the matches for “${rule.name}”`)
     }
 
     // Names of OTHER rules — feeds the editor's duplicate-name guard.

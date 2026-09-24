@@ -65,6 +65,11 @@ import type {
     SearchValuesResult as GenSearchValuesResult,
     SearchValueSuggestion as GenSearchValueSuggestion,
     ScopeDiagnostics as GenScopeDiagnostics,
+    SearchMembershipRequest as GenSearchMembershipRequest,
+    SearchMembershipResult as GenSearchMembershipResult,
+    SearchCountsRequest as GenSearchCountsRequest,
+    SearchCountsResult as GenSearchCountsResult,
+    SearchRuleCount as GenSearchRuleCount,
 } from './generated/searchquery'
 
 
@@ -204,6 +209,15 @@ export type SearchDiscoverLabel = SearchDiscoverLabelInfo
 /** `GET /search/values` — a property's most common values in a view. The
  *  server always sends every field. */
 export type SearchValueSuggestion = RequireKeys<GenSearchValueSuggestion, 'count'>
+/** ``POST /search/membership`` — which on-screen entities match which rules. */
+export type SearchMembershipRequest = GenSearchMembershipRequest
+export type SearchMembershipResult = RequireKeys<GenSearchMembershipResult, 'matches' | 'errors'>
+
+/** ``POST /search/counts`` — each rule's exact total in the view. */
+export type SearchCountsRequest = GenSearchCountsRequest
+export type SearchRuleCount = GenSearchRuleCount
+export type SearchCountsResult = RequireKeys<GenSearchCountsResult, 'counts'>
+
 export type SearchValuesResult = RequireKeys<
     Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },
     'values' | 'complete' | 'truncated'

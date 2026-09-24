@@ -1,8 +1,8 @@
 /**
  * DisplayRuleList — the roster of saved display rules inside the
- * Property Manager. Each card shows the tag chip, the live match count
- * (from ``displayRuleMatchStore``), and enable / reveal / edit / delete /
- * reorder controls.
+ * Property Manager. Each card shows the tag chip, the rule's count in the
+ * view (from ``displayRuleMatchStore``), and enable / reveal / edit /
+ * delete / reorder controls.
  *
  * Reorder is exposed as up/down affordances (keyboard-friendly, no DnD
  * dependency) — chip stacking order on the canvas follows rule order.
@@ -15,7 +15,7 @@ import {
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { DisplayRuleConfig } from '@/types/schema'
-import { useRuleMatchCount } from '@/store/displayRuleMatchStore'
+import { useRuleCount } from '@/store/displayRuleMatchStore'
 
 
 export interface DisplayRuleListProps {
@@ -26,7 +26,7 @@ export interface DisplayRuleListProps {
     onDelete: (id: string) => void
     /** Reorder to a new id sequence (chip stacking order). */
     onReorder: (orderedIds: string[]) => void
-    /** Spotlight a rule's matched nodes on the canvas. */
+    /** Show every match of a rule (runs its criteria as a search). */
     onReveal: (rule: DisplayRuleConfig) => void
 }
 
@@ -114,6 +114,26 @@ export function DisplayRuleList({
 }
 
 
+/** A rule's total in the view: exact once counted, what has been found so
+ *  far while the count runs, or why it couldn't be counted (or finished). */
+function RuleCountLine({ enabled, count }: {
+    enabled: boolean
+    count: ReturnType<typeof useRuleCount>
+}) {
+    if (!enabled) return <>Disabled</>
+    if (!count) return <>Counting…</>
+    if (count.error && count.complete) {
+        return <span className="text-rose-400" title={count.error}>Can't be counted</span>
+    }
+    const n = <span className="text-ink font-semibold">{count.count.toLocaleString()}</span>
+    if (count.error) {
+        return <span title={count.error}>At least {n} · <span className="text-rose-400">count stopped</span></span>
+    }
+    if (!count.complete) return <>{n} so far · counting {count.percent}%</>
+    return <>{n} {count.count === 1 ? 'match' : 'matches'} in this view</>
+}
+
+
 function RuleCard({
     rule, isFirst, isLast, onEdit, onToggle, onDelete, onReveal, onMoveUp, onMoveDown,
 }: {
@@ -127,7 +147,10 @@ function RuleCard({
     onMoveUp: () => void
     onMoveDown: () => void
 }) {
-    const matchCount = useRuleMatchCount(rule.id)
+    const count = useRuleCount(rule.id)
+    // Reveal runs the rule as a search, so it only waits on a count that
+    // has finished and found nothing.
+    const nothingToReveal = !rule.enabled || (count?.complete === true && count.count === 0)
 
     return (
         <motion.div
@@ -190,10 +213,8 @@ function RuleCard({
                         {rule.icon && <DynamicIcon name={rule.icon} className="w-3 h-3 shrink-0" />}
                         <span className="truncate">{rule.name}</span>
                     </span>
-                    <div className="mt-1 text-[10.5px] text-ink-muted tabular-nums">
-                        {rule.enabled
-                            ? <><span className="text-ink font-semibold">{matchCount}</span> tagged on canvas</>
-                            : 'Disabled'}
+                    <div className="mt-1 text-[10.5px] text-ink-muted tabular-nums" aria-live="polite">
+                        <RuleCountLine enabled={rule.enabled} count={count} />
                     </div>
                 </div>
 
@@ -202,10 +223,10 @@ function RuleCard({
                     <button
                         type="button"
                         onClick={onReveal}
-                        title="Spotlight matches on canvas"
-                        disabled={!rule.enabled || matchCount === 0}
+                        title="Show every match in search"
+                        disabled={nothingToReveal}
                         className={cn('p-1.5 rounded-lg transition-colors',
-                            (!rule.enabled || matchCount === 0)
+                            nothingToReveal
                                 ? 'text-ink-muted/30 cursor-not-allowed'
                                 : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10')}
                     >
