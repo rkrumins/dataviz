@@ -159,12 +159,15 @@ See [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/v
 | `GET /graphs/{gid}/imports/template` (`:2030`) | `_READ` | `?format` → a prepopulated starter file. (Declared **before** `/{job_id}` so the literal wins.) |
 | `GET /graphs/{gid}/imports/{job_id}` (`:2053`) | `_READ` | Job status (camelCase). |
 | `GET /graphs/{gid}/imports/{job_id}/preview` (`:2066`) | `_READ` | `{job, summary, sample, previewDownloadUrl, rejectedDownloadUrl}`. |
-| `POST /graphs/{gid}/exports` (`:2087`) | `_READ` | `?format&asOfSeq&viewId&branchId&props&ids&types&idempotencyKey` → **202** `{jobId, resultUri, status}`. |
+| `GET /graphs/{gid}/exports/plan` | `_READ` + `graphExportEnabled` | `?format&asOfSeq&viewId&branchId&ids&types` → what the export would hold, before downloading: `{nodes, edges, exact, empty, formatLimit, view:{placements, found, entities}, asOfSeq, branchId}`. Counts are `null` when they take longer than `GRAPH_EXPORT_PLAN_BUDGET_SECS` to count. |
+| `GET /graphs/{gid}/exports/stream` | `_READ` + `graphExportEnabled` | Same params plus `props&filename` → the file, **streamed as it is written** from one pinned commit (flat memory at any size; exempt from the request timeout). **429** + `Retry-After` when this process already streams `GRAPH_EXPORT_CONCURRENCY` exports; **422** `EXCEL_ROW_LIMIT` for an xlsx a sheet can't hold. What the Export dialog uses. |
+| `GET /{ws}/graph/export/plan · /stream` | `_READ` + `graphExportEnabled` | `?dataSourceId&format[&props&filename]` → the same for a data source **without** version control: its live graph, read from the provider (a cold copy whose rows carry URNs, no entity ids). Counts come from the provider's statistics. |
+| `POST /graphs/{gid}/exports` (`:2087`) | `_READ` | `?format&asOfSeq&viewId&branchId&props&ids&types&idempotencyKey` → **202** `{jobId, resultUri, status}`. The job writes the same stream into the object store (for API clients; the dialog streams). |
 | `GET /graphs/{gid}/exports · /{job_id}` (`:2121/2131`) | `_READ` | Export job list / status. |
 | `GET /graphs/{gid}/exports/{job_id}/download` (`:2144`) | `_READ` | `StreamingResponse`; 409 if not `completed`. |
 
 > **Limitation.** The export **row/type scoping** params (`ids`/`types`) are wired end-to-end on the
-> backend (`create_export → create_export_job → ExportWorker`), but the ExportDialog / client service
+> backend (the plan, the stream and the job), but the ExportDialog / client service
 > send only `format`, `viewId`, `branchId`, and `props` — so row-scoped export is **reachable over
 > HTTP but not surfaced in the UI**. Whole-DS, view-scoped, branch-vs-published, and extra-`props`
 > columns are exercised everywhere. Details in [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md).

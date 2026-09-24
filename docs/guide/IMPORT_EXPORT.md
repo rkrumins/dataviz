@@ -14,10 +14,10 @@ travel too: see [Moving views between environments](#moving-views-between-enviro
 ## Where to find it
 
 Look for the **Import / Export** menu in the header, in either View or Edit
-mode. **Export** always works. **Import** needs an open draft — if you're not
-already in Edit mode, the menu tells you to start one first. (If your data
-source doesn't have version control turned on, Import won't appear at all —
-see [Versioning & Change Control](/guide/versioning-change-control).)
+mode. **Export** always works, with or without version control. **Import** needs
+an open draft — if you're not already in Edit mode, the menu tells you to start
+one first. (If your data source doesn't have version control turned on, Import
+won't appear at all — see [Versioning & Change Control](/guide/versioning-change-control).)
 
 ---
 
@@ -32,7 +32,8 @@ editing dozens of nodes on the canvas.
    files aren't — save as CSV first).
 2. **Edit it** anywhere — a spreadsheet, a script, whatever's convenient.
 3. **Upload it.** The import runs in the background, so you can keep working
-   while it processes.
+   while it processes. One file can be up to 100 MB; split a larger one and
+   import the parts one after another — each adds to the same draft.
 4. **Review every change.** When it's done, you get a clear breakdown — how
    many items are new, updated, deleted, or need fixing — plus a preview of
    the actual rows, before anything touches the published graph.
@@ -68,9 +69,38 @@ backup, not just a report.
 - **Choose a format**: the same five formats Import accepts — Excel is the
   best choice if you plan to edit it afterward.
 
+Before anything downloads, {brand} checks what the export will hold. If it
+would hold nothing — say, none of the entities a View places are in this data
+source — it tells you why instead of downloading an empty file. Then your
+browser downloads the file **while it is being written**, so an export of any
+size starts at once and shows its progress in your browser's downloads, and
+you can close the dialog while it runs. A whole data source of several
+gigabytes takes a few minutes.
+
 An export can always be brought back in through Import later, so it doubles
 as a safety net before a big change and as a way to work with your data
 outside {brand}.
+
+### Data sources without version control
+
+Export works here too, in View mode as in Edit mode: it reads the data
+source's graph as it stands — every entity and relationship — as a **cold
+copy**. Its rows carry each entity's URN rather than {brand}'s own identity
+columns, so importing the file into a data source with version control (this
+one, once version control is on, or another) matches the entities by URN.
+Changes made to the graph while the file downloads may or may not be in it.
+
+### Limits
+
+| Limit | Why |
+| --- | --- |
+| **Excel**: 1,048,575 rows per sheet (Nodes and Edges) | Excel's own limit. A larger export offers CSV instead, before anything downloads. |
+| **Import**: 100 MB per file | Uploads pass through the same proxies as every request. |
+| **Several exports at once** | Each server runs a few exports at a time; beyond that a new one waits up to 30 seconds, then asks you to try again in a minute. |
+
+CSV and TSV exports start with a UTF-8 byte-order mark, so Excel reads names
+with accents and other non-ASCII characters correctly. Import handles files
+with or without one.
 
 ---
 

@@ -86,7 +86,65 @@ version control.
 The formats, rules and API are in `docs/features/view-portability.md`. The file format's JSON
 Schema is `docs/features/view-bundle.v1.schema.json`, rendered from the importer's own model.
 
+**Graph data exports stream, at any size.** The export dialog first asks what the export will
+hold, then the browser downloads the file while the server writes it: the first byte arrives at
+once and nothing is built or stored first. The server reads the graph a page at a time from one
+pinned commit, so memory stays flat whatever the size, and any pod can serve the download. A
+3-million-node, 3-million-edge graph exported as 4.5 GB of NDJSON in under six minutes, with the
+server at about 200 MB throughout. Each server process streams a few exports at a time
+(`GRAPH_EXPORT_CONCURRENCY`, default 2); a request beyond that waits up to 30 seconds for a turn,
+then gets 429 with `Retry-After`. An export that would hold nothing says why instead of
+downloading an empty file, and one too large for Excel's 1,048,575 rows per sheet offers CSV
+before anything downloads.
+
+**A data source without version control can be exported**, in View mode as in Edit mode: a cold
+copy of its live graph, in any of the five formats. Its rows carry URNs, so importing it into a
+data source with version control matches them there. The same is true while version control is
+still being set up for a data source.
+
 ### Fixed
+
+**Some exports downloaded empty files.** A view-scoped export only matched a view's placements by
+URN, so a view on a version-controlled source (whose placements can be keyed `gv:<entity id>`)
+exported nothing. The export job also ran inside its request, which the 120-second timeout ended,
+and wrote to disk local to one pod, so its download could come from a pod that didn't have it.
+Exports now stream (above), match every placement key the canvas writes, and never download an
+empty file.
+
+**Every format re-imports what it exported.** A list property written to CSV, TSV or Excel came
+back as the text `['a', 'b']`; it is now written as JSON and read back as the list. A CSV cell
+holding a line break (a description, say) split its row in two. A JSON array was taken for NDJSON
+when its first line was valid JSON on its own. Parsing a large NDJSON or JSON file took time that
+grew with the square of its size; it is now linear. Exporting then importing each format into the
+same data source now reports every row unchanged.
+
+**Import and export jobs outlive their request, and never read "running" once stopped.** They ran
+as the request's background tasks, which the request's timeout cancelled after 120 seconds, and a
+cancelled job read "running" forever. They now run as tasks of their own, a running job reports
+in every 15 seconds, and one silent for 15 minutes (`JOB_STALE_AFTER_SECS`) — its server restarted —
+reads as failed: "The job stopped before it finished … Start it again."
+
+**Import and export files are kept where every server can read them.** Uploads and export artifacts
+were written to disk local to one pod, so a download or an import could land on a pod that didn't
+have the file. They now live in the database, in 1 MB chunks, swept after a day
+(`OBJECT_STORE_TTL_HOURS`). A download whose file was already swept is a 404, not a broken file.
+
+**Large uploads reach their routes.** The 100 MB body cap for uploads only matched paths no upload
+route used, so a bulk import, a view package, or a view file over 8 MB was refused at 8 MB. Those
+routes, and checking and importing a view file's designs, now take up to 100 MB; everything else
+keeps 8 MB.
+
+**Imports larger than 100 MB are refused before they upload**, with how to split them, instead of
+an opaque error from the proxy. An import the server cancelled no longer shows as finished.
+
+**The projector's node fingerprint showed as a property.** Every node projected from version
+control carried `gvHash`, the projector's own bookkeeping, among its user properties in the canvas
+and in exports. It is now reserved like the projector's other fields.
+
+**A request that allocated a lot stalled every other request on its worker.** Each full garbage
+collection walked the whole heap the server builds at startup (about 300,000 objects, 140–180 ms
+on the event loop), and a large export set one off about once a second. That heap is now frozen
+once startup finishes, and those collections take a few milliseconds.
 
 **Saving a view from the wizard deleted its display rules**, and anything else its reference
 layout carried beyond layers and placements, because the layout write replaced the reference
@@ -112,11 +170,12 @@ for the person who uploaded it only. Imports pass the same gates as building a v
 
 ### Upgrading
 
-Two migrations, both additive: `20260923_1000_view_versions` adds `views.portable_id` (stamped on
+Three migrations, all additive: `20260923_1000_view_versions` adds `views.portable_id` (stamped on
 existing views in batches) and the `view_versions` table, and widens the view-activity actions.
 `20260925_1000_view_draft_stage` adds `views.draft_branch_id` and the staged-import columns on
-`view_layout_overlays`. Existing views get no versions up front; each gets its first the first time
-it is needed.
+`view_layout_overlays`. `20260926_1000_object_store` adds the two tables that hold import and
+export files (`object_store_objects`, `object_store_chunks`). Existing views get no versions up
+front; each gets its first the first time it is needed.
 
 Nothing changes for users on upgrade: the feature is a preview and ships off. To try it, turn on
 Admin → Features → **View versions, import and export**.
@@ -126,6 +185,20 @@ below nginx's 180 s. Package uploads wait in the object store under `transfer-up
 versioning worker prunes them after a day. nginx's `client_max_body_size` (100 MB) already matches
 the package limit.
 
+Import and export files now live in the database: `OBJECT_STORE_BACKEND=database` is the new
+default (`local` keeps the old per-pod directory, for a single-instance setup), and the versioning
+worker's daily pass sweeps files older than `OBJECT_STORE_TTL_HOURS` (24).
+
+Streamed exports need their proxies to let a long download run. The frontend's nginx has a new
+location for the two export stream routes (`proxy_buffering off`, `proxy_read_timeout 3600s`);
+every other API route keeps its 180 s. The GKE BackendConfigs' `timeoutSec` goes from 180 to 3600
+(frontend and viz-service), and the Helm ingress's `proxy-read-timeout` from 180 to 3600: the app's
+own tiers still end every other request first. The export stream routes are exempt from the
+request timeout, like server-sent events. New settings, all optional: `GRAPH_EXPORT_CONCURRENCY`
+(2 per process), `GRAPH_EXPORT_SLOT_WAIT_SECS` (30), `GRAPH_EXPORT_MAX_BYTES` (20 GiB, the most one
+export may stream), `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20, how long a plan counts before answering
+without exact counts) and `GRAPH_EXPORT_PAGE_SIZE` (2,000 rows per read).
+
 ### Known limitations
 
 - **Entity identifiers are not rewritten between environments.** A view matches where the
@@ -133,6 +206,10 @@ the package limit.
 - **Files are not signed.** The hashes prove a file wasn't changed after export, not who exported it.
 - **A package brings its data with one of its views**, because a draft belongs to one view. Import
   the package's other views afterwards with **View only**.
+- **An import is one file of at most 100 MB.** An export has no such limit, so a large one is
+  imported back in parts.
+- **A live export isn't a snapshot.** A data source without version control has no commit to pin,
+  so a change made while its export downloads may or may not be in the file.
 
 ---
 

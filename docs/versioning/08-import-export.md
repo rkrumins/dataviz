@@ -13,8 +13,9 @@ draft flow at scale*. Every import opens (or appends to) the user's working **dr
 worker parses the file, resolves each row against the draft's composed state, and applies the
 changes via the same `apply_ops` the canvas uses. The result is **reviewed and published through the
 normal draft diff/PR workflow** — the import/export service never writes `main` itself. Export is
-symmetric: it materializes a branch's state to a downloadable, re-importable artifact (a backup),
-lossless enough that an unchanged round-trip resolves to **zero changes**.
+symmetric: it reads a branch's state a page at a time and streams it out as a downloadable,
+re-importable file (a backup), lossless enough that an unchanged round-trip resolves to **zero
+changes**.
 
 ---
 
@@ -266,25 +267,43 @@ property is typing under a new `prop.<name>` header — nothing shifts.
 
 ## 8. Export
 
-`ExportWorker.run` (`export_worker.py:198-239`) materializes a branch's state and streams it to the
-`result_uri` artifact through the chosen adapter, then records a `{nodes, edges, bytes}` summary.
+An export reads a **snapshot** (`import_export/snapshot.py`): the branch's state as a stack of
+layers — `main` at a commit (a fork's `main` sits on its parent's at the fork point), then a draft
+at a commit or as it stands now (its `entity_heads`). Each layer is keyset-paged on `entity_id`,
+and each page drops the entities a higher layer decides, found with one indexed point lookup per
+layer — so every live entity comes out once, a page at a time, with no global sort and no map of
+the whole state in memory. `main` is pinned to its head commit when the export starts, so a long
+export is one consistent snapshot. `import_export/stream.py` turns each page into records (off the
+event loop) and hands them to the format's `write_pages`; spreadsheets take a first pass that keeps
+only the records' keys, for their columns. Postgres integration test:
+`tests/integration/test_export_stream.py` (identical records to `materialize_state` for main,
+as-of, draft, draft as-of and fork, many pages each).
+
+Three ways out, one pipeline:
+
+- **`GET /exports/plan` then `GET /exports/stream`** — what the Export dialog does: the plan says
+  what the export would hold (counts, emptiness, whether Excel can hold it), then the browser
+  downloads the stream natively. Nothing is stored; any pod serves it.
+- **`GET /{ws}/graph/export/plan · /stream`** (`import_export/live.py`) — a data source **without**
+  version control: the provider's `scan_nodes`/`scan_edges` (FalkorDB: internal-id windows, each
+  one `NodeByIdSeek`) into the same rows, with no entity ids, so a re-import matches by URN.
+- **`POST /exports`** — the job (`ExportWorker.run`), for API clients: the same stream written to
+  the `result_uri` artifact, then a `{nodes, edges, bytes}` summary.
 
 - **Branch vs published.** A `branch_id` (a working draft) exports the draft's **composed state**
-  (main + committed + draft ops, `:210-213`); omitting it defaults to **published `main`**
-  (`:205-208`). This is what lets a user export their in-progress branch, edit it in Excel, and
-  re-import onto the same branch.
-- **As-of.** `as_of_seq` gives a point-in-time snapshot (materialized via the engine's time-travel
-  read).
-- **View-scoped export.** When a `viewId` is given, `filter_to_scope` (`export_worker.py:144-159`)
-  restricts to the view's entity set. The **authoritative source is the view's
-  `context_model.instance_assignments`** — the explicit physical-entity → logical-layer placements —
-  resolved server-side by `_resolve_export_view_scope` (`versioning.py:1906-1937`): the assigned URNs
-  (entries with a real `layerId`) plus their containment descendants (when `inheritsChildren`, the
-  default). Edges are kept only when **both** endpoints are in scope. Fail-open ⇒ whole data source.
-  A type/layer allow-list is the fallback for views not defined by explicit assignments
-  (`_keep_from_filters`, `:128-141`).
-- **Row-scoped export.** `filter_to_selection` (`export_worker.py:162-182`) keeps only an explicit
-  `entity_id`/`urn` set and/or entity-type set (intersection), composing after view scope.
+  (main + committed + staged draft changes); omitting it defaults to **published `main`**. A draft
+  must be readable by the caller. This is what lets a user export their in-progress branch, edit it
+  in Excel, and re-import onto the same branch.
+- **As-of.** `as_of_seq` gives a point-in-time snapshot: `main` and the draft read at that commit.
+- **View-scoped export.** When a `viewId` is given, `stream.view_entities` restricts to the view's
+  entity set. The **authoritative source is the view's reference-layout placements** — the explicit
+  physical-entity → logical-layer assignments — read by `_view_export_scope` (`versioning.py`): the
+  placed entities (entries with a real `layerId`) plus their containment descendants (when
+  `inheritsChildren`, the default). A placement key is the entity's URN, or `gv:<entity id>` for a
+  node without one, as the canvas writes it. Edges are kept only when **both** endpoints are in
+  scope. A view that places nothing exports the whole data source (the plan says so).
+- **Row-scoped export.** `stream.Selection` keeps only an explicit `entity_id`/`urn` set and/or
+  entity-type set (intersection), composing after view scope.
 - **Add-property columns.** `props` emits extra empty `prop.<name>` columns to fill (`:219-222`).
 
 **The options plumbing is consistent end to end** (verified against the current tree): the
@@ -302,12 +321,7 @@ them into an `options` dict stored in `field_scope` (`service.py:208-221`) → `
 > analysis flagged a `TypeError` in this plumbing; it is **not present in the current code** — the
 > three layers' kwargs line up.)
 
-> **Limitation — export buffers the read.** v1 `materialize_state`s the whole branch state, then
-> streams the write (`export_worker.py:9-10`). Fine for human-scale exports; a keyset-streaming read
-> for multi-million-node graphs is a follow-up that swaps `materialize_state` for
-> `reconcile._stream_pg_nodes` without changing the rest.
-
-**Lossless round-trip.** `records_from_state` → `denormalize_node`/`denormalize_edge`
+**Lossless round-trip.** `denormalize_node`/`denormalize_edge`
 (`rowmodel.py:132-168`) spill scalar props to `prop.*` and nested to `properties_json`, mirroring the
 projector's native-vs-`propertiesRaw` split, so an unchanged export re-imports to a zero diff. A
 whole-data-source export is therefore a faithful **backup**; the identity columns let a re-import
@@ -378,10 +392,8 @@ rejects keys that resolve outside the root (`:85-91`), and the same sweep delete
 - **In-process dispatch**, not a durable async dispatcher — a process restart mid-import kills the
   job, which is then reported `failed` once stale (`service.py:9-11`). Highest-priority hardening
   item.
-- **Export buffers the read** (`materialize_state` before streaming the write) — keyset streaming is
-  the 5M+ follow-up (`export_worker.py:9-10`); **JSON and xlsx are buffered** on both parse and write
-  (`formats.py:120-122`, `xlsx_adapter.py:26-32`), so they're human-scale formats — use ndjson/csv
-  for millions.
+- **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable); every
+  format *writes* streaming. Imports are capped at 100 MB per file anyway.
 - **No cloud object store yet**: artifacts live in the management database (§9); S3/GCS and the
   presigned-upload path are stubbed (`object_store.py:333-348`).
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
