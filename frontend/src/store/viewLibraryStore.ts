@@ -196,5 +196,13 @@ export const useViewLibraryStore = create<ViewLibraryState>()((set, get) => {
 })
 
 
+/** Read ``viewId``'s library again if a canvas has it open: a version
+ *  restore or a bundle import rewrote its design, display rules among it. */
+export function reloadViewLibrary(viewId: string): void {
+    const library = useViewLibraryStore.getState()
+    if (library.viewId === viewId) void library.reload()
+}
+
+
 export const useLibraryCanEdit = () => useViewLibraryStore((s) => s.canEdit)
 export const useSavedViewQueries = () => useViewLibraryStore((s) => s.savedQueries)

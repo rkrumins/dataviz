@@ -19,7 +19,7 @@ import type { SavedViewQuery, ViewLibrary } from '@/services/viewLibraryService'
 import type { DisplayRuleConfig } from '@/types/schema'
 
 import { useReferenceModelStore } from '../referenceModelStore'
-import { useViewLibraryStore } from '../viewLibraryStore'
+import { reloadViewLibrary, useViewLibraryStore } from '../viewLibraryStore'
 
 
 const rule = (id: string, over: Partial<DisplayRuleConfig> = {}): DisplayRuleConfig => ({
@@ -208,5 +208,23 @@ describe('saved queries', () => {
         expect(store().savedQueries.map((q) => q.id)).toEqual(['q2'])
         await expect(removing).rejects.toThrow('Service Unavailable')
         await vi.waitFor(() => expect(store().savedQueries.map((q) => q.id)).toEqual(['q1', 'q2']))
+    })
+})
+
+
+describe('after a restore or an import rewrote a view', () => {
+    it("reads the open view's library again — its rules are the version's or the file's now", async () => {
+        await open({}, 'br1')
+        api.getViewLibrary.mockResolvedValueOnce(library({ branchId: 'br1', displayRules: [rule('b')] }))
+        reloadViewLibrary('v1')
+        await vi.waitFor(() => expect(shown()).toEqual(['b']))
+        expect(api.getViewLibrary).toHaveBeenLastCalledWith('v1', 'br1')
+    })
+
+    it('leaves the library of another view alone', async () => {
+        await open()
+        reloadViewLibrary('v2')
+        expect(api.getViewLibrary).toHaveBeenCalledTimes(1)
+        expect(shown()).toEqual(['a'])
     })
 })

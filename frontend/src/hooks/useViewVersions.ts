@@ -17,6 +17,7 @@ import {
   type ViewVersionPage,
   type ViewVersionStatus,
 } from '@/services/viewVersionsApiService'
+import { reloadViewLibrary } from '@/store/viewLibraryStore'
 import { VIEW_ACTIVITY_QUERY_KEY } from './useViewActivity'
 import { VIEW_QUERY_KEY } from './useViewMetadata'
 
@@ -90,6 +91,8 @@ export function useRestoreViewVersion(viewId: string) {
       void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, viewId] })
       void queryClient.invalidateQueries({ queryKey: ['views'] })
       void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })
+      // Its display rules are the version's: a canvas that has it open reads them again.
+      reloadViewLibrary(viewId)
     },
   })
 }
