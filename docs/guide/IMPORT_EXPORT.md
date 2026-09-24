@@ -31,11 +31,14 @@ editing dozens of nodes on the canvas.
    NDJSON, and JSON are all supported (older formats like `.xls` or Numbers
    files aren't — save as CSV first).
 2. **Edit it** anywhere — a spreadsheet, a script, whatever's convenient.
-3. **Upload it.** The import runs in the background, so you can keep working
-   while it processes. One file can be up to 100 MB; split a larger one and
-   import the parts one after another — each adds to the same draft. When the
-   server is busy with other imports and exports, yours waits its turn, and
-   the dialog says how many are ahead of it.
+3. **Upload it.** A CSV, TSV or NDJSON file can be up to 10 GB; a JSON or
+   Excel file, which is read whole, up to 100 MB. The dialog shows how much of
+   the file is up. If the upload stops (a dropped connection, a closed tab),
+   choose the same file again and it picks up where it left off. The import
+   then runs in the background, so you can keep working. When the server is
+   busy with other imports and exports, yours waits its turn, and the dialog
+   says how many are ahead of it. A multi-GB import takes a while: allow about
+   an hour for every 5 million rows.
 4. **Review every change.** When it's done, you get a clear breakdown — how
    many items are new, updated, deleted, or need fixing — plus a preview of
    the actual rows, before anything touches the published graph.
@@ -97,7 +100,7 @@ Changes made to the graph while the file downloads may or may not be in it.
 | Limit | Why |
 | --- | --- |
 | **Excel**: 1,048,575 rows per sheet (Nodes and Edges) | Excel's own limit. A larger export offers CSV instead, before anything downloads. |
-| **Import**: 100 MB per file | Uploads pass through the same proxies as every request. |
+| **Import**: 10 GB per CSV, TSV or NDJSON file; 100 MB per JSON or Excel file | A JSON or Excel file is read whole. A larger file can be split and imported in parts, each adding to the same draft. |
 | **Several exports at once** | Each server runs two exports at a time. Another waits for its turn, for up to 15 minutes: your browser shows the download once it begins. If no turn frees up, the download fails; try again later. |
 
 CSV and TSV exports start with a UTF-8 byte-order mark, so Excel reads names

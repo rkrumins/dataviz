@@ -61,6 +61,7 @@ tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
+tests/test_import_uploads.py
 tests/test_import_xlsx.py
 tests/test_index_ddl_once.py
 tests/test_insights_asset_endpoints.py

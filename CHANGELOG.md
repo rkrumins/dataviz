@@ -9,6 +9,53 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Imports up to 10 GB
+
+### Added
+
+**Imports of up to 10 GB, uploaded in parts that resume.** A CSV, TSV or NDJSON file can now be
+10 GB (a JSON or Excel file, which is read whole, stays at 100 MB). The Import dialog sends the file
+in 16 MB parts, three at a time, retries a part that failed, and shows how much is up. If the upload
+stops (a dropped connection, a closed tab), choosing the same file again sends only what the server
+doesn't hold yet. A file too large for its format is refused before any of it is sent. Scripts can
+use the same routes (`…/imports/uploads`), or still send a file of up to 100 MB as one request.
+
+### Changed
+
+**Imports use a fraction of the memory, and run three to four times faster.** The importer held the
+data source's whole graph in memory (about 4.4 KB per entity) and every row of the file. It now
+works a window of 50,000 rows at a time, looking up only what the window names: 200,000 rows into a
+200,000-node graph peaked at 490 MB instead of 1.4 GB, and memory no longer grows with the graph.
+Rows, resolutions and entity versions are written in bulk rather than one statement each: that
+import took 2 to 3 minutes instead of 8½. Every commit writes its entity heads in bulk too, so
+large publishes, merges and reverts gain as well.
+
+### Fixed
+
+**An import's staged rows are cleared.** Every row of every import stayed in the database forever:
+the retention setting was never used. The versioning worker now deletes the rows of imports finished
+more than `IMPORT_STAGING_GC_DAYS` (7) ago.
+
+### Upgrading
+
+One migration, `20260927_1000_import_indexes`: an index on `node_versions (graph_id,
+qualified_name)` and one on `import_rows (job_id, matched_entity_id)`. It builds them with a plain
+`CREATE INDEX`, which holds writes to the table until it is done: on a large installation, run it in
+a quiet hour. New settings, both optional: `IMPORT_MAX_BYTES` (10 GiB) and
+`IMPORT_WHOLE_FILE_MAX_BYTES` (100 MB). The parts are kept in the object store: for multi-GB files,
+keep that on a mount (`OBJECT_STORE_BACKEND=local`) rather than in the database.
+
+### Known limitations
+
+- **A 10 GB import takes hours.** It writes about 1,500 to 2,500 rows a second, and a 10 GB NDJSON
+  file holds around 40 million rows. It runs on the worker, not in the web servers. The dialog shows
+  the upload's progress and the job's place in the queue, but not yet the import's own progress.
+- **An interrupted import starts over**, and an upload has a day to finish before its parts are
+  swept.
+- **A large import's staged rows take about the file's size again in Postgres** until they are swept.
+
+---
+
 ## [Unreleased] — Imports and exports off the web servers
 
 ### Changed
