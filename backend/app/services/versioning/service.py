@@ -902,6 +902,9 @@ class GraphVersioningService:
         if not deltas:
             draft.status = "merged"
             draft.base_commit_seq = graph.main_head_commit_seq
+            # Nothing reaches main, yet the branch is merged all the same (what it holds in views
+            # goes live with it), so no review raised from it may be left live either.
+            await self._resolve_live_prs(s, draft.id, None, actor, merged_via)
             return draft.head_commit_id or ""
 
         contributors = await self._branch_contributors(s, graph.id, draft.id)
@@ -961,13 +964,7 @@ class GraphVersioningService:
         # Leaving them live (what `publish` used to do) stranded a PR pointing at a dead branch:
         # unmergeable (`_require_open` rejects it) yet still rendered as actionable, with an empty
         # diff. Resolve them all here, in the shared body, so no squash path can skip it.
-        for pr in await self._live_prs_for_branch(s, draft.id):
-            pr.status = "merged"
-            pr.resulting_commit_id = squash.id
-            pr.merged_at = _now()
-            pr.merged_by = actor
-            pr.merged_via = merged_via
-            pr.updated_at = _now()
+        await self._resolve_live_prs(s, draft.id, squash.id, actor, merged_via)
 
         ps = await s.get(ProjectionStateORM, graph.id)
         if ps is not None:
@@ -1785,6 +1782,49 @@ class GraphVersioningService:
         return await self._retry_seq(f"merge_pr {pr_id}", _once)
 
     # ---- the one-live-PR-per-branch invariant ----------------------------- #
+    async def _resolve_live_prs(self, s, branch_id: str, commit_id: Optional[str], actor: str,
+                                merged_via: str) -> None:
+        """Mark every live PR raised from a branch that has just merged as merged too."""
+        for pr in await self._live_prs_for_branch(s, branch_id):
+            pr.status = "merged"
+            pr.resulting_commit_id = commit_id
+            pr.merged_at = _now()
+            pr.merged_by = actor
+            pr.merged_via = merged_via
+            pr.updated_at = _now()
+
+    async def claim_draft(
+        self, *, graph_id: str, branch_id: str, actor: str, view_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """A draft an import writes into: open, on ``graph_id``, and ``actor``'s own. With
+        ``view_id``, a draft that names no view yet becomes that view's (a draft opened for a
+        package's data, then given the new view that came with it), so the view opens on it.
+
+        Raises ``ValueError`` for an unknown or closed draft and :class:`AccessDenied` for someone
+        else's."""
+        async with self._session() as s:
+            draft = await self._get_branch(s, graph_id, branch_id)
+            if draft.kind != "draft":
+                raise ValueError("not a draft")
+            self._require_open(draft)
+            if draft.owner != actor:
+                raise AccessDenied("this draft belongs to someone else")
+            if view_id and draft.originating_view_id is None:
+                draft.originating_view_id = view_id
+            return {"branch_id": draft.id, "name": draft.name, "originating_view_id": draft.originating_view_id}
+
+    async def branch_statuses(self, branch_ids: Sequence[str]) -> Dict[str, str]:
+        """The status (open, publishing, merged, abandoned) of each branch named that exists."""
+        ids = sorted(set(branch_ids))
+        out: Dict[str, str] = {}
+        async with self._session() as s:
+            for i in range(0, len(ids), 500):
+                rows = (await s.execute(
+                    select(BranchORM.id, BranchORM.status).where(BranchORM.id.in_(ids[i:i + 500]))
+                )).all()
+                out.update({bid: status for bid, status in rows})
+        return out
+
     async def _live_prs_for_branch(self, s, branch_id: str) -> List[MergeRequestORM]:
         """Every non-terminal PR raised from ``branch_id``, newest first.
 
@@ -4179,6 +4219,12 @@ class GraphVersioningService:
         """No-op when ``viewer`` is None (internal/test callers); else raise on a private draft."""
         if viewer is not None and not await self._branch_readable(s, branch, viewer):
             raise AccessDenied(f"{viewer.actor} cannot view branch {branch.id}")
+
+    async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"]) -> None:
+        """Raise ``ValueError`` when ``branch_id`` isn't one of the graph's branches, and
+        ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
+        async with self._session() as s:
+            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
 
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results

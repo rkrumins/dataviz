@@ -304,6 +304,29 @@ async def test_sse_path_bypasses_timeout():
     assert sink.terminal_chunks == 1
 
 
+async def test_streamed_export_bypasses_timeout():
+    """A streamed export runs as long as the file takes: a deadline would cut it short, and the
+    clean closing chunk would make the truncated file look complete."""
+
+    async def slow_download(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await asyncio.sleep(0.5)  # > 0.2s default timeout
+        await send({"type": "http.response.body", "body": b"rows\n", "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    mw = _TimeoutMiddleware(slow_download)
+    sink = _Sink()
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/stream"), _Receiver(), sink)
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    # Only those routes: the export job's status is an ordinary request.
+    assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/stream/extra")
+    assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1")
+
+
 async def test_non_http_scope_passes_through():
     """Lifespan / websocket / etc must not be touched by the HTTP-only
     timeout — call the inner app directly."""

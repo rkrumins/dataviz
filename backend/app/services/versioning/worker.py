@@ -86,10 +86,34 @@ class ProjectionWorker:
         return await self._proj.project_pending()
 
     async def sweep_once(self):
-        """One pass of the idle-draft janitor (plan §17 #8); no-op without a service."""
+        """One pass of the idle-draft janitor (plan §17 #8); no-op without a service. What a swept
+        draft held in views goes with it, as on abandon, and any draft whose views were left
+        unsettled by its publish or abandon is settled (``draft_views``). Import/export artifacts
+        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store."""
         if self._versioning is None:
             return []
-        return await self._versioning.sweep_idle_drafts()
+        swept = await self._versioning.sweep_idle_drafts()
+        from backend.app.services import draft_views
+
+        try:
+            if swept:
+                await draft_views.discard(swept)
+            await draft_views.settle(self._versioning)
+        except Exception:  # noqa: BLE001 — the drafts are swept; their views settle next pass
+            logger.exception("settling the views of finished drafts failed")
+        try:
+            from backend.app.services.view_transfer.package import prune_uploads
+
+            await prune_uploads()
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("pruning view package uploads failed")
+        try:
+            from backend.app.services.storage.object_store import get_object_store
+
+            await get_object_store().sweep(older_than_hours=config.OBJECT_STORE_TTL_HOURS)
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("sweeping expired import/export artifacts failed")
+        return swept
 
     async def evict_once(self):
         """One pass of the per-provider RAM-budget cache janitor (plan §16.5 #9-10):

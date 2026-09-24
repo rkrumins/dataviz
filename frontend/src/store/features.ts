@@ -40,6 +40,9 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
     graphExportEnabled: true,
+    viewPortabilityEnabled: false,        // experimental preview — ships OFF
+    viewExportEnabled: true,
+    viewImportEnabled: true,
     blankModelsEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
     // Fail OPEN to "workspaces decide". Guessing the strictest value on a

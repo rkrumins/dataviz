@@ -16,7 +16,8 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import * as api from '@/services/versioningApiService'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { useBranchDiffSummary } from '../hooks/useVersioning'
+import { useBranchDiffSummary, useBranchViewChanges } from '../hooks/useVersioning'
+import { DraftViewChanges } from './DraftViewChanges'
 import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
 import { ViewHistoryTimeline } from './ViewHistoryTimeline'
@@ -92,6 +93,7 @@ export function ViewVersioningPanel({
   // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
   const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null, 1000)
+  const viewChangesQ = useBranchViewChanges(wsId, graphId, branchId ?? null)
   const fetchChildren = useCallback(
     (key: string, offset: number) =>
       api.getBranchDiffChildren(wsId, graphId, branchId!, key, { offset, limit: 50 }),
@@ -143,6 +145,14 @@ export function ViewVersioningPanel({
             (branchId ? (
               <div className="space-y-4">
                 <PendingChanges />
+                {viewChangesQ.data && (viewChangesQ.data.views.length + viewChangesQ.data.hidden) > 0 && (
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider mb-2 px-0.5">
+                      Views in this branch
+                    </p>
+                    <DraftViewChanges changes={viewChangesQ.data} branchId={branchId} onNavigate={onClose} />
+                  </div>
+                )}
                 <div>
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2 px-0.5">
                     Committed in this branch

@@ -586,6 +586,60 @@ async def list_views(
     return response
 
 
+async def authorize_view_create(
+    claims: PermissionClaims,
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    data_source_id: Optional[str],
+    visibility: Optional[str],
+) -> None:
+    """Refuse a new view the caller may not create. Every way a view is born goes through
+    here (``POST /views`` and the import), so the rules cannot drift between them.
+
+    ``workspace:view:create`` in the target workspace; creating straight to ``enterprise``
+    additionally needs ``workspace:view:publish`` (the same gate as the visibility endpoint —
+    a birth certificate is not a bypass).
+    """
+    if visibility is not None and visibility not in (
+        "private", "workspace", "enterprise",
+    ):
+        # Validate before the DB CHECK constraint turns this into a 500.
+        raise HTTPException(
+            status_code=422,
+            detail="visibility must be one of: private, workspace, enterprise",
+        )
+
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        from backend.app.services.permission_service import has_permission
+        if not has_permission(
+            claims, "workspace:view:create", workspace_id=workspace_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:create",
+            )
+        if visibility == "enterprise":
+            # The platform ceiling binds everyone, including the people who
+            # hold the publish permission — a limit only non-admins obey is
+            # not a limit. Below it, an 'open' workspace lets any creator
+            # publish, unless the source itself is restricted.
+            platform = await resolve_enterprise_view_policy(session)
+            if platform == "off":
+                raise feature_disabled("enterpriseViewPolicy")
+            has_perm = view_access.can_publish_in_workspace(claims, workspace_id)
+            if not has_perm:
+                open_ws = await _publish_policy(session, workspace_id) == "open"
+                restricted = await _source_is_restricted(
+                    session, workspace_id, data_source_id,
+                )
+                if platform == "request" or not open_ws or restricted:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Missing permission: workspace:view:publish",
+                    )
+
+
 @router.post("/", response_model=ViewResponse, status_code=201)
 async def create_view(
     req: ViewCreateRequest = Body(...),
@@ -604,43 +658,10 @@ async def create_view(
     requires ``workspace:view:publish`` (the same gate as the
     visibility endpoint — a birth certificate is not a bypass).
     """
-    if req.visibility is not None and req.visibility not in (
-        "private", "workspace", "enterprise",
-    ):
-        # Validate before the DB CHECK constraint turns this into a 500.
-        raise HTTPException(
-            status_code=422,
-            detail="visibility must be one of: private, workspace, enterprise",
-        )
-
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        from backend.app.services.permission_service import has_permission
-        if not has_permission(
-            claims, "workspace:view:create", workspace_id=req.workspace_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="Missing permission: workspace:view:create",
-            )
-        if req.visibility == "enterprise":
-            # The platform ceiling binds everyone, including the people who
-            # hold the publish permission — a limit only non-admins obey is
-            # not a limit. Below it, an 'open' workspace lets any creator
-            # publish, unless the source itself is restricted.
-            platform = await resolve_enterprise_view_policy(session)
-            if platform == "off":
-                raise feature_disabled("enterpriseViewPolicy")
-            has_perm = view_access.can_publish_in_workspace(claims, req.workspace_id)
-            if not has_perm:
-                open_ws = await _publish_policy(session, req.workspace_id) == "open"
-                restricted = await _source_is_restricted(
-                    session, req.workspace_id, req.data_source_id,
-                )
-                if platform == "request" or not open_ws or restricted:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Missing permission: workspace:view:publish",
-                    )
+    await authorize_view_create(
+        claims, session, workspace_id=req.workspace_id,
+        data_source_id=req.data_source_id, visibility=req.visibility,
+    )
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
@@ -842,6 +863,16 @@ async def update_view_layout(
         raise HTTPException(status_code=422, detail=str(e))
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    # A wizard save asks for its result to be recorded as a version, in this same
+    # transaction. A draft write never is: the draft isn't the view yet, and its design
+    # becomes a version when the draft is promoted.
+    if req.checkpoint is not None and not branch_id:
+        from backend.app.db.repositories import view_version_repo
+        view_orm = await _load_view_orm(session, view_id)
+        await view_version_repo.checkpoint(
+            session, view_orm, source=req.checkpoint.source,
+            actor=_user_id(user), message=req.checkpoint.message,
+        )
     return view
 
 
@@ -918,6 +949,22 @@ async def restore_view(
     return view
 
 
+_WAITING_IN_DRAFT = ("This view is waiting in a draft. It goes live, with the visibility chosen when "
+                     "it was imported, when the draft is published.")
+
+
+async def _refuse_while_in_draft(session: AsyncSession, view_id: str) -> None:
+    """A view staged in a draft stays private until the draft goes live, and then takes the
+    visibility chosen at import; its sharing tier can't be changed or requested meanwhile
+    (explicit grants still can, to show it to the draft's reviewers)."""
+    from sqlalchemy import select
+    staged = (await session.execute(
+        select(ViewORM.draft_branch_id).where(ViewORM.id == view_id)
+    )).scalar_one_or_none()
+    if staged:
+        raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
+
+
 @router.put("/{view_id}/visibility", response_model=ViewResponse)
 async def update_view_visibility(
     view_id: str = Path(...),
@@ -935,6 +982,7 @@ async def update_view_visibility(
     """
     if visibility not in ("private", "workspace", "enterprise"):
         raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
+    await _refuse_while_in_draft(session, view_id)
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
@@ -1050,6 +1098,8 @@ async def request_publication(
         )
     if view_orm.visibility == "enterprise":
         raise HTTPException(status_code=409, detail="This view is already published")
+    if view_orm.draft_branch_id:
+        raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
 
     view_orm.publish_requested_by = user.id
     view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()

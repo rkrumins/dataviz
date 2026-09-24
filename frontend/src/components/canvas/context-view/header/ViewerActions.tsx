@@ -26,7 +26,7 @@ import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
 import { DisplayMenu } from './DisplayMenu'
-import { ImportExportMenu } from './ImportExportMenu'
+import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
 import { HoverTip } from '@/components/ui/HoverTip'
 
@@ -99,6 +99,9 @@ export interface ComprehensionToolsProps {
   onImport?: () => void
   onExport?: () => void
   isDraft: boolean
+  /** The same menu's "This view" section: export the view, with or without its data, or update it
+   *  from a file. */
+  thisView?: ViewFileActions
 }
 
 export function ComprehensionTools({
@@ -135,6 +138,7 @@ export function ComprehensionTools({
   onImport,
   onExport,
   isDraft,
+  thisView,
   traceHistory = [],
   onResumeTraceHistory,
   onClearTraceHistory,
@@ -418,7 +422,7 @@ export function ComprehensionTools({
 
       {/* Import / Export — one dropdown, both modes. Import is disabled with an explainer outside
           Edit mode; Export is always available (published state is a valid, re-importable backup). */}
-      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} />
+      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
     </>
   )
 }

@@ -5,7 +5,7 @@ Both the visualization service and graph service import from here.
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Awaitable, Callable, List, Optional, Dict, Any
+from typing import AsyncIterator, Awaitable, Callable, List, Optional, Dict, Any
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -85,6 +85,32 @@ def capability_for(provider_type: Optional[str]) -> ProviderCapability:
     return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
 
 
+async def resolve_identities_by_query(provider: Any, urns: List[str], *, chunk: int = 1000,
+                                      ) -> Dict[str, Optional[Dict[str, Any]]]:
+    """:meth:`GraphDataProvider.resolve_identities` for any object with an async ``get_nodes``:
+    ``chunk`` URNs per call, found / ``None`` (absent) / left out (a chunk whose lookup failed,
+    so unknown, never missing)."""
+    out: Dict[str, Optional[Dict[str, Any]]] = {}
+    wanted = list(dict.fromkeys(u for u in urns if isinstance(u, str) and u))
+    for start in range(0, len(wanted), chunk):
+        batch = wanted[start:start + chunk]
+        try:
+            nodes = await provider.get_nodes(
+                NodeQuery(urns=batch, include_child_count=False, limit=len(batch))
+            )
+        except Exception:
+            continue  # absent = unknown, never missing
+        found = {n.urn: n for n in nodes}
+        for urn in batch:
+            node = found.get(urn)
+            out[urn] = (
+                {"type": node.entity_type, "name": node.display_name,
+                 "qualifiedName": node.qualified_name}
+                if node is not None else None
+            )
+    return out
+
+
 class GraphDataProvider(ABC):
     """
     Abstract interface for graph data providers.
@@ -127,6 +153,30 @@ class GraphDataProvider(ABC):
         rows = await self.get_nodes(query.model_copy(update={"limit": limit + 1}))
         page = rows[:limit]
         return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
+
+    async def scan_nodes(self, page_size: int = 2000) -> AsyncIterator[List[GraphNode]]:
+        """Every node, a page at a time — what an export of a graph without version control
+        reads. Offset pages of `get_nodes` here; a provider with a cheaper full scan overrides it.
+        Not a snapshot: what changes while it runs may or may not be in it."""
+        offset = 0
+        while True:
+            page = await self.get_nodes(NodeQuery(offset=offset, limit=page_size, includeChildCount=False))
+            if page:
+                yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
+
+    async def scan_edges(self, page_size: int = 2000) -> AsyncIterator[List[GraphEdge]]:
+        """Every edge, a page at a time (see `scan_nodes`)."""
+        offset = 0
+        while True:
+            page = await self.get_edges(EdgeQuery(offset=offset, limit=page_size))
+            if page:
+                yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
 
     @abstractmethod
     async def search_nodes(self, query: str, limit: int = 10) -> List[GraphNode]:
@@ -558,6 +608,27 @@ class GraphDataProvider(ABC):
 
         pairs = await asyncio.gather(*(one(u) for u in dict.fromkeys(urns)))
         return {urn: chain for urn, chain in pairs if chain is not None}
+
+    #: URNs asked for per ``get_nodes`` call by the default ``resolve_identities``.
+    RESOLVE_IDENTITIES_CHUNK = 1000
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which of ``urns`` exist, and as what.
+
+        Built for checking an imported view against this graph, where the difference between
+        "not here" and "couldn't tell" decides a match percentage, so the result has THREE
+        states, not two:
+
+          * ``{urn: {"type", "name", "qualifiedName"}}``: found;
+          * ``{urn: None}``: looked for and confirmed absent;
+          * urn ABSENT from the result: unknown, because its lookup failed. Callers must never
+            treat that as missing.
+
+        This default asks ``get_nodes`` a chunk at a time; a chunk that raises is unknown. A
+        provider whose ``get_nodes`` swallows partial failures must override this (FalkorDB
+        does).
+        """
+        return await resolve_identities_by_query(self, urns, chunk=self.RESOLVE_IDENTITIES_CHUNK)
 
     @abstractmethod
     async def get_descendants(

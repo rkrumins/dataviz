@@ -10,6 +10,9 @@
  *    CanvasRouter shows a pill over the data rather than the blocking card.
  *  - A retry of the SAME view does not clear the canvas between attempts.
  *  - A genuinely new view still starts from an empty canvas.
+ *  - Placements the load asked for and didn't get are recorded as not found, but never those in
+ *    a batch that failed (unknown, not absent) and never a temporary URN; in an open view too,
+ *    whose placements the type pages didn't bring are asked for by URN.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,10 +20,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mockProvider, viewState } = vi.hoisted(() => ({
   mockProvider: {
     getNodes: vi.fn(async () => [] as unknown[]),
+    getNodesPage: vi.fn(async () => ({ nodes: [] as unknown[], hasMore: false, nextOffset: 0 })),
     getEdgesBetween: vi.fn(async () => []),
     getChildren: vi.fn(async () => []),
   },
-  viewState: { id: 'v1', assignments: {} as Record<string, { layerId: string }> },
+  viewState: { id: 'v1', assignments: {} as Record<string, { layerId: string }>, scope: 'curated' as 'curated' | 'all' },
 }))
 
 vi.mock('@/providers/GraphProviderContext', () => ({
@@ -44,7 +48,7 @@ vi.mock('@/store/schema', () => ({
       type: 'reference',
       referenceLayout: { layers: [{ id: 'L1' }], assignments: viewState.assignments },
     },
-    content: { visibleEntityTypes: ['layer', 'object'], entityScope: 'curated' },
+    content: { visibleEntityTypes: ['layer', 'object'], entityScope: viewState.scope },
   }),
   isContainmentEdgeType: () => false,
   normalizeEdgeType: (t: string) => t,
@@ -147,5 +151,52 @@ describe('useGraphHydration — partial loads and retries keep data on screen', 
     act(() => release())
     await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
     expect(useCanvasStore.getState().nodes.map(n => n.id)).toEqual(['urn:e:7'])
+  })
+})
+
+describe('useGraphHydration — placements that point at nothing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    viewState.id = 'v1'
+    useCanvasStore.getState().setGraph([], [])
+    useCanvasStore.getState().clearNodeFetchFailures()
+  })
+
+  it('records assigned entities the graph was asked for and didn’t return', async () => {
+    assignUrns(5)
+    viewState.assignments['urn:staged:object:tmp1'] = { layerId: 'L1' }
+    mockProvider.getNodes.mockResolvedValue([node(0), node(1), node(2)])
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
+    expect(useCanvasStore.getState().placementsNotFound).toEqual({ viewId: 'v1', urns: ['urn:e:3', 'urn:e:4'] })
+  })
+
+  it('records them in an open view too, from the placements it asked for by URN', async () => {
+    viewState.scope = 'all'
+    try {
+      assignUrns(3)
+      // The type pages bring nothing, so every placement is asked for by URN; one isn't here.
+      mockProvider.getNodes.mockResolvedValue([node(0), node(1)])
+      const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+      await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
+      expect(mockProvider.getNodesPage).toHaveBeenCalled()
+      expect(useCanvasStore.getState().placementsNotFound).toEqual({ viewId: 'v1', urns: ['urn:e:2'] })
+    } finally {
+      viewState.scope = 'curated'
+    }
+  })
+
+  it('leaves out the entities of a batch that failed: those are unknown, not absent', async () => {
+    assignUrns(150) // batches: 100 + 50
+    mockProvider.getNodes.mockImplementation(async (...args: unknown[]) => {
+      const q = args[0] as { urns?: string[] }
+      if (q.urns && q.urns.length === 50) throw apiError(504, 'PROVIDER_TIMEOUT')
+      return [node(0)]
+    })
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('slow'))
+    const urns = useCanvasStore.getState().placementsNotFound?.urns ?? []
+    expect(urns).toHaveLength(99)
+    expect(urns.some((u) => Number(u.split(':')[2]) >= 100)).toBe(false)
   })
 })

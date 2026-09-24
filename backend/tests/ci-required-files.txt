@@ -30,6 +30,7 @@ tests/test_alembic_revision_lengths.py
 tests/test_api_graph.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
+tests/test_background_tasks.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
 tests/test_ci_required_list.py
@@ -53,10 +54,14 @@ tests/test_falkordb_store_outage.py
 tests/test_freshness_endpoints.py
 tests/test_freshness_source_doc.py
 tests/test_graph_cache.py
+tests/test_graph_export_api.py
 tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
+tests/test_import_formats.py
+tests/test_import_job_liveness.py
+tests/test_import_xlsx.py
 tests/test_index_ddl_once.py
 tests/test_insights_asset_endpoints.py
 tests/test_job_list_overlay.py
@@ -67,6 +72,7 @@ tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
 tests/test_metrics_backend.py
 tests/test_nav_catalogue.py
+tests/test_object_store.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
@@ -79,6 +85,7 @@ tests/test_purge_then_rebuild.py
 tests/test_read_pressure_yield.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
+tests/test_request_body_limit.py
 tests/test_run_step_ledger.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
@@ -86,4 +93,17 @@ tests/test_source_changed_signal.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_top_level_provider_kwargs.py
+tests/test_versioned_branch_resolve_identities.py
 tests/test_versioning_read_only_queries.py
+tests/test_view_bundle_schema.py
+tests/test_view_live_filter.py
+tests/test_view_portability_switch.py
+tests/test_view_transfer_canonical.py
+tests/test_view_transfer_export.py
+tests/test_view_transfer_import.py
+tests/test_view_transfer_package.py
+tests/test_view_transfer_packages_api.py
+tests/test_view_transfer_reconcile_merge.py
+tests/test_view_transfer_references.py
+tests/test_view_transfer_staging.py
+tests/test_view_versions.py

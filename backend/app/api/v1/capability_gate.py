@@ -55,7 +55,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
 )
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import ViewORM
+from backend.app.db.models import ViewORM, view_is_live
 from backend.app.db.repositories import data_source_repo
 from backend.app.services import view_access
 from backend.app.services.permission_service import (
@@ -136,7 +136,7 @@ def datasource_read_or_view_capability(
             view = (await session.execute(
                 select(ViewORM).where(
                     ViewORM.id == viewId,
-                    ViewORM.deleted_at.is_(None),
+                    view_is_live(),
                 )
             )).scalar_one_or_none()
             if view is None or view.workspace_id != ws_id:

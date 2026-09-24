@@ -166,6 +166,13 @@ interface CanvasState {
   noteNodeFetchFailure: (batches: number, entities: number) => void
   clearNodeFetchFailures: () => void
 
+  // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
+  // graph didn't return (failed batches are left out, since those are unknown rather than
+  // absent). A view brought in from another environment keeps these, marked not found.
+  // `null` = not checked yet.
+  placementsNotFound: { viewId: string; urns: string[] } | null
+  setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
+
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
   // because multi-locate flows fire multiple pulses concurrently; using
@@ -389,6 +396,8 @@ export const useCanvasStore = create<CanvasState>()(
         missingEntityCount: entities,
       }),
       clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
+      placementsNotFound: null,
+      setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the

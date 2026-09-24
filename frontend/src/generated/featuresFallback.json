@@ -213,7 +213,7 @@
       "options": null,
       "helpUrl": null,
       "adminHint": "This is the switch that decides whether your lineage can leave the product. Note that 'Export layers' only covers the SCHEMA \u2014 the shape of your estate. This one covers the data. If you are turning one off for confidentiality, you almost certainly want both.",
-      "impactWhenOff": "The export controls disappear and the server refuses both the export job and the download. Everything inside the product is unaffected: people can still read, filter and trace every graph they have access to. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
+      "impactWhenOff": "The export controls disappear and the server refuses every export: streamed, as a job, and its download. Everything inside the product is unaffected: people can still read, filter and trace every graph they have access to. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
       "sortOrder": 0,
       "deprecated": false,
       "stage": "active",
@@ -221,6 +221,8 @@
       "enforcedServerSide": true,
       "posture": "capability",
       "serverGates": [
+        "GET /graphs/{id}/exports/plan and /stream \u2014 check, then download, a streamed export",
+        "GET /graph/export/plan and /stream \u2014 the same for a data source without version control",
         "POST /graphs/{id}/exports \u2014 start an export job",
         "GET /graphs/{id}/exports/{job}/download \u2014 take the file"
       ],
@@ -263,6 +265,109 @@
       ],
       "dependsOn": [
         "versioningEnabled"
+      ]
+    },
+    {
+      "key": "viewPortabilityEnabled",
+      "name": "View versions, import and export",
+      "description": "Keep a history of each view's design that people can compare and restore, and let them move views between environments as files, with or without their graph data. Export views and Import views decide which directions are allowed.",
+      "category": "governance",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A preview. Turn it on to try moving views from one environment to another, for example from development to production, and to give people a view's history.",
+      "impactWhenOff": "Versions, Export and Import disappear from every view, the Explorer and the View wizard, and the server refuses those requests. Views keep working exactly as they are, and versions keep being recorded, so turning this on later shows each view's whole history. Imports already waiting in a draft go live, or are discarded, with their draft.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Every /views/transfer route \u2014 export, inspect, reconcile, import, packages",
+        "Every /views/{id}/versions route \u2014 history, compare, save, restore"
+      ],
+      "uiSurfaces": [
+        "Versions and Export on the view header, the view card menu and the Explorer bulk bar",
+        "The 'Import a view' journey in the View wizard, and 'Import view' in the Explorer and the workspace Views manager",
+        "The 'This view' section of the canvas Import / Export menu"
+      ],
+      "stillAllowed": [
+        "Every view keeps working exactly as it is",
+        "Versions keep being recorded, so turning this on shows each view's whole history",
+        "Imports already waiting in a draft go live, or are discarded, with their draft"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "viewExportEnabled",
+      "name": "Export views",
+      "description": "Let people download a view \u2014 its layers, assignments and settings \u2014 as a file, to bring it into another environment or keep a copy of its design.",
+      "category": "governance",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A view file holds the view's design and the names and types of the entities it places, not the graph data itself; exporting the data is 'Export graph data'. Turn both off if nothing about your lineage should leave the product.",
+      "impactWhenOff": "The Export actions disappear and the server refuses to build the file. Views keep working and their version history is unaffected. Files already downloaded are not recalled \u2014 this stops new ones leaving.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /views/transfer/export \u2014 build a view file",
+        "POST /views/transfer/export/preview \u2014 say what an export would write",
+        "POST /views/transfer/packages \u2014 build a view + data package"
+      ],
+      "uiSurfaces": [
+        "Export on the view header, the view card menu and the Explorer bulk bar",
+        "'Export view' items in the canvas Import / Export menu"
+      ],
+      "stillAllowed": [
+        "Reading, editing and versioning every view",
+        "Files already downloaded are not recalled \u2014 this stops NEW ones"
+      ],
+      "dependsOn": [
+        "viewPortabilityEnabled"
+      ]
+    },
+    {
+      "key": "viewImportEnabled",
+      "name": "Import views",
+      "description": "Let people bring a view in from a file exported by another environment, check it against a data source here, and create or update a view from it.",
+      "category": "governance",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn this off to make every view in this environment be built here, in the wizard, rather than arrive as a file from somewhere else.",
+      "impactWhenOff": "The Import journey disappears from the View wizard and the server refuses uploads. Views can still be built in the wizard, and exporting still works.",
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /views/transfer/inspect \u2014 read an uploaded view file",
+        "POST /views/transfer/reconcile \u2014 check it against a data source",
+        "POST /views/transfer/import \u2014 create or update a view from it",
+        "POST /views/transfer/packages/inspect and /packages/{id}/data \u2014 read a view + data package, and bring its data into a draft"
+      ],
+      "uiSurfaces": [
+        "The 'Import a view' journey in the View wizard",
+        "'Import view' buttons in the Explorer and the workspace Views manager, and a view file dropped on the Explorer",
+        "'Update from file' on the view card menu and in the canvas Import / Export menu"
+      ],
+      "stillAllowed": [
+        "Building views in the wizard",
+        "Exporting views"
+      ],
+      "dependsOn": [
+        "viewPortabilityEnabled"
       ]
     },
     {
@@ -693,6 +798,9 @@
     "traceEnabled": true,
     "graphExportEnabled": true,
     "blankModelsEnabled": true,
+    "viewPortabilityEnabled": false,
+    "viewExportEnabled": true,
+    "viewImportEnabled": true,
     "nodeSortingEnabled": true,
     "semanticLayerEditMode": true,
     "semanticLayerNonAdminEditing": true,

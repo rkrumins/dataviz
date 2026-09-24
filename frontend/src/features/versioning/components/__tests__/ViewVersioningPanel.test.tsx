@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../../hooks/useVersioning', () => ({
   useBranchDiffSummary: () => ({ data: undefined, isLoading: false }),
+  useBranchViewChanges: () => ({ data: undefined, isLoading: false }),
 }))
 vi.mock('@/services/versioningApiService', () => ({ getBranchDiffChildren: vi.fn() }))
 vi.mock('@/store/stagedChangesStore', () => ({

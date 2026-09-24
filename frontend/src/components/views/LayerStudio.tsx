@@ -25,6 +25,7 @@
 
 import {
     useCallback,
+    useContext,
     useEffect,
     useMemo,
     useRef,
@@ -49,7 +50,7 @@ import { cn, generateId } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { LayerHierarchyPanel, type ActiveTarget, type AnchorMore, type DropPayload, type LayerRootRow } from './LayerHierarchyPanel'
 import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
-import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
+import { useWizardEntityIndex, fallbackNameFromUrn, WizardEntitySeedContext } from '../views/ViewWizard/useWizardEntityIndex'
 import { suggestLayerMappings, type MagicMapSuggestion } from '../views/ViewWizard/magicMap'
 import {
     deriveRootTypeCandidates,
@@ -1092,11 +1093,13 @@ export function LayerStudio({
     // assignments the browser hasn't paged in yet (edit mode).
     const provider = useGraphProvider()
     const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null)
+    const entitySeed = useContext(WizardEntitySeedContext)
     const entityIndex = useWizardEntityIndex({
         provider,
         containmentEdgeTypes,
         assignments: formData.assignments ?? {},
         snapshot,
+        seed: entitySeed,
     })
     const nameOf = useCallback(
         (urn: string) => entityIndex.resolve(urn)?.name ?? fallbackNameFromUrn(urn),

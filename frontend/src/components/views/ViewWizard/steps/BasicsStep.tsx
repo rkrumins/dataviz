@@ -53,6 +53,10 @@ interface BasicsStepProps {
     blankNaming?: { workspaceId: string; providerId: string }
     /** The tier this view is SAVED at — undefined while creating. */
     savedVisibility?: 'private' | 'workspace' | 'enterprise'
+    /** Shown above the name (the Import journey's "what the file says" panel). */
+    aboveFields?: React.ReactNode
+    /** Updating a view from a file leaves who can see it alone, so there is nothing to pick. */
+    hideVisibility?: boolean
 }
 
 const ICON_OPTIONS = [
@@ -93,7 +97,7 @@ const PUBLISH_REVIEW_REASON: Record<'platform' | 'workspace' | 'source', string>
         + 'approves it.',
 }
 
-export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming, savedVisibility }: BasicsStepProps) {
+export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming, savedVisibility, aboveFields, hideVisibility }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
     const { appName } = useBrand()
@@ -147,10 +151,10 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     // with no tile to point at. Fall back to the next-widest tier that
     // still exists.
     useEffect(() => {
-        if (visibilityOptions.length && !selectedOption) {
+        if (!hideVisibility && visibilityOptions.length && !selectedOption) {
             updateFormData({ visibility: visibilityOptions[visibilityOptions.length - 1].id })
         }
-    }, [visibilityOptions, selectedOption, updateFormData])
+    }, [hideVisibility, visibilityOptions, selectedOption, updateFormData])
 
     // Context-catered suggestions: scope (workspace / data source / ontology)
     // + root entity types from the schema store — hydrated in BOTH journeys
@@ -337,6 +341,8 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                     </div>
                 </motion.div>
             )}
+
+            {aboveFields}
 
             {/* Name Input */}
             <motion.div
@@ -544,6 +550,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
             </motion.div>
 
             {/* Visibility Selector */}
+            {!hideVisibility && (
             <motion.div
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -653,6 +660,7 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                 <div className="hidden">
                 </div>
             </motion.div>
+            )}
 
             {/* Tags Input */}
             <motion.div

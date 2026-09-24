@@ -9,6 +9,212 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Views that travel between environments, and remember their versions
+
+### Added
+
+**A view can move to another environment.** Export any view, or any version of it, to a
+`.view.json` file, and import it wherever the same data source is onboarded: the View wizard has a
+new **Import a view** journey, the Explorer and each workspace's Views manager have **Import view**,
+and a file dropped anywhere on the Explorer opens it. The import suggests where the view belongs,
+measured on a sample of its own entities ("49 of 50 found here"), then looks up every entity the
+view places and shows the match percentage. Anything not found is kept and marked, and goes live
+if the entity appears later; you can also drop it, remap it to another entity, or map a missing
+type to one that exists. Then the usual wizard steps let you change anything before it writes.
+On the canvas, a chip counts the placements not found here and lists them with their layers.
+
+**Importing a view that is already here updates it.** Each view carries an identity that crosses
+environments and the hashes of its whole history. So a newer file of the same view becomes its next
+version, and the import says how the two stand: the file is newer, the view here has moved on, or
+both changed. **Replace** takes the file's design; **Merge** keeps what changed here, and the file
+wins where both changed the same thing. A file can also create a new view, import as a separate
+copy, or overwrite another view you can edit (its design is saved as a version first).
+
+**Round trips lose nothing, and prove it.** The server writes a view's design (everything but its
+ids, owners and label) in one canonical form and hashes it. The file carries that hash, and the
+import re-reads what it stored and says whether it is exactly what was sent. When this environment
+had to change something, such as custom node order where node sorting is off, the import says what
+and why. Export, import, export and import again gives byte-identical designs. Name, description,
+icon and tags travel beside the design, so renaming never breaks the view's identity, and settings
+this release doesn't know are carried through untouched.
+
+**Views have versions.** Every view keeps numbered, immutable versions of its design: v1, v2, …
+Saving in the wizard, importing, restoring, a draft going live and exporting unsaved changes each
+keep one, and **Save version** keeps one with a note. The view header's **Versions** opens the
+history: compare any two versions (or one with the current design), restore one (the current
+design is saved first, and sharing is left alone), or export it. An imported version shows how
+much of its file matched. Canvas autosaves show as "unsaved changes since vN" rather than a
+version each. A view that predates this gets its first version the first time it is needed.
+Anyone who can read a view can export it; someone who can't edit it exports its latest version
+as it stands, and nothing is written for them.
+
+**A file of several views imports in one go.** Export several views from the Explorer's (or Views
+manager's) selection bar. On import, map each source to a data source, check every view at once,
+and review them in one table: create, update, copy, overwrite a view picked here, or skip; name;
+visibility. A type missing where the views land is mapped once for every view from that source.
+Each view then imports as its own request under one batch, so one failure doesn't stop the rest,
+and **Retry failed** is safe to press.
+
+**An import can wait in a draft.** On a data source under version control, a new view or an update
+can go into a draft and go live when the draft is published or its review request merges. This is
+the default where you can open drafts. Until then a new view is private and appears in no list,
+count or search. The draft's Changes tab, its review request and the publish dialog show its
+views, and a draft that changes only views can now be published. **Submit for review** is offered
+as soon as the import finishes; a file's views each wait in their own draft, and are submitted
+together, one review each.
+
+**A view can travel with its data.** **View + data** in the export dialog packages the view with
+its data source's own export (the view's entities or the whole source, published or from your
+draft) as a `.view-package.zip`. Importing one brings the data into a new draft of the target
+(adding and updating only, never deleting), checks the view against that draft so the entities the
+data brought count as found, and puts the view in the same draft, so the two go live together.
+If the data import fails, **Try again** runs it again into the same draft.
+
+**Wherever a view is, so are these actions.** The view header has **Versions** and **Export**. A
+view's card menu in the Explorer has **Export…**, **Versions** and **Update from file…**. The
+canvas's **Import / Export** menu has a new **This view** section: export the view, export it with
+its data, or update it from a file.
+
+**All of this is a preview, off until an admin turns it on**: Admin → Features → **View versions,
+import and export** (`viewPortabilityEnabled`). While it is off, none of the actions above appear
+and the server refuses their requests. Versions are recorded all the same, so turning it on shows
+each view's whole history. Two more switches, **Export views** (`viewExportEnabled`) and **Import
+views** (`viewImportEnabled`), are on by default and decide which directions are allowed once the
+preview is on. Exporting a view with its data also needs **Export graph data**; importing one needs
+version control.
+
+The formats, rules and API are in `docs/features/view-portability.md`. The file format's JSON
+Schema is `docs/features/view-bundle.v1.schema.json`, rendered from the importer's own model.
+
+**Graph data exports stream, at any size.** The export dialog first asks what the export will
+hold, then the browser downloads the file while the server writes it: the first byte arrives at
+once and nothing is built or stored first. The server reads the graph a page at a time from one
+pinned commit, so memory stays flat whatever the size, and any pod can serve the download. A
+3-million-node, 3-million-edge graph exported as 4.5 GB of NDJSON in under six minutes, with the
+server at about 200 MB throughout. An export keeps about one CPU core busy while it runs, so each
+server (a pod, across all of its worker processes) streams two at a time
+(`GRAPH_EXPORT_CONCURRENCY`). Another waits for a turn, for up to 15 minutes, then gets 429 with
+`Retry-After`; an export job waits its turn the same way. An export that would hold nothing says
+why instead of downloading an empty file, and one too large for Excel's 1,048,575 rows per sheet
+offers CSV before anything downloads.
+
+**A data source without version control can be exported**, in View mode as in Edit mode: a cold
+copy of its live graph, in any of the five formats. Its rows carry URNs, so importing it into a
+data source with version control matches them there. The same is true while version control is
+still being set up for a data source.
+
+### Fixed
+
+**Some exports downloaded empty files.** A view-scoped export only matched a view's placements by
+URN, so a view on a version-controlled source (whose placements can be keyed `gv:<entity id>`)
+exported nothing. The export job also ran inside its request, which the 120-second timeout ended,
+and wrote to disk local to one pod, so its download could come from a pod that didn't have it.
+Exports now stream (above), match every placement key the canvas writes, and never download an
+empty file.
+
+**Every format re-imports what it exported.** A list property written to CSV, TSV or Excel came
+back as the text `['a', 'b']`; it is now written as JSON and read back as the list. A CSV cell
+holding a line break (a description, say) split its row in two. A JSON array was taken for NDJSON
+when its first line was valid JSON on its own. Parsing a large NDJSON or JSON file took time that
+grew with the square of its size; it is now linear. Exporting then importing each format into the
+same data source now reports every row unchanged.
+
+**Import and export jobs outlive their request, and never read "running" once stopped.** They ran
+as the request's background tasks, which the request's timeout cancelled after 120 seconds, and a
+cancelled job read "running" forever. They now run as tasks of their own, a running job reports
+in every 15 seconds, and one silent for 15 minutes (`JOB_STALE_AFTER_SECS`) — its server restarted —
+reads as failed: "The job stopped before it finished … Start it again."
+
+**Import and export files are kept where every server can read them.** Uploads and export artifacts
+were written to disk local to one pod, so a download or an import could land on a pod that didn't
+have the file. They now live in the database, in 1 MB chunks, swept after a day
+(`OBJECT_STORE_TTL_HOURS`). A download whose file was already swept is a 404, not a broken file.
+
+**Large uploads reach their routes.** The 100 MB body cap for uploads only matched paths no upload
+route used, so a bulk import, a view package, or a view file over 8 MB was refused at 8 MB. Those
+routes, and checking and importing a view file's designs, now take up to 100 MB; everything else
+keeps 8 MB.
+
+**Imports larger than 100 MB are refused before they upload**, with how to split them, instead of
+an opaque error from the proxy. An import the server cancelled no longer shows as finished.
+
+**The projector's node fingerprint showed as a property.** Every node projected from version
+control carried `gvHash`, the projector's own bookkeeping, among its user properties in the canvas
+and in exports. It is now reserved like the projector's other fields.
+
+**A request that allocated a lot stalled every other request on its worker.** Each full garbage
+collection walked the whole heap the server builds at startup (about 300,000 objects, 140–180 ms
+on the event loop), and a large export set one off about once a second. That heap is now frozen
+once startup finishes, and those collections take a few milliseconds.
+
+**Saving a view from the wizard deleted its display rules**, and anything else its reference
+layout carried beyond layers and placements, because the layout write replaced the reference
+layout wholesale. The wizard now carries them through, as the canvas already did.
+
+**Publishing a draft dropped layout fields the layout merge didn't know about.** Any
+`referenceLayout` field beyond layers, placements, display rules and default sort was lost when a
+draft's layout went live. Such fields are now merged three ways like the rest.
+
+### Security
+
+**Views waiting in a draft stay private until it goes live.** Every query that lists, counts or
+facets views now goes through one live-view filter, and a structural test fails the build if a
+new query of the views table skips it. That includes the analytics, popularity, search-facet and
+workspace-count paths. Such a view can't have its visibility changed, or be put up for
+publication, until its draft goes live.
+
+**An uploaded file is untrusted input, and is treated as such.** View files are capped at 64 MB,
+200 views, 250,000 placements and 64 levels of nesting. Packages are capped at 100 MB, and their
+data at 2 GB decompressed however the archive describes itself. Every part is checked against the
+package's checksums, and a part changed after export is reported. An upload is kept for 24 hours,
+for the person who uploaded it only. Imports pass the same gates as building a view.
+
+### Upgrading
+
+Three migrations, all additive: `20260923_1000_view_versions` adds `views.portable_id` (stamped on
+existing views in batches) and the `view_versions` table, and widens the view-activity actions.
+`20260925_1000_view_draft_stage` adds `views.draft_branch_id` and the staged-import columns on
+`view_layout_overlays`. `20260926_1000_object_store` adds the two tables that hold import and
+export files (`object_store_objects`, `object_store_chunks`). Existing views get no versions up
+front; each gets its first the first time it is needed.
+
+Nothing changes for users on upgrade: the feature is a preview and ships off. To try it, turn on
+Admin → Features → **View versions, import and export**.
+
+The transfer routes run under a new 120-second timeout tier (`HTTP_TIMEOUT_VIEW_TRANSFER_SECS`),
+below nginx's 180 s. Package uploads wait in the object store under `transfer-uploads/` and the
+versioning worker prunes them after a day. nginx's `client_max_body_size` (100 MB) already matches
+the package limit.
+
+Import and export files now live in the database: `OBJECT_STORE_BACKEND=database` is the new
+default (`local` keeps the old per-pod directory, for a single-instance setup), and the versioning
+worker's daily pass sweeps files older than `OBJECT_STORE_TTL_HOURS` (24).
+
+Streamed exports need their proxies to let a long download run. The frontend's nginx has a new
+location for the two export stream routes (`proxy_buffering off`, `proxy_read_timeout 3600s`);
+every other API route keeps its 180 s. The GKE BackendConfigs' `timeoutSec` goes from 180 to 3600
+(frontend and viz-service), and the Helm ingress's `proxy-read-timeout` from 180 to 3600: the app's
+own tiers still end every other request first. The export stream routes are exempt from the
+request timeout, like server-sent events. New settings, all optional: `GRAPH_EXPORT_CONCURRENCY`
+(2 per pod, shared by its worker processes through lock files in the temp directory; size it to
+the CPU cores a pod can spare), `GRAPH_EXPORT_SLOT_WAIT_SECS` (900), `GRAPH_EXPORT_MAX_BYTES`
+(20 GiB, the most one export may stream), `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20, how long a plan
+counts before answering without exact counts) and `GRAPH_EXPORT_PAGE_SIZE` (2,000 rows per read).
+
+### Known limitations
+
+- **Entity identifiers are not rewritten between environments.** A view matches where the
+  environments use the same URNs; anything else shows as not found and can be remapped by hand.
+- **Files are not signed.** The hashes prove a file wasn't changed after export, not who exported it.
+- **A package brings its data with one of its views**, because a draft belongs to one view. Import
+  the package's other views afterwards with **View only**.
+- **An import is one file of at most 100 MB.** An export has no such limit, so a large one is
+  imported back in parts.
+- **A live export isn't a snapshot.** A data source without version control has no commit to pin,
+  so a change made while its export downloads may or may not be in the file.
+
+---
+
 ## [Unreleased] — The cluster window, and the names a graph can hold
 
 ### Fixed

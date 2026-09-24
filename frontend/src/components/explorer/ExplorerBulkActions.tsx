@@ -3,7 +3,7 @@
  */
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, Eye, X, ChevronDown } from 'lucide-react'
+import { Trash2, Eye, X, ChevronDown, FileDown } from 'lucide-react'
 import { usePlatformPublishPolicy } from '@/hooks/usePublishGate'
 import {
   VISIBILITY_ICON,
@@ -20,6 +20,9 @@ interface ExplorerBulkActionsProps {
    *  workspace:view:delete in each view's workspace). */
   onDelete?: () => void
   onChangeVisibility: (visibility: 'private' | 'workspace' | 'enterprise') => void
+  /** Download the selection as one view file. Hidden when undefined (the
+   *  export switch is off, or the selection can't be exported, e.g. Trash). */
+  onExport?: () => void
   onClearSelection: () => void
 }
 
@@ -41,6 +44,7 @@ export function ExplorerBulkActions({
   selectedCount,
   onDelete,
   onChangeVisibility,
+  onExport,
   onClearSelection,
 }: ExplorerBulkActionsProps) {
   const [showVisMenu, setShowVisMenu] = useState(false)
@@ -140,6 +144,16 @@ export function ExplorerBulkActions({
                 )}
               </AnimatePresence>
             </div>
+
+            {onExport && (
+              <button
+                onClick={onExport}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                Export
+              </button>
+            )}
 
             {onDelete && (
               <>

@@ -84,6 +84,15 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "graphExportEnabled":
         "Exporting graph data is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "viewPortabilityEnabled":
+        "View versions, import and export are a preview that is turned off for this deployment. "
+        "An administrator can turn them on under Admin → Features.",
+    "viewExportEnabled":
+        "Exporting views to a file is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
+    "viewImportEnabled":
+        "Importing views from a file is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
     "blankModelsEnabled":
         "Building a lineage model from scratch is turned off for this deployment — lineage must "
         "come from a connected data source. An administrator can enable it under Admin → Features.",
@@ -433,8 +442,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "file they can take away."
         ),
         "impact_when_off": (
-            "The export controls disappear and the server refuses both the export job and the "
-            "download. Everything inside the product is unaffected: people can still read, filter "
+            "The export controls disappear and the server refuses every export: streamed, as a job, "
+            "and its download. Everything inside the product is unaffected: people can still read, filter "
             "and trace every graph they have access to. Files already downloaded are not recalled — "
             "this stops new ones leaving."
         ),
@@ -509,6 +518,81 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "the estate nobody downstream can tell which is which."
         ),
         "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "viewPortabilityEnabled",
+        "name": "View versions, import and export",
+        "description": (
+            "Keep a history of each view's design that people can compare and restore, and let "
+            "them move views between environments as files, with or without their graph data. "
+            "Export views and Import views decide which directions are allowed."
+        ),
+        "impact_when_off": (
+            "Versions, Export and Import disappear from every view, the Explorer and the View "
+            "wizard, and the server refuses those requests. Views keep working exactly as they "
+            "are, and versions keep being recorded, so turning this on later shows each view's "
+            "whole history. Imports already waiting in a draft go live, or are discarded, with "
+            "their draft."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. Turn it on to try moving views from one environment to another, for "
+            "example from development to production, and to give people a view's history."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "viewExportEnabled",
+        "name": "Export views",
+        "description": (
+            "Let people download a view — its layers, assignments and settings — as a file, to "
+            "bring it into another environment or keep a copy of its design."
+        ),
+        "impact_when_off": (
+            "The Export actions disappear and the server refuses to build the file. Views keep "
+            "working and their version history is unaffected. Files already downloaded are not "
+            "recalled — this stops new ones leaving."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A view file holds the view's design and the names and types of the entities it "
+            "places, not the graph data itself; exporting the data is 'Export graph data'. "
+            "Turn both off if nothing about your lineage should leave the product."
+        ),
+        "sort_order": 3,
+        "deprecated": False,
+    },
+    {
+        "key": "viewImportEnabled",
+        "name": "Import views",
+        "description": (
+            "Let people bring a view in from a file exported by another environment, check it "
+            "against a data source here, and create or update a view from it."
+        ),
+        "impact_when_off": (
+            "The Import journey disappears from the View wizard and the server refuses uploads. "
+            "Views can still be built in the wizard, and exporting still works."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(True),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn this off to make every view in this environment be built here, in the wizard, "
+            "rather than arrive as a file from somewhere else."
+        ),
+        "sort_order": 4,
         "deprecated": False,
     },
     # ── Display & UI ──────────────────────────────────────────────────────────

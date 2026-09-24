@@ -13,8 +13,9 @@ draft flow at scale*. Every import opens (or appends to) the user's working **dr
 worker parses the file, resolves each row against the draft's composed state, and applies the
 changes via the same `apply_ops` the canvas uses. The result is **reviewed and published through the
 normal draft diff/PR workflow** — the import/export service never writes `main` itself. Export is
-symmetric: it materializes a branch's state to a downloadable, re-importable artifact (a backup),
-lossless enough that an unchanged round-trip resolves to **zero changes**.
+symmetric: it reads a branch's state a page at a time and streams it out as a downloadable,
+re-importable file (a backup), lossless enough that an unchanged round-trip resolves to **zero
+changes**.
 
 ---
 
@@ -78,15 +79,19 @@ is (`service.py:86-88`). It inserts the `JobORM` row and mints a self-describing
 (`{ws}/{ds}/{graph}/{job}/source.<fmt>`) for the caller to stream the upload into
 (`service.py:102-105`).
 
-**Dispatch.** The endpoint streams the uploaded file into the object store, then schedules the
-worker via FastAPI `BackgroundTasks` (`versioning.py:2012-2013`). `run_import_safe` / `_run_safe`
-(`service.py:108-122`) wrap the run so any exception marks the job `failed` with an
-`error_message` — the failure is durable on the job row.
+**Dispatch.** The endpoint streams the uploaded file into the object store, then runs the worker as
+a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI `BackgroundTasks`:
+those run inside the request's ASGI call, so the route's 120 s timeout tier cancelled any import
+that outlasted it. `run_import_safe` / `_run_safe` wrap the run so any exception, or a
+cancellation, marks the job `failed` with an `error_message` — the failure is durable on the job
+row.
 
-> **Limitation — in-process dispatch.** v1 runs imports/exports on **FastAPI `BackgroundTasks`**
-> inside the web process, not a real async dispatcher (`service.py:9-11`). Two consequences to know:
-> a `uvicorn --reload` (or any process restart) **mid-import kills the job** — it never reaches
-> `completed` and its `summary` stays null; and a very large import competes with request handling.
+> **Limitation — in-process dispatch.** v1 runs imports (detached tasks) and exports (**FastAPI
+> `BackgroundTasks`**) inside the web process, not a real async dispatcher (`service.py:9-11`). Two
+> consequences to know: a `uvicorn --reload` (or any process restart) **mid-import kills the job** —
+> it never reaches `completed`, and since a running import touches its `updated_at` every 15 s,
+> `get_job` reports a job silent for `JOB_STALE_AFTER_SECS` (default 900) as `failed` so the UI
+> stops waiting; and a very large import competes with request handling.
 > A Redis/Postgres dispatcher (mirroring the aggregation worker) slots in behind the same
 > `run_import_safe` call without touching the pipeline. Tracked in
 > [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
@@ -262,25 +267,50 @@ property is typing under a new `prop.<name>` header — nothing shifts.
 
 ## 8. Export
 
-`ExportWorker.run` (`export_worker.py:198-239`) materializes a branch's state and streams it to the
-`result_uri` artifact through the chosen adapter, then records a `{nodes, edges, bytes}` summary.
+An export reads a **snapshot** (`import_export/snapshot.py`): the branch's state as a stack of
+layers — `main` at a commit (a fork's `main` sits on its parent's at the fork point), then a draft
+at a commit or as it stands now (its `entity_heads`). Each layer is keyset-paged on `entity_id`,
+and each page drops the entities a higher layer decides, found with one indexed point lookup per
+layer — so every live entity comes out once, a page at a time, with no global sort and no map of
+the whole state in memory. `main` is pinned to its head commit when the export starts, so a long
+export is one consistent snapshot. `import_export/stream.py` turns each page into records (off the
+event loop) and hands them to the format's `write_pages`; spreadsheets take a first pass that keeps
+only the records' keys, for their columns. Postgres integration test:
+`tests/integration/test_export_stream.py` (identical records to `materialize_state` for main,
+as-of, draft, draft as-of and fork, many pages each).
+
+Three ways out, one pipeline:
+
+- **`GET /exports/plan` then `GET /exports/stream`** — what the Export dialog does: the plan says
+  what the export would hold (counts, emptiness, whether Excel can hold it), then the browser
+  downloads the stream natively. Nothing is stored; any pod serves it.
+- **`GET /{ws}/graph/export/plan · /stream`** (`import_export/live.py`) — a data source **without**
+  version control: the provider's `scan_nodes`/`scan_edges` (FalkorDB: internal-id windows, each
+  one `NodeByIdSeek`) into the same rows, with no entity ids, so a re-import matches by URN.
+- **`POST /exports`** — the job (`ExportWorker.run`), for API clients: the same stream written to
+  the `result_uri` artifact, then a `{nodes, edges, bytes}` summary.
+
+All three take turns (`stream.Slots`). An export keeps about one CPU core busy, so a pod streams
+`GRAPH_EXPORT_CONCURRENCY` (2) at once, whichever of its worker processes serve them. A turn is an
+exclusive `flock` on one of that many files in the temp directory, which the kernel drops when its
+holder exits. Another export waits for a turn, before its response starts, for up to
+`GRAPH_EXPORT_SLOT_WAIT_SECS` (15 minutes); then a download gets 429 with `Retry-After`, and a job
+fails.
 
 - **Branch vs published.** A `branch_id` (a working draft) exports the draft's **composed state**
-  (main + committed + draft ops, `:210-213`); omitting it defaults to **published `main`**
-  (`:205-208`). This is what lets a user export their in-progress branch, edit it in Excel, and
-  re-import onto the same branch.
-- **As-of.** `as_of_seq` gives a point-in-time snapshot (materialized via the engine's time-travel
-  read).
-- **View-scoped export.** When a `viewId` is given, `filter_to_scope` (`export_worker.py:144-159`)
-  restricts to the view's entity set. The **authoritative source is the view's
-  `context_model.instance_assignments`** — the explicit physical-entity → logical-layer placements —
-  resolved server-side by `_resolve_export_view_scope` (`versioning.py:1906-1937`): the assigned URNs
-  (entries with a real `layerId`) plus their containment descendants (when `inheritsChildren`, the
-  default). Edges are kept only when **both** endpoints are in scope. Fail-open ⇒ whole data source.
-  A type/layer allow-list is the fallback for views not defined by explicit assignments
-  (`_keep_from_filters`, `:128-141`).
-- **Row-scoped export.** `filter_to_selection` (`export_worker.py:162-182`) keeps only an explicit
-  `entity_id`/`urn` set and/or entity-type set (intersection), composing after view scope.
+  (main + committed + staged draft changes); omitting it defaults to **published `main`**. A draft
+  must be readable by the caller. This is what lets a user export their in-progress branch, edit it
+  in Excel, and re-import onto the same branch.
+- **As-of.** `as_of_seq` gives a point-in-time snapshot: `main` and the draft read at that commit.
+- **View-scoped export.** When a `viewId` is given, `stream.view_entities` restricts to the view's
+  entity set. The **authoritative source is the view's reference-layout placements** — the explicit
+  physical-entity → logical-layer assignments — read by `_view_export_scope` (`versioning.py`): the
+  placed entities (entries with a real `layerId`) plus their containment descendants (when
+  `inheritsChildren`, the default). A placement key is the entity's URN, or `gv:<entity id>` for a
+  node without one, as the canvas writes it. Edges are kept only when **both** endpoints are in
+  scope. A view that places nothing exports the whole data source (the plan says so).
+- **Row-scoped export.** `stream.Selection` keeps only an explicit `entity_id`/`urn` set and/or
+  entity-type set (intersection), composing after view scope.
 - **Add-property columns.** `props` emits extra empty `prop.<name>` columns to fill (`:219-222`).
 
 **The options plumbing is consistent end to end** (verified against the current tree): the
@@ -298,12 +328,7 @@ them into an `options` dict stored in `field_scope` (`service.py:208-221`) → `
 > analysis flagged a `TypeError` in this plumbing; it is **not present in the current code** — the
 > three layers' kwargs line up.)
 
-> **Limitation — export buffers the read.** v1 `materialize_state`s the whole branch state, then
-> streams the write (`export_worker.py:9-10`). Fine for human-scale exports; a keyset-streaming read
-> for multi-million-node graphs is a follow-up that swaps `materialize_state` for
-> `reconcile._stream_pg_nodes` without changing the rest.
-
-**Lossless round-trip.** `records_from_state` → `denormalize_node`/`denormalize_edge`
+**Lossless round-trip.** `denormalize_node`/`denormalize_edge`
 (`rowmodel.py:132-168`) spill scalar props to `prop.*` and nested to `properties_json`, mirroring the
 projector's native-vs-`propertiesRaw` split, so an unchanged export re-imports to a zero diff. A
 whole-data-source export is therefore a faithful **backup**; the identity columns let a re-import
@@ -313,18 +338,36 @@ restore or clone the graph.
 
 ## 9. Object store & artifacts
 
-All import/export blobs (uploaded source, export result, preview/rejected reports) are stored under a
-self-describing `{workspace}/{data_source}/{graph}/{job}/{name}` key (`storage_key`,
-`object_store.py:25-27`), attributable to their origin at a glance. Everything streams at a 1 MiB
-chunk size, so a 5M-row file is never buffered whole (`LocalFsObjectStore`,
-`object_store.py:75-100`); a path-escape guard rejects keys that resolve outside the root
-(`:67-73`).
+All import/export blobs (uploaded source, export result, preview/rejected reports, view packages and
+their uploads) are stored under a self-describing `{workspace}/{data_source}/{graph}/{job}/{name}`
+key (`storage_key`, `object_store.py:40-42`), attributable to their origin at a glance. Everything
+streams at a 1 MiB chunk size, so a 5M-row file is never buffered whole.
 
-> **Limitation — local only in v1.** `get_object_store` returns a filesystem store rooted at
-> `IMPORT_STORE_ROOT`; `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
-> (`object_store.py:121-133`). Cloud backends implement the same `ObjectStore` Protocol and differ
-> only in `upload_target` (a presigned PUT vs the backend-streamed blob), so callers don't change —
-> but the presigned path is modeled, not yet backed (`UploadTarget`, `:37-49`).
+**The store is the management database** (`DatabaseObjectStore`, `object_store.py:202-330`; the
+default, `OBJECT_STORE_BACKEND=database`). Production runs several API pods with no shared volume,
+so an artifact written to one pod's disk was missing on the others: an export download, or a view
+package's data import (`/packages/inspect` keeps the upload, `/packages/{uploadId}/data` reads it
+back), failed whenever the load balancer sent the next request to another pod. The database is the
+one place every pod shares:
+
+- `object_store_objects` has a row per key naming a blob; `object_store_chunks` holds the blob's
+  bytes in 1 MiB chunks, in order. A put coalesces whatever sizes arrive into 1 MiB chunks and
+  commits every few of them, so a multi-GB artifact never sits in one transaction. Only after the
+  last chunk does a single transaction point the key at the new blob and drop the blob it replaced,
+  so a reader gets the previous version, whole, until then. A put that fails deletes what it wrote.
+- A read fetches one chunk per short query, from any byte offset (`open_stream(start=…)`).
+- The versioning worker's daily sweep deletes objects older than `OBJECT_STORE_TTL_HOURS`
+  (default 24), and chunks no object names once they are an hour old (a put that died mid-way).
+
+`OBJECT_STORE_BACKEND=local` keeps the filesystem store rooted at `IMPORT_STORE_ROOT`
+(`LocalFsObjectStore`, `object_store.py:79-173`) for a single-node stack; a path-escape guard
+rejects keys that resolve outside the root (`:85-91`), and the same sweep deletes its files by age.
+
+> **Limitation — no cloud store yet.** `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
+> (`get_object_store`, `object_store.py:333-348`). Cloud backends implement the same `ObjectStore`
+> Protocol and differ only in `upload_target` (a presigned PUT vs the backend-streamed blob), so
+> callers don't change — but the presigned path is modeled, not yet backed (`UploadTarget`,
+> `:52-64`).
 
 ---
 
@@ -353,14 +396,13 @@ chunk size, so a 5M-row file is never buffered whole (`LocalFsObjectStore`,
 
 ## 11. Limitations & open items (candid)
 
-- **In-process `BackgroundTasks` dispatch**, not a durable async dispatcher — a process restart
-  mid-import kills the job (`service.py:9-11`). Highest-priority hardening item.
-- **Export buffers the read** (`materialize_state` before streaming the write) — keyset streaming is
-  the 5M+ follow-up (`export_worker.py:9-10`); **JSON and xlsx are buffered** on both parse and write
-  (`formats.py:120-122`, `xlsx_adapter.py:26-32`), so they're human-scale formats — use ndjson/csv
-  for millions.
-- **Object store is local-only**; S3/GCS and the presigned-upload path are stubbed
-  (`object_store.py:121-133`).
+- **In-process dispatch**, not a durable async dispatcher — a process restart mid-import kills the
+  job, which is then reported `failed` once stale (`service.py:9-11`). Highest-priority hardening
+  item.
+- **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable); every
+  format *writes* streaming. Imports are capped at 100 MB per file anyway.
+- **No cloud object store yet**: artifacts live in the management database (§9); S3/GCS and the
+  presigned-upload path are stubbed (`object_store.py:333-348`).
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow

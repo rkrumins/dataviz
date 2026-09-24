@@ -236,14 +236,16 @@ TRACE_LEASE_TTL_SECS: int = int(os.getenv("GRAPHVER_TRACE_LEASE_TTL_SECS", "120"
 # Import / Export (bulk CRUD) — object store + pipeline tunables               #
 # --------------------------------------------------------------------------- #
 def object_store_backend() -> str:
-    """Which ObjectStore backend serves import/export artifacts: local | s3 | gcs.
+    """Which ObjectStore backend serves import/export artifacts: database | local | s3 | gcs.
 
-    LocalFS in v1 (a mounted volume); S3/GCS are drop-in behind the same Protocol."""
-    return os.getenv("OBJECT_STORE_BACKEND", "local").lower()
+    The management database by default, which every API pod shares: an artifact one pod stored
+    is there whichever pod serves the next request. ``local`` (one process's disk) suits a
+    single-node dev stack; S3/GCS are drop-in behind the same Protocol."""
+    return os.getenv("OBJECT_STORE_BACKEND", "database").lower()
 
 
 def import_store_root() -> str:
-    """Filesystem root for the LocalFs object store (a mounted volume in prod).
+    """Filesystem root for the LocalFs object store (``OBJECT_STORE_BACKEND=local``).
 
     Artifacts live under ``{root}/{workspace}/{data_source}/{graph}/{job}/{name}`` so any file
     is attributable to its workspace/data source/graph/job at a glance."""
@@ -261,6 +263,12 @@ INLINE_IMPORT_MAX: int = int(os.getenv("INLINE_IMPORT_MAX", "5000"))
 IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
 # Retain import/export artifacts + staging rows this many days after a terminal job.
 STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
+# The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
+# written more than this many hours ago.
+OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
+# A pending/running import or export job silent this long (no ``updated_at`` heartbeat) is
+# reported failed: the process running it went away, and nothing else will ever finish it.
+JOB_STALE_AFTER_SECS: int = int(os.getenv("JOB_STALE_AFTER_SECS", "900"))
 
 
 # --------------------------------------------------------------------------- #

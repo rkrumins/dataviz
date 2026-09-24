@@ -21,6 +21,7 @@ import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import { isTempUrn } from '@/components/canvas/context-view/assignmentMutations'
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
 import { resetCircuitBreakers } from '@/services/circuitBreaker'
@@ -571,6 +572,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         useCanvasStore.getState().clearEdgeFetchFailures()
         useCanvasStore.getState().setEdgesTruncated(false)
         useCanvasStore.getState().clearNodeFetchFailures()
+        useCanvasStore.getState().setPlacementsNotFound(null)
 
         const controller = new AbortController()
 
@@ -623,6 +625,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Assigned entities inside the batches that failed — what a
                     // partial load is missing, by count, for the pill.
                     let missingEntities = 0
+                    // Their URNs: whether those exist is unknown, so they are never reported
+                    // as placements that point at nothing.
+                    const failedUrns = new Set<string>()
                     const loadNodeBatches = async (queries: NodeQuery[]): Promise<GraphNode[]> => {
                         const settled = await mapWithConcurrency(
                             queries, HYDRATION_CONCURRENCY, q => provider.getNodes(q),
@@ -634,6 +639,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             } else {
                                 batchErrors.push(outcome.reason)
                                 missingEntities += queries[i].urns?.length ?? 0
+                                for (const urn of queries[i].urns ?? []) failedUrns.add(String(urn))
                             }
                         })
                         return loaded
@@ -735,6 +741,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             if (controller.signal.aborted) return
                             allNodes = [...allNodes, ...placed]
                         }
+                    }
+
+                    // Placements the graph was asked for and didn't return: a view brought in
+                    // from another environment keeps these, marked not found (the canvas shows
+                    // them; see CanvasStatusChips). Either scope asks for every placement by URN
+                    // that nothing else brought, so what isn't here now was looked for and absent.
+                    if (activeView?.id) {
+                        const returned = new Set(allNodes.map(n => n.urn))
+                        useCanvasStore.getState().setPlacementsNotFound({
+                            viewId: activeView.id,
+                            urns: [...assignedUrns].filter(u => !returned.has(u) && !failedUrns.has(u) && !isTempUrn(u)),
+                        })
                     }
 
                     // ── Anchored columns ──────────────────────────────

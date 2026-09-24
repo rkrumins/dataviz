@@ -13,7 +13,7 @@
  * highlight state, and rendering to extracted hooks and components.
  */
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useContext } from 'react'
 import { AnimatePresence, motion, useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import {
@@ -273,6 +273,9 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
@@ -873,6 +876,8 @@ export function ContextViewCanvas({
   // Threading the view id keeps every resolve consumer on ONE cache entry per
   // scope AND carries the capability context for non-members.
   const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId, activeView?.id ?? null)
+  const exportDataSourceName = useWorkspacesStore(s => s.workspaces
+    .find(w => w.id === scopeWsId)?.dataSources?.find(d => d.id === dataSourceId)?.label)
   const isBlankModel = resolveQ.data?.kind === 'blank'
   const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
 
@@ -892,6 +897,17 @@ export function ContextViewCanvas({
     canAdminPerm,
     canPublishPerm,
   })
+  // The Import / Export menu's "This view": moving the view itself between environments. Updating
+  // it from a file opens the View wizard's Import journey on it, for someone who may edit it.
+  const viewEditor = useContext(ViewEditorContext)
+  const activeViewId = activeView?.id ?? null
+  const thisView = useMemo(() => activeViewId ? {
+    onExport: () => setViewExport('view'),
+    onExportWithData: () => setViewExport('data'),
+    onUpdateFromFile: viewCaps.canEdit && viewEditor
+      ? () => viewEditor.openViewEditor(undefined, { journey: 'import', importIntoViewId: activeViewId })
+      : undefined,
+  } : undefined, [activeViewId, viewCaps.canEdit, viewEditor])
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
@@ -1499,6 +1515,8 @@ export function ContextViewCanvas({
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
+  // The view itself, exported for another environment: its design alone, or with its data.
+  const [viewExport, setViewExport] = useState<'view' | 'data' | null>(null)
   const [showStartEditing, setShowStartEditing] = useState(false)
   // An import commits to the draft server-side; we refresh only when the user LEAVES the import
   // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
@@ -4738,6 +4756,18 @@ export function ContextViewCanvas({
 
   // ── Canvas status chips: loaded-but-hidden data surfaced to the user ──
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  // Placements that point at nothing here (recorded by the load: see useGraphHydration). Only
+  // what the load asked for and didn't get, still placed, and still absent: an entity that has
+  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported.
+  const placementsCheck = useCanvasStore((s) => s.placementsNotFound)
+  const notFoundPlacements = useMemo(() => {
+    if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || traceActive) return []
+    const assignments = activeReferenceLayout.assignments
+    const layerNames = new Map(sortedLayers.map((l) => [l.id, l.name]))
+    return placementsCheck.urns
+      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
+      .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
+  }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -5317,6 +5347,7 @@ export function ContextViewCanvas({
         onOpenStagedChanges={openStagedChangesPanel}
         onImport={() => setShowImportDialog(true)}
         onExport={() => setShowExportDialog(true)}
+        thisView={thisView}
         canUndo={stagedChangeList.length > 0}
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
@@ -5553,14 +5584,25 @@ export function ContextViewCanvas({
             }}
           />
         )}
-        {showExportDialog && graphId && scopeWsId && (
+        {/* Export works in view and edit mode alike, with or without version control: a source
+             without it (or still being put under it) exports its live graph, a cold copy. */}
+        {showExportDialog && scopeWsId && dataSourceId && !resolveQ.isLoading && (
           <ExportDialog
             wsId={scopeWsId}
-            graphId={graphId}
+            dataSourceId={dataSourceId}
+            graphId={resolveQ.data && !resolveQ.data.bootstrap ? resolveQ.data.graphId : null}
+            dataSourceName={exportDataSourceName}
             viewId={activeView?.id}
-            branchId={useBranchStore.getState().isDraftMode()
-              ? (useBranchStore.getState().currentBranchId ?? undefined) : undefined}
+            viewName={activeView?.name}
+            branchId={effectiveBranchId ?? undefined}
             onClose={() => setShowExportDialog(false)}
+          />
+        )}
+        {viewExport && activeView && (
+          <ExportViewDialog
+            views={[{ id: activeView.id, name: activeView.name }]}
+            initialContent={viewExport}
+            onClose={() => setViewExport(null)}
           />
         )}
         {/* Start editing — the deliberate branch chooser that replaces the silent draft resume/create. */}
@@ -5810,6 +5852,7 @@ export function ContextViewCanvas({
           // during the walk the browse picture — and its count — still stand.
           unresolvedEdgeCount={!overlay.active && showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
+          notFoundPlacements={notFoundPlacements}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}

@@ -26,6 +26,7 @@ def _apply_node_set(item: dict) -> dict:
               "propertiesRaw", "searchableText"):
         props[k] = item[k]
     props.update(item["nativeProps"])                             # n += item.nativeProps
+    props["gvHash"] = 1234567890                                  # n.gvHash = item.gvHash
     props.pop("properties", None)                                 # REMOVE n.properties
     return props
 
@@ -47,6 +48,7 @@ def test_projected_node_reads_back_clean_properties():
     assert node.properties == {"owner": "team-finance", "rows": 42}  # ONLY the real user props
     assert "searchableText" not in node.properties                # the doubled-name leak — gone
     assert "entityId" not in node.properties                      # the raw-urn leak — gone
+    assert "gvHash" not in node.properties                        # the projector's fingerprint — not user data
 
 
 def test_reserved_set_covers_every_denormalised_write_field():

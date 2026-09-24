@@ -9,6 +9,8 @@
 import type { ViewVisibility } from '@/lib/viewVisibility'
 import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
 import { authFetch } from './apiClient'
+import { queryClient } from '@/lib/queryClient'
+import { VIEW_VERSIONS_QUERY_KEY, VIEW_VERSION_STATUS_QUERY_KEY } from './viewVersionsApiService'
 
 // ============================================
 // Types
@@ -154,6 +156,10 @@ export interface View {
     health?: ViewHealth | null
     /** A pending ask to publish this view to everyone. Null when none. */
     publishRequest?: ViewPublishRequest | null
+    /** The identity this view carries between environments (kept by export and import). */
+    portableId?: string | null
+    /** Set while the view exists only in a draft (an import waiting for the draft to go live). */
+    draftBranchId?: string | null
 }
 
 export interface ViewCreateRequest {
@@ -556,14 +562,24 @@ export async function updateViewLayout(
         referenceLayout: { layers: ViewLayerConfig[]; assignments: Record<string, LayerAssignmentEntry> }
         entityScope?: 'all' | 'curated'
         displayRules?: unknown[]
+        /** Record the saved design as a version of the view (a wizard save). Ignored for a
+         *  draft's write: a draft isn't the view yet, and becomes a version when promoted. */
+        checkpoint?: { source: 'create' | 'wizard'; message?: string }
     },
     branchId?: string,
 ): Promise<View> {
     const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
-    return apiFetch<View>(`/api/v1/views/${viewId}/layout${qs}`, {
+    const view = await apiFetch<View>(`/api/v1/views/${viewId}/layout${qs}`, {
         method: 'PUT',
         body: JSON.stringify(body),
     })
+    // A write to the view itself (not a draft's overlay) is a change since its latest version:
+    // the header's version chip and the history's "unsaved changes" must say so.
+    if (!branchId) {
+        void queryClient.invalidateQueries({ queryKey: [VIEW_VERSION_STATUS_QUERY_KEY, viewId] })
+        void queryClient.invalidateQueries({ queryKey: [VIEW_VERSIONS_QUERY_KEY, viewId] })
+    }
+    return view
 }
 
 /** Delete a view. Soft-deletes by default; pass permanent=true to remove from DB. */

@@ -5,7 +5,8 @@
  * file to `POST /api/v1/{wsId}/versioning/graphs/{gid}/imports` (the file IS the request body,
  * options are query params), the server opens/append s a **draft**, resolves + applies the rows
  * onto it, and the changes become reviewable through the existing draft diff/publish endpoints.
- * Export is symmetric — an async job produces a downloadable, re-importable artifact (a backup).
+ * Export is symmetric: ask what an export would hold (the plan), then the browser downloads it
+ * as the server writes it, a re-importable artifact (a backup) of any size.
  *
  * Talks to the workspace-scoped versioning router, mirroring `versioningApiService`
  * (cookie + CSRF session via `fetchWithTimeout`, camelCase wire types).
@@ -51,12 +52,6 @@ export interface CreateImportResult {
   jobId: string
   branchId: string
   sourceUri: string
-  status: JobStatus
-}
-
-export interface CreateExportResult {
-  jobId: string
-  resultUri: string
   status: JobStatus
 }
 
@@ -131,25 +126,6 @@ export function listImports(wsId: string, graphId: string): Promise<Job[]> {
   return authFetch<Job[]>(`${base(wsId)}/graphs/${graphId}/imports`)
 }
 
-/** Create an export job. A whole-data-source export doubles as a re-importable backup. */
-export function createExport(
-  wsId: string,
-  graphId: string,
-  opts: { format?: ImportFormat; asOfSeq?: number; viewId?: string; branchId?: string; props?: string[]; idempotencyKey?: string } = {},
-): Promise<CreateExportResult> {
-  const params = new URLSearchParams()
-  params.set('format', opts.format ?? 'ndjson')
-  if (opts.asOfSeq != null) params.set('asOfSeq', String(opts.asOfSeq))
-  if (opts.viewId) params.set('viewId', opts.viewId)
-  if (opts.branchId) params.set('branchId', opts.branchId)
-  if (opts.props?.length) params.set('props', opts.props.join(','))
-  if (opts.idempotencyKey) params.set('idempotencyKey', opts.idempotencyKey)
-  return authFetch<CreateExportResult>(
-    `${base(wsId)}/graphs/${graphId}/exports?${params.toString()}`,
-    { method: 'POST' },
-  )
-}
-
 export function getExport(wsId: string, graphId: string, jobId: string): Promise<Job> {
   return authFetch<Job>(`${base(wsId)}/graphs/${graphId}/exports/${jobId}`)
 }
@@ -176,39 +152,88 @@ export function triggerBrowserDownload(url: string, filename: string): void {
   a.remove()
 }
 
-/** Detect a file's format from its CONTENT (universal — never relies on the extension, which may
- *  be missing after a download). Reads the first line and classifies json-lines vs csv vs tsv. */
+/** Detect a file's import format. An unambiguous extension wins; otherwise (none after a download,
+ *  or an unknown one) the CONTENT decides: a "PK" zip signature is a workbook, and the first
+ *  non-whitespace character tells a JSON array (`[`) from json-lines (`{`) — never a JSON.parse of
+ *  the first line, which a single-line array longer than the read truncates. Else tsv when the
+ *  first line has a tab and no comma, otherwise csv. */
 export async function detectFormat(file: File): Promise<ImportFormat> {
-  // xlsx is a binary zip (PK signature) — detect by extension/magic BEFORE any text read.
   const ext = file.name.toLowerCase().split('.').pop() || ''
+  if (ext === 'json') return 'json'
+  if (ext === 'ndjson' || ext === 'jsonl') return 'ndjson'
+  if (ext === 'csv') return 'csv'
+  if (ext === 'tsv' || ext === 'tab') return 'tsv'
   if (ext === 'xlsx' || ext === 'xlsm') return 'xlsx'
   try {
     const sig = new Uint8Array(await file.slice(0, 4).arrayBuffer())
     if (sig[0] === 0x50 && sig[1] === 0x4b) return 'xlsx'   // "PK" → an Excel workbook
-    const head = (await file.slice(0, 8192).text()).replace(/^﻿/, '')
+    const head = (await file.slice(0, 8192).text()).replace(/^\uFEFF/, '')
+    const first = head.trimStart()[0]
+    if (first === '[') return 'json'
+    if (first === '{') return 'ndjson'
     const firstLine = (head.split(/\r?\n/).find((l) => l.trim().length > 0) || '').trim()
-    if (firstLine.startsWith('{') || firstLine.startsWith('[')) {
-      try { JSON.parse(firstLine); return 'ndjson' } catch { /* not json-lines */ }
-    }
-    if (firstLine.includes('\t') && !firstLine.includes(',')) return 'tsv'
-    if (firstLine.includes(',')) return 'csv'
-  } catch { /* fall through to extension */ }
+    return firstLine.includes('\t') && !firstLine.includes(',') ? 'tsv' : 'csv'
+  } catch { /* unreadable — fall back to the name */ }
   return inferFormat(file.name)
 }
 
-/** Export the graph and download it (with a correct .{format} filename) when ready. */
-export async function exportAndDownload(
-  wsId: string,
-  graphId: string,
-  opts: { format?: ImportFormat; viewId?: string; branchId?: string; props?: string[]; onStatus?: (s: JobStatus) => void } = {},
-): Promise<void> {
-  const format = opts.format ?? 'csv'
-  const created = await createExport(wsId, graphId, { format, viewId: opts.viewId, branchId: opts.branchId, props: opts.props })
-  const done = await pollJob(() => getExport(wsId, graphId, created.jobId), {
-    onTick: (j) => opts.onStatus?.(j.status),
-  })
-  if (done.status !== 'completed') throw new Error(done.errorMessage || 'Export failed')
-  triggerBrowserDownload(downloadExportUrl(wsId, graphId, created.jobId), `graph-export.${format}`)
+/** What an export would hold, asked before downloading it (`/exports/plan`, `/graph/export/plan`). */
+export interface ExportPlan {
+  format: ImportFormat
+  /** `null` when too many to count quickly. */
+  nodes: number | null
+  edges: number | null
+  /** Counted exactly; otherwise an estimate (or unknown). */
+  exact: boolean
+  /** `true` when there is nothing to export; `null` when that isn't known yet. */
+  empty: boolean | null
+  /** Why this format can't hold the export (an Excel sheet stops at 1,048,575 rows), if it can't. */
+  formatLimit: string | null
+  /** A view-scoped export: how many entities the view places, how many were found, how many it
+   *  holds with their contents. `placements: 0` means the view places none, so the whole data
+   *  source is exported. */
+  view?: { viewId: string; placements: number; found: number; entities: number | null } | null
+}
+
+/** Which data an export reads. A version-controlled data source exports from its versioned graph
+ *  (`graphId`): published, a draft (`branchId`), or one view's entities (`viewId`). One without
+ *  version control (`graphId` null) exports its whole live graph, a cold copy. */
+export interface ExportTarget {
+  wsId: string
+  dataSourceId: string
+  graphId: string | null
+  viewId?: string
+  branchId?: string
+}
+
+function exportQuery(target: ExportTarget, format: ImportFormat, extra: Record<string, string | undefined> = {}): string {
+  const q = new URLSearchParams({ format })
+  if (!target.graphId) q.set('dataSourceId', target.dataSourceId)
+  if (target.graphId && target.viewId) q.set('viewId', target.viewId)
+  if (target.graphId && target.branchId) q.set('branchId', target.branchId)
+  for (const [k, v] of Object.entries(extra)) if (v) q.set(k, v)
+  return q.toString()
+}
+
+function exportBase(target: ExportTarget): string {
+  return target.graphId
+    ? `${base(target.wsId)}/graphs/${target.graphId}/exports`
+    : `/api/v1/${target.wsId}/graph/export`
+}
+
+export function planExport(target: ExportTarget, format: ImportFormat): Promise<ExportPlan> {
+  return authFetch<ExportPlan>(`${exportBase(target)}/plan?${exportQuery(target, format)}`)
+}
+
+/** The streamed download itself: a plain GET the browser saves as it arrives (the session cookie
+ *  authenticates it), so a file of any size never passes through this page's memory. */
+export function exportStreamUrl(
+  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+): string {
+  return `${exportBase(target)}/stream?${exportQuery(target, format, {
+    props: opts.props?.length ? opts.props.join(',') : undefined,
+    filename: opts.filename,
+  })}`
 }
 
 /** Poll a job until it reaches a terminal state (or the signal aborts). */
