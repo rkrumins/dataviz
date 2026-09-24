@@ -135,7 +135,10 @@ interface LayerColumnProps {
   onRenameGroup?: (layerId: string, groupId: string, name: string) => void
   onDeleteGroup?: (layerId: string, groupId: string, groupName: string) => void
   onPlaceInGroup?: (entityId: string, layerId: string, groupId: string, groupName: string) => void
-  onMoveGroup?: (layerId: string, groupId: string, newParentId: string | null) => void
+  /** Move a group (with everything in it) from one layer to a layer — the same one or another. */
+  onMoveGroup?: (fromLayerId: string, groupId: string, toLayerId: string, newParentId: string | null) => void
+  /** Every layer's groups — where a group on this column can move to. */
+  groupDestinations?: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
   onMoveGroupContents?: (layerId: string, fromId: string, toId: string) => void
   onUngroup?: (layerId: string, groupId: string, groupName: string) => void
   onDeleteLayer?: (layerId: string) => void
@@ -322,6 +325,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDeleteGroup,
   onPlaceInGroup,
   onMoveGroup,
+  groupDestinations,
   onMoveGroupContents,
   onUngroup,
   onDeleteLayer,
@@ -419,22 +423,25 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Group rows' actions, bound to this layer (stable, so rows keep their memo).
   const groupActions = useMemo<GroupActions | undefined>(() =>
     onCreateGroup && onRenameGroup && onDeleteGroup && onPlaceInGroup && onMoveGroup && onMoveGroupContents && onUngroup ? {
+      layerId: layer.id,
       layerName: layer.name,
       groups: listGroups([layer], layer.id),
+      otherLayers: (groupDestinations ?? []).filter((d) => d.layerId !== layer.id),
       subtreeOf: (groupId) => groupSubtreeIds([layer], layer.id, groupId),
       create: (name, parentGroupId) => onCreateGroup(layer.id, name, parentGroupId),
       rename: (groupId, name) => onRenameGroup(layer.id, groupId, name),
       remove: (groupId, name) => onDeleteGroup(layer.id, groupId, name),
       place: (entityId, groupId, groupName) => onPlaceInGroup(entityId, layer.id, groupId, groupName),
-      move: (groupId, newParentId) => onMoveGroup(layer.id, groupId, newParentId),
+      move: (groupId, newParentId, toLayerId) => onMoveGroup(layer.id, groupId, toLayerId ?? layer.id, newParentId),
+      receive: (groupId, fromLayerId, newParentId) => onMoveGroup(fromLayerId, groupId, layer.id, newParentId),
       moveContents: (fromId, toId) => onMoveGroupContents(layer.id, fromId, toId),
       ungroup: (groupId, name) => onUngroup(layer.id, groupId, name),
     } : undefined,
-  [layer, onCreateGroup, onRenameGroup, onDeleteGroup, onPlaceInGroup, onMoveGroup, onMoveGroupContents, onUngroup])
+  [layer, groupDestinations, onCreateGroup, onRenameGroup, onDeleteGroup, onPlaceInGroup, onMoveGroup, onMoveGroupContents, onUngroup])
   const [draftGroupName, setDraftGroupName] = useState('')
   const [draftName, setDraftName] = useState(layer.name)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [dragKind, setDragKind] = useState<'entity' | 'layer' | null>(null)
+  const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
@@ -1647,13 +1654,14 @@ export const LayerColumn = React.memo(function LayerColumn({
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
           const isEntity = types.includes('text/x-entity-id')
+          const isGroup = types.includes('text/x-group-id')
           // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
           // gate on the presence of the typed key + the matching handler).
-          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer)) {
+          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer) || (isGroup && groupActions)) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'move'
             setIsDragOver(true)
-            setDragKind(isLayer ? 'layer' : 'entity')
+            setDragKind(isLayer ? 'layer' : isGroup ? 'group' : 'entity')
           }
         }}
         onDragLeave={(e) => {
@@ -1665,6 +1673,11 @@ export const LayerColumn = React.memo(function LayerColumn({
           setDragKind(null)
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
+          const groupId = e.dataTransfer.getData('text/x-group-id')
+          if (groupId && groupActions) {
+            groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+            return
+          }
           const entityId = e.dataTransfer.getData('text/x-entity-id')
           if (entityId && onAssignToLayer) onAssignToLayer(entityId, layer.id)
         }}
@@ -1684,7 +1697,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   arrow carry it. */}
               {!isCollapsed && (
                 <span className="text-xs font-medium" style={{ color: layer.color }}>
-                  {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
+                  {dragKind === 'layer' ? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : `Move to ${layer.name}`}
                 </span>
               )}
             </div>
@@ -2355,13 +2368,33 @@ export const LayerColumn = React.memo(function LayerColumn({
               // the rAF loop below applies smooth, distance-proportional
               // scrolling and self-terminates ~200ms after events stop
               // (drop, cancel, or the pointer leaving the column).
-              // Deliberately does NOT preventDefault — drop acceptance stays
-              // with the row targets.
-              if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+              // Deliberately does NOT preventDefault for entities — drop
+              // acceptance stays with the row targets. A GROUP is taken
+              // anywhere in the column (rows that aren't groups don't take it):
+              // it moves to the top of this layer, lit up in the header.
+              const isGroup = e.dataTransfer.types.includes('text/x-group-id') && !!groupActions
+              if (isGroup) {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (!isDragOver) setIsDragOver(true)
+                if (dragKind !== 'group') setDragKind('group')
+              }
+              if (!e.dataTransfer.types.includes('text/x-entity-id') && !isGroup) return
               dragPointerRef.current = { y: e.clientY, t: performance.now() }
               if (dragScrollRafRef.current == null) {
                 dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
               }
+            }}
+            onDragLeave={(e) => {
+              if (dragKind === 'group' && !e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+            }}
+            onDrop={(e) => {
+              const groupId = e.dataTransfer.getData('text/x-group-id')
+              if (!groupId || !groupActions) return
+              e.preventDefault()
+              setIsDragOver(false)
+              setDragKind(null)
+              groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
             }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.

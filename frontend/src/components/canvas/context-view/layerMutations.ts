@@ -265,3 +265,29 @@ export function moveGroupContents(
   return mapGroups(emptied, layerId, (gs) =>
     editTree(gs, (g) => (g.id === toId ? { ...g, children: [...(g.children ?? []), ...subs] } : g)))
 }
+
+/** Move a group, with everything inside it, to ANOTHER layer — to its top level (`null`) or into a
+ *  group there. Its sub-groups go with it, and so does every entity placed in any of them (their
+ *  assignments follow to the new layer; a custom order from the old column means nothing in the new
+ *  one, so it is dropped). Within one layer this is `moveGroup`. Same layout when it cannot move. */
+export function moveGroupToLayer(
+  layout: NormalizedReferenceLayout, fromLayerId: string, groupId: string, toLayerId: string, newParentId: string | null,
+): NormalizedReferenceLayout {
+  if (fromLayerId === toLayerId) {
+    const layers = moveGroup(layout.layers, fromLayerId, groupId, newParentId)
+    return layers === layout.layers ? layout : { ...layout, layers }
+  }
+  const moving = findGroup(layout.layers.find((l) => l.id === fromLayerId)?.logicalNodes, groupId)
+  if (!moving || !layout.layers.some((l) => l.id === toLayerId)) return layout
+  if (newParentId && !findGroup(layout.layers.find((l) => l.id === toLayerId)?.logicalNodes, newParentId)) return layout
+  const carried = new Set(groupSubtreeIds(layout.layers, fromLayerId, groupId))
+  const layers = addGroup(removeGroup(layout.layers, fromLayerId, groupId), toLayerId, moving, newParentId ?? undefined)
+  const assignments = { ...layout.assignments }
+  for (const [urn, entry] of Object.entries(layout.assignments)) {
+    if (entry.logicalNodeId && carried.has(entry.logicalNodeId) && entry.layerId === fromLayerId) {
+      const { orderKey: _drop, ...rest } = entry
+      assignments[urn] = { ...rest, layerId: toLayerId }
+    }
+  }
+  return { ...layout, layers, assignments }
+}
