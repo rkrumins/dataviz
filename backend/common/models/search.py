@@ -1080,6 +1080,30 @@ class SearchDiscoverResult(_Base):
     elapsed_ms: int = Field(0, alias="elapsedMs", description="Discovery query duration in milliseconds.")
 
 
+class SearchValueSuggestion(_Base):
+    """One distinct value of a property and how many times it is stored.
+    ``value`` keeps its stored kind — a 19-digit id is that integer."""
+    value: Any = None
+    count: int = 0
+
+
+class SearchValuesResult(_Base):
+    """Response shape for ``GET /search/values``: a property's most common
+    values across the view's entity types — the value picker's list.
+
+    Suggestions, not statistics: the scan is time-bounded, so ``complete``
+    says whether every type was read and ``truncated`` whether a type had
+    more distinct values than listed (a count may then be an undercount).
+    """
+    key: str
+    values: List[SearchValueSuggestion] = Field(default_factory=list)
+    complete: bool = Field(
+        True, description="Every entity type was read within the time budget.")
+    truncated: bool = Field(
+        False, description="A type had more distinct values than listed.")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+
 class SearchApiContract(_Base):
     """Bundle root that wraps every API-surface shape in one model.
 
@@ -1097,6 +1121,7 @@ class SearchApiContract(_Base):
     search_result_page: Optional[SearchResultPage] = Field(None, alias="searchResultPage")
     search_explain_result: Optional[SearchExplainResult] = Field(None, alias="searchExplainResult")
     search_discover_result: Optional[SearchDiscoverResult] = Field(None, alias="searchDiscoverResult")
+    search_values_result: Optional[SearchValuesResult] = Field(None, alias="searchValuesResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

@@ -6365,6 +6365,14 @@ class FalkorDBProvider(GraphDataProvider):
             self, sample_per_label=sample_per_label,
         )
 
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """A property's most common values. Mirrors ``deep_search``."""
+        from .falkordb_deep_search import suggest_property_values
+        await self._ensure_connected()
+        return await suggest_property_values(
+            self, key=key, entity_types=entity_types, q=q, limit=limit,
+        )
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 

@@ -516,6 +516,20 @@ class AdvancedSearchService:
             sample_per_label=sample_per_label,
         )
 
+    async def values(self, *, view_id: str, key: str, q: str = "", limit: int = 25):
+        """A property's most common values in a view — what the value
+        picker lists (``GET /search/values``). Read over the view's entity
+        types; the view is resolved like a search's, and a view of another
+        data source is refused the same way."""
+        eff_scope = await self._resolve_scope(SearchScope(view_id=view_id, scope_mode="view"))
+        await self._guard_view_data_source(eff_scope)
+        return await self._provider_op("deep_search_values")(
+            key=key,
+            entity_types=sorted(eff_scope.entity_type_allow_list) or None,
+            q=q,
+            limit=limit,
+        )
+
     def _provider_op(self, name: str):
         """The active provider's deep-search method, or ``NotImplementedError``
         (the route's 501) when it has none.

@@ -15,6 +15,8 @@ performs:
   * ``deep_search_explain``   — compile-only, return Cypher + params
   * ``deep_search_discover``  — sample the graph, return queryable
                                 property/tag/edge metadata
+  * ``deep_search_values``    — one property's most common values, for
+                                the value picker
 
 ``CompileError`` lives here so the service layer can ``except`` it
 without importing from any provider module. Each provider re-exports
@@ -22,7 +24,7 @@ the same symbol.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from backend.common.models.search import SearchQuery, SearchResultPage
 
@@ -73,5 +75,20 @@ class DeepSearchProvider(Protocol):
         missingContainment, tagValues, missingSearchableText, edges,
         elapsedMs}``. Powers the FE's property / value / tag / edge
         pickers.
+        """
+        ...
+
+    async def deep_search_values(
+        self,
+        *,
+        key: str,
+        entity_types: Optional[List[str]] = None,
+        q: str = "",
+        limit: int = 25,
+    ) -> Dict[str, Any]:
+        """A property's most common values across the given entity types
+        (all when None), optionally only those whose text contains ``q``.
+        Returns ``{key, values: [{value, count}], complete, truncated,
+        elapsedMs}``. Powers the value picker's suggestions.
         """
         ...

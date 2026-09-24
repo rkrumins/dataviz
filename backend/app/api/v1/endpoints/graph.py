@@ -1891,6 +1891,60 @@ async def search_discover(
         raise _map_not_implemented(engine, exc) from exc
 
 
+@router.get("/search/values")
+async def search_values(
+    request: Request,
+    viewId: str = Query(..., min_length=1),
+    key: str = Query(..., min_length=1, max_length=128),
+    q: str = Query("", max_length=256,
+                   description="Only values whose text contains this "
+                               "(case-insensitive)."),
+    limit: int = Query(25, ge=1, le=50),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """The most common values of one property in a view — the value
+    picker's suggestions, counted over every entity of the view's types.
+    ``/search/discover`` reads 200 nodes per type, so on a large graph it
+    showed a property's values by accident ("I only ever see two").
+
+    Bounded to about 1.5 s: ``complete`` says whether every type was read,
+    ``truncated`` whether there were more distinct values than listed. What
+    a user picks is still compared exactly; only the list is bounded.
+
+    The values come from the view's entity TYPES, which for a view scoped
+    to a subtree is wider than the view — so, like ``/search/discover``, a
+    share-link identity is refused (``_guard_capability_scope``).
+    """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request)
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+        branch_id=branchId,
+    )
+    try:
+        return await _bounded_compute(
+            engine, lambda: svc.values(view_id=viewId, key=key, q=q, limit=limit),
+        )()
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
 # Process-level cache of the SearchQuery JSON Schema. It's static
 # within a release (Pydantic builds it from class definitions at import
 # time), so compute once and reuse on every request.

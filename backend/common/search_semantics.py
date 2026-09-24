@@ -441,6 +441,18 @@ def element_texts(stored: Any) -> Tuple[str, ...]:
     return tuple(t for t in (_text(e) for e in _elements(stored)) if t is not None)
 
 
+def value_slot(value: Any) -> Tuple[str, Any]:
+    """One distinct value, as FalkorDB groups them: equal numbers are one
+    (15 and 15.0 — equal as numbers, and both read "15" as text), while
+    text and booleans stay apart from numbers ("15" is not 15, true is not
+    1). For counting values the way the engine does."""
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, (int, float)):
+        return ("number", value)
+    return (type(value).__name__, value)
+
+
 def fold_case(s: str) -> str:
     """``toLower`` as FalkorDB applies it: one character at a time (simple
     case mapping), so "ΑΣ" folds to "ασ" and "İ" to "i" — ``str.lower``

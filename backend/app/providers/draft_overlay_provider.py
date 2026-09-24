@@ -555,6 +555,12 @@ class DraftOverlayProvider:
             sample_per_label=sample_per_label,
         )
 
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — the base's values, like :meth:`deep_search`."""
+        return await self._base.deep_search_values(
+            key=key, entity_types=entity_types, q=q, limit=limit,
+        )
+
     # ---- writes: commit to the draft (reused from the branch provider) -- #
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         self._delta = None

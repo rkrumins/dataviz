@@ -30,10 +30,12 @@ from backend.app.services.deep_search import CompileError
 from backend.app.services.deep_search.settings import get_deep_search_settings
 from backend.common.search_semantics import (
     SemanticsError,
+    element_texts,
     evaluate,
     fold_case,
     resolve_comparison,
     resolve_predicate,
+    value_slot,
 )
 from backend.common.models.search import (
     EntityTypePredicate,
@@ -154,6 +156,40 @@ class StubDeepSearchProvider:
                 list(query.scope.root_urns) if query.scope.root_urns else None
             ),
             "notes": ["stub provider — predicates evaluated in Python"],
+        }
+
+    async def deep_search_values(
+        self,
+        *,
+        key: str,
+        entity_types: Optional[List[str]] = None,
+        q: str = "",
+        limit: int = 25,
+    ) -> Dict[str, Any]:
+        """Every fixture node counted — the FalkorDB query's answer on a
+        graph small enough to finish within its budget."""
+        start = time.monotonic()
+        wanted = {str(t).lower() for t in entity_types} if entity_types else None
+        needle = fold_case(q.strip())
+        counts: Dict[tuple, int] = {}
+        for n in self._nodes:
+            if wanted is not None and str(n.get("entityType", "")).lower() not in wanted:
+                continue
+            stored = n.get(key)
+            for v in stored if isinstance(stored, list) else [stored]:
+                if not isinstance(v, (str, int, float, bool)):
+                    continue
+                if needle and needle not in fold_case(element_texts(v)[0]):
+                    continue
+                slot = value_slot(v)
+                counts[slot] = counts.get(slot, 0) + 1
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0][1])))
+        return {
+            "key": key,
+            "values": [{"value": v, "count": c} for (_, v), c in ordered[:limit]],
+            "complete": True,
+            "truncated": len(ordered) > limit,
+            "elapsedMs": int((time.monotonic() - start) * 1000),
         }
 
     async def deep_search_discover(

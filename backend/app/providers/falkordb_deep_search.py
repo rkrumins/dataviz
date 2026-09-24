@@ -68,7 +68,7 @@ from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
     platform_property_names,
 )
-from backend.app.providers.falkordb_typed_ops import compile_comparison
+from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.derived_artifacts import is_derived_label
 from backend.common.search_semantics import (
@@ -76,6 +76,7 @@ from backend.common.search_semantics import (
     element_texts,
     fold_case,
     resolve_predicate,
+    value_slot,
 )
 from backend.common.models.search import (
     AggregationSpec,
@@ -1654,6 +1655,115 @@ _DISCOVER_RESERVED_KEYS = _RESERVED_NODE_KEYS
 # with test imports; internal call sites read settings directly.
 
 
+async def _searchable_labels(provider, *, timeout_s: float) -> List[str]:
+    """The labels a user's entities live under.
+
+    ``db.labels()`` lists every label the graph has ever had, including the
+    platform's own bookkeeping labels (``_GVRollupMeta``, ``_AggMeta``,
+    ``_Projection``, ``_PropReserve``) — they sit in the catalogue for good,
+    because it walks the schema, not the rows — and their keys (``id``,
+    ``seq``, …) were offered as properties somebody had written. The
+    underscore prefix is the platform's naming for all of them, so a future
+    one is excluded before it is added to ``DERIVED_LABELS`` — unless the
+    live ontology declares it, which no platform label ever is (a source
+    type whose id sanitised to a leading "_" stays searchable).
+    """
+    try:
+        lbl_result = await provider._ro_query(
+            "CALL db.labels() YIELD label RETURN label",
+            params={}, timeout=timeout_s,
+        )
+        labels = [row[0] for row in (lbl_result.result_set or [])
+                  if row and row[0]]
+    except Exception as exc:
+        logger.warning("search: CALL db.labels() failed: %s", exc)
+        return []
+    declared = set(getattr(provider, "_entity_type_levels", None) or {})
+    return [
+        lbl for lbl in labels
+        if not is_derived_label(lbl)
+        and (not str(lbl).startswith("_") or lbl in declared)
+    ]
+
+
+async def suggest_property_values(
+    provider,
+    *,
+    key: str,
+    entity_types: Optional[List[str]] = None,
+    q: str = "",
+    limit: int = 25,
+    budget_s: float = 1.5,
+) -> Dict[str, Any]:
+    """The most common values of one property — a value picker's list.
+
+    Discovery reads 200 nodes per label, so on a large graph it shows a
+    property's values by accident: the report was "I only ever see two
+    distinct values". This counts values over EVERY node of the view's
+    types that has the property — a list one element at a time — optionally
+    only those whose text contains ``q`` (case-insensitive, as a text
+    comparison reads it), and returns the most common ``limit`` with their
+    counts, in their stored kinds: a 19-digit id comes back as that exact
+    integer, "15" stays text.
+
+    Suggestions, not statistics. The scan stops at ``budget_s``
+    (``complete`` is false when a type was skipped or timed out) and each
+    type contributes its own top ``limit`` (``truncated`` when one had more),
+    so a count may be an undercount. What a user picks is still compared
+    exactly — only the list is bounded, never a search.
+    """
+    t0 = time.monotonic()
+    labels = await _searchable_labels(provider, timeout_s=min(budget_s, 1.0))
+    if entity_types:
+        wanted = {str(t).lower() for t in entity_types}
+        # Types match labels case-insensitively, as the compiler's
+        # ``toLower(labels(n)[0]) IN $types`` does.
+        labels = [lbl for lbl in labels if str(lbl).lower() in wanted]
+    col = f"n.{_safe_property_name(key)}"
+    params: Dict[str, Any] = {"lim": int(limit)}
+    narrow = ""
+    if q.strip():
+        params["q"] = fold_case(q.strip())
+        narrow = f" AND toLower({text_of('_v')}) CONTAINS $q"
+    counts: Dict[Tuple[str, Any], int] = {}
+    complete, truncated = True, False
+    for label in labels:
+        remaining = budget_s - (time.monotonic() - t0)
+        if remaining < 0.2:
+            complete = False
+            break
+        cypher = (
+            f"MATCH (n:`{_sanitize_label(label)}`) WHERE {col} IS NOT NULL "
+            f"UNWIND CASE WHEN typeOf({col}) = 'List' THEN {col} ELSE [{col}] END AS _v "
+            f"WITH _v WHERE typeOf(_v) IN ['String', 'Integer', 'Float', 'Boolean']{narrow} "
+            # ORDER BY on the WITH: FalkorDB drops it on a RETURN that
+            # follows an aggregation.
+            "WITH _v, count(*) AS _c ORDER BY _c DESC LIMIT $lim "
+            "RETURN _v, _c"
+        )
+        try:
+            res = await provider._ro_query(
+                cypher, params=params, timeout=max(remaining, 0.5),
+            )
+        except Exception as exc:
+            logger.info("search.values label=%s key=%s stopped: %s", label, key, exc)
+            complete = False
+            continue
+        rows = res.result_set or []
+        truncated = truncated or len(rows) >= limit
+        for value, count in rows:
+            slot = value_slot(value)
+            counts[slot] = counts.get(slot, 0) + int(count)
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0][1])))[:limit]
+    return {
+        "key": key,
+        "values": [{"value": value, "count": count} for (_, value), count in ordered],
+        "complete": complete,
+        "truncated": truncated,
+        "elapsedMs": int((time.monotonic() - t0) * 1000),
+    }
+
+
 async def discover_native_property_keys(
     provider,
     *,
@@ -1726,32 +1836,8 @@ async def discover_native_property_keys(
     tag_value_counts: Dict[str, int] = {}
     missing_searchable_text = 0
 
-    # Step 1: list labels (FalkorDB supports CALL db.labels())
-    try:
-        lbl_result = await provider._ro_query(
-            "CALL db.labels() YIELD label RETURN label",
-            params={}, timeout=timeout_s,
-        )
-        labels = [row[0] for row in (lbl_result.result_set or [])
-                  if row and row[0]]
-    except Exception as exc:
-        logger.warning("discover: CALL db.labels() failed: %s", exc)
-        labels = []
-    # The platform's own bookkeeping labels (``_GVRollupMeta``, ``_AggMeta``,
-    # ``_Projection``, ``_PropReserve``) sit in the label catalogue for good —
-    # ``db.labels()`` walks the schema, not the rows — and their keys (``id``,
-    # ``seq``, …) were offered as properties somebody had written. The
-    # underscore prefix is the platform's naming for all of them, so a future
-    # one is excluded before it is added to ``DERIVED_LABELS`` — unless the
-    # live ontology declares it, which no platform label ever is (a source
-    # type whose id sanitised to a leading "_" stays searchable).
-    declared = set(getattr(provider, "_entity_type_levels", None) or {})
-    labels = [
-        lbl for lbl in labels
-        if not is_derived_label(lbl)
-        and (not str(lbl).startswith("_") or lbl in declared)
-    ]
-    labels = labels[:max_labels]
+    # Step 1: the labels a user's entities live under
+    labels = (await _searchable_labels(provider, timeout_s=timeout_s))[:max_labels]
 
     # Step 2: per label, sample nodes + extract native keys + values
     for label in labels:

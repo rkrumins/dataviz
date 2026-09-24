@@ -2130,6 +2130,60 @@
       "title": "SearchScope",
       "type": "object"
     },
+    "SearchValueSuggestion": {
+      "description": "One distinct value of a property and how many times it is stored.\n``value`` keeps its stored kind \u2014 a 19-digit id is that integer.",
+      "properties": {
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "title": "SearchValueSuggestion",
+      "type": "object"
+    },
+    "SearchValuesResult": {
+      "description": "Response shape for ``GET /search/values``: a property's most common\nvalues across the view's entity types \u2014 the value picker's list.\n\nSuggestions, not statistics: the scan is time-bounded, so ``complete``\nsays whether every type was read and ``truncated`` whether a type had\nmore distinct values than listed (a count may then be an undercount).",
+      "properties": {
+        "complete": {
+          "default": true,
+          "description": "Every entity type was read within the time budget.",
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "description": "A type had more distinct values than listed.",
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "values": {
+          "items": {
+            "$ref": "#/$defs/SearchValueSuggestion"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "SearchValuesResult",
+      "type": "object"
+    },
     "TagPredicate": {
       "description": "Match against the (currently JSON-stringified) ``n.tags`` field.\n\nTags remain stringified in this workstream \u2014 see the storage-refactor\ncommit. Server-side this maps to ``n.tags CONTAINS $tag`` per value,\ncomposed by ``op``.",
       "properties": {
@@ -2391,6 +2445,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SearchResultPage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchValuesResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchValuesResult"
         },
         {
           "type": "null"

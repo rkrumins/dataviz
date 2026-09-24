@@ -86,6 +86,7 @@ tests/test_reconcile_sweeper.py
 tests/test_run_step_ledger.py
 tests/test_search_schema_endpoint.py
 tests/test_search_semantics.py
+tests/test_search_values.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py

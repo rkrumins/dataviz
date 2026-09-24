@@ -116,9 +116,10 @@ class TestNumberOrdering:
 
     def test_text_and_date_order_need_no_guard(self):
         where, _ = _compile("gt", "m")
-        assert "_x > $p0" in where and "_x >= 0" not in where
+        assert "toLower(toStringOrNull(n.`k`)) > $p0" in where and ">= 0" not in where
         where, _ = _compile("between", ["2024-05-01", "2024-06-01"])
-        assert "$p0 <= _x <= $p1" in where
+        assert "$p0 <= substring(toStringOrNull(n.`k`), 0, 10) <= $p1" in where
+        assert ">= 0" not in where
 
 
 class TestParams:
@@ -138,6 +139,53 @@ class TestParams:
         assert params == {"p0": ["a", "b"]}
 
     def test_negatives_decide_the_missing_key(self):
-        assert _compile("neq", "a")[0].startswith("(n.`k` IS NOT NULL AND NOT ANY(")
+        assert _compile("neq", "a")[0].startswith("(n.`k` IS NOT NULL AND NOT (")
         assert _compile("neq", "a", include_missing=True)[0].startswith(
-            "(n.`k` IS NULL OR NOT ANY(")
+            "(n.`k` IS NULL OR NOT (")
+
+
+class TestBranchPerKind:
+    """One branch per stored kind, each gated by ``typeOf``: FalkorDB
+    short-circuits AND / OR in a WHERE, so an entity only pays for the
+    branch of its own kind — a scalar compared directly, a list element by
+    element. (Building one list per entity for every value cost ten times a
+    raw comparison; this costs two to three.) Each branch is total, so a
+    projection, which evaluates them all, is safe as well."""
+
+    def test_number_reads_numbers_numeric_text_and_lists(self):
+        where, _ = _compile("gt", 5, "number")
+        assert "(typeOf(n.`k`) IN ['Integer', 'Float'] AND n.`k` = n.`k` AND " in where
+        assert "(typeOf(n.`k`) = 'String' AND NOT toStringOrNull(n.`k`) CONTAINS '.' " in where
+        assert "(typeOf(n.`k`) = 'String' AND toStringOrNull(n.`k`) CONTAINS '.' AND ANY(" in where
+        assert "(typeOf(n.`k`) = 'List' AND ANY(_e IN CASE WHEN typeOf(n.`k`) = 'List'" in where
+        assert "WHERE (typeOf(_e) IN ['Integer', 'Float'] AND _e = _e AND " in where
+
+    def test_text_reads_every_kind_and_floats_through_tojson(self):
+        where, _ = _compile("eq", "A")
+        assert ("(typeOf(n.`k`) IN ['String', 'Integer', 'Boolean', 'Date', 'Datetime', "
+                "'Duration', 'Point'] AND toLower(toStringOrNull(n.`k`)) = $p0)") in where
+        assert ("(typeOf(n.`k`) = 'Float' AND toLower(toJSON(CASE WHEN typeOf(n.`k`) = "
+                "'Float' THEN n.`k` END)) = $p0)") in where
+        assert "AND toStringOrNull(n.`k`) = $p0)" in _compile("eq", "A", case_sensitive=True)[0]
+
+    def test_boolean_reads_booleans_and_their_text(self):
+        where, _ = _compile("eq", True, "boolean")
+        assert "(typeOf(n.`k`) = 'Boolean' AND n.`k` = $p0)" in where
+        assert "toBooleanOrNull(toStringOrNull(n.`k`)) IS NOT NULL" in where
+
+    def test_dates_check_the_cheap_things_first(self):
+        where, _ = _compile("gt", "2024-05-01", "date")
+        branch = where.split(" OR (typeOf(n.`k`) = 'List'")[0]
+        dashes = branch.index("substring(toStringOrNull(n.`k`), 4, 1) = '-'")
+        test = branch.index("> $p0")
+        digits = branch.index("toStringOrNull(toIntegerOrNull(")
+        assert dashes < test < digits
+
+    def test_every_branch_shares_one_set_of_parameters(self):
+        where, params = _compile("between", [1, 9], "number")
+        assert params == {"p0": 1, "p1": 9}
+        # Three branches for a scalar, the same three per list element.
+        assert where.count("$p0") == 6 and where.count("$p1") == 6
+
+    def test_contains_all_reads_the_whole_list(self):
+        assert _compile("containsAll", ["a"])[0].startswith("ANY(_ks IN [")
