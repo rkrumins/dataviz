@@ -22,7 +22,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text, update
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from .. import config, db
 from ..ids import prefixed_id
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 
 _PARSE_BATCH = 2000
 _PERSIST_BATCH = 5000
+# Record a batch of resolutions: each column one array parameter, so the statement never changes.
+_RESOLVE_ROWS = text(
+    f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = v.eid, resolved_op = v.op, "
+    "status = v.status, reasons = v.reasons::jsonb "
+    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons) AS v(row_index, eid, op, status, reasons) "
+    "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
+).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
+             *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
 # How often a running import or export touches its job's ``updated_at``. ``get_job`` reports a job
 # silent for JOB_STALE_AFTER_SECS as failed, and a long parse or apply window says nothing on its own.
 _HEARTBEAT_SECS = 15
@@ -228,14 +237,13 @@ class ImportWorker:
                             job_id, fmt, sniffed)
                 fmt = sniffed
         adapter = get_adapter(fmt)
-        batch: List[ImportRowORM] = []
+        batch: List[Dict[str, Any]] = []
         idx = 0
         async for raw in adapter.parse(self._store.open_stream(source_uri)):
             kind = raw.get("kind")
             if kind not in ("node", "edge"):
                 continue  # tallied as skipped; a malformed record never aborts the parse
-            batch.append(ImportRowORM(job_id=job_id, row_index=idx, kind=kind,
-                                      raw=normalize(raw, kind)))
+            batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": normalize(raw, kind)})
             idx += 1
             if len(batch) >= _PARSE_BATCH:
                 await self._flush(batch)
@@ -244,9 +252,10 @@ class ImportWorker:
             await self._flush(batch)
         return idx
 
-    async def _flush(self, batch: List[ImportRowORM]) -> None:
+    async def _flush(self, batch: List[Dict[str, Any]]) -> None:
+        """Stage a batch of parsed rows: batched multi-row INSERTs, no ORM object per row."""
         async with db.graphver_session() as s:
-            s.add_all(batch)
+            await s.execute(insert(ImportRowORM.__table__), batch)
 
     async def _resolve_and_build(self, job_id, graph_id, branch_id, actor,
                                  reconcile_mode: str = "upsert") -> Dict[str, int]:
@@ -363,15 +372,15 @@ class ImportWorker:
         return [eid for eid in eids if eid not in matched]
 
     async def _persist_resolutions(self, job_id: str, resolutions) -> None:
-        """Record each row's resolution: a bulk UPDATE by primary key, a few thousand rows a
-        statement, rather than a round trip per row (which took over a third of an import)."""
-        values = [{"job_id": job_id, "row_index": res["_row_index"],
-                   "matched_entity_id": res["matched_entity_id"], "resolved_op": res["resolved_op"],
-                   "status": res["status"], "reasons": res["reasons"] or None}
-                  for res in resolutions]
+        """Record each row's resolution: one UPDATE per few thousand rows, each column as one array
+        (unnest), rather than a round trip per row (which took over a third of an import)."""
         async with db.graphver_session() as s:
-            for chunk in _chunks(values, _PERSIST_BATCH):
-                await s.execute(update(ImportRowORM), chunk)
+            for chunk in _chunks(resolutions, _PERSIST_BATCH):
+                await s.execute(_RESOLVE_ROWS, {
+                    "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
+                    "eids": [r["matched_entity_id"] for r in chunk],
+                    "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
+                    "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
 
 
 async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> int:
