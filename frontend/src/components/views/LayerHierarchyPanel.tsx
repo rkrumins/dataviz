@@ -682,7 +682,7 @@ function LogicalNodeItem({
                     <button
                         onClick={e => { e.stopPropagation(); setGroupMode('move') }}
                         className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
-                        title={`Move group ${node.name} into another group`}
+                        title={`Move group ${node.name} into another group or layer`}
                         aria-label={`Move group ${node.name}`}
                     >
                         <FolderInput className="w-3 h-3" />
@@ -734,15 +734,29 @@ function LogicalNodeItem({
                             onKeyDown={e => { if (e.key === 'Escape') setGroupMode(null) }}
                             onChange={e => {
                                 const v = e.target.value
-                                if (groupMode === 'move') logicalNodes.moveNode(layerId, node.id, v === '__top__' ? undefined : v)
-                                else if (v) logicalNodes.moveContents(layerId, node.id, v)
+                                if (groupMode === 'move' && v) {
+                                    const [toLayerId, parent] = JSON.parse(v) as [string, string | null]
+                                    logicalNodes.moveNodeToLayer(layerId, node.id, toLayerId, parent ?? undefined)
+                                } else if (v) logicalNodes.moveContents(layerId, node.id, v)
                                 setGroupMode(null)
                             }}
                             className="w-full px-2 py-1 rounded-lg text-xs bg-white dark:bg-slate-800 border border-violet-300 dark:border-violet-500/50 text-slate-700 dark:text-slate-200 outline-none"
                         >
                             <option value="" disabled>{groupMode === 'move' ? `Move “${node.name}” into…` : `Move everything in “${node.name}” into…`}</option>
-                            {groupMode === 'move' && <option value="__top__">Top level of {layerName}</option>}
-                            {moveTargets.map(g => <option key={g.id} value={g.id}>{g.path}</option>)}
+                            {groupMode === 'move' ? (
+                                <>
+                                    <optgroup label={`In ${layerName}`}>
+                                        <option value={JSON.stringify([layerId, null])}>Top level of {layerName}</option>
+                                        {moveTargets.map(g => <option key={g.id} value={JSON.stringify([layerId, g.id])}>{g.path}</option>)}
+                                    </optgroup>
+                                    {logicalNodes.layerChoices().filter(l => l.layerId !== layerId).map(l => (
+                                        <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                                            <option value={JSON.stringify([l.layerId, null])}>Top level of {l.layerName}</option>
+                                            {l.groups.map(g => <option key={g.id} value={JSON.stringify([l.layerId, g.id])}>{l.layerName} › {g.path}</option>)}
+                                        </optgroup>
+                                    ))}
+                                </>
+                            ) : moveTargets.map(g => <option key={g.id} value={g.id}>{g.path}</option>)}
                         </select>
                     )}
                 </div>

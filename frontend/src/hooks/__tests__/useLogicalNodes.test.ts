@@ -67,4 +67,17 @@ describe('View Wizard groups = the canvas group operations', () => {
     const { hook } = setup()
     expect(hook.nodePathLabel('L', 'a1')).toBe('A › A1')
   })
+
+  it('moves a group to another layer; its members go along', () => {
+    const commit = vi.fn()
+    const two: NormalizedReferenceLayout = { ...layout(), layers: [...layout().layers, { id: 'M', name: 'Layer 3', color: '#000', order: 1, entityTypes: [] } as never] }
+    const { result } = renderHook(() => useLogicalNodes(two, commit))
+    expect(result.current.layerChoices().map(l => l.layerName)).toEqual(['Apps', 'Layer 3'])
+    result.current.moveNodeToLayer('L', 'a', 'M')
+    const next = commit.mock.calls[0][0] as NormalizedReferenceLayout
+    expect(next.layers[0].logicalNodes!.map(g => g.id)).toEqual(['b'])
+    expect(next.layers[1].logicalNodes!.map(g => g.id)).toEqual(['a'])
+    expect(next.assignments.x).toEqual({ layerId: 'M', logicalNodeId: 'a1' })   // inside a1, inside a
+    expect(next.assignments.y).toEqual({ layerId: 'L', logicalNodeId: 'b' })
+  })
 })

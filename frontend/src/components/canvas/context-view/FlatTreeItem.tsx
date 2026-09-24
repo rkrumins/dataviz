@@ -341,6 +341,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       e.dataTransfer.effectAllowed = 'move'
       if (isGroupDraggable) {
         e.dataTransfer.setData('text/x-group-id', node.id.replace(/^logical:/, ''))
+        e.dataTransfer.setData('text/x-group-layer', groupActions!.layerId)
       } else {
         e.dataTransfer.setData('text/x-entity-id', node.id)
         e.dataTransfer.setData('text/x-entity-name', node.name)
@@ -424,7 +425,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           e.stopPropagation()
           setDropHover(false)
           const target = node.id.replace(/^logical:/, '')
-          if (draggedGroup !== target) groupActions.move(draggedGroup, target)
+          const from = e.dataTransfer.getData('text/x-group-layer') || groupActions.layerId
+          if (draggedGroup !== target) groupActions.receive(draggedGroup, from, target)
           return
         }
         const draggedId = e.dataTransfer.getData('text/x-entity-id')
@@ -1061,6 +1063,7 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
 
 /** What a group row can do — bound to its layer by the column. */
 export interface GroupActions {
+  layerId: string
   layerName: string
   /** Every group in the layer, with its path — the targets the pickers offer. */
   groups: Array<{ id: string; name: string; path: string }>
@@ -1070,7 +1073,12 @@ export interface GroupActions {
   rename: (groupId: string, name: string) => void
   remove: (groupId: string, name: string) => void
   place: (entityId: string, groupId: string, groupName: string) => void
-  move: (groupId: string, newParentId: string | null) => void
+  /** Move one of THIS layer's groups — within it, or to another layer (`toLayerId`). */
+  move: (groupId: string, newParentId: string | null, toLayerId?: string) => void
+  /** Take a group dropped here from any layer: to the top of this layer, or into one of its groups. */
+  receive: (groupId: string, fromLayerId: string, newParentId: string | null) => void
+  /** The other layers a group can move to, with their groups. */
+  otherLayers: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
   moveContents: (fromId: string, toId: string) => void
   ungroup: (groupId: string, name: string) => void
 }
@@ -1108,7 +1116,8 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
   if (mode === 'move' || mode === 'contents') {
     const own = new Set(actions.subtreeOf(groupId))
     const targets = actions.groups.filter((g) => (mode === 'move' ? !own.has(g.id) : g.id !== groupId && !own.has(g.id)))
-    const TOP = '__top__'
+    // A choice is where the group goes: a layer, and a group in it (none = the layer's top level).
+    const dest = (layerId: string, parent: string | null) => JSON.stringify([layerId, parent])
     return (
       <select
         autoFocus
@@ -1119,15 +1128,29 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
         onBlur={() => setMode('idle')}
         onChange={(e) => {
           const v = e.target.value
-          if (mode === 'move') actions.move(groupId, v === TOP ? null : v)
-          else if (v) actions.moveContents(groupId, v)
+          if (mode === 'move' && v) {
+            const [layerId, parent] = JSON.parse(v) as [string, string | null]
+            actions.move(groupId, parent, layerId)
+          } else if (v) actions.moveContents(groupId, v)
           setMode('idle')
         }}
         className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
       >
         <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
-        {mode === 'move' && <option value={TOP}>Top level of {actions.layerName}</option>}
-        {targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
+        {mode === 'move' ? (
+          <>
+            <optgroup label={`In ${actions.layerName}`}>
+              <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
+              {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
+            </optgroup>
+            {actions.otherLayers.map((l) => (
+              <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
+                {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+              </optgroup>
+            ))}
+          </>
+        ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
       </select>
     )
   }
@@ -1152,7 +1175,7 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
         onClick={(e) => { stop(e); setDraft(name); setMode('rename') }}>
         <LucideIcons.Pencil className="w-3 h-3" aria-hidden />
       </button>
-      <button type="button" className={iconBtn} title={`Move group ${name} into another group`} aria-label={`Move group ${name}`}
+      <button type="button" className={iconBtn} title={`Move group ${name} into another group or layer`} aria-label={`Move group ${name}`}
         onClick={(e) => { stop(e); setMode('move') }}>
         <LucideIcons.FolderInput className="w-3 h-3" aria-hidden />
       </button>

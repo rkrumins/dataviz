@@ -17,7 +17,11 @@ const layers: ViewLayerConfig[] = [{
 } as ViewLayerConfig]
 
 const logicalNodes = (): UseLogicalNodesReturn => ({
-  addNode: vi.fn(), renameNode: vi.fn(), deleteNode: vi.fn(), moveNode: vi.fn(),
+  addNode: vi.fn(), renameNode: vi.fn(), deleteNode: vi.fn(), moveNode: vi.fn(), moveNodeToLayer: vi.fn(),
+  layerChoices: () => [
+    { layerId: 'l1', layerName: 'Apps', groups: [] },
+    { layerId: 'l3', layerName: 'Layer 3', groups: [{ id: 'g9', name: 'Gold', path: 'Gold' }] },
+  ],
   ungroupNode: vi.fn(), moveContents: vi.fn(), toggleCollapse: vi.fn(),
   nodesForLayer: (id: string) => layers.find(l => l.id === id)?.logicalNodes ?? [],
   nodePathLabel: (_l: string, id: string) => id,
@@ -70,9 +74,20 @@ describe('View Wizard ↔ canvas: one set of group actions, one placement langua
     renderPanel(ln)
     fireEvent.click(screen.getByLabelText('Move group Critical'))
     const select = screen.getByLabelText('Move group Critical into') as HTMLSelectElement
-    expect([...select.options].map(o => o.text)).toEqual(['Move “Critical” into…', 'Top level of Apps', 'Archive'])
-    fireEvent.change(select, { target: { value: '__top__' } })
-    expect(ln.moveNode).toHaveBeenCalledWith('l1', 'g1', undefined)
+    expect([...select.options].map(o => o.text)).toEqual([
+      'Move “Critical” into…', 'Top level of Apps', 'Archive', 'Top level of Layer 3', 'Layer 3 › Gold',
+    ])
+    fireEvent.change(select, { target: { value: select.options[1].value } })
+    expect(ln.moveNodeToLayer).toHaveBeenCalledWith('l1', 'g1', 'l1', undefined)
+  })
+
+  it('a group can move to another layer, into one of its groups — as on the canvas', () => {
+    const ln = logicalNodes()
+    renderPanel(ln)
+    fireEvent.click(screen.getByLabelText('Move group Critical'))
+    const select = screen.getByLabelText('Move group Critical into') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: select.options[4].value } })
+    expect(ln.moveNodeToLayer).toHaveBeenCalledWith('l1', 'g1', 'l3', 'g9')
   })
 
   it('an assigned entity with a parent in the data shows "Placed · Part of …"', () => {

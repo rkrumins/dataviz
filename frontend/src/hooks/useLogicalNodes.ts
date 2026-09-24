@@ -26,6 +26,11 @@ export interface UseLogicalNodesReturn {
     /** Move a group into another group, or to the layer's top level (no parent). Never into itself
      *  or its own descendants. */
     moveNode: (layerId: string, nodeId: string, newParentId?: string) => void
+    /** Move a group, with everything in it, to another layer — to its top level or into one of its
+     *  groups. The entities placed in it (and in its sub-groups) go along. */
+    moveNodeToLayer: (fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => void
+    /** Every layer with its groups — where a group can move to. */
+    layerChoices: () => Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
     /** Dismantle a group: its sub-groups and entities move up one level */
     ungroupNode: (layerId: string, nodeId: string) => void
     /** Move everything in one group (entities and sub-groups) into another */
@@ -88,6 +93,16 @@ export function useLogicalNodes(
         if (layers !== layout.layers) commit(withLayers(layers))
     }, [layout, commit, withLayers])
 
+    const moveNodeToLayer = useCallback((fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => {
+        const next = layerOps.moveGroupToLayer(layout, fromLayerId, nodeId, toLayerId, newParentId ?? null)
+        if (next !== layout) commit(next)
+    }, [layout, commit])
+
+    const layerChoices = useCallback(
+        () => layout.layers.map(l => ({ layerId: l.id, layerName: l.name, groups: layerOps.listGroups(layout.layers, l.id) })),
+        [layout],
+    )
+
     const ungroupNode = useCallback((layerId: string, nodeId: string) => {
         const parent = layerOps.parentGroupOf(layout.layers, layerId, nodeId) ?? null
         commit(reassignGroupMembers(withLayers(layerOps.ungroup(layout.layers, layerId, nodeId)), [nodeId], parent))
@@ -120,7 +135,7 @@ export function useLogicalNodes(
     )
 
     return {
-        addNode, renameNode, deleteNode, moveNode, ungroupNode, moveContents, toggleCollapse,
+        addNode, renameNode, deleteNode, moveNode, moveNodeToLayer, layerChoices, ungroupNode, moveContents, toggleCollapse,
         nodesForLayer, nodePathLabel,
         canUndo: history.canUndo, canRedo: history.canRedo, undo: history.undo, redo: history.redo,
     }

@@ -2873,19 +2873,32 @@ export function ContextViewCanvas({
     stageLayerChange(`group:${groupId}`, before, after, 'delete', `Deleted group “${groupName}” (its entities stay in ${layerNameOf(before, layerId)})`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf])
 
-  // Nest a group inside another group, or move it to the top of its layer (null).
-  const moveGroupInLayer = useCallback((layerId: string, groupId: string, newParentId: string | null) => {
+  // Move a group — nest it inside another group, or send it to the top of a layer (null) — in its
+  // own layer or ANOTHER one. Across layers everything in it goes along: its sub-groups and every
+  // entity placed in any of them (their placements follow to the new column).
+  const moveGroupInLayer = useCallback((fromLayerId: string, groupId: string, toLayerId: string, newParentId: string | null) => {
     const before = currentLayout()
-    const layers = layerOps.moveGroup(before.layers, layerId, groupId, newParentId)
-    if (layers === before.layers) return
-    const after = { ...before, layers }
-    if (newParentId) revealGroup(layers, layerId, newParentId)
-    const names = layerOps.listGroups(before.layers, layerId)
-    const name = names.find(g => g.id === groupId)?.name ?? 'group'
-    const target = newParentId ? `into “${names.find(g => g.id === newParentId)?.path ?? 'group'}”` : `to the top of ${layerNameOf(before, layerId)}`
+    const after = layerOps.moveGroupToLayer(before, fromLayerId, groupId, toLayerId, newParentId)
+    if (after === before) return
+    // A member dragged to a column earlier in this session carries that column in the session
+    // record, which outranks the layout — it would stay behind. The layout is the truth now.
+    for (const [urn, entry] of Object.entries(after.assignments)) {
+      if (entry !== before.assignments[urn]) useReferenceModelStore.getState().removeEntityAssignment(urn)
+    }
+    if (newParentId) revealGroup(after.layers, toLayerId, newParentId)
+    const name = layerOps.listGroups(before.layers, fromLayerId).find(g => g.id === groupId)?.name ?? 'group'
+    const across = fromLayerId !== toLayerId
+    const target = newParentId
+      ? `into “${layerOps.listGroups(after.layers, toLayerId).find(g => g.id === newParentId)?.path ?? 'group'}”${across ? ` in ${layerNameOf(before, toLayerId)}` : ''}`
+      : across ? `to ${layerNameOf(before, toLayerId)}` : `to the top of ${layerNameOf(before, toLayerId)}`
     persistReferenceLayout(after)
     stageLayerChange(`group:${groupId}`, before, after, 'move', `Moved group “${name}” ${target}`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup])
+
+  // Where a group can move: every layer, with the groups in it.
+  const groupDestinations = useMemo(() => sortedLayers.map((l) => ({
+    layerId: l.id, layerName: l.name, groups: layerOps.listGroups([l], l.id),
+  })), [sortedLayers])
 
   // Move everything in one group (its entities and sub-groups) into another; the emptied group stays.
   const moveGroupContentsInLayer = useCallback((layerId: string, fromId: string, toId: string) => {
@@ -6218,6 +6231,7 @@ export function ContextViewCanvas({
                 onDeleteGroup={isDraft && !traceActive ? deleteGroupInLayer : undefined}
                 onPlaceInGroup={isDraft && !traceActive ? placeInGroup : undefined}
                 onMoveGroup={isDraft && !traceActive ? moveGroupInLayer : undefined}
+                groupDestinations={groupDestinations}
                 onMoveGroupContents={isDraft && !traceActive ? moveGroupContentsInLayer : undefined}
                 onUngroup={isDraft && !traceActive ? ungroupInLayer : undefined}
                 feedMore={feedMoreByLayer.get(layer.id)}

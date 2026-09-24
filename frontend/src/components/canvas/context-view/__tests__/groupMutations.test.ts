@@ -82,3 +82,48 @@ describe('managing groups: nest, move contents, ungroup', () => {
     expect(reassignGroupMembers(layout, ['a'], 'b').assignments.x).toEqual({ layerId: 'L3', logicalNodeId: 'b' })
   })
 })
+
+import { moveGroupToLayer } from '../layerMutations'
+
+describe('moving a group to another layer', () => {
+  // L1: Outer › Inner, with x in Outer and y in Inner; z is in L1 but in no group.
+  const start = () => ({
+    layers: addGroup(addGroup(layers(), 'L1', g('outer', 'Outer')), 'L1', g('inner', 'Inner'), 'outer'),
+    assignments: {
+      x: { layerId: 'L1', logicalNodeId: 'outer', orderKey: 'a0' },
+      y: { layerId: 'L1', logicalNodeId: 'inner' },
+      z: { layerId: 'L1' },
+    },
+  }) as never as import('@/utils/referenceLayout').NormalizedReferenceLayout
+
+  it('moves a nested group to the top of another layer; its members follow, the rest stay', () => {
+    const out = moveGroupToLayer(start(), 'L1', 'inner', 'L3', null)
+    expect(listGroups(out.layers, 'L1').map((x) => x.path)).toEqual(['Outer'])
+    expect(listGroups(out.layers, 'L3').map((x) => x.path)).toEqual(['Inner'])
+    expect(out.assignments.y).toEqual({ layerId: 'L3', logicalNodeId: 'inner' })
+    expect(out.assignments.x).toEqual({ layerId: 'L1', logicalNodeId: 'outer', orderKey: 'a0' })
+    expect(out.assignments.z).toEqual({ layerId: 'L1' })
+  })
+
+  it('carries the whole subtree and every member in it, into a group in the other layer', () => {
+    let out = { ...start(), layers: addGroup(start().layers, 'L3', g('dest', 'Dest')) }
+    out = moveGroupToLayer(out, 'L1', 'outer', 'L3', 'dest')
+    expect(listGroups(out.layers, 'L1')).toEqual([])
+    expect(listGroups(out.layers, 'L3').map((x) => x.path)).toEqual(['Dest', 'Dest › Outer', 'Dest › Outer › Inner'])
+    expect(out.assignments.x).toEqual({ layerId: 'L3', logicalNodeId: 'outer' })   // old column's order dropped
+    expect(out.assignments.y).toEqual({ layerId: 'L3', logicalNodeId: 'inner' })
+  })
+
+  it('does nothing for an unknown group, layer or destination group', () => {
+    const s = start()
+    expect(moveGroupToLayer(s, 'L1', 'nope', 'L3', null)).toBe(s)
+    expect(moveGroupToLayer(s, 'L1', 'inner', 'nope', null)).toBe(s)
+    expect(moveGroupToLayer(s, 'L1', 'inner', 'L3', 'nope')).toBe(s)
+  })
+
+  it('within one layer it is a plain move (still refusing a move into itself)', () => {
+    const s = start()
+    expect(moveGroupToLayer(s, 'L1', 'outer', 'L1', 'inner')).toBe(s)
+    expect(listGroups(moveGroupToLayer(s, 'L1', 'inner', 'L1', null).layers, 'L1').map((x) => x.path)).toEqual(['Outer', 'Inner'])
+  })
+})

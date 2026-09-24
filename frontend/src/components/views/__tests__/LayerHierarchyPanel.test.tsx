@@ -24,7 +24,7 @@ const fakeLogicalNodes: UseLogicalNodesReturn = {
   addNode: vi.fn(),
   renameNode: vi.fn(),
   deleteNode: vi.fn(),
-  moveNode: vi.fn(), ungroupNode: vi.fn(), moveContents: vi.fn(),
+  moveNode: vi.fn(), moveNodeToLayer: vi.fn(), layerChoices: () => [], ungroupNode: vi.fn(), moveContents: vi.fn(),
   toggleCollapse: vi.fn(),
   nodesForLayer: (layerId: string) => (layers.find(l => l.id === layerId)?.logicalNodes ?? []),
   nodePathLabel: (_layerId: string, nodeId: string) => nodeId,
