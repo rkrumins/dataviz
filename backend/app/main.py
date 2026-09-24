@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import os
 import re
@@ -1623,6 +1624,16 @@ async def lifespan(_app: FastAPI):
             ),
             name="idp-health",
         )
+
+    # Everything startup built lives as long as the process: take it out of
+    # the garbage collector's reach. A full collection otherwise walks this
+    # whole heap (~300k objects, 140-180ms on the event loop), and a request
+    # that allocates freely (a streamed export, a large graph read) set one
+    # off about once a second, stalling every other request on the worker.
+    # Frozen, the same collections take a few ms. Collect first, so nothing
+    # already garbage is kept.
+    gc.collect()
+    gc.freeze()
 
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
