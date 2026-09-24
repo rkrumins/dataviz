@@ -540,6 +540,10 @@ class GraphVersioningService:
             ).scalar_one()
             seq = int(start)
             for op in ops:
+                if op.get("op") not in ("create", "update", "delete"):
+                    # Staged changes are folded op by op at checkpoint; anything else (a `move` is
+                    # resolved against stored state only by apply_ops) would be misread there.
+                    raise ValueError(f"unsupported staged op {op.get('op')!r}: create | update | delete")
                 seq += 1
                 entity_id = op.get("entity_id") or prefixed_id("ent")
                 ref = op.get("ref", entity_id)
@@ -2331,6 +2335,60 @@ class GraphVersioningService:
                 out.add(eid)
         return out
 
+    async def ancestor_chains(
+        self, *, graph_id: str, branch_id: str, urns: Sequence[str],
+        containment_edge_types: Sequence[str], as_of_seq: Optional[int] = None,
+    ) -> Dict[str, List[str]]:
+        """Each urn's containment chain on a branch — ``{urn: [parent, …, root]}``, ``[]`` for a root —
+        read from the branch's own state (a draft's moves included). An urn that is not a live node
+        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not urns or not cset:
+            return {}
+        async with self._session() as s:
+            # urn → live entity id, in batches (a node's id is usually its urn; imported ones may not be).
+            cand: Dict[str, set] = {}
+            for u in urns:
+                if u.startswith("gv:"):
+                    cand.setdefault(u[3:], set()).add(u)
+                cand.setdefault(u, set()).add(u)
+            for chunk in _chunks(list(urns), _IN_LIST_MAX):
+                for eid, urn in (await s.execute(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn.in_(chunk),
+                    ).distinct()
+                )).all():
+                    cand.setdefault(eid, set()).add(urn)
+            vals = await self._current_values(s, graph_id, branch_id, list(cand), as_of_seq)
+            eid_of: Dict[str, str] = {}
+            for eid, asked in cand.items():
+                v = vals.get(eid)
+                if v is None or _is_edge_payload(v):
+                    continue
+                for u in asked:
+                    if v.get("urn") == u or f"gv:{eid}" == u or eid == u:
+                        eid_of.setdefault(u, eid)
+            if not eid_of:
+                return {}
+            seen, edges = await self._containment_parents_climb(
+                s, graph_id, branch_id, set(eid_of.values()), cset, as_of_seq)
+            parent: Dict[str, str] = {}
+            for p in edges.values():
+                a, b = _edge_src_tgt(p)
+                if a and b:
+                    parent.setdefault(b, a)
+            node_vals = await self._current_values(s, graph_id, branch_id, list(seen), as_of_seq)
+            urn_of = {e: ((v or {}).get("urn") or f"gv:{e}") for e, v in node_vals.items()}
+            out: Dict[str, List[str]] = {}
+            for u, eid in eid_of.items():
+                chain, at, guard = [], parent.get(eid), set()
+                while at and at not in guard:
+                    guard.add(at)
+                    chain.append(urn_of.get(at, at))
+                    at = parent.get(at)
+                out[u] = chain
+            return out
+
     async def get_node_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, containment_edge_types: Optional[Sequence[str]] = None,
@@ -2919,6 +2977,63 @@ class GraphVersioningService:
         viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
         if viol:
             raise OntologyViolation(viol)
+        viol = await self._parentless_violations(
+            s, graph_id, branch_id, written, prior, kind_by_entity, ontology_rules)
+        if viol:
+            raise OntologyViolation(viol)
+
+    async def _parentless_violations(
+        self, s, graph_id: str, branch_id: str,
+        written: Mapping[str, Optional[dict]], prior: Mapping[str, Optional[dict]],
+        kind_by_entity: Mapping[str, str], rules: OntologyRules,
+    ) -> List[dict]:
+        """An entity whose type the ontology does not allow at the top level must sit inside a
+        parent. Judged only for what this write can leave parentless — a node it creates, and the
+        child of every containment link it deletes or re-points (an un-nest, a move to the top
+        level) — so legacy data that predates the rule stays editable."""
+        if not rules.root_entity_types:
+            return []
+        cset = set(rules.containment_edge_types) | {k for k, r in rules.edge_types.items() if r.is_containment}
+        if not cset:
+            return []
+
+        def _cont(v: Optional[Mapping]) -> bool:
+            return bool(v) and str(v.get("edgeType") or v.get("edge_type") or "").upper() in cset
+
+        candidates: set = set()
+        for eid, v in written.items():
+            kind = kind_by_entity.get(eid, "node")
+            if kind == "node" and v is not None and prior.get(eid) is None:
+                candidates.add(eid)
+            elif kind == "edge" and _cont(prior.get(eid)):
+                old_child = _edge_src_tgt(prior[eid])[1]
+                if v is None or _edge_src_tgt(v)[1] != old_child:
+                    candidates.add(old_child)
+        candidates = {c for c in candidates if c and written.get(c, True) is not None}
+        if not candidates:
+            return []
+        unknown = [c for c in candidates if c not in written]
+        values = dict(await self._current_values(s, graph_id, branch_id, unknown)) if unknown else {}
+        values.update({c: written[c] for c in candidates if c in written})
+        stored = await self._incident_live_edges(s, graph_id, branch_id, list(candidates))
+        has_parent: set = set()
+        for eid, v in stored.items():
+            if eid not in written and _cont(v) and _edge_src_tgt(v)[1] in candidates:
+                has_parent.add(_edge_src_tgt(v)[1])      # an untouched stored parent link
+        for eid, v in written.items():
+            if v is not None and kind_by_entity.get(eid) == "edge" and _cont(v):
+                has_parent.add(_edge_src_tgt(v)[1])      # a parent link this write keeps / adds
+        out: List[dict] = []
+        for c in sorted(candidates - has_parent):
+            v = values.get(c)
+            if not v or _is_edge_payload(v):
+                continue
+            et = v.get("entityType")
+            if not rules.is_root_type(et):
+                out.append({"entity_id": c, "kind": "node", "rule": "parent_required",
+                            "reason": f"A {et} can't be at the top level — it must sit inside a parent "
+                                      f"(top-level types: {', '.join(sorted(rules.root_entity_types))})."})
+        return out
 
     async def _validate_edge_integrity(
         self, s, graph_id: str, branch_id: str,
@@ -5078,6 +5193,8 @@ class GraphVersioningService:
             if branch.kind == "main":
                 await self._lock_graph(s, graph_id)
 
+            ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
+
             # Resolve ops → new payloads for the AFFECTED entities only.
             new_vals: Dict[str, Optional[dict]] = {}
             kind_by_entity: Dict[str, str] = {}
@@ -5592,6 +5709,52 @@ class GraphVersioningService:
                 cand.update(rows)
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _expand_moves(
+        self, s, graph_id: str, branch_id: str, ops: Sequence[Mapping],
+        containment_edge_types: Optional[Sequence[str]],
+    ) -> List[Mapping]:
+        """Expand each ``move`` op — ``{op: "move", entity_id: child, payload: {parentEntityId,
+        edgeType, edgeId}}`` — into the edits it means, resolved against what is STORED: delete
+        every containment link the child has (on this branch, plus any this batch created before
+        the move), then, unless the move is to the top level (no parent), create the new one.
+
+        A move used to be expressed by the client as "delete the old link I can see + create the
+        new one"; a link the canvas had not loaded was never deleted, and the node kept two
+        parents. Here the server finds the links, so a move is exact whatever the client loaded."""
+        if not any(o.get("op") == "move" for o in ops):
+            return list(ops)
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not cset:
+            raise ValueError("a move needs the ontology's containment relationship types")
+
+        def _is_cont(p: Optional[Mapping]) -> bool:
+            return bool(p) and str(p.get("edgeType") or p.get("edge_type") or "").upper() in cset
+
+        children = [o["entity_id"] for o in ops if o.get("op") == "move"]
+        stored = await self._incident_live_edges(s, graph_id, branch_id, children)
+        out: List[Mapping] = []
+        for o in ops:
+            if o.get("op") != "move":
+                out.append(o)
+                continue
+            child = o["entity_id"]
+            p = o.get("payload") or {}
+            links = {eid for eid, v in stored.items()
+                     if _is_cont(v) and _edge_src_tgt(v)[1] == child}
+            links |= {x["entity_id"] for x in out            # created earlier in this batch
+                      if x.get("op") == "create" and x.get("entity_kind") == "edge"
+                      and _is_cont(x.get("payload")) and _edge_src_tgt(x["payload"])[1] == child}
+            for eid in sorted(links):
+                out.append({"op": "delete", "entity_kind": "edge", "entity_id": eid, "payload": None})
+            parent = p.get("parentEntityId")
+            if parent:
+                if not p.get("edgeType") or not p.get("edgeId"):
+                    raise ValueError("a move under a parent needs edgeType and edgeId")
+                out.append({"op": "create", "entity_kind": "edge", "entity_id": p["edgeId"],
+                            "payload": {"sourceEntityId": parent, "targetEntityId": child,
+                                        "edgeType": p["edgeType"]}})
+        return out
 
     async def _effective_incident_edges(
         self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int],

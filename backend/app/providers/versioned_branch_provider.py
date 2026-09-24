@@ -597,6 +597,22 @@ class VersionedBranchProvider:
             tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"]) for t, c in tag_counts.items()],
         )
 
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        """An entity's ancestors on this branch, parent first, root last (as FalkorDB's reader)."""
+        chain = (await self.get_ancestor_chains([urn])).get(urn, [])[offset: offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain)))
+        by_urn = {n.urn: n for n in nodes}
+        return [by_urn[u] for u in chain if u in by_urn]
+
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """``{urn: [parent, …, root]}`` from this branch's own state (a draft's moves included);
+        absent = unknown, ``[]`` = a root — the GraphDataProvider contract."""
+        return await self._svc.ancestor_chains(
+            graph_id=self._gid, branch_id=self._branch, urns=urns,
+            containment_edge_types=self._containment_types, as_of_seq=self._as_of)
+
     # ---- writes: one audited commit on this branch via apply_ops -------- #
     async def _commit(self, ops: List[dict], message: str) -> Optional[str]:
         if self._as_of is not None:

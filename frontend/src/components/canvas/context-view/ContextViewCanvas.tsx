@@ -30,6 +30,8 @@ import {
 } from '@/hooks/useViewSchema'
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
+import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
+import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
@@ -60,6 +62,8 @@ import {
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useAncestorChains } from '@/hooks/useAncestorChains'
+import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
+import { buildPlacements, type PlacementInfo } from './placement'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
@@ -1108,6 +1112,12 @@ export function ContextViewCanvas({
     armLayoutSave()
   }, [canManage, armLayoutSave, effectiveBranchId])
 
+  // Hooks rendered below the canvas (a move from the drawer or a tree row) write layout through this.
+  useEffect(
+    () => registerLayoutWriter({ current: currentLayout, persist: persistReferenceLayout }),
+    [currentLayout, persistReferenceLayout],
+  )
+
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
     if (!activeView) return
@@ -1878,7 +1888,7 @@ export function ContextViewCanvas({
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, unassignedNodes } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -1887,6 +1897,34 @@ export function ContextViewCanvas({
     defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
     sortOverrides,
   })
+
+  // An entity PLACED in one column while its parent sits in another (view arrangement only — the
+  // data is unchanged): it carries its full path in the data, so it reads as a deliberate placement
+  // rather than a stray duplicate. The path's unloaded top is asked of the server once.
+  const placementInputs = useMemo(() => {
+    const layerName = new Map(sortedLayers.map(l => [l.id, l.name]))
+    return {
+      parentMap,
+      nodeLayerMap,
+      facts: (id: string) => {
+        const d = nodeMap.get(id)?.data as Record<string, unknown> | undefined
+        return d ? { name: String(d.label ?? id), type: String(d.type ?? '') } : undefined
+      },
+      layerName: (id: string) => layerName.get(id) ?? 'another layer',
+      groupOf: (id: string) => nodeGroupMap.get(id),
+    }
+  }, [parentMap, nodeLayerMap, nodeGroupMap, nodeMap, sortedLayers])
+  const placementTops = useMemo(
+    () => buildPlacements({ ...placementInputs, ancestry: new Map() }).unknownTops,
+    [placementInputs],
+  )
+  const placementAncestry = usePlacementAncestry(placementTops)
+  const placementResult = useMemo(
+    () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }),
+    [placementInputs, placementAncestry],
+  )
+  const placedApart = placementResult.placements
+  const placedOut = placementResult.placedOut
 
   // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
   // sort handlers keep a stable identity and LayerColumn's memo holds).
@@ -2771,7 +2809,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'delete' | 'reorder' | 'sort',
+    action: 'add' | 'rename' | 'delete' | 'reorder' | 'sort' | 'move',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -2802,6 +2840,117 @@ export function ContextViewCanvas({
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // ── Groups: view-only containers inside a layer (the wizard's logicalNodes), managed here ──────
+  // Staged exactly like a layer change — reviewable under "View layout", undoable, never a graph op.
+  const layerNameOf = useCallback((layout: NormalizedReferenceLayout, layerId: string) =>
+    layout.layers.find((l) => l.id === layerId)?.name ?? 'layer', [])
+
+  // Open a group and every group above it, so what just landed in it is on screen.
+  const revealGroup = useCallback((layers: NormalizedReferenceLayout['layers'], layerId: string, groupId: string) => {
+    const chain: string[] = []
+    let at: string | null | undefined = groupId
+    while (at && !chain.includes(at)) { chain.push(at); at = layerOps.parentGroupOf(layers, layerId, at) }
+    setExpandedNodes(prev => {
+      const next = new Set(prev)
+      chain.forEach(g => next.add(`logical:${g}`))
+      return next
+    })
+  }, [])
+
+  const createGroup = useCallback((layerId: string, name: string, parentGroupId?: string) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const before = currentLayout()
+    const id = `grp-${Date.now().toString(36)}`
+    const after = { ...before, layers: layerOps.addGroup(before.layers, layerId, { id, name: trimmed, type: 'group' }, parentGroupId) }
+    persistReferenceLayout(after)
+    if (parentGroupId) revealGroup(after.layers, layerId, parentGroupId)
+    stageLayerChange(`group:${id}`, before, after, 'add', `Added group “${trimmed}” in ${layerNameOf(before, layerId)}`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup])
+
+  const renameGroupInLayer = useCallback((layerId: string, groupId: string, name: string) => {
+    const trimmed = name.trim()
+    const before = currentLayout()
+    const after = { ...before, layers: layerOps.renameGroup(before.layers, layerId, groupId, trimmed) }
+    if (!trimmed || JSON.stringify(after.layers) === JSON.stringify(before.layers)) return
+    persistReferenceLayout(after)
+    stageLayerChange(`group:${groupId}`, before, after, 'rename', `Renamed group to “${trimmed}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  const deleteGroupInLayer = useCallback((layerId: string, groupId: string, groupName: string) => {
+    const before = currentLayout()
+    const removed = layerOps.groupSubtreeIds(before.layers, layerId, groupId)
+    // Members stay in the column, ungrouped — nothing leaves the view, and the data is untouched.
+    const after = assignmentOps.releaseGroupMembers(
+      { ...before, layers: layerOps.removeGroup(before.layers, layerId, groupId) }, removed)
+    persistReferenceLayout(after)
+    stageLayerChange(`group:${groupId}`, before, after, 'delete', `Deleted group “${groupName}” (its entities stay in ${layerNameOf(before, layerId)})`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf])
+
+  // Nest a group inside another group, or move it to the top of its layer (null).
+  const moveGroupInLayer = useCallback((layerId: string, groupId: string, newParentId: string | null) => {
+    const before = currentLayout()
+    const layers = layerOps.moveGroup(before.layers, layerId, groupId, newParentId)
+    if (layers === before.layers) return
+    const after = { ...before, layers }
+    if (newParentId) revealGroup(layers, layerId, newParentId)
+    const names = layerOps.listGroups(before.layers, layerId)
+    const name = names.find(g => g.id === groupId)?.name ?? 'group'
+    const target = newParentId ? `into “${names.find(g => g.id === newParentId)?.path ?? 'group'}”` : `to the top of ${layerNameOf(before, layerId)}`
+    persistReferenceLayout(after)
+    stageLayerChange(`group:${groupId}`, before, after, 'move', `Moved group “${name}” ${target}`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf, revealGroup])
+
+  // Move everything in one group (its entities and sub-groups) into another; the emptied group stays.
+  const moveGroupContentsInLayer = useCallback((layerId: string, fromId: string, toId: string) => {
+    const before = currentLayout()
+    const layers = layerOps.moveGroupContents(before.layers, layerId, fromId, toId)
+    const after = assignmentOps.reassignGroupMembers({ ...before, layers }, [fromId], toId)
+    if (after.layers === before.layers && after.assignments === before.assignments) return
+    const names = layerOps.listGroups(before.layers, layerId)
+    persistReferenceLayout(after)
+    stageLayerChange(`group:${fromId}`, before, after, 'move',
+      `Moved the contents of “${names.find(g => g.id === fromId)?.name}” into “${names.find(g => g.id === toId)?.path}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Ungroup (dismantle): the group goes; its sub-groups and entities move up one level — into its
+  // parent group, or back to the layer.
+  const ungroupInLayer = useCallback((layerId: string, groupId: string, groupName: string) => {
+    const before = currentLayout()
+    const parent = layerOps.parentGroupOf(before.layers, layerId, groupId) ?? null
+    const after = assignmentOps.reassignGroupMembers(
+      { ...before, layers: layerOps.ungroup(before.layers, layerId, groupId) }, [groupId], parent)
+    persistReferenceLayout(after)
+    const where = parent ? `“${layerOps.listGroups(before.layers, layerId).find(g => g.id === parent)?.name}”` : layerNameOf(before, layerId)
+    stageLayerChange(`group:${groupId}`, before, after, 'delete', `Ungrouped “${groupName}” — its contents moved up to ${where}`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange, layerNameOf])
+
+  // Drop an entity onto a group: PLACE it there (view only; its place in the data is unchanged).
+  const placeInGroup = useCallback((entityId: string, layerId: string, groupId: string, groupName: string) => {
+    if (traceWriteLocked()) return
+    const before = currentLayout()
+    const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const key = (entity?.data?.urn as string) ?? entityId
+    const name = (entity?.data?.label as string) ?? key
+    const after = assignmentOps.assignEntities(before, [key], layerId, { logicalNodeId: groupId })
+    persistReferenceLayout(after)
+    revealGroup(after.layers, layerId, groupId)
+    useReferenceModelStore.getState().removeEntityAssignment(key)
+    useStagedChangesStore.getState().stageOrReplace(
+      (c) => (c.type === 'assign_layer' || c.type === 'move_to_layer') && c.targetId === key,
+      {
+        type: 'assign_layer',
+        targetId: key,
+        targetUrn: key,
+        before: { layerId: before.assignments[key]?.layerId },
+        after: { layerId, logicalNodeId: groupId },
+        summary: `Place '${name}' in group “${groupName}” (${layerNameOf(before, layerId)})`,
+        discard: () => persistReferenceLayout(before),
+        reapply: () => persistReferenceLayout(after),
+      },
+    )
+  }, [currentLayout, persistReferenceLayout, traceWriteLocked, layerNameOf, revealGroup])
 
   // Authored column width — part of the view definition (ships to every
   // viewer of the published view). Not staged as a reviewable change:
@@ -3527,6 +3676,14 @@ export function ContextViewCanvas({
     }
     return revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
+
+  const { returnToParent } = useReparentNode()
+  // A placed entity's path → its parent in the data, opened and scrolled to (the reveal walk expands
+  // each ancestor on the way, exactly as for a search hit).
+  const revealPlacementParent = useCallback((placement: PlacementInfo) => {
+    const parent = placement.path[placement.path.length - 1]
+    if (parent) void revealSearchHit(parent.urn, placement.path.slice(0, -1))
+  }, [revealSearchHit])
 
   // Close the loop on the wrapper the search session was handed above.
   // The trace-aware `revealSearchHit`, not the bare browse walk: a reveal
@@ -5465,6 +5622,16 @@ export function ContextViewCanvas({
                 remapEntityId: (oldId, newId) => {
                   remapEntityId(oldId, newId)
                   persistReferenceLayout(assignmentOps.remapAssignmentUrn(currentLayout(), oldId, newId))
+                  // An entity open before the save stays open after it: its expanded state was
+                  // keyed by the temp urn, so a saved parent came back collapsed ("my children
+                  // vanished").
+                  setExpandedNodes(prev => {
+                    if (!prev.has(oldId)) return prev
+                    const next = new Set(prev)
+                    next.delete(oldId)
+                    next.add(newId)
+                    return next
+                  })
                 },
                 // After the remaps, drop any placement still keyed by a temp urn — a create that was
                 // staged (writing its placement) then discarded before this Save (see assignmentMutations).
@@ -6063,6 +6230,18 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 exhaustedParents={exhaustedParents}
+                loadedChildren={childMap}
+                placedApart={placedApart}
+                placedOut={placedOut}
+                onRevealPlacement={revealPlacementParent}
+                onReturnPlacement={returnToParent}
+                onCreateGroup={isDraft && !traceActive ? createGroup : undefined}
+                onRenameGroup={isDraft && !traceActive ? renameGroupInLayer : undefined}
+                onDeleteGroup={isDraft && !traceActive ? deleteGroupInLayer : undefined}
+                onPlaceInGroup={isDraft && !traceActive ? placeInGroup : undefined}
+                onMoveGroup={isDraft && !traceActive ? moveGroupInLayer : undefined}
+                onMoveGroupContents={isDraft && !traceActive ? moveGroupContentsInLayer : undefined}
+                onUngroup={isDraft && !traceActive ? ungroupInLayer : undefined}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
                 onScroll={handleLayerScroll}
@@ -6141,16 +6320,14 @@ export function ContextViewCanvas({
             key="hierarchy-builder-panel"
             onClose={() => useHierarchyBuilderStore.getState().close()}
             onEntityStaged={(tempUrn, parentUrn) => {
-              // The layered view only renders nodes that resolve to a layer, so
-              // a freshly-staged node is invisible until assigned. Assign it to
-              // the creation layer → else the parent's layer → else the first
-              // layer. Writes the canonical view-config entry (keyed by the temp
-              // urn, remapped to the real urn on save) plus the optimistic
-              // session assignment (an instanceAssignment wins even in
-              // closed-scope views, before the canonical write's render lands).
-              const layer = builderLayerId
-                ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
-                ?? sortedLayers[0]?.id
+              // Only a TOP-LEVEL entity is pinned to a layer (the creation column, else the
+              // first): it has nothing to inherit from. A child is never pinned — it follows its
+              // parent's layer by containment inheritance. Pinning a child to the column the panel
+              // was opened from split it out of its parent whenever that column differed (an
+              // orphan-looking root), and kept it there after it was moved. The pin writes the
+              // canonical view-config entry (keyed by the temp urn, remapped on save) plus the
+              // optimistic session assignment.
+              const layer = parentUrn ? undefined : (builderLayerId ?? sortedLayers[0]?.id)
               if (layer) {
                 assignEntityToLayer(tempUrn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [tempUrn], layer))
@@ -6167,11 +6344,14 @@ export function ContextViewCanvas({
             onClose={() => useHierarchyBuilderStore.getState().close()}
             layerId={buildLayerId}
             typeLayerMap={buildTypeLayerMapMemo}
-            onRowStaged={(row, urn) => {
-              // Auto-by-type per row: writes the canonical view-config entry
-              // (keyed by the row's temp urn, remapped to its real urn on save)
+            onRowStaged={(row, urn, hasParent) => {
+              // A top-level row is placed auto-by-type; a row with a parent follows its parent (see
+              // onEntityStaged) unless the user chose its layer explicitly. Writes the canonical
+              // view-config entry (keyed by the row's temp urn, remapped to its real urn on save)
               // plus the optimistic session assignment for immediate display.
-              const layer = resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
+              const layer = hasParent && !row.layerId
+                ? undefined
+                : resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
               if (layer) {
                 assignEntityToLayer(urn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [urn], layer))

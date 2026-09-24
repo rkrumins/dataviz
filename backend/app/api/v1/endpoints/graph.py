@@ -2922,7 +2922,9 @@ class GraphChangeOp(BaseModel):
     """One typed change in a draft save. ``update`` payloads are *partial* — the
     server merges them onto the entity's current state, so the client never has to
     reload (and risk clobbering) fields it didn't edit."""
-    op: str = Field(description="create | update | delete")
+    op: str = Field(description="create | update | delete | move — a node `move` carries "
+                    "`{parentEntityId, edgeType}` (no parent = to the top level); the server "
+                    "replaces whatever containment the node has")
     kind: str = Field(description="node | edge")
     id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
     ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
@@ -2985,6 +2987,18 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             if not o.id:
                 continue
             ops.append({"op": "delete", "entity_kind": kind, "entity_id": _ref(o.id), "payload": None})
+        elif o.op == "move":                   # the service resolves the node's CURRENT containment
+            if not o.id:
+                continue
+            p = o.payload or {}
+            edge_id = mint_id("ent")
+            if o.ref:                          # the client's optimistic link → the real one
+                assigned[o.ref] = edge_id
+            ops.append({"op": "move", "entity_kind": "node", "entity_id": _ref(o.id), "payload": {
+                "parentEntityId": _ref(p.get("parentEntityId")) if p.get("parentEntityId") else None,
+                "edgeType": p.get("edgeType"),
+                "edgeId": edge_id,
+            }})
         elif o.op == "create":
             eid = create_eid[i]
             payload = dict(o.payload or {})

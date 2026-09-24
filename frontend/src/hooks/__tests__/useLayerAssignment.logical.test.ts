@@ -64,7 +64,7 @@ describe('useLayerAssignment — canonical logicalNodeId wraps entities into log
       assignments: { e1: { layerId: 'l1', inheritsChildren: true, logicalNodeId: 'g1' } },
     })
     const roots = res.nodesByLayer.get('l1') ?? []
-    expect(roots.map(n => n.id)).toEqual(['logical:g1'])
+    expect(roots.map(n => n.id)).toEqual(['logical:g1', 'logical:g2'])   // every configured group shows, empty or not
     expect(roots[0].isLogical).toBe(true)
     expect(roots[0].children.map(n => n.id)).toEqual(['e1'])
   })
@@ -80,7 +80,7 @@ describe('useLayerAssignment — canonical logicalNodeId wraps entities into log
       assignments: { e1: { layerId: 'l1', inheritsChildren: true, logicalNodeId: 'g1' } },
     })
     const roots = res.nodesByLayer.get('l1') ?? []
-    expect(roots.map(n => n.id)).toEqual(['logical:g1'])
+    expect(roots.map(n => n.id)).toEqual(['logical:g1', 'logical:g2'])
     expect(roots[0].children.map(n => n.id)).toEqual(['e1'])
   })
 
@@ -93,7 +93,7 @@ describe('useLayerAssignment — canonical logicalNodeId wraps entities into log
       assignments: { e1: { layerId: 'l1', inheritsChildren: true, logicalNodeId: 'GHOST' } },
     })
     const roots = res.nodesByLayer.get('l1') ?? []
-    expect(roots.map(n => n.id)).toEqual(['e1'])
+    expect(roots.map(n => n.id)).toEqual(['logical:g1', 'logical:g2', 'e1'])   // the entity stays visible, ungrouped
   })
 
   it('a legacy-only entityAssignments logicalNodeId still wraps (untouched path)', () => {
@@ -107,7 +107,7 @@ describe('useLayerAssignment — canonical logicalNodeId wraps entities into log
       assignments: { e1: { layerId: 'l1', inheritsChildren: true } },
     })
     const roots = res.nodesByLayer.get('l1') ?? []
-    expect(roots.map(n => n.id)).toEqual(['logical:g1'])
+    expect(roots.map(n => n.id)).toEqual(['logical:g1', 'logical:g2'])
     expect(roots[0].children.map(n => n.id)).toEqual(['e1'])
   })
 })
