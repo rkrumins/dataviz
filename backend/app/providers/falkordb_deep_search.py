@@ -2187,6 +2187,85 @@ async def _run_path_query(
     return paths, truncated
 
 
+def _candidate_prefixes(
+    provider, query: SearchQuery, compiler: _Compiler, where_fragment: str,
+    base_params: Dict[str, Any], effective_candidate_cap: int,
+) -> Tuple[str, str]:
+    """The candidate-selection prefix a search's scope implies — capped at
+    ``effective_candidate_cap``, and the same without the cap — binding the
+    scope's parameters into ``base_params``.
+
+    Shared by the capped engine and by the uncapped one, whose facets
+    still pivot on these prefixes.
+    """
+    # 2. Effective scope — collect the URN sets each becoming its own
+    #    scope-clamp MATCH (see explain_deep_search for the rationale).
+    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
+
+    # 3. Scope mode resolution (mirrors explain_deep_search).
+    scope_mode = query.scope.scope_mode
+    visible_urns_list = list(query.scope.visible_urns or [])
+    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
+        where_fragment, scope_mode, visible_urns_list, base_params,
+    )
+    scope_chain = ""
+    if scope_urn_sets:
+        scope_chain, scope_params = _build_scope_continuation_chain(
+            provider, scope_urn_sets, query.scope.max_depth or 12,
+        )
+        base_params.update(scope_params)
+
+    # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
+    wh_continuation, wh_params, _ = _build_within_hops_continuation(
+        compiler.hoisted_within_hops, compiler._param_counter,
+    )
+    base_params.update(wh_params)
+
+    # 5. Build the candidate prefix. When a containment traversal or a
+    #    visible-URN allow-list already bounds the scan, the entity types
+    #    must not gate it as well — see the parallel branch in
+    #    explain_deep_search, which surfaces the same decision as a note.
+    effective_types: Optional[List[str]] = None
+    et_note: Optional[str] = None
+    if not scope_chain and not visible_clause_added:
+        effective_types, et_note = _resolve_entity_types_scope(
+            provider, list(query.scope.entity_types or []),
+        )
+    use_entity_types = effective_types is not None
+    if use_entity_types:
+        # Lowercased to pair with the case-insensitive ``toLower(l)``
+        # check in the candidate WHERE — see ``_build_candidate_cypher``.
+        base_params["_scopeEntityTypes"] = [t.lower() for t in effective_types]
+    if et_note:
+        # execute_deep_search has no diagnostic-notes channel
+        # (explain_deep_search does — see the parallel branch). Log at
+        # WARNING so operators can spot stale view-scope configs in
+        # production and so /search/explain can be re-issued to surface
+        # the same note to the UI.
+        logger.warning("deep_search: %s", et_note)
+    # Scope-first shape: anchor the candidate scan on the scope subtree so the
+    # candidate cap applies to IN-SCOPE nodes (see explain_deep_search + the
+    # _build_candidate_cypher docstring). Post-filter would drop in-scope
+    # matches for broad predicates by capping the graph-wide set first.
+    cand_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=effective_candidate_cap,
+        within_hops_continuation=wh_continuation,
+    )
+    # The same prefix without the cap — the only shape that can answer
+    # "how many matches are there really?" once the cap has fired.
+    uncapped_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=None,
+        within_hops_continuation=wh_continuation,
+    )
+    return cand_cypher, uncapped_cypher
+
+
 async def execute_deep_search(
     provider,
     query: SearchQuery,
@@ -2260,70 +2339,11 @@ async def execute_deep_search(
                 cache_hit=False,
             )
 
-    # 2. Effective scope — collect the URN sets each becoming its own
-    #    scope-clamp MATCH (see explain_deep_search for the rationale).
-    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
-
-    # 3. Scope mode resolution (mirrors explain_deep_search).
-    scope_mode = query.scope.scope_mode
-    visible_urns_list = list(query.scope.visible_urns or [])
-    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
-        where_fragment, scope_mode, visible_urns_list, base_params,
-    )
-    scope_chain = ""
-    if scope_urn_sets:
-        scope_chain, scope_params = _build_scope_continuation_chain(
-            provider, scope_urn_sets, query.scope.max_depth or 12,
-        )
-        base_params.update(scope_params)
-
-    # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
-    wh_continuation, wh_params, _ = _build_within_hops_continuation(
-        compiler.hoisted_within_hops, compiler._param_counter,
-    )
-    base_params.update(wh_params)
-
-    # 5. Build the candidate prefix. When a containment traversal or a
-    #    visible-URN allow-list already bounds the scan, the entity types
-    #    must not gate it as well — see the parallel branch in
-    #    explain_deep_search, which surfaces the same decision as a note.
-    effective_types: Optional[List[str]] = None
-    et_note: Optional[str] = None
-    if not scope_chain and not visible_clause_added:
-        effective_types, et_note = _resolve_entity_types_scope(
-            provider, list(query.scope.entity_types or []),
-        )
-    use_entity_types = effective_types is not None
-    if use_entity_types:
-        # Lowercased to pair with the case-insensitive ``toLower(l)``
-        # check in the candidate WHERE — see ``_build_candidate_cypher``.
-        base_params["_scopeEntityTypes"] = [t.lower() for t in effective_types]
-    if et_note:
-        # execute_deep_search has no diagnostic-notes channel
-        # (explain_deep_search does — see the parallel branch). Log at
-        # WARNING so operators can spot stale view-scope configs in
-        # production and so /search/explain can be re-issued to surface
-        # the same note to the UI.
-        logger.warning("deep_search: %s", et_note)
-    # Scope-first shape: anchor the candidate scan on the scope subtree so the
-    # candidate cap applies to IN-SCOPE nodes (see explain_deep_search + the
-    # _build_candidate_cypher docstring). Post-filter would drop in-scope
-    # matches for broad predicates by capping the graph-wide set first.
-    cand_cypher = _build_candidate_cypher(
-        where_fragment=where_fragment,
-        entity_types_param=use_entity_types,
-        scope_pre_filter=scope_chain,
-        candidate_cap=effective_candidate_cap,
-        within_hops_continuation=wh_continuation,
-    )
-    # The same prefix without the cap — the only shape that can answer
-    # "how many matches are there really?" once the cap has fired.
-    uncapped_cypher = _build_candidate_cypher(
-        where_fragment=where_fragment,
-        entity_types_param=use_entity_types,
-        scope_pre_filter=scope_chain,
-        candidate_cap=None,
-        within_hops_continuation=wh_continuation,
+    # 2.–5. The candidate prefix, capped and uncapped (see
+    #       ``_candidate_prefixes``).
+    cand_cypher, uncapped_cypher = _candidate_prefixes(
+        provider, query, compiler, where_fragment, base_params,
+        effective_candidate_cap,
     )
 
     # 5. Execute according to requested result shape

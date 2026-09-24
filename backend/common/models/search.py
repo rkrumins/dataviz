@@ -724,7 +724,30 @@ class SearchOptions(_Base):
             "(default 10000). Requests can raise this up to "
             "``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the "
             "user explicitly opts into a larger scan. The service "
-            "validator rejects values above the deployment max."
+            "validator rejects values above the deployment max. The "
+            "uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or "
+            "counts; it applies only to the facets that still pivot on a "
+            "capped candidate set."
+        ),
+    )
+    wait_ms: Optional[int] = Field(
+        None, alias="waitMs", ge=0, le=120000,
+        description=(
+            "Progressive mode (uncapped engine). Answer after this long "
+            "with what the scan has found so far — ``status: 'running'``, "
+            "provisional hits in their final order, a ``progress`` "
+            "block — and send the SAME request again with ``sessionId`` "
+            "to continue it. Omitted, the request waits up to "
+            "``softDeadlineMs`` for the complete answer."
+        ),
+    )
+    session_id: Optional[str] = Field(
+        None, alias="sessionId", max_length=64,
+        description=(
+            "Continue this search session (from a ``running`` response) "
+            "rather than start a new one. It finishes on the data it "
+            "started on even if the graph changes meanwhile, and says so "
+            "(``stale``). Ignored when it doesn't belong to this query."
         ),
     )
 
@@ -925,6 +948,16 @@ class ScopeDiagnostics(_Base):
     )
 
 
+class SearchProgress(_Base):
+    """How far a running search has got. Node counts are the scan's
+    estimate of what each part of the graph holds, so ``scanned / total``
+    is a fraction to draw, not a count to report."""
+    scanned: int = Field(description="Nodes in the parts already scanned.")
+    total: int = Field(description="Nodes in every part the search scans.")
+    matched: int = Field(description="Matches found so far — exact for the "
+                                     "parts scanned.")
+
+
 class SearchResultPage(_Base):
     """Provider + service response. One inner list in ``aggregates`` per
     requested AggregationSpec."""
@@ -969,6 +1002,34 @@ class SearchResultPage(_Base):
         description="Resolved-scope + ontology diagnostics. Surfaced on "
                     "every response so the FE can interpret 0-result "
                     "cases without round-tripping to /search/explain.",
+    )
+    # --- Uncapped engine (``DEEP_SEARCH_ENGINE=v2``); null otherwise ---
+    session_id: Optional[str] = Field(
+        None, alias="sessionId",
+        description="The search session this page came from. Send it back "
+                    "as ``options.sessionId`` to continue a running one.",
+    )
+    status: Optional[Literal["running", "complete"]] = Field(
+        None,
+        description="``running``: the scan is not finished — the hits are "
+                    "the best found so far, already in their final order, "
+                    "and ``totalCount`` is null. ``complete``: every match "
+                    "was counted and ranked.",
+    )
+    count_status: Optional[Literal["exact", "lowerBound"]] = Field(
+        None, alias="countStatus",
+        description="Whether ``candidateCount`` is the exact number of "
+                    "matches or only those found so far.",
+    )
+    progress: Optional[SearchProgress] = None
+    data_version: Optional[str] = Field(
+        None, alias="dataVersion",
+        description="The graph data the session read. Opaque.",
+    )
+    stale: bool = Field(
+        False,
+        description="The graph changed after this session started; run "
+                    "the search again for an answer on the current data.",
     )
 
 

@@ -1698,7 +1698,7 @@
             }
           ],
           "default": null,
-          "description": "Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max.",
+          "description": "Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max. The uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or counts; it applies only to the facets that still pivot on a capped candidate set.",
           "title": "Candidatecap"
         },
         "cursor": {
@@ -1743,6 +1743,20 @@
           "title": "Results",
           "type": "string"
         },
+        "sessionId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.",
+          "title": "Sessionid"
+        },
         "softDeadlineMs": {
           "default": 30000,
           "description": "Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.",
@@ -1786,9 +1800,51 @@
           "default": null,
           "description": "When set, hits are ordered by this native node property (e.g. 'rowCount') instead of by `sort`. Useful for 'biggest first' / 'newest first' UX.",
           "title": "Sortproperty"
+        },
+        "waitMs": {
+          "anyOf": [
+            {
+              "maximum": 120000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Progressive mode (uncapped engine). Answer after this long with what the scan has found so far \u2014 ``status: 'running'``, provisional hits in their final order, a ``progress`` block \u2014 and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.",
+          "title": "Waitms"
         }
       },
       "title": "SearchOptions",
+      "type": "object"
+    },
+    "SearchProgress": {
+      "description": "How far a running search has got. Node counts are the scan's\nestimate of what each part of the graph holds, so ``scanned / total``\nis a fraction to draw, not a count to report.",
+      "properties": {
+        "matched": {
+          "description": "Matches found so far \u2014 exact for the parts scanned.",
+          "title": "Matched",
+          "type": "integer"
+        },
+        "scanned": {
+          "description": "Nodes in the parts already scanned.",
+          "title": "Scanned",
+          "type": "integer"
+        },
+        "total": {
+          "description": "Nodes in every part the search scans.",
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scanned",
+        "total",
+        "matched"
+      ],
+      "title": "SearchProgress",
       "type": "object"
     },
     "SearchQuery": {
@@ -1924,6 +1980,23 @@
           "title": "Candidatecount",
           "type": "integer"
         },
+        "countStatus": {
+          "anyOf": [
+            {
+              "enum": [
+                "exact",
+                "lowerBound"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether ``candidateCount`` is the exact number of matches or only those found so far.",
+          "title": "Countstatus"
+        },
         "cursor": {
           "anyOf": [
             {
@@ -1935,6 +2008,19 @@
           ],
           "default": null,
           "title": "Cursor"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The graph data the session read. Opaque.",
+          "title": "Dataversion"
         },
         "deadlineExceeded": {
           "default": false,
@@ -1977,6 +2063,17 @@
           "description": "Populated when the request's predicate contains a PathPredicate and options.results='paths'. Ordered node\u2192edge\u2192node sequences from source to target.",
           "title": "Paths"
         },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "queryExplain": {
           "anyOf": [
             {
@@ -1999,6 +2096,42 @@
           ],
           "default": null,
           "description": "Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain."
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.",
+          "title": "Sessionid"
+        },
+        "stale": {
+          "default": false,
+          "description": "The graph changed after this session started; run the search again for an answer on the current data.",
+          "title": "Stale",
+          "type": "boolean"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "running",
+                "complete"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "``running``: the scan is not finished \u2014 the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.",
+          "title": "Status"
         },
         "totalCount": {
           "anyOf": [

@@ -18,13 +18,22 @@ performs:
   * ``deep_search_values``    — one property's most common values, for
                                 the value picker
 
+and, optionally (outside the Protocol, so a provider without it still
+satisfies it):
+
+  * ``deep_search_session``   — the uncapped engine: run a request's share
+                                of a search session (``SearchRunContext``)
+                                and return its page. A provider without it
+                                is searched by ``deep_search``.
+
 ``CompileError`` lives here so the service layer can ``except`` it
 without importing from any provider module. Each provider re-exports
 the same symbol.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from backend.common.models.search import SearchQuery, SearchResultPage
 
@@ -37,6 +46,24 @@ class CompileError(ValueError):
     to HTTP 400 with the message intact — the message is user-facing
     and tells the caller which feature to use instead.
     """
+
+
+@dataclass(frozen=True)
+class SearchRunContext:
+    """What the uncapped engine needs from the request around it.
+
+    * ``data_version`` — the graph data the request reads (content
+      generation + FalkorDB generation); a session started on one version
+      is never served as another's answer;
+    * ``scope_hash`` — the resolved view scope, so a session can only ever
+      answer the scope it was planned for;
+    * ``admit`` — takes one fleet slot for the length of one statement.
+      The engine runs many statements per request, so it is admitted per
+      statement rather than once around the whole search.
+    """
+    data_version: str = ""
+    scope_hash: str = ""
+    admit: Optional[Callable[[], AsyncContextManager]] = None
 
 
 @runtime_checkable

@@ -12,8 +12,8 @@ so the timings are for the typed Cypher that production runs.
 
 ## Decisions
 
-These are the choices the measurements support. Section 12 turns them
-into the design for P2a.
+These are the choices the measurements support. Section 12 describes
+the engine built on them.
 
 1. **Scan a label in ID ranges, 50k nodes per chunk, two chunks at a
    time per interactive search.** A labelled `ID(n)` range is a seek
@@ -387,77 +387,145 @@ This buys four things:
 - **Any process can continue any session**, because the state lives
   in Redis. Without Redis (quickstart) the state is process-local.
 
-Page 1 keeps the global top 500, not just the top 50. The next nine
-pages are then slices of a finished session, not new scans. A page
-past that starts a keyset session after the last key it has.
+A session keeps whole pages of rows in order, at least 1,000. The pages
+after the first are then slices of a finished session, not new scans. A
+page past the rows it holds starts a keyset session after the last key
+it has.
 
-## 12. Design for P2a
+## 12. The engine as built (P2a)
 
-**Chunks**
+The code is in `backend/app/providers/falkordb_search/`, and the
+settings are `DEEP_SEARCH_ENGINE`, `DEEP_SEARCH_CHUNK_*`,
+`DEEP_SEARCH_SESSION_*` and `DEEP_SEARCH_WALK_MAX`. Setting
+`DEEP_SEARCH_ENGINE=legacy` restores the capped engine.
 
-Each label is split into ranges holding about 50k of its nodes. The
-ranges come from the label's minimum ID, maximum ID and count, cached
-per data version; reading them costs 146 ms for 949k nodes. A label
-with 50k nodes or fewer is one chunk.
+**Units**
 
-Page 1 runs this per chunk:
+The planner cuts each label into bands of about 50k of its nodes. Two
+cheap reads size the bands:
+
+- `db.meta.stats()` gives every label's count in about 1 ms;
+- each label's first node ID comes from one `UNION ALL` statement (3 ms
+  for four labels).
+
+The first band starts at 0 and the last is open-ended, so the bands
+cover the label even if the estimate is wrong. A band that runs out of
+time or memory is split in half and retried; an open-ended band is cut
+at its estimated end and stays open above it. A label with no nodes has
+no band.
+
+A range unit runs one statement:
 
 ```cypher
-MATCH (n:L) WHERE ID(n) >= $lo AND ID(n) < $hi AND (<predicate>) <scope clamps>
-WITH n, <sort keys> ORDER BY <sort keys>
-WITH count(*) AS c, collect([<sort keys>, ID(n)]) AS rows
-RETURN c, rows[..$k]
+MATCH (n:L) WHERE ID(n) >= $_lo AND ID(n) < $_hi AND NOT (n:Earlier …)
+  AND n.urn IS NOT NULL AND (<predicate>) <clamps> <withinHops>
+WITH n, <keys> ORDER BY <keys>
+WITH count(*) AS _c, collect([<keys>]) AS _rows
+RETURN _c, _rows[..$_k]
 ```
 
-A keyset page runs the same chunk with no count:
-
-```cypher
-… WITH n, <sort keys> WHERE <after the cursor's keys> ORDER BY … LIMIT $k
-```
-
-A node with two in-scope labels is counted under the first only
-(`NOT n:Earlier`).
+The last key is always the urn, so a row never carries a node ID and
+stays meaningful to hydrate whatever happens to the IDs. A walk unit
+counts and ranks in two statements, because a subtree can be larger than
+a chunk. A later page filters after the cursor's keys in one `WITH` and
+orders in a second: a `WITH`'s `WHERE` applies after its `ORDER BY` and
+`LIMIT`.
 
 **Sort keys**
 
-Every order ends with `urn` ascending as the tie-break.
-
 | Sort | Keys |
 |---|---|
-| relevance | tier score descending, `toLower(displayName)`, urn |
-| displayName / qualifiedName | lower-cased text in the requested direction, then urn |
-| a property | kind rank (number, text, missing), sign, number, lower-cased text; the direction applies to the value keys |
+| relevance | the `_score_hit` score (section 10), descending; the display name; the urn |
+| displayName / qualifiedName | the lower-cased text in `sortDir`; the urn ascending |
+| a property | kind (numbers and booleans before text), sign, number, lower-cased text, each in `sortDir`; the urn ascending |
+
+An exact-match leaf that every match must satisfy scores the same on
+every row, so it becomes a constant rather than work per row. That
+halved the slowest search below (`owner in 3`: 6.4 s → 3.4 s).
 
 **Scope**
 
-- **Visible URNs**: per-label `n.urn IN $urns` index scans.
-- **View roots**:
-  1. Resolve each root to its node ID with per-label index lookups.
-  2. Run a walk bounded at `min(300k, nodes ÷ 8)` from those IDs.
-  3. If the walk ends under the bound, answer the search with one walk
-     statement.
-  4. Otherwise run the chunked label scan, clamped per chunk by
-     `WITH n MATCH (n)<-[:C*0..D]-(_r) WHERE ID(_r) IN $rootIds WITH DISTINCT n`.
+- **Visible URNs**: per-label `n.urn IN $_visible` index lookups.
+- **View roots and `descendantOf` sets**:
+  1. Each set is resolved to node IDs through the per-label urn index.
+  2. A walk bounded at `min(walk_max, max(width, nodes ÷ 8))` sizes each
+     set's subtree.
+  3. The smallest set under the bound is walked in one unit, and the
+     other sets clamp it.
+  4. Otherwise, a set of up to 64 roots clamps range units.
+  5. A larger set is walked in buckets of 32 roots, after dropping roots
+     inside other roots. Containment is a tree, as
+     `_get_ancestor_chain` already assumes.
+- **`withinHops`**: the capped engine's continuation, after the clamps.
+- **No roots**: the view's entity types, matched case-insensitively
+  against the live searchable labels — or the ontology's types, or
+  every label.
 
-  `descendantOf` sets clamp the same way. `withinHops` anchors are
-  also resolved to IDs.
-- **No roots**: chunked scans of the view's labels, which are the
-  entity types matched case-insensitively against the live, searchable
-  labels.
+The plan lives in its session.
 
-The plan is cached per (scope hash, data version).
+**Sessions**
 
-**Session**
+- A session's id is a hash of the query (predicate, resolved scope and
+  its hash, order, facets, rows kept), the data version, and the keyset
+  position.
+- It holds the pending units, the running count, and the merged rows.
+- Each request takes the lease, runs units two at a time until its wait
+  is spent, and commits. A request always runs at least one wave, so a
+  client polling with no wait still makes progress.
+- A client that sends `sessionId` finishes its session on the data it
+  started on, and is told `stale` if the data has changed.
+- A failed session is not kept, so the next request starts clean.
 
-- Key: sha1 of the canonical predicate, scope hash, data version,
-  sort, and keyset position.
-- State: the plan, the chunks done, the running count, and the merged
-  top 500.
-- Concurrency: 2 chunks per hop, each under the fleet slot. A chunk
-  that times out is split in half and retried.
+**Facets**
+
+A search asking for facets gets the capped engine's statements for
+them. They are computed once per session, in the background of the
+request that claimed them. The page reports `running` until they land;
+if they fail, the note in its diagnostics says why.
 
 **Response**
 
-`status` (`running` / `complete`), `progress`, and `countStatus`
-(`exact` / `lowerBound`). `truncated` is never set by the engine; it is
-set only when a request's deadline runs out.
+- `status` (`running` / `complete`) and `countStatus` (`exact` /
+  `lowerBound`).
+- `progress` (`scanned`, `total`, `matched`), `sessionId`,
+  `dataVersion` and `stale`.
+- `truncated` and `deadlineExceeded` are set only when a request
+  without `waitMs` runs out of time. The request can be sent again with
+  its `sessionId` to finish.
+
+**End to end on `bench_1m`**
+
+Measured through `execute_session_search`: 2 chunks in flight, 4 engine
+threads, `waitMs` 500, 50 hits hydrated per answer, polling with
+`sessionId` until complete.
+
+| Predicate (order) | Matches | First answer | Exact and complete | Requests |
+|---|---:|---:|---:|---:|
+| name contains `field_12` (relevance) | 11,111 | 643 ms | 2.41 s | 4 |
+| gvHash = exact int64 (relevance) | 1 | 565 ms | 1.73 s | 3 |
+| gvHash contains `74` (relevance) | 167,163 | 546 ms | 2.16 s | 4 |
+| sourceId > 50000 (relevance) | 500,886 | 762 ms | 3.63 s | 5 |
+| score between 0.2 and 0.3 (name) | 99,822 | 610 ms | 2.44 s | 4 |
+| updated within 30 days (relevance) | 9,573 | 573 ms | 2.25 s | 4 |
+| owner in 3 (relevance) | 564,287 | 595 ms | 3.43 s | 5 |
+| tier is empty (name) | 199,846 | 843 ms | 2.05 s | 3 |
+| any field contains `field_1` (relevance) | 111,111 | 1,369 ms | 4.71 s | 5 |
+
+Ordering a match set costs more than counting it. On a 50k chunk with
+30k matches:
+
+| Work on the chunk | Time |
+|---|---:|
+| Count | 51 ms |
+| Order by urn | 90 ms |
+| Order by name | 168 ms |
+| Order by relevance | 432 ms |
+
+The relevance score's word tier is the dearest part, about 2 µs per
+row per field. Running 4 chunks in flight instead of 2 roughly halves
+every "complete" time above, at the cost of the engine threads that
+canvas reads share.
+
+Walking pages past the rows a session holds costs one full scan each:
+about 1.2 s per page for 100k broad matches on 200k nodes. Taking every
+match out of a large result is the export job's task (P6).

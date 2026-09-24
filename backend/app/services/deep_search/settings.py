@@ -59,6 +59,24 @@ class DeepSearchSettings:
     cache_ttl_seconds: int
     rate_limit_per_minute: int
 
+    # --- Uncapped engine (``providers/falkordb_search``) ---
+    # ``v2`` scans every match in ID-range chunks and counts them exactly;
+    # ``legacy`` is the capped candidate scan, kept as a kill switch.
+    # See docs/search-engine/S0_FINDINGS.md for where each number comes from.
+    engine: str
+    # Nodes per chunk. Throughput does not depend on it; the slowest chunk,
+    # which every other reader queues behind, does.
+    chunk_width: int
+    # Chunks in flight per search, each under its own fleet slot.
+    chunk_concurrency: int
+    # One chunk statement's budget. A chunk that runs out is split in half.
+    chunk_timeout_ms: int
+    # Rows a session keeps in order — the pages served without a rescan.
+    session_rows: int
+    session_ttl_seconds: int
+    # Largest view subtree answered by walking it rather than chunking.
+    walk_max: int
+
     @classmethod
     def from_env(cls) -> "DeepSearchSettings":
         """Read ``DEEP_SEARCH_*`` env vars with documented fallbacks."""
@@ -102,6 +120,13 @@ class DeepSearchSettings:
             rate_limit_per_minute=_read_int(
                 "DEEP_SEARCH_RATE_LIMIT_PER_MIN", 120,
             ),
+            engine=_read_choice("DEEP_SEARCH_ENGINE", ("v2", "legacy"), "v2"),
+            chunk_width=max(1000, _read_int("DEEP_SEARCH_CHUNK_WIDTH", 50_000)),
+            chunk_concurrency=max(1, _read_int("DEEP_SEARCH_CHUNK_CONCURRENCY", 2)),
+            chunk_timeout_ms=max(1000, _read_int("DEEP_SEARCH_CHUNK_TIMEOUT_MS", 15_000)),
+            session_rows=max(50, _read_int("DEEP_SEARCH_SESSION_ROWS", 1000)),
+            session_ttl_seconds=max(60, _read_int("DEEP_SEARCH_SESSION_TTL", 900)),
+            walk_max=max(0, _read_int("DEEP_SEARCH_WALK_MAX", 300_000)),
         )
 
 
@@ -121,3 +146,8 @@ def _read_int(env_var: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _read_choice(env_var: str, choices: tuple, default: str) -> str:
+    raw = (os.getenv(env_var) or "").strip().lower()
+    return raw if raw in choices else default

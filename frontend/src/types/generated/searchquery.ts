@@ -143,7 +143,7 @@ export type Propertykey = string | null
  */
 export type Samplehitsperbucket = number
 /**
- * Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max.
+ * Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max. The uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or counts; it applies only to the facets that still pivot on a capped candidate set.
  */
 export type Candidatecap = number | null
 /**
@@ -158,6 +158,10 @@ export type Includeancestorpath = boolean
 export type Pagesize = number
 export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
 /**
+ * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
+ */
+export type Sessionid = string | null
+/**
  * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
  */
 export type Softdeadlinems = number
@@ -167,6 +171,10 @@ export type Sortdir = 'asc' | 'desc'
  * When set, hits are ordered by this native node property (e.g. 'rowCount') instead of by `sort`. Useful for 'biggest first' / 'newest first' UX.
  */
 export type Sortproperty = string | null
+/**
+ * Progressive mode (uncapped engine). Answer after this long with what the scan has found so far — ``status: 'running'``, provisional hits in their final order, a ``progress`` block — and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.
+ */
+export type Waitms = number | null
 export type Predicate =
     | TextPredicate
     | PropertyPredicate
@@ -435,7 +443,15 @@ export type Cachehit = boolean
  * Candidates that passed the predicate scan before the scope check and aggregation/limit. Useful for showing 'searching X nodes…' captions in the FE.
  */
 export type Candidatecount = number
+/**
+ * Whether ``candidateCount`` is the exact number of matches or only those found so far.
+ */
+export type Countstatus = ('exact' | 'lowerBound') | null
 export type Cursor1 = string | null
+/**
+ * The graph data the session read. Opaque.
+ */
+export type Dataversion = string | null
 export type Deadlineexceeded = boolean
 export type Elapsedms1 = number
 /**
@@ -455,6 +471,18 @@ export type Hopcount = number
  * Ordered list — first is source endpoint, last is target endpoint.
  */
 export type Nodes = AncestorRef[]
+/**
+ * Matches found so far — exact for the parts scanned.
+ */
+export type Matched = number
+/**
+ * Nodes in the parts already scanned.
+ */
+export type Scanned = number
+/**
+ * Nodes in every part the search scans.
+ */
+export type Total = number
 export type Costscore = number
 export type Cypher1 = string
 export type Estimatedrows = number | null
@@ -462,6 +490,18 @@ export type Estimatedrows = number | null
  * Diagnostic hints — e.g. 'no index on properties.foo'.
  */
 export type Notes2 = string[]
+/**
+ * The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.
+ */
+export type Sessionid1 = string | null
+/**
+ * The graph changed after this session started; run the search again for an answer on the current data.
+ */
+export type Stale = boolean
+/**
+ * ``running``: the scan is not finished — the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.
+ */
+export type Status = ('running' | 'complete') | null
 /**
  * Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).
  */
@@ -631,10 +671,12 @@ export interface SearchOptions {
     includeAncestorPath?: Includeancestorpath
     pageSize?: Pagesize
     results?: Results
+    sessionId?: Sessionid
     softDeadlineMs?: Softdeadlinems
     sort?: Sort
     sortDir?: Sortdir
     sortProperty?: Sortproperty
+    waitMs?: Waitms
 }
 /**
  * Roll matches up to ancestors (or facets) for orient-before-drill UX.
@@ -964,16 +1006,22 @@ export interface SearchResultPage {
     aggregates?: Aggregates
     cacheHit?: Cachehit
     candidateCount?: Candidatecount
+    countStatus?: Countstatus
     cursor?: Cursor1
+    dataVersion?: Dataversion
     deadlineExceeded?: Deadlineexceeded
     elapsedMs: Elapsedms1
     hits?: Hits
     paths?: Paths
+    progress?: SearchProgress | null
     queryExplain?: QueryExplain | null
     /**
      * Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain.
      */
     scopeDiagnostics?: ScopeDiagnostics | null
+    sessionId?: Sessionid1
+    stale?: Stale
+    status?: Status
     totalCount?: Totalcount
     truncated?: Truncated
 }
@@ -1067,6 +1115,16 @@ export interface EdgeRef {
 }
 export interface Properties1 {
     [k: string]: unknown
+}
+/**
+ * How far a running search has got. Node counts are the scan's
+ * estimate of what each part of the graph holds, so ``scanned / total``
+ * is a fraction to draw, not a count to report.
+ */
+export interface SearchProgress {
+    matched: Matched
+    scanned: Scanned
+    total: Total
 }
 /**
  * Compiled-query metadata. Returned by POST /search/explain (dry-run)

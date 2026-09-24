@@ -542,6 +542,15 @@ class DraftOverlayProvider:
         """
         return await self._base.deep_search(query, deadline_ms=deadline_ms)
 
+    @property
+    def supports_search_sessions(self) -> bool:
+        return bool(getattr(self._base, "supports_search_sessions", False))
+
+    async def deep_search_session(self, query, *, context):
+        """The uncapped engine, on the base — the draft's edits are not
+        searched, for the reason :meth:`deep_search` gives."""
+        return await self._base.deep_search_session(query, context=context)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Delegated for the same reason as
         :meth:`deep_search` — the Cypher explained is the one that would

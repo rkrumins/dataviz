@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
@@ -32,6 +34,7 @@ from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
 from backend.common.adapters import ProviderFailingOver
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
@@ -1781,9 +1784,17 @@ async def search_advanced(
         branch_id=branchId,
     )
     try:
-        page, eff_scope = await _bounded_compute(
-            engine, lambda: svc.search(query),
-        )()
+        if get_deep_search_settings().engine == "v2":
+            # The uncapped engine runs many statements per request, so it is
+            # admitted per statement, not once around the whole search.
+            page, eff_scope = await svc.search(query, run_context=SearchRunContext(
+                data_version=await _search_data_version(engine),
+                admit=_statement_admission(engine),
+            ))
+        else:
+            page, eff_scope = await _bounded_compute(
+                engine, lambda: svc.search(query),
+            )()
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
@@ -1793,6 +1804,38 @@ async def search_advanced(
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
     response.headers["X-Search-Scope-Hash"] = eff_scope.scope_hash
     return page
+
+
+def _statement_admission(engine: ContextEngine):
+    """``_bounded_compute``'s two slots — this process's and the fleet's —
+    as a context manager held for ONE statement, or None when the engine's
+    provider has no slot key (``_bounded_compute`` degrades the same way)."""
+    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
+    if key is None:
+        return None
+
+    @asynccontextmanager
+    async def admit():
+        sem = await provider_manager.acquire_provider_slot(*key)
+        try:
+            async with provider_manager.fleet_slot(*key):
+                yield
+        finally:
+            sem.release()
+
+    return admit
+
+
+async def _search_data_version(engine: ContextEngine) -> str:
+    """The graph data a search reads: the published graph's content
+    generation (a draft searches the graph it is a draft of) and the
+    physical graph behind it. Never raises; "" when unknown."""
+    scope = _cache_scope(engine)
+    if scope is None:
+        return ""
+    published = replace(scope, branch_id="")
+    generation = await get_graph_cache().content_generation(published)
+    return f"{generation}.{published.graph_ns}"
 
 
 @router.post("/search/explain")

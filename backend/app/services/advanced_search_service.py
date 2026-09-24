@@ -21,12 +21,18 @@ and that's enforced here — before any Cypher is generated.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
+from dataclasses import replace
 from typing import Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.deep_search import (
+    CompileError,
+    SearchRunContext,
+    get_deep_search_settings,
+)
 from backend.app.services.view_scope import (
     EffectiveViewScope,
     ViewNotFound,
@@ -265,6 +271,20 @@ def _reject_unbounded_text_any(
     )
 
 
+def _returns_hits(query: SearchQuery) -> bool:
+    """Whether a search is one the uncapped engine runs: it returns hits,
+    and it isn't a path search (a different statement and response)."""
+    if query.options.results not in ("hits", "both"):
+        return False
+
+    def has_path(p) -> bool:
+        if isinstance(p, PathPredicate):
+            return True
+        return isinstance(p, GroupPredicate) and any(has_path(c) for c in p.children)
+
+    return not has_path(query.predicate)
+
+
 def _empty_page(query: SearchQuery) -> SearchResultPage:
     """Construct a zero-results ``SearchResultPage`` for short-circuit cases.
 
@@ -399,6 +419,7 @@ class AdvancedSearchService:
         query: SearchQuery,
         *,
         deadline_ms: Optional[int] = None,
+        run_context: Optional[SearchRunContext] = None,
     ) -> Tuple[SearchResultPage, EffectiveViewScope]:
         """Run a search; return the page plus the resolved scope.
 
@@ -406,6 +427,11 @@ class AdvancedSearchService:
         to set the ``X-Search-Dropped-URNs`` header and to populate the
         audit-log row (so the audit trail records what was *actually*
         searched, not what the client asked for).
+
+        With a ``run_context`` (``DEEP_SEARCH_ENGINE=v2``), a search that
+        returns hits runs on the uncapped engine when the provider has it;
+        everything else — and every search on a provider without it — runs
+        ``deep_search`` inside one admission, as the endpoint used to wrap it.
         """
         _count_and_validate(query)
 
@@ -448,12 +474,13 @@ class AdvancedSearchService:
         )
 
         try:
-            page = await self._provider_op("deep_search")(
-                query, deadline_ms=deadline_ms,
-            )
+            page = await self._run(query, eff_scope, deadline_ms, run_context)
+            extra_notes = [entity_types_note] if entity_types_note else []
+            if page.scope_diagnostics is not None:
+                # Notes the engine carried out (a plan's, a facet's failure).
+                extra_notes.extend(page.scope_diagnostics.notes)
             page.scope_diagnostics = self._build_scope_diagnostics(
-                eff_scope,
-                extra_notes=[entity_types_note] if entity_types_note else None,
+                eff_scope, extra_notes=extra_notes or None,
             )
             return page, eff_scope
         except CompileError as exc:
@@ -470,6 +497,24 @@ class AdvancedSearchService:
             # Ontology hasn't been configured for this workspace. The
             # existing graph endpoints translate this to 400.
             raise ValidationError(str(exc)) from exc
+
+    async def _run(
+        self,
+        query: SearchQuery,
+        eff_scope: EffectiveViewScope,
+        deadline_ms: Optional[int],
+        run_context: Optional[SearchRunContext],
+    ) -> SearchResultPage:
+        provider = self._engine.provider
+        if (run_context is not None and _returns_hits(query)
+                and getattr(provider, "supports_search_sessions", False)):
+            return await provider.deep_search_session(
+                query, context=replace(run_context, scope_hash=eff_scope.scope_hash),
+            )
+        op = self._provider_op("deep_search")
+        admit = run_context.admit if run_context is not None else None
+        async with (admit() if admit is not None else nullcontext()):
+            return await op(query, deadline_ms=deadline_ms)
 
     async def explain(self, query: SearchQuery):
         """Compile-only path. Returns the generated Cypher + bound params
@@ -494,6 +539,15 @@ class AdvancedSearchService:
         # the user *what their search actually scopes to*. Critical
         # for debugging "why didn't this return anything" — answer is
         # often "your view doesn't contain these URNs".
+        if (isinstance(result, dict) and get_deep_search_settings().engine == "v2"
+                and _returns_hits(query)
+                and getattr(self._engine.provider, "supports_search_sessions", False)):
+            result.setdefault("notes", []).append(
+                "Runs on the uncapped engine: this predicate is evaluated over the "
+                "whole scope in chunks (label ID bands, a walk from the view's "
+                "roots, or the canvas URNs), each counting and ranking its own "
+                "matches. The candidate cap applies only to facets."
+            )
         if isinstance(result, dict):
             result["resolvedScope"] = {
                 "viewId": eff_scope.view_id,

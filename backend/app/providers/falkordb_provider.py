@@ -6350,6 +6350,17 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await execute_deep_search(self, query, deadline_ms=deadline_ms)
 
+    #: Read by ``AdvancedSearchService.search``: this provider runs the
+    #: uncapped engine (``deep_search_session``).
+    supports_search_sessions = True
+
+    async def deep_search_session(self, query, *, context):
+        """The uncapped engine: run this request's share of a search
+        session and return its page. See ``falkordb_search/engine.py``."""
+        from .falkordb_search.engine import execute_session_search
+        await self._ensure_connected()
+        return await execute_session_search(self, query, context=context)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
         avoid the circular load order)."""
