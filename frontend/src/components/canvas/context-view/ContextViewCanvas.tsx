@@ -869,6 +869,8 @@ export function ContextViewCanvas({
   // Threading the view id keeps every resolve consumer on ONE cache entry per
   // scope AND carries the capability context for non-members.
   const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId, activeView?.id ?? null)
+  const exportDataSourceName = useWorkspacesStore(s => s.workspaces
+    .find(w => w.id === scopeWsId)?.dataSources?.find(d => d.id === dataSourceId)?.label)
   const isBlankModel = resolveQ.data?.kind === 'blank'
   const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
 
@@ -5409,13 +5411,17 @@ export function ContextViewCanvas({
             }}
           />
         )}
-        {showExportDialog && graphId && scopeWsId && (
+        {/* Export works in view and edit mode alike, with or without version control: a source
+             without it (or still being put under it) exports its live graph, a cold copy. */}
+        {showExportDialog && scopeWsId && dataSourceId && !resolveQ.isLoading && (
           <ExportDialog
             wsId={scopeWsId}
-            graphId={graphId}
+            dataSourceId={dataSourceId}
+            graphId={resolveQ.data && !resolveQ.data.bootstrap ? resolveQ.data.graphId : null}
+            dataSourceName={exportDataSourceName}
             viewId={activeView?.id}
-            branchId={useBranchStore.getState().isDraftMode()
-              ? (useBranchStore.getState().currentBranchId ?? undefined) : undefined}
+            viewName={activeView?.name}
+            branchId={effectiveBranchId ?? undefined}
             onClose={() => setShowExportDialog(false)}
           />
         )}

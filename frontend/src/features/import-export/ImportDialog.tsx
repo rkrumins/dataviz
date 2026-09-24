@@ -42,13 +42,26 @@ const UNSUPPORTED: Record<string, string> = {
 
 function unsupportedReason(name: string): string | null {
   const ext = name.toLowerCase().split('.').pop() || ''
-  return UNSUPPORTED[ext] ? `${UNSUPPORTED[ext]}s aren't supported yet` : null
+  return UNSUPPORTED[ext]
+    ? `${UNSUPPORTED[ext]}s aren't supported yet. Please open it and 'Save As' CSV, then import that file.`
+    : null
+}
+
+/** The most one import uploads: the proxy and the server both refuse a larger body (100 MB). */
+const MAX_IMPORT_BYTES = 100 * 1024 * 1024
+
+function tooLargeReason(size: number): string | null {
+  return size > MAX_IMPORT_BYTES
+    ? `This file is ${prettyBytes(size)}, and one import can be at most ${prettyBytes(MAX_IMPORT_BYTES)}. `
+      + 'Split it into smaller files and import them one after another: each adds to the same draft.'
+    : null
 }
 
 function prettyBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
 }
 
 export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onReviewChanges, onImported }: ImportDialogProps) {
@@ -77,7 +90,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     if (f) handleFile(f)
   }, [handleFile])
 
-  const warning = file ? unsupportedReason(file.name) : null
+  const warning = file ? unsupportedReason(file.name) ?? tooLargeReason(file.size) : null
 
   async function start() {
     if (!file) return
@@ -88,8 +101,9 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
       const created = await createImport(wsId, graphId, file, { format, reconcileMode, branchId, viewId })
       setResultBranch(created.branchId)
       const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob })
-      if (done.status === 'failed') {
-        setError(done.errorMessage || 'The import could not be completed.')
+      if (done.status === 'failed' || done.status === 'cancelled') {
+        setError(done.errorMessage
+          || (done.status === 'cancelled' ? 'The import was cancelled.' : 'The import could not be completed.'))
         setPhase('failed')
       } else {
         setJob(done)
@@ -283,9 +297,7 @@ function ChooseStep(props: {
             {warning ? (
               <div className="flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
-                <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                  {warning}. Please open it and 'Save As' CSV, then import that file.
-                </p>
+                <p className="text-[11px] text-amber-700 dark:text-amber-400">{warning}</p>
               </div>
             ) : (
               <div>
