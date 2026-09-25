@@ -245,6 +245,38 @@ def test_a_walk_on_a_spent_read_clock_asks_nothing_and_says_why():
     assert pressure.truncation_reason == "timeout"
 
 
+def test_a_failed_chain_bucket_is_recorded_on_the_read():
+    """The aggregated read drops the roll-ups a chain it could not get would
+    have resolved, so the loss must mark the answer short."""
+    from backend.app.providers import falkordb_provider as fp
+
+    p = _walker(
+        [("Column", [COLUMN]), ("Dataset", [LEAF])],
+        {LEAF: [PARENT, ROOT], COLUMN: [LEAF, PARENT, ROOT]},
+        failing=("Column",),
+    )
+    pressure = fp._ReadPressure()
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher([LEAF, COLUMN], pressure=pressure))
+    assert chains == {LEAF: [PARENT, ROOT]}
+    assert pressure.truncation_reason == "failed"
+
+
+def test_an_urn_with_no_row_or_no_label_marks_nothing():
+    """A partner that no longer exists, or a residue left unscanned, is not a
+    failed read. Marking it would pin every such answer to the negative TTL
+    and recompute it for ever."""
+    from backend.app.providers import falkordb_provider as fp
+
+    residue = [f"urn:test:{i}" for i in range(fp._ANCESTOR_UNLABELED_MAX + 1)]
+    p = _walker([("", residue), ("Dataset", [LEAF, "urn:test:ghost"])], {LEAF: [PARENT, ROOT]})
+    pressure = fp._ReadPressure()
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher(
+        [LEAF, "urn:test:ghost", *residue], pressure=pressure,
+    ))
+    assert chains == {LEAF: [PARENT, ROOT]}
+    assert pressure.degraded_batches == 0
+
+
 def test_a_large_unlabeled_residue_is_never_scanned():
     """An unlabeled anchor is a full node scan. A residue this large means
     label resolution failed wholesale: better unknown, and asked again."""

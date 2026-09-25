@@ -7800,7 +7800,11 @@ class FalkorDBProvider(GraphDataProvider):
         ``deadline`` is an aggregated read's wall clock: each bucket query's
         budget is capped by what is left of it, and a bucket it no longer
         fits is not queried — its urns are unknown, and the loss is recorded
-        on ``pressure`` as a ``timeout``.
+        on ``pressure`` as a ``timeout``. A bucket query that FAILED is
+        recorded there too: the roll-ups its chains would resolve are lost.
+        A urn that simply has no row, or sits in a residue left unscanned, is
+        not a failure and marks nothing; marking it would pin every such
+        answer to the negative TTL.
         """
         out: Dict[str, List[str]] = {}
         if not urns:
@@ -7878,6 +7882,8 @@ class FalkorDBProvider(GraphDataProvider):
                             "ancestor chain bucket (%s, %d urns) failed: %s",
                             label or "<unlabeled>", len(bucket), exc,
                         )
+                        if pressure is not None:
+                            pressure.degrade(_lost_batch_kind(exc))
                         return []
 
                 for rows in await asyncio.gather(*[

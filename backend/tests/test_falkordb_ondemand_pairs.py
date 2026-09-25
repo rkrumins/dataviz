@@ -1661,7 +1661,7 @@ def test_pressure_kind_is_one_classifier_for_both_ladders():
 import pytest
 
 
-def _clocked_provider(fake, levels, *, depth_fails=False):
+def _clocked_provider(fake, levels, *, depth_fails=False, chains_fail=False):
     """A provider whose chain read-through and depth-stamp probes are the
     real ones, recording every query after the regime read as (cypher,
     timeout). Stored cells: none."""
@@ -1676,6 +1676,8 @@ def _clocked_provider(fake, levels, *, depth_fails=False):
 
     async def ro_query(cypher, params=None, timeout=None, **kw):
         asked.append((cypher, timeout))
+        if chains_fail and _CHAIN_RE.search(cypher):
+            raise RuntimeError("chain bucket failed")
         return await fake.ro_query(cypher, params=params, timeout=timeout)
 
     async def proj_ro_query(cypher, params=None, timeout=None, **kw):
@@ -1740,6 +1742,16 @@ def test_a_depth_stamp_read_that_failed_marks_the_answer_short():
     cached as complete."""
     fake = _FakeGraph()
     p, _ = _clocked_provider(fake, _seed_mixed(fake), depth_fails=True)
+    result = _clocked_read(p)
+    assert result.truncated and result.truncation_reason == "failed"
+    assert result.stale_reason == "degraded"
+
+
+def test_a_chain_walk_that_failed_marks_the_answer_short():
+    """The roll-ups those chains would have resolved are missing, and an
+    answer cached as complete would keep them missing for the full TTL."""
+    fake = _FakeGraph()
+    p, _ = _clocked_provider(fake, _seed_mixed(fake), chains_fail=True)
     result = _clocked_read(p)
     assert result.truncated and result.truncation_reason == "failed"
     assert result.stale_reason == "degraded"
