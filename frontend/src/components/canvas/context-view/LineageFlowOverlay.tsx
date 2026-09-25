@@ -649,7 +649,6 @@ export function LineageFlowOverlay({
             isTraceEdge,
             isFocusIncident,
             isReverseFlow: !!edge.isReverseFlow,
-            isBrowseBundle: !!(edge as any).isBrowseBundle,
             isBidirectional: !!(edge as any).isBidirectional,
           })
         }

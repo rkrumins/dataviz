@@ -2,9 +2,8 @@
  * useEdgeProjection — connection visibility and the roll-up (ghost) rule.
  *
  * 1. `isGhost` means "this line stands for something other than the raw
- *    relationship between the two cards it touches": an AGGREGATED edge, a
- *    browse-meta-bundle, or an edge whose endpoint was resolved up to an
- *    ancestor. The old rule compared `originalSourceId`/`originalTargetId`,
+ *    relationship between the two cards it touches": an AGGREGATED edge, or
+ *    an edge whose endpoint was resolved up to an ancestor. The old rule compared `originalSourceId`/`originalTargetId`,
  *    fields nothing ever assigns, so EVERY bundle came back a ghost and every
  *    line on the board drew dashed.
  * 2. `hiddenEdgeTypes` is applied per GROUP MEMBER: a bundle whose members all
@@ -78,7 +77,6 @@ function run(opts: {
   aggregatedEdges?: Map<string, AggregatedEntry[1]>
   expandedNodes?: Set<string>
   parentMap?: Map<string, string>
-  browseBundleEnabled?: boolean
   hiddenEdgeTypes?: ReadonlySet<string>
 }) {
   const flat: HierarchyNode[] = []
@@ -103,7 +101,6 @@ function run(opts: {
       isTracing: false,
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
-      browseBundleEnabled: opts.browseBundleEnabled,
       browseBundleParentMap: opts.parentMap,
       hiddenEdgeTypes: opts.hiddenEdgeTypes,
     }),
@@ -115,7 +112,6 @@ type Projected = {
   source: string
   target: string
   isGhost: boolean
-  isBrowseBundle: boolean
   isAggregated: boolean
   isBidirectional: boolean
   edgeCount: number
@@ -156,17 +152,26 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
     expect(bundles(res)[0].isGhost).toBe(true)
   })
 
-  it('a browse-meta-bundled group is a roll-up', () => {
+  // Browse mode used to re-key the lines of rows sharing a parent onto that
+  // parent. In an anchored column the parent is the anchor, which is never a
+  // row, so the lines went somewhere no card is drawn and the rows lost them.
+  it("rows sharing a parent keep their own lines — the parent is not a row (an anchored column's anchor)", () => {
     const res = run({
       roots: [hNode('s1'), hNode('s2'), hNode('t')],
       edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
-      browseBundleEnabled: true,
       parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
     })
-    const sp = bundles(res).find(e => e.source === 'sp' && e.target === 't')
-    expect(sp).toBeDefined()
-    expect(sp!.isBrowseBundle).toBe(true)
-    expect(sp!.isGhost).toBe(true)
+    expect(bundles(res).map(e => `${e.source}->${e.target}`).sort()).toEqual(['s1->t', 's2->t'])
+    expect(bundles(res).every(e => !e.isGhost)).toBe(true)
+  })
+
+  it('rows sharing a parent keep their own lines — even when the parent is a row too', () => {
+    const res = run({
+      roots: [hNode('sp'), hNode('s1'), hNode('s2'), hNode('t')],
+      edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
+      parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
+    })
+    expect(bundles(res).map(e => `${e.source}->${e.target}`).sort()).toEqual(['s1->t', 's2->t'])
   })
 
   it('a bidirectional pair is a roll-up when either direction is', () => {
@@ -343,15 +348,14 @@ describe('useEdgeProjection — a bundle carries the weight it summarises', () =
     expect(rollup.edgeCount).toBeGreaterThan(pair.edgeCount)
   })
 
-  it('raw members still weigh one apiece — a browse-meta-bundle counts its members', () => {
+  it('raw members still weigh one apiece — on the rows that hold them', () => {
     const res = run({
       roots: [hNode('s1'), hNode('s2'), hNode('t')],
-      edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
-      browseBundleEnabled: true,
+      edges: [edge('e1', 's1', 't'), edge('e2', 's1', 't'), edge('e3', 's2', 't')],
       parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
     })
-    const sp = bundles(res).find(e => e.source === 'sp' && e.target === 't')!
-    expect(sp.edgeCount).toBe(2)
+    expect(bundles(res).find(e => e.source === 's1' && e.target === 't')!.edgeCount).toBe(2)
+    expect(bundles(res).find(e => e.source === 's2' && e.target === 't')!.edgeCount).toBe(1)
   })
 })
 

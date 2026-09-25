@@ -137,12 +137,6 @@ export type ComputedEdge = {
    */
   isReverseFlow?: boolean
   /**
-   * True when the projection meta-bundled this edge from many fine-grained
-   * leaf-pair edges up to a containment-parent pair (browse-mode rollup).
-   * Drives the badge label "+N pairs" instead of "+N edges".
-   */
-  isBrowseBundle?: boolean
-  /**
    * True when the projection collapsed an A→B and a B→A bundle into a
    * single record. Renderer should draw a dual-arrowhead path
    * (markerStart + markerEnd) to communicate two-way flow.

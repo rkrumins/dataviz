@@ -67,21 +67,11 @@ export interface UseEdgeProjectionOptions {
    */
   traceFocusLevel?: number
   /**
-   * Browse-mode bundling. When enabled, edges between distinct visible
-   * leaf nodes get projected up the containment hierarchy until pair-count
-   * fan-in shrinks below the threshold — collapsing hub-style "every
-   * object → every object" densities into one bundle per parent pair.
-   * Independent of trace mode; controlled by the canvas.
+   * Canvas containment parent map (child id → parent id) in browse mode.
+   * Delegation reads it to tell when an open container's line is covered by
+   * its children's lines.
    */
-  browseBundleEnabled?: boolean
-  /** Containment parent map used for browse-mode bundling. */
   browseBundleParentMap?: Map<string, string>
-  /**
-   * Maximum edges per (source, target) pair in browse mode before the
-   * projection walks endpoints one level coarser. Default 1 — every pair
-   * collapses on the first walk pass.
-   */
-  browseBundleFanInThreshold?: number
   /**
    * nodeId → layer index map (Source=0, Staging=1, …). When provided,
    * each projected edge gets `isReverseFlow` set true if the target's
@@ -234,9 +224,7 @@ export function useEdgeProjection({
   traceBundleParentMap,
   entityTypeLevels,
   traceFocusLevel,
-  browseBundleEnabled = false,
   browseBundleParentMap,
-  browseBundleFanInThreshold = 1,
   nodeLayerIndexMap,
   hiddenEdgeTypes,
   ancestorChains,
@@ -618,79 +606,12 @@ export function useEdgeProjection({
       }
     }
 
-    // ── Browse-mode meta-bundling ─────────────────────────────────────────
-    //
-    // Trace-mode bundling already rolls up via `projectToTraceLevel` above.
-    // For browse mode we run a separate pass over the per-pair `edgeGroups`:
-    // when many distinct visible-leaf pairs share a common COLLAPSED
-    // containment parent (e.g. 76 Compliance objects → 109 Finance objects,
-    // both layers collapsed), the canvas is hopeless. Roll those pairs up
-    // to a single parent-pair bundle so the macro flow is legible.
-    //
-    // CRITICAL — never collapse to an EXPANDED parent. The user's expansion
-    // is an explicit request to see leaf-level detail; rolling those edges
-    // back into the parent would make the fine-grained lineage disappear
-    // the moment they reveal it. The walk only steps to a parent when that
-    // parent is collapsed (i.e. is itself the user's chosen view-level).
-    //
-    // Disabled in trace mode (trace has its own path) and when the parent
-    // map / fan-in config is missing.
-    if (
-      !isTracing
-      && browseBundleEnabled
-      && browseBundleParentMap !== undefined
-      && edgeGroups.size > 0
-    ) {
-      // Walk one parent step. Iterate up to 6 passes; each pass collapses
-      // the highest-fan-in groupings until the count drops under threshold.
-      // 6 is enough to walk leaf → object → schema → domain → layer for
-      // every realistic ontology depth.
-      for (let pass = 0; pass < 6; pass++) {
-        // Group existing keys by their (parent-of-source, parent-of-target),
-        // but only consider parents that are NOT currently expanded.
-        const parentBuckets = new Map<string, string[]>()
-        for (const key of edgeGroups.keys()) {
-          const [sId, tId] = key.split('->')
-          const rawSP = browseBundleParentMap.get(sId)
-          const rawTP = browseBundleParentMap.get(tId)
-          // Skip the walk on a side whose parent is expanded — that side
-          // stays at the visible leaf level (the user explicitly opened it).
-          const sP = rawSP && !expandedNodes.has(rawSP) ? rawSP : undefined
-          const tP = rawTP && !expandedNodes.has(rawTP) ? rawTP : undefined
-          // Only consider buckets where AT LEAST one endpoint has a
-          // collapsed parent available. If both are at user-chosen view
-          // level, the key stays as-is.
-          if (!sP && !tP) continue
-          const parentKey = `${sP ?? sId}->${tP ?? tId}`
-          if (parentKey === key) continue
-          let bucket = parentBuckets.get(parentKey)
-          if (!bucket) { bucket = []; parentBuckets.set(parentKey, bucket) }
-          bucket.push(key)
-        }
-
-        let collapsedAny = false
-        parentBuckets.forEach((childKeys, parentKey) => {
-          if (childKeys.length <= browseBundleFanInThreshold) return
-          // Collapse: merge every child group's edges into one bundle keyed
-          // at the parent pair. Stamp with `isBrowseBundle` so the renderer
-          // (and future drill UI) can distinguish from per-pair groupings.
-          const [sP, tP] = parentKey.split('->')
-          if (sP === tP) return  // self-loop at parent level — skip
-          const merged: any[] = edgeGroups.get(parentKey) ?? []
-          for (const ck of childKeys) {
-            const child = edgeGroups.get(ck)
-            if (!child) continue
-            // Re-key each edge to the new parent endpoints so finalize()
-            // pulls source/target from the merged group consistently.
-            for (const e of child) merged.push({ ...e, source: sP, target: tP, _browseBundled: true })
-            edgeGroups.delete(ck)
-          }
-          edgeGroups.set(parentKey, merged)
-          collapsedAny = true
-        })
-        if (!collapsedAny) break
-      }
-    }
+    // Browse mode has no meta-bundling pass. It used to re-key the lines of
+    // rows sharing a collapsed parent onto that parent, but every group key
+    // above is already a row the reader sees at the level they chose. The
+    // parent it stepped to was either not a row at all (an anchored column's
+    // anchor) or a different card, so the rows lost their lines and markers.
+    // Lines stay on the rows they belong to.
 
     // The types one group member carries. `data.edgeTypes` was previously
     // tested for truthiness alone, so an empty-but-present array skipped the
@@ -716,8 +637,8 @@ export function useEdgeProjection({
     const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
       // Hidden types are applied per MEMBER, not per group: grouping stayed
-      // identical above so meta-bundling and the bidirectional collapse behave
-      // exactly as before, and only the finalized bundle changes.
+      // identical above so the bidirectional collapse behaves exactly as
+      // before, and only the finalized bundle changes.
       const members = hiddenEdgeTypes && hiddenEdgeTypes.size > 0
         ? groupEdges.filter((e: any) => {
             const ts = memberTypes(e)
@@ -730,7 +651,6 @@ export function useEdgeProjection({
 
       const distinctTypes = new Set<string>()
       let isAggregated = false
-      let isBrowseBundle = false
       let maxConfidence = 0
       let rawWeight = 0
       let rollupWeight = 0
@@ -741,7 +661,6 @@ export function useEdgeProjection({
       members.forEach(e => {
         if (e.data?.isAggregated) { isAggregated = true; rollupWeight += memberWeight(e) }
         else rawWeight += memberWeight(e)
-        if (e._browseBundled) isBrowseBundle = true
         memberTypes(e).forEach((et: string) => {
           if (hiddenEdgeTypes?.has(et.toUpperCase())) return
           distinctTypes.add(et)
@@ -751,7 +670,7 @@ export function useEdgeProjection({
 
       // A bundle is a roll-up when it summarises something other than the raw
       // relationship between the two cards it touches.
-      const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
+      const isGhost = isAggregated || members.some((e: any) => e._lifted === true)
 
       // TWO NUMBERS, because this bundle answers two different questions and
       // one field was doing both jobs.
@@ -788,8 +707,7 @@ export function useEdgeProjection({
         id: `bundle-${key}`,
         source: sourceId,
         target: targetId,
-        isBundled: edgeCount > 1 || isBrowseBundle,
-        isBrowseBundle,
+        isBundled: edgeCount > 1,
         isGhost,
         edgeCount,
         types: typesArray,
@@ -836,9 +754,8 @@ export function useEdgeProjection({
           source: s,
           target: t,
           isBundled: true,
-          isBrowseBundle: fwd.isBrowseBundle || rev.isBrowseBundle,
           // A pair that summarises anything in either direction IS a summary —
-          // matching the OR its isBrowseBundle/isAggregated siblings already use.
+          // matching the OR its isAggregated sibling already uses.
           isGhost: fwd.isGhost || rev.isGhost,
           edgeCount,
           types: typesArr,
@@ -858,7 +775,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains])
 
   const projectedEdges = projection.edges
 

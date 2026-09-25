@@ -418,13 +418,12 @@ export function ContextViewCanvas({
   const isContainmentEdge = useViewIsContainmentEdge()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
 
-  // Lineage rendering preferences — drive the Stubs/Auto/Raw mode, the
-  // auto-mode size cutover, and the bundle fan-in threshold. Read with
-  // separate selectors so unrelated preference changes don't re-render.
+  // Lineage rendering preferences — drive the Stubs/Auto/Raw mode and the
+  // auto-mode size cutover. Read with separate selectors so unrelated
+  // preference changes don't re-render.
   const lineageRenderMode = usePreferencesStore((s) => s.lineageRenderMode)
   const setLineageRenderMode = usePreferencesStore((s) => s.setLineageRenderMode)
   const autoStubThreshold = usePreferencesStore((s) => s.autoStubThreshold)
-  const lineageBundleFanIn = usePreferencesStore((s) => s.lineageBundleFanIn)
 
   // Canvas display settings — driven by the header's DisplaySettingsPopover.
   // `?? default` guards users whose persisted preferences predate these
@@ -4148,9 +4147,8 @@ export function ContextViewCanvas({
         // Trace path: also batch-drill the AGGREGATED edges incident to
         // this node so the server returns the next-finer level of trace
         // edges between this node's subtree and its peers' subtrees. The
-        // density-tier renderer + browse-mode bundling now absorb the
-        // result; the historical reason this was disabled (canvas
-        // overload) no longer applies.
+        // density-tier renderer now absorbs the result; the historical
+        // reason this was disabled (canvas overload) no longer applies.
         await announceChildLoad(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
@@ -4347,15 +4345,6 @@ export function ContextViewCanvas({
     return byNode
   }, [sortedLayers, nodeLayerMap])
 
-  // Browse-mode bundling is on by default. The previous behaviour gated it
-  // behind `edges.length > 800`, which meant the most common dense case
-  // (300–700 edges with high per-pair fan-in) never bundled — bundling
-  // would only kick in after the canvas was already overloaded. Letting
-  // the projection run from the first edge collapses leaf pairs to
-  // collapsed-parent bundles immediately; expanded parents stay at leaf
-  // resolution because the walk respects `expandedNodes`.
-  const browseBundleEnabled = !overlay.active
-
   // Edge projection — BROWSE only. In trace mode the overlay's own wire
   // ledger has already decided the grain (see traceWireLedger), so the
   // projection would be re-deciding it from a store that holds none of the
@@ -4384,13 +4373,9 @@ export function ContextViewCanvas({
     showLineageFlow, isTracing: overlay.active,
     traceContextSet, isContainmentEdge,
     suppressedAggEdgeKeys,
-    // Browse-mode bundling: kicks in only outside trace mode and only when
-    // edge density would otherwise overload the canvas. Walks endpoints up
-    // the containment chain in passes; collapses parent-pairs whose fan-in
-    // exceeds the threshold.
-    browseBundleEnabled,
+    // Delegation reads the containment parents to tell when an open
+    // container's line is covered by its children's lines.
     browseBundleParentMap: parentMap,
-    browseBundleFanInThreshold: lineageBundleFanIn,
     nodeLayerIndexMap,
     // Hiding a type is real: the projection drops those relationships per
     // group member. While the OVERLAY draws it is already fed EMPTY_EDGES,
@@ -5241,7 +5226,7 @@ export function ContextViewCanvas({
     // browse and trace mode for client-side bundles — the trace AGGREGATED
     // server drill (Path 2) only kicks in when the bundle itself is the
     // server-returned AGG edge.
-    if (bundle && (bundle.isBrowseBundle || bundle.isBundled)) {
+    if (bundle && bundle.isBundled) {
       const isServerAgg = bundle.isAggregated  // backed by server AGGREGATED edge
       if (!isServerAgg || !trace.isTracing) {
         // Resolve against what is ON SCREEN: during a trace the rows and the

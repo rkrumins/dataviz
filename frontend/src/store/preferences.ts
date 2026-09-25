@@ -128,14 +128,6 @@ interface PreferencesState {
   autoStubThreshold: number
   setAutoStubThreshold: (n: number) => void
   /**
-   * Browse-mode parent-pair fan-in threshold. Any collapsed-parent pair with
-   * more than this many leaf edges between its descendants collapses into
-   * one bundle. Default 1 — every multi-edge pair bundles immediately.
-   * Raise to 2/3 to keep small pairs un-bundled while still collapsing hubs.
-   */
-  lineageBundleFanIn: number
-  setLineageBundleFanIn: (n: number) => void
-  /**
    * Show the "N connections not on canvas" indicators. Views are subsets
    * of a Data Source — a curated view legitimately excludes upstream /
    * downstream partners, so the missing-link alerts are informative for
@@ -385,8 +377,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLineageAutoThreshold: (lineageAutoThreshold) => set({ lineageAutoThreshold }),
       autoStubThreshold: 500,
       setAutoStubThreshold: (autoStubThreshold) => set({ autoStubThreshold }),
-      lineageBundleFanIn: 1,
-      setLineageBundleFanIn: (lineageBundleFanIn) => set({ lineageBundleFanIn }),
       showMissingConnectionIndicators: true,
       toggleMissingConnectionIndicators: () =>
         set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),
