@@ -839,11 +839,15 @@ class ContextEngine:
         return await self.provider.get_distinct_values(property_name)
 
     async def get_node_degrees(self, urns, edge_types=None):
-        """Total lineage degree per URN (see provider docstring). Providers
-        without the capability degrade to {} — absent means unknown."""
+        """Total lineage degree per URN (see provider docstring). The draft
+        and versioned-branch readers cannot count at all, and say so the way
+        their other unsupported reads do (a 501 at the route): answering {}
+        read as "unknown" for every urn, which the canvas asked about again."""
         fn = getattr(self.provider, "get_node_degrees", None)
         if fn is None:
-            return {}
+            raise NotImplementedError(
+                f"node degrees are not available on {type(self.provider).__name__}"
+            )
         return await fn(urns, edge_types)
 
     async def save_custom_graph(

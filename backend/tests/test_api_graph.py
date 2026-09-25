@@ -630,6 +630,91 @@ async def test_trace_closure_provider_not_implemented_returns_501_through_cache_
     ] == []
 
 
+# ── POST /nodes/degree ────────────────────────────────────────────────
+
+class _DegreeStub(_StubProvider):
+    """Counts every urn but u2, whose bucket failed: absent means unknown."""
+
+    async def get_node_degrees(self, urns, edge_types=None):
+        return {u: {"in": 1, "out": 2} for u in urns if u != "u2"}
+
+
+async def _post_degrees(test_client: AsyncClient, engine, monkeypatch, cache=None, urns=("u1", "u2")):
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    async def _override():
+        return engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    if cache is not None:
+        monkeypatch.setattr(graph_module, "get_graph_cache", lambda: cache)
+    try:
+        return await test_client.post(
+            "/api/v1/test-ws/graph/nodes/degree",
+            json={"urns": list(urns), "edgeTypes": ["FLOWS_TO"]},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+
+def _answer_writes(redis):
+    """The SETs that stored an answer (primary or last-known-good), not the
+    cache's own bookkeeping."""
+    from backend.app.services import graph_cache as _gc
+
+    bookkeeping = (_gc._LEADER_PREFIX, _gc._BUILTAT_PREFIX, _gc._OVERSIZED_PREFIX)
+    return [c for c in redis.set.await_args_list if not str(c.args[0]).startswith(bookkeeping)]
+
+
+async def test_node_degrees_on_a_reader_that_cannot_count_is_501(test_client: AsyncClient, monkeypatch):
+    """A draft or a versioned branch has no degree count. Answering {} read
+    as "unknown" for every card, and the canvas asked again forever."""
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+
+    overlay = DraftOverlayProvider(
+        _BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1",
+    )
+    resp = await _post_degrees(test_client, ContextEngine(provider=overlay), monkeypatch)
+    assert resp.status_code == 501
+
+
+async def test_node_degrees_501_through_the_cache_wrapper(test_client: AsyncClient, monkeypatch):
+    engine, cache, redis = _make_scoped_engine_and_cache(_StubProvider())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache)
+    assert resp.status_code == 501
+    assert redis.get.await_count >= 1
+    assert _answer_writes(redis) == []
+
+
+async def test_an_incomplete_degree_answer_is_held_only_briefly(test_client: AsyncClient, monkeypatch):
+    """An answer missing urns is served, but kept only for the negative TTL
+    and never as the last-known-good: the canvas's retry must be able to
+    complete it rather than be handed the same gap for the full TTL."""
+    from backend.app.services import graph_cache as _gc
+
+    engine, cache, redis = _make_scoped_engine_and_cache(_DegreeStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 1, "out": 2}}
+    writes = _answer_writes(redis)
+    assert [c.kwargs.get("ex") for c in writes] == [_gc._NEGATIVE_TTL]
+    assert not [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
+async def test_a_complete_degree_answer_is_still_cached(test_client: AsyncClient, monkeypatch):
+    from backend.app.services import graph_cache as _gc
+
+    engine, cache, redis = _make_scoped_engine_and_cache(_DegreeStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1", "u3"))
+
+    assert resp.status_code == 200
+    writes = _answer_writes(redis)
+    assert _gc._NEGATIVE_TTL not in [c.kwargs.get("ex") for c in writes]
+    assert [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────
 
 async def test_get_node_found(graph_client):

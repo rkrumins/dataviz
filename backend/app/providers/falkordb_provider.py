@@ -14197,7 +14197,10 @@ class FalkorDBProvider(GraphDataProvider):
         if not urns:
             return out
         await self._ensure_connected()
-        rel_alt = "|".join(_sanitize_label(t) for t in (edge_types or []) if t)
+        # In the graph's own spelling, as get_edges asks: types match
+        # case-sensitively, and a miss counts zero for every card.
+        types = [t for t in self._alias_rel_types([t for t in (edge_types or []) if t]) if t]
+        rel_alt = "|".join(_sanitize_label(t) for t in types)
         rel_frag = f":{rel_alt}" if rel_alt else ""
         for label, bucket_urns in await self._label_buckets(urns):
             lbl_frag = f":{label}" if label else ""

@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2436,7 +2436,18 @@ async def get_edges_between(
 
 
 class _DegreesResult(RootModel[Dict[str, Dict[str, int]]]):
-    """RootModel wrapper so GraphCache can serialize /nodes/degree."""
+    """RootModel wrapper so GraphCache can serialize /nodes/degree.
+
+    ``degraded_detail`` is what GraphCache's ``_is_incomplete_result`` reads:
+    an answer that left urns out (a bucket failed: absent = unknown) is kept
+    only for the negative TTL and never becomes the last-known-good, so the
+    canvas's retry can complete it. Not serialized."""
+
+    _unanswered: int = PrivateAttr(default=0)
+
+    @property
+    def degraded_detail(self) -> Optional[str]:
+        return f"{self._unanswered} urns could not be counted" if self._unanswered else None
 
 
 @router.post("/nodes/degree", response_model=Dict[str, Dict[str, int]])
@@ -2458,25 +2469,34 @@ async def get_node_degrees(
     ``nodes_degree``, which is not a registered key, so ``is_enabled``
     answered False and every call bypassed the cache the docstring above
     promised — silently, since a bypass is a legal outcome.
+
+    An answer that left urns out is never cached as THE answer (see
+    ``_DegreesResult``). A reader that cannot count at all (a draft, a
+    versioned branch) is a 501, like /nodes/ancestor-chains.
     """
     async def compute() -> _DegreesResult:
-        return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+        result = _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+        result._unanswered = len(set(query.urns) - result.root.keys())
+        return result
 
-    scope = _cache_scope(engine)
-    if scope is None:
-        return (await _bounded_compute(engine, compute)()).root
-    result = await get_graph_cache().get_or_compute(
-        scope=scope,
-        endpoint=ENDPOINT_NODES_DEGREE,
-        params={
-            "urns": sorted(query.urns),
-            "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
-        },
-        compute=_bounded_compute(engine, compute),
-        model_cls=_DegreesResult,
-        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
-        expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
-    )
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return (await _bounded_compute(engine, compute)()).root
+        result = await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_NODES_DEGREE,
+            params={
+                "urns": sorted(query.urns),
+                "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+            },
+            compute=_bounded_compute(engine, compute),
+            model_cls=_DegreesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     return result.root
 
 
