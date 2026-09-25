@@ -331,7 +331,7 @@ function stubProvider(
    *  other observable. */
   aggregatedExtra?: Record<string, unknown>,
   /** Totals `/nodes/degree` answers with (see `renderCanvasWithTrace`). */
-  nodeDegrees?: Record<string, { in: number; out: number }>,
+  nodeDegrees?: Record<string, { in: number; out: number } | 'fail'>,
   /** Answer `/nodes/ancestor-chains` from the estate's containment. */
   ancestorChains?: boolean,
 ): GraphDataProvider {
@@ -402,10 +402,12 @@ function stubProvider(
       return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
     },
     // The server answers every URN it could count, so every URN asked about
-    // is answered here: one the test did not list has no lineage.
+    // is answered here: one the test did not list has no lineage, and one
+    // listed as 'fail' is left out, as a URN the server could not count is.
     ...(nodeDegrees ? {
-      getNodeDegrees: async (urns: string[]) =>
-        Object.fromEntries(urns.map(urn => [urn, nodeDegrees[urn] ?? { in: 0, out: 0 }])),
+      getNodeDegrees: async (urns: string[]) => Object.fromEntries(urns
+        .filter(urn => nodeDegrees[urn] !== 'fail')
+        .map(urn => [urn, nodeDegrees[urn] ?? { in: 0, out: 0 }])),
     } : {}),
     // Parent first, root last. A URN the estate does not hold is left out —
     // unknown, as the server leaves out a URN it could not answer.
@@ -559,9 +561,10 @@ export async function renderCanvasWithTrace(
      *  inert without one. Absent by default. */
     dataSourceId?: string
     /** Lineage totals per URN for `/nodes/degree`. Every URN the canvas asks
-     *  about is answered, and one not listed has none ({ in: 0, out: 0 }).
-     *  Absent by default: the provider then cannot count degrees at all. */
-    nodeDegrees?: Record<string, { in: number; out: number }>
+     *  about is answered, and one not listed has none ({ in: 0, out: 0 });
+     *  one listed as 'fail' is never answered (its count failed). Absent by
+     *  default: the provider then cannot count degrees at all. */
+    nodeDegrees?: Record<string, { in: number; out: number } | 'fail'>
     /** Answer `/nodes/ancestor-chains` from the estate's containment. Off by
      *  default: the provider then cannot walk containment. */
     ancestorChains?: boolean

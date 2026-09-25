@@ -172,3 +172,46 @@ export function anchoredEstate() {
   const assignments = { SRC: { layerId: 'src' }, DST: { layerId: 'dst' } }
   return { model, layers, assignments }
 }
+
+/**
+ * An anchored view where every card has its own lineage story: what each
+ * card's lineage ports must say on open.
+ *
+ *   SRC ⊃ {raw_orders, DB_A ⊃ {DB_A.t1}, DB_B ⊃ {DB_B.t2}, quiet}   ← column "Source"
+ *   STG ⊃ {s1, s2, s9}             ← column "Staging"; s9 is not loaded
+ *   REP ⊃ {dash, rpt, uncounted}   ← column "Report"
+ *   far                            ← held by nothing in the view
+ *
+ * The lineage (a test adds it to the store, and serves the DB_A cell as a
+ * roll-up): raw_orders → s1; raw_orders → STG (another column's anchor);
+ * DB_A ⇒ s2 (a roll-up cell); s2 → s9; DB_B.t2 → rpt; far → dash.
+ */
+export function anchoredPortsEstate() {
+  const nodes = [
+    wn('SRC', 'dataPlatform', 4), wn('SRC.raw_orders', 'dataset'),
+    wn('SRC.DB_A', 'container', 1), wn('SRC.DB_A.t1', 'dataset'),
+    wn('SRC.DB_B', 'container', 1), wn('SRC.DB_B.t2', 'dataset'),
+    wn('SRC.quiet', 'dataset'),
+    wn('STG', 'dataPlatform', 3), wn('s1', 'dataset'), wn('s2', 'dataset'), wn('s9', 'dataset'),
+    wn('REP', 'dataPlatform', 3), wn('dash', 'dataset'), wn('rpt', 'dataset'), wn('uncounted', 'dataset'),
+    wn('far', 'dataset'),
+  ]
+  const containmentEdges = [
+    has('SRC', 'SRC.raw_orders'), has('SRC', 'SRC.DB_A'), has('SRC.DB_A', 'SRC.DB_A.t1'),
+    has('SRC', 'SRC.DB_B'), has('SRC.DB_B', 'SRC.DB_B.t2'), has('SRC', 'SRC.quiet'),
+    has('STG', 's1'), has('STG', 's2'), has('STG', 's9'),
+    has('REP', 'dash'), has('REP', 'rpt'), has('REP', 'uncounted'),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'SRC.raw_orders', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'src', name: 'Source', order: 0, entityTypes: [], anchorUrn: 'SRC' },
+    { id: 'stg', name: 'Staging', order: 1, entityTypes: [], anchorUrn: 'STG' },
+    { id: 'rep', name: 'Report', order: 2, entityTypes: [], anchorUrn: 'REP' },
+  ]
+  const assignments = { SRC: { layerId: 'src' }, STG: { layerId: 'stg' }, REP: { layerId: 'rep' } }
+  return { model, layers, assignments }
+}
