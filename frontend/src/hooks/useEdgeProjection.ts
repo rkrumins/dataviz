@@ -457,7 +457,14 @@ export function useEdgeProjection({
     // outside: an end it cannot place is in the view, column unknown (a feed
     // row past its page, an entity no rule places).
     const nowhere = openScope ? UNKNOWN : OUTSIDE
+    // Once per URN per pass: every cell and edge naming an end asks again.
+    const places = new Map<string, Place>()
     const place = (end: string): Place => {
+      let known = places.get(end)
+      if (!known) { known = locate(end); places.set(end, known) }
+      return known
+    }
+    const locate = (end: string): Place => {
       const row = rowOf(end)
       if (row) return { at: 'row', id: row }
       const column = promotedAnchors?.get(end)
@@ -476,9 +483,15 @@ export function useEdgeProjection({
     }
 
     // The containment ancestors of one end: its loaded parents, else its
-    // fetched chain.
+    // fetched chain. Walked once per URN per pass, as `place` is.
     const containmentParents = browseBundleParentMap ?? traceBundleParentMap
+    const upPaths = new Map<string, readonly string[]>()
     const upPath = (end: string): readonly string[] => {
+      let known = upPaths.get(end)
+      if (!known) { known = walkUp(end); upPaths.set(end, known) }
+      return known
+    }
+    const walkUp = (end: string): readonly string[] => {
       let cursor = containmentParents?.get(end)
       if (cursor === undefined) return ancestorChains?.get(end) ?? []
       const path: string[] = []
