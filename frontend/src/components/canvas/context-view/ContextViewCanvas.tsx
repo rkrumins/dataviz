@@ -73,6 +73,7 @@ import {
 } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
+import { renderedAggregationTargets } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
@@ -1770,22 +1771,10 @@ export function ContextViewCanvas({
   }, [sortedLayers, nodeMap, childMap, childPaging])
 
 
-  // Helper: Calculate currently visible top-level nodes (containers)
-  const getVisibleContainerUrns = useCallback(() => {
-    return nodes
-      .filter(n => {
-        const parentId = parentMap.get(n.id)
-        if (!parentId) return true // Root
-        return expandedNodes.has(parentId)
-      })
-      .map(n => (n.data?.urn as string) || n.id)
-      .filter(Boolean)
-  }, [nodes, parentMap, expandedNodes])
-
   // Track previous aggregation target fingerprint to avoid redundant fetches
   const prevAggregationKeyRef = useRef<string>('')
 
-  // Stable node URN-to-ID map (updated via ref to avoid effect dependency on nodes)
+  // The latest nodes, for callbacks that must not depend on `nodes`
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
 
@@ -3420,7 +3409,9 @@ export function ContextViewCanvas({
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
   // for them, so including both ends would double-count the same TRANSFORMS edges
-  // at two hierarchy levels.)
+  // at two hierarchy levels.) The set is read off the rendered tree
+  // (renderedAggregationTargets): an anchored column's rows are targets, and its
+  // anchor, which is the column rather than a row, never is.
   //
   // Two gates keep this off the hot path. `/edges/aggregated` is the most
   // expensive endpoint we have — it is the tightest fair-share bucket on the
@@ -3445,13 +3436,7 @@ export function ContextViewCanvas({
     if (loadingNodes.size > 0) return
 
     const fetchDebounced = setTimeout(() => {
-      const currentVisibleList = getVisibleContainerUrns()
-
-      const urnToIdMap = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
-      const aggregationTargets = currentVisibleList.filter(urn => {
-        const nodeId = urnToIdMap.get(urn)
-        return nodeId && !expandedNodes.has(nodeId)
-      })
+      const aggregationTargets = renderedAggregationTargets(nodesByLayer, expandedNodes)
 
       // Only fetch if the target set actually changed
       const aggregationKey = `${aggregatedCacheVersion}:` + aggregationTargets.sort().join(',')
@@ -3464,7 +3449,7 @@ export function ContextViewCanvas({
     }, 300)
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes])
+  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes])
 
   // Source-changed self-refresh: while the aggregated overlay is flagged
   // `source_changed`, poll readiness and invalidate the aggregated cache once

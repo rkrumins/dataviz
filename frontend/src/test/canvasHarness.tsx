@@ -96,6 +96,10 @@ export interface TraceCanvasHarness {
    *  `settle()` (which barely advances the clock) will read an empty list —
    *  wait past the debounce first. */
   aggregatedGranularities(): Array<string | null>
+  /** The `sourceUrns` every `/edges/aggregated` request carried, in order —
+   *  the entities the canvas asked for roll-ups of. Debounced like the
+   *  granularities above. */
+  aggregatedSources(): string[][]
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -312,7 +316,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null> },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][] },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
@@ -323,6 +327,10 @@ function stubProvider(
    *  about the completeness of the wires it drew, and that decision has no
    *  other observable. */
   aggregatedExtra?: Record<string, unknown>,
+  /** Totals `/nodes/degree` answers with (see `renderCanvasWithTrace`). */
+  nodeDegrees?: Record<string, { in: number; out: number }>,
+  /** Answer `/nodes/ancestor-chains` from the estate's containment. */
+  ancestorChains?: boolean,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -382,13 +390,34 @@ function stubProvider(
     },
     getEdges: async () => [],
     // The aggregated fan-out the browse canvas fires for its visible
-    // containers. It answers nothing — what a test reads is the LEVEL the
-    // canvas asked for, which is the whole blast radius of the granularity
-    // it auto-selects.
-    getAggregatedEdges: async (request: { granularity?: string | null }) => {
+    // containers. It answers nothing — what a test reads is what the canvas
+    // asked for: the LEVEL, which is the whole blast radius of the
+    // granularity it auto-selects, and the entities it asked about.
+    getAggregatedEdges: async (request: { granularity?: string | null; sourceUrns?: string[] }) => {
       calls.aggregated.push(request?.granularity ?? null)
+      calls.aggregatedSources.push([...(request?.sourceUrns ?? [])])
       return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
     },
+    // The server answers every URN it could count, so every URN asked about
+    // is answered here: one the test did not list has no lineage.
+    ...(nodeDegrees ? {
+      getNodeDegrees: async (urns: string[]) =>
+        Object.fromEntries(urns.map(urn => [urn, nodeDegrees[urn] ?? { in: 0, out: 0 }])),
+    } : {}),
+    // Parent first, root last. A URN the estate does not hold is left out —
+    // unknown, as the server leaves out a URN it could not answer.
+    ...(ancestorChains ? {
+      getAncestorChains: async (urns: string[]) => {
+        const chains: Record<string, string[]> = {}
+        for (const urn of urns) {
+          if (!byUrn.has(urn)) continue
+          const chain: string[] = []
+          for (let up = parentMap.get(urn); up; up = parentMap.get(up)) chain.push(up)
+          chains[urn] = chain
+        }
+        return chains
+      },
+    } : {}),
     computeLayerAssignments: async () => ({
       assignments,
       parentMap,
@@ -525,6 +554,13 @@ export async function renderCanvasWithTrace(
     /** Give the seeded view a data source, arming the canvas hooks that are
      *  inert without one. Absent by default. */
     dataSourceId?: string
+    /** Lineage totals per URN for `/nodes/degree`. Every URN the canvas asks
+     *  about is answered, and one not listed has none ({ in: 0, out: 0 }).
+     *  Absent by default: the provider then cannot count degrees at all. */
+    nodeDegrees?: Record<string, { in: number; out: number }>
+    /** Answer `/nodes/ancestor-chains` from the estate's containment. Off by
+     *  default: the provider then cannot walk containment. */
+    ancestorChains?: boolean
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -592,7 +628,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null> }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][] }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -601,7 +637,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra),
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
@@ -881,6 +917,7 @@ export async function renderCanvasWithTrace(
     },
     providerCalls: () => providerCalls.traceClosure,
     aggregatedGranularities: () => [...providerCalls.aggregated],
+    aggregatedSources: () => providerCalls.aggregatedSources.map(urns => [...urns]),
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })

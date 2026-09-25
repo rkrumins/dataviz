@@ -143,3 +143,32 @@ export function coarseThenFineEstate() {
   return { model, layers: base.layers, assignments: base.assignments }
 }
 
+
+/**
+ * A view built the way Data Source views are: ONE COLUMN PER ENTITY. Each
+ * layer is anchored at an entity, the anchor is promoted to be the column
+ * itself (never a row), and its children are the column's rows.
+ *
+ *   SRC ⊃ {SRC.orders, SRC.customers}   ← column "Source"
+ *   DST ⊃ {DST.revenue}                 ← column "Target"
+ *   SRC.orders → DST.revenue
+ */
+export function anchoredEstate() {
+  const nodes = [
+    wn('SRC', 'dataPlatform', 2), wn('SRC.orders', 'dataset'), wn('SRC.customers', 'dataset'),
+    wn('DST', 'dataPlatform', 1), wn('DST.revenue', 'dataset'),
+  ]
+  const containmentEdges = [has('SRC', 'SRC.orders'), has('SRC', 'SRC.customers'), has('DST', 'DST.revenue')]
+  const lineageEdges = [raw('SRC.orders', 'DST.revenue')]
+  const model: LensWalkModel = {
+    focusUrn: 'SRC.orders', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(['DST.revenue']),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'src', name: 'Source', order: 0, entityTypes: [], anchorUrn: 'SRC' },
+    { id: 'dst', name: 'Target', order: 1, entityTypes: [], anchorUrn: 'DST' },
+  ]
+  const assignments = { SRC: { layerId: 'src' }, DST: { layerId: 'dst' } }
+  return { model, layers, assignments }
+}
