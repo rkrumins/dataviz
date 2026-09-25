@@ -279,6 +279,17 @@ export interface UseGraphHydrationResult {
     hydrationStatus: HydrationStatus
     /** Explicit user-triggered retry for a warming/unavailable provider. */
     retryHydration: () => void
+    /** A partial load has used its fast attempts and stopped retrying on its
+     *  own; retryHydration (the pill's Retry) starts it again. */
+    autoRetryStopped: boolean
+}
+
+/** What a partial curated load already has, for a retry of the SAME load:
+ *  the URNs whose batch answered and the nodes they brought. */
+interface HydrationCarry {
+    key: string
+    answered: Set<string>
+    nodes: GraphNode[]
 }
 
 interface UseGraphHydrationOptions {
@@ -432,6 +443,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // while the provider is warming up / down (see the retry effect below).
     const [retryEpoch, setRetryEpoch] = useState(0)
     const retryCountRef = useRef(0)
+    // Set when a partial load has used its fast attempts (see markPartial).
+    const [autoRetryStopped, setAutoRetryStopped] = useState(false)
+    // A partial load's progress (HydrationCarry): its retry asks only for the rest.
+    const carryRef = useRef<HydrationCarry | null>(null)
     // Last (provider, view) key the retry budget was reset for — so a genuinely
     // NEW view starts fresh at 'loading' with a full retry budget, while a retry
     // of the SAME view keeps counting.
@@ -503,6 +518,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             lastInitKeyRef.current = initKey
             retryCountRef.current = 0
         }
+        // Keyed on the other deps too, so only a retry reuses a partial load's
+        // progress: a save or a schema change reloads in full.
+        const carryKey = `${initKey}|${rootTypesKey}|${schemaTypesKey}|${committedDeltaKey}`
+        const carry = !isFreshView && carryRef.current?.key === carryKey ? carryRef.current : null
+        carryRef.current = null
         // Any ACTIVE load — a fresh view OR a re-fetch of the same view (deps
         // churned) — must show 'loading', NOT 'ready'. Otherwise the canvas is
         // cleared (setGraph([],[]) below) while status is still 'ready' from the
@@ -534,17 +554,23 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setHydrationError(null)
             setHydrationStatus('ready')
             setHydrationPhase('complete')
+            setAutoRetryStopped(false)
         }
 
         // A load that rendered SOME of the view but not all of it: the nodes
         // that arrived stay on screen, the status records why the rest did
-        // not, and the retry loop keeps trying for the remainder. Not 'ready'
+        // not, and the retry loop asks again for the remainder. Not 'ready'
         // — 'ready' means complete — and not the blocking overlay either: the
         // canvas has data, so CanvasRouter shows a pill over it instead.
+        // Past its fast attempts it stops asking on its own: the pill offers
+        // Retry, and re-running the view every minute re-fetched its heaviest
+        // read, /edges/between, forever. Warming is the backend saying "retry
+        // later", so that keeps going.
         const markPartial = (failure: HydrationFailure, cause?: unknown) => {
             setHydrationStatus(failure)
             setHydrationError(hydrationMessage(failure, cause))
             setHydrationPhase('complete')
+            setAutoRetryStopped(failure !== 'warming' && retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS)
         }
 
         // Clear the canvas ONLY for a genuinely new view. A reload of the SAME
@@ -648,6 +674,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Where each open-scope type feed stands after its first page —
                     // seeded once the graph is set (setGraph clears feeds).
                     const typeFeedSeeds: Array<[string, TypeFeedState]> = []
+                    // This attempt's progress, kept for a retry if it ends partial.
+                    let nextCarry: HydrationCarry | null = null
 
                     if (loadByUrn) {
                         // ── Assignment-driven loading (curated scope) ──
@@ -663,15 +691,26 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         const createdRoots = new Set([...branchCreatedDelta].filter((u) => !createdChildren.has(u)))
                         const urnArray = closedScopeLoadUrns(assignedUrns, createdRoots, isDraft)
                         deltaLoadedCount = urnArray.length - assignedUrns.size
+                        // A retry of a partial load asks only for what has not answered.
+                        const toAsk = carry ? urnArray.filter(u => !carry.answered.has(u)) : urnArray
                         // Batch URNs to avoid overly large queries
-                        for (let i = 0; i < urnArray.length; i += 100) {
-                            urnBatches.push(urnArray.slice(i, i + 100))
+                        for (let i = 0; i < toAsk.length; i += 100) {
+                            urnBatches.push(toAsk.slice(i, i + 100))
                         }
 
-                        allNodes = await loadNodeBatches(
-                            urnBatches.map(batch => ({ urns: batch as any[], limit: batch.length })),
-                        )
+                        allNodes = [
+                            ...(carry?.nodes ?? []),
+                            ...await loadNodeBatches(
+                                urnBatches.map(batch => ({ urns: batch as any[], limit: batch.length })),
+                            ),
+                        ]
                         if (controller.signal.aborted) return
+                        nextCarry = {
+                            key: carryKey,
+                            answered: new Set([...(carry?.answered ?? []), ...toAsk.filter(u => !failedUrns.has(u))]),
+                            // A copy: the anchored columns' pages are pushed onto allNodes below.
+                            nodes: [...allNodes],
+                        }
 
                         // Children are NOT prefetched. Top-level assigned entities
                         // render collapsed; expanding a parent fires the lazy loader
@@ -907,6 +946,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
                     if (partial) {
+                        carryRef.current = nextCarry
                         markPartial(worstHydrationFailure(batchErrors), batchErrors)
                         return
                     }
@@ -1088,6 +1128,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     setHydrationStatus(failure)
                     setHydrationError(hydrationMessage(failure, err))
                     setHydrationPhase('complete')
+                    setAutoRetryStopped(false)
                 }
             }
         }
@@ -1113,6 +1154,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const retryHydration = useCallback(() => {
         forceReprobe()                     // close the breaker so this actually hits the network
         retryCountRef.current = 0
+        setAutoRetryStopped(false)
         initializedKeyRef.current = null
         setRetryEpoch(e => e + 1)
     }, [forceReprobe])
@@ -1132,6 +1174,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     //    (providerRetrySlow, default 60s) — a completed node rotation must
     //    self-heal without a user click or page reload, and a persistently
     //    slow view must not re-run its heavy query every 10s forever;
+    //  • except a PARTIAL load: the canvas has data and a pill with Retry, so
+    //    after its fast attempts it stops (markPartial sets autoRetryStopped).
+    //    Tab focus, a health recovery and Retry start it again;
     //  • PAUSED entirely while the tab is hidden (no background-tab hammering).
     // A retry NEVER clears the status/overlay — only a SUCCESSFUL load
     // (markReady) flips to 'ready', so the overlay can't blink to "Start
@@ -1143,6 +1188,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             retryCountRef.current = 0
             return
         }
+        if (autoRetryStopped) return
         if (typeof document !== 'undefined' && document.hidden) return
         const exhausted = hydrationStatus !== 'warming'
             && retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS
@@ -1157,7 +1203,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setRetryEpoch(e => e + 1)          // re-run; status/overlay stay until success
         }, delay)
         return () => clearTimeout(t)
-    }, [enableHydration, hydrationStatus, retryEpoch, forceReprobe])
+    }, [enableHydration, hydrationStatus, retryEpoch, forceReprobe, autoRetryStopped])
 
     // Resume retrying the moment a hidden tab returns to the foreground (the
     // auto-retry above pauses while hidden), so a user coming back to a warming
@@ -1686,6 +1732,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         /** Explicit user retry (overlay "Retry" button). Re-arms a fresh round
          *  of bounded auto-retries. */
         retryHydration,
+        autoRetryStopped,
         loadMoreRoots,
         rootsLoaded,
         rootsHaveMore,
