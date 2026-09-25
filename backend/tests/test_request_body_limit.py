@@ -77,6 +77,7 @@ def test_import_routes_get_the_larger_cap():
     # The versioning router is mounted per workspace, so the real bulk
     # import path carries a workspace segment the prefix has to see past.
     assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports") == 100_000
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/parts/0") == 100_000
     assert mw._cap_for("/api/v1/views/transfer/packages/inspect") == 100_000
     # A view file is up to 64 MB, and its designs travel on to reconcile and import.
     for route in ("inspect", "reconcile", "import"):

@@ -9,6 +9,10 @@ stale head write is a CAS miss → `_retry_seq` re-runs against fresh state → 
 
 We force the exact interleaving by wrapping `_current_values` (the writer's state read) so that A
 commits immediately after B has read — no timing luck, so this is a reliable RED→GREEN test.
+
+On a DRAFT: writes to `main` take the graph lock before reading, so there A cannot commit between
+B's read and B's write at all (the forced interleaving would wait on B's lock forever). Drafts are
+lock-free, so the head CAS is what keeps a draft's concurrent writers from losing each other's work.
 """
 import asyncio
 import os
@@ -35,6 +39,7 @@ async def _run() -> None:
     gid = G["graph_id"]
     await svc.apply_ops(graph_id=gid, actor="u", message="seed",
                         ops=[_node("A", displayName="v0", description="d0")])
+    draft = await svc.open_draft(graph_id=gid, owner="u")
 
     # Force the losing interleaving: right after B's state read returns, A commits a DIFFERENT field.
     orig = svc._current_values
@@ -44,17 +49,18 @@ async def _run() -> None:
         vals = await orig(s, graph_id, bid, ids)          # B reads (still pre-A)
         if not fired.get("x") and "A" in list(ids):
             fired["x"] = True
-            await svc.apply_ops(graph_id=gid, actor="alice", message="A",  # A commits, own txn
+            await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="A",  # A commits
                                 ops=[_upd("A", description="ALICE")])
         return vals                                        # B proceeds against STALE state
 
     svc._current_values = racing
     try:
-        await svc.apply_ops(graph_id=gid, actor="bob", message="B", ops=[_upd("A", displayName="BOB")])
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="bob", message="B",
+                            ops=[_upd("A", displayName="BOB")])
     finally:
         svc._current_values = orig
 
-    v = await svc.entity_value(graph_id=gid, entity_id="A")
+    v = await svc.entity_value(graph_id=gid, entity_id="A", branch_id=draft)
     assert v is not None, "entity A vanished"
     assert v.get("displayName") == "BOB", v                # B's change
     assert v.get("description") == "ALICE", v              # A's change — LOST from head without the CAS

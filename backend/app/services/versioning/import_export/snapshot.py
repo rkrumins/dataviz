@@ -110,12 +110,12 @@ class VersionLayer:
             rows = (await s.execute(stmt.limit(limit))).all()
         return [_winner(kind, self.graph_id, r) for r in rows]
 
-    async def lookup(self, kind: str, entity_ids: Sequence[str]) -> Dict[str, Winner]:
+    async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
         model = _model(kind)
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with db.graphver_session() as s:
-                rows = (await s.execute(self._winners(kind).where(model.entity_id.in_(chunk)))).all()
+                rows = (await s.execute(self._winners(kind, payload).where(model.entity_id.in_(chunk)))).all()
             for r in rows:
                 out[r[0]] = _winner(kind, self.graph_id, r)
         return out
@@ -150,11 +150,12 @@ class HeadsLayer:
             rows = (await s.execute(stmt.limit(limit))).all()
         return [self._winner(kind, r) for r in rows]
 
-    async def lookup(self, kind: str, entity_ids: Sequence[str]) -> Dict[str, Winner]:
+    async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with db.graphver_session() as s:
-                rows = (await s.execute(self._heads(kind).where(EntityHeadORM.entity_id.in_(chunk)))).all()
+                rows = (await s.execute(
+                    self._heads(kind, payload).where(EntityHeadORM.entity_id.in_(chunk)))).all()
             for r in rows:
                 out[r[0]] = self._winner(kind, r)
         return out
@@ -201,14 +202,15 @@ class Snapshot:
                 if len(page) < self.page_size:
                     break
 
-    async def lookup_live(self, kind: str, entity_ids: Iterable[str]) -> Dict[str, Winner]:
-        """The live entities among ``entity_ids`` (deciding layer first, top down)."""
+    async def lookup_live(self, kind: str, entity_ids: Iterable[str], payload: bool = False) -> Dict[str, Winner]:
+        """The live entities among ``entity_ids`` (deciding layer first, top down), with each
+        version's payload when ``payload``."""
         remaining = set(entity_ids)
         out: Dict[str, Winner] = {}
         for layer in reversed(self.layers):
             if not remaining:
                 break
-            found = await layer.lookup(kind, list(remaining))
+            found = await layer.lookup(kind, list(remaining), payload)
             for eid, w in found.items():
                 if w.live:
                     out[eid] = w
@@ -217,18 +219,43 @@ class Snapshot:
 
     async def nodes_by_urn(self, urns: Iterable[str]) -> Dict[str, str]:
         """``urn -> entity_id`` for the live nodes carrying these URNs."""
-        wanted = [u for u in dict.fromkeys(urns) if u]
+        return await self._nodes_by(NodeVersionORM.urn, "urn", urns)
+
+    async def nodes_by_qname(self, qnames: Iterable[str]) -> Dict[str, str]:
+        """``qualifiedName -> entity_id`` for the live nodes carrying these qualified names (not
+        unique: one of them)."""
+        return await self._nodes_by(NodeVersionORM.qualified_name, "qualified_name", qnames)
+
+    async def _nodes_by(self, column, attr: str, keys: Iterable[str]) -> Dict[str, str]:
+        wanted = [k for k in dict.fromkeys(keys) if k]
         candidates: Set[str] = set()
         for graph_id in {layer.graph_id for layer in self.layers}:
             for chunk in _chunks(wanted, _LOOKUP_CHUNK):
                 async with db.graphver_session() as s:
                     rows = (await s.execute(
                         select(NodeVersionORM.entity_id).where(
-                            NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn.in_(chunk)).distinct())).all()
+                            NodeVersionORM.graph_id == graph_id, column.in_(chunk)).distinct())).all()
                 candidates.update(r[0] for r in rows)
         live = await self.lookup_live("node", candidates)
         wanted_set = set(wanted)
-        return {w.urn: eid for eid, w in live.items() if w.urn in wanted_set}
+        return {getattr(w, attr): eid for eid, w in live.items() if getattr(w, attr) in wanted_set}
+
+    async def edges_between(self, sources: Iterable[str], targets: Iterable[str]) -> Dict[tuple, str]:
+        """``(source, target, edgeType) -> entity_id`` for the live edges from one of ``sources``
+        to one of ``targets``."""
+        sources, targets = set(sources), set(targets)
+        candidates: Set[str] = set()
+        for graph_id in {layer.graph_id for layer in self.layers}:
+            for chunk in _chunks(list(sources), _LOOKUP_CHUNK):
+                async with db.graphver_session() as s:
+                    rows = (await s.execute(
+                        select(EdgeVersionORM.entity_id, EdgeVersionORM.target_entity_id).where(
+                            EdgeVersionORM.graph_id == graph_id,
+                            EdgeVersionORM.source_entity_id.in_(chunk)).distinct())).all()
+                candidates.update(eid for eid, target in rows if target in targets)
+        live = await self.lookup_live("edge", candidates)
+        return {(w.source_id, w.target_id, w.edge_type): eid for eid, w in live.items()
+                if w.source_id in sources and w.target_id in targets}
 
     async def containment_descendants(self, roots: Iterable[str], containment_types: Set[str]) -> Set[str]:
         """Every node reachable from ``roots`` down live containment edges (the roots excluded)."""

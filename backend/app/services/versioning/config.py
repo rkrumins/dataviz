@@ -239,13 +239,16 @@ def object_store_backend() -> str:
     """Which ObjectStore backend serves import/export artifacts: database | local | s3 | gcs.
 
     The management database by default, which every API pod shares: an artifact one pod stored
-    is there whichever pod serves the next request. ``local`` (one process's disk) suits a
-    single-node dev stack; S3/GCS are drop-in behind the same Protocol."""
+    is there whichever pod serves the next request. ``local`` keeps them as files under
+    ``IMPORT_STORE_ROOT``: a directory every API and versioning-worker pod mounts (a shared volume,
+    or an S3/GCS bucket through its FUSE driver), or one pod's own disk for a single-pod stack.
+    S3/GCS are drop-in behind the same Protocol."""
     return os.getenv("OBJECT_STORE_BACKEND", "database").lower()
 
 
 def import_store_root() -> str:
-    """Filesystem root for the LocalFs object store (``OBJECT_STORE_BACKEND=local``).
+    """Filesystem root for the LocalFs object store (``OBJECT_STORE_BACKEND=local``): where the
+    files land, typically a mount every pod shares.
 
     Artifacts live under ``{root}/{workspace}/{data_source}/{graph}/{job}/{name}`` so any file
     is attributable to its workspace/data source/graph/job at a glance."""
@@ -269,6 +272,18 @@ OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
 # A pending/running import or export job silent this long (no ``updated_at`` heartbeat) is
 # reported failed: the process running it went away, and nothing else will ever finish it.
 JOB_STALE_AFTER_SECS: int = int(os.getenv("JOB_STALE_AFTER_SECS", "900"))
+# Where import and export jobs run. On (the default): in the API process that took the request,
+# as a task of its own. Off: API processes only queue them and the versioning worker runs them
+# (import_export/runner.py) — for deployments that run that worker, so a large import or export
+# never shares an API pod's CPU and memory with interactive requests.
+TRANSFER_INPROCESS: bool = os.getenv("GRAPHVER_TRANSFER_INPROCESS", "1").lower() in ("1", "true", "yes")
+# Jobs one versioning-worker process runs at once. An export job also takes one of its pod's export
+# turns (GRAPH_EXPORT_CONCURRENCY, 2), so raise the two together.
+TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
+# How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
+TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
+# A queued job no worker has started in this long reads as failed: none may be running.
+TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 
 
 # --------------------------------------------------------------------------- #

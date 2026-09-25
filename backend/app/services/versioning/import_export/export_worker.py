@@ -23,6 +23,9 @@ from . import stream
 from .import_worker import heartbeat
 from .rowmodel import denormalize_edge, denormalize_node
 
+# How often a running export says how far it has got (an import's heartbeat only says it's alive).
+_PROGRESS_SECS = 5
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -97,15 +100,28 @@ class ExportWorker:
         # A spreadsheet makes every property its own column: existing ones + any the user asked to
         # add, so a brand-new property is an empty column ready to fill.
         tally = {"node": 0, "edge": 0}
-        # It takes its turn with the streamed exports; the heartbeat keeps it alive while it waits.
+        written = 0
+
+        async def counted(chunks):
+            nonlocal written
+            async for chunk in chunks:
+                written += len(chunk)
+                yield chunk
+
+        # It takes its turn with the streamed exports; the heartbeat keeps it alive while it waits,
+        # and says how far it has got: this pass's records (a spreadsheet reads them all once for
+        # its columns first) and the bytes written.
         body = stream.in_turn(stream.write_export(lambda: stream.record_pages(snap, selection, tally=tally),
                                                   fmt=fmt, props=self._extra_props))
-        beat = asyncio.create_task(heartbeat(job_id))   # a large export writes for many minutes
+        beat = asyncio.create_task(heartbeat(job_id, every=_PROGRESS_SECS, progress=lambda: {
+            "nodes": tally["node"], "edges": tally["edge"], "passes": tally.get("passes", 0), "bytes": written}))
         try:
             async with contextlib.aclosing(body):       # its turn goes back even if the store fails
-                stat = await self._store.put_stream(result_uri, body)
+                stat = await self._store.put_stream(result_uri, counted(body))
         finally:
             beat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await beat                              # so no late beat overwrites the summary below
 
         summary = {"nodes": tally["node"], "edges": tally["edge"], "bytes": stat.size}
         finished = (await self._after_write(job_id, result_uri, summary) or {}) if self._after_write else {}

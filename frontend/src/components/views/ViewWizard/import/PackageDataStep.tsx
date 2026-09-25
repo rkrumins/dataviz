@@ -14,7 +14,7 @@ import {
   Pencil, Plus, RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { ImportPreviewRow } from '@/services/importExportApiService'
+import { queuePosition, type ImportPreviewRow } from '@/services/importExportApiService'
 import { pluralize } from '@/features/view-transfer/format'
 import { sameDataTarget, useImportSession, type PackageDataTarget } from './importSession'
 import { useDraftStaging } from './useDraftStaging'
@@ -35,6 +35,7 @@ export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
   // What's shown is only ever about this target: a try elsewhere (the person went back and chose
   // another) doesn't count here.
   const mine = data.target && sameDataTarget(data.target, target) ? data : null
+  const queued = queuePosition(mine?.job)
   const start = () => void session.startData({ ...target, draftName })
 
   const heading = (
@@ -121,6 +122,7 @@ export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
           <p className="text-sm font-semibold text-ink">
             {!mine.started ? 'Opening the draft…' : mine.job?.status === 'running' ? 'Bringing in the data…' : 'Waiting to start…'}
           </p>
+          {queued && <p className="text-[11px] text-ink-muted -mt-2">{queued}</p>}
           <p className="text-[11px] text-ink-muted max-w-sm">
             Each entity is matched to what’s already here: new ones are added, changed ones updated. You can keep this open; it runs on the server.
           </p>
