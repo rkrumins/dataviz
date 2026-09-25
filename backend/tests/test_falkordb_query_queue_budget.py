@@ -137,3 +137,23 @@ async def test_a_deadline_the_queue_shortened_is_not_counted_as_a_wedged_node(mo
         await p._ro_query("MATCH (n) RETURN n", timeout=1.2)
     assert fp._deadline_streaks.get(p._endpoint_label(), 0) == 0
     await holder
+
+
+async def test_a_write_that_queued_and_then_ran_out_its_own_budget_still_counts(monkeypatch):
+    """The queue never shortens a write's budget, so a write that ran its
+    whole budget and missed it is evidence about the node however long it
+    queued. Under a black-holed node the queue is exactly where writes pile
+    up, and excluding them there stalled the streak that reports it."""
+    from backend.app.config import resilience
+
+    monkeypatch.setattr(resilience, "FALKORDB_SLOW_QUERY_MS", 100)
+    monkeypatch.setattr(fp, "_TRANSIENT_RETRY_BACKOFFS", ())
+    p = _make_provider(delay_s=5)
+    sem = _one_slot(p)
+    holder = asyncio.create_task(_hold(sem, 0.3))
+    await asyncio.sleep(0)
+
+    with pytest.raises(TimeoutError):
+        await p._query("CREATE (n)", timeout=0.2)
+    assert fp._deadline_streaks.get(p._endpoint_label(), 0) == 1
+    await holder

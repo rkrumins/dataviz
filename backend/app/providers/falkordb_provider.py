@@ -4581,10 +4581,11 @@ class FalkorDBProvider(GraphDataProvider):
                 # A pinned call is aimed at a replica the router chose; the
                 # replica has its own penalty box, and the streak below is
                 # evidence about the node this provider otherwise reads. A
-                # deadline the queue shortened is saturation, not evidence.
+                # deadline the queue shortened is saturation, not evidence;
+                # only a read's is shortened, so a write always counts.
                 if (
                     not pinned
-                    and waited * 1000 < FALKORDB_SLOW_QUERY_MS
+                    and (not read_only or waited * 1000 < FALKORDB_SLOW_QUERY_MS)
                     and isinstance(exc, (asyncio.TimeoutError, TimeoutError))
                 ):
                     failover = self._deadline_streak_verdict(exc)
