@@ -1375,9 +1375,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   const lineageLogMax = useMemo(() => {
     if (!showLineageIndicators || !lineagePorts || lineagePorts.size === 0) return 0
     let maxCount = 0
-    for (const p of lineagePorts.values()) maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
+    for (const item of flatTree) {
+      const p = lineagePorts.get(item.node.id)
+      maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
+    }
     return Math.log2(1 + Math.max(1, maxCount))
-  }, [showLineageIndicators, lineagePorts])
+  }, [showLineageIndicators, lineagePorts, flatTree])
 
   // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out

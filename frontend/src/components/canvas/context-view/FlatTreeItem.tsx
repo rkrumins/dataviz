@@ -467,10 +467,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:to-transparent",
         "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
-        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgb(var(--nx-accent-lineage-rgb)_/_0.3)]",
         // One of several: the row has to be findable while scanning a column,
         // so the ring is a full 2px in the accent rather than a 30% hairline.
-        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgba(var(--accent-lineage-rgb),0.7)]",
+        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]",
         // Search result highlight — direct match (advanced search or quick search)
         isSearchResult && !isSelected && cn(
             "bg-gradient-to-r from-amber-500/15 to-transparent",
@@ -563,9 +563,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             dropIndicator === 'before' ? '-top-[3px]' : '-bottom-[3px]',
           )}
         >
-          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)] flex-shrink-0" />
-          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgba(var(--accent-lineage-rgb),0.7)]" />
-          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgba(var(--accent-lineage-rgb),0.6)] max-w-[150px] flex-shrink-0">
+          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgb(var(--nx-accent-lineage-rgb)_/_0.9)] flex-shrink-0" />
+          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]" />
+          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.6)] max-w-[150px] flex-shrink-0">
             {dropIndicator === 'before'
               ? <LucideIcons.ArrowUpToLine className="w-2.5 h-2.5 flex-shrink-0" />
               : <LucideIcons.ArrowDownToLine className="w-2.5 h-2.5 flex-shrink-0" />}
@@ -960,7 +960,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // Selection speaks in the accent, not in the entity's type colour:
           // a rail tinted per type reads as decoration, and a column of them
           // cannot be scanned for "what did I pick?".
-          style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
+          style={{ backgroundColor: isSelected ? 'rgb(var(--nx-accent-lineage-rgb))' : nodeColor }}
           initial={false}
           animate={{
             width: isBulkSelected ? 4 : 3,
