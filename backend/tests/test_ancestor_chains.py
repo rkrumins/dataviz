@@ -146,3 +146,173 @@ def test_falkordb_answers_from_its_bulk_chain_path():
     out = asyncio.run(p.get_ancestor_chains([LEAF, LEAF, ROOT]))
     assert seen["urns"] == [LEAF, ROOT]
     assert out == {LEAF: [PARENT], ROOT: [PARENT]}
+
+
+# ── what the walk could not answer is unknown, and is never cached ───────
+#
+# Every reader of the chain hash reads "[]" as "a root". A failed bucket, a
+# row the query never returned, or a failed per-urn fallback all used to come
+# back as [] and be written into a hash whose TTL is re-armed on every write,
+# so they never aged out: an in-view partner read as "outside the view" for
+# good.
+
+COLUMN = "urn:test:column"
+
+
+class _FakeRedis:
+    """The chain hash: every pipelined HGET misses, and HSETs are recorded."""
+
+    def __init__(self):
+        self.written: List[str] = []
+
+    async def execute_command(self, cmd, key, urn, *value):
+        if cmd == "HSET":
+            self.written.append(urn)
+        return None
+
+    async def expire(self, *args):
+        return True
+
+    def pipeline(self, transaction=False):
+        redis, queued = self, []
+
+        class _Pipe:
+            def execute_command(self, cmd, key, urn, *value):
+                queued.append(None)
+                if cmd == "HSET":
+                    redis.written.append(urn)
+
+            def expire(self, *args):
+                queued.append(True)
+
+            async def execute(self):
+                return list(queued)
+
+        return _Pipe()
+
+
+def _walker(buckets=None, answers=None, *, failing=()):
+    """A FalkorDB provider whose chain query answers ``answers`` for the urns
+    of each bucket it is asked about, and fails for the ``failing`` labels."""
+    from types import SimpleNamespace
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p._redis = _FakeRedis()
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p.queried = []
+
+    async def _buckets(urns):
+        return buckets
+
+    async def _ro(cypher, params=None, timeout=None, op=None):
+        p.queried.append(cypher)
+        if any(f"(child:{label})" in cypher for label in failing):
+            raise RuntimeError("bucket failed")
+        return SimpleNamespace(result_set=[
+            [u, answers[u]] for u in params["urns"] if u in (answers or {})
+        ])
+
+    p._label_buckets = _buckets
+    p._ro_query = _ro
+    return p
+
+
+def test_a_failed_label_bucket_leaves_its_urns_unknown():
+    p = _walker(
+        [("Column", [COLUMN]), ("Dataset", [LEAF])],
+        {LEAF: [PARENT, ROOT], COLUMN: [LEAF, PARENT, ROOT]},
+        failing=("Column",),
+    )
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher([LEAF, COLUMN]))
+    assert chains == {LEAF: [PARENT, ROOT]}
+
+
+def test_an_urn_the_query_returned_no_row_for_is_unknown():
+    p = _walker([("Dataset", [LEAF, "urn:test:ghost"])], {LEAF: [PARENT, ROOT]})
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher([LEAF, "urn:test:ghost"]))
+    assert chains == {LEAF: [PARENT, ROOT]}
+
+
+def test_a_root_is_still_answered_as_a_root():
+    p = _walker([("Platform", [ROOT])], {ROOT: []})
+    assert asyncio.run(p._compute_ancestor_chains_bulk_cypher([ROOT])) == {ROOT: []}
+
+
+def test_a_large_unlabeled_residue_is_never_scanned():
+    """An unlabeled anchor is a full node scan. A residue this large means
+    label resolution failed wholesale: better unknown, and asked again."""
+    from backend.app.providers import falkordb_provider as fp
+
+    urns = [f"urn:test:{i}" for i in range(fp._ANCESTOR_UNLABELED_MAX + 1)]
+    p = _walker([("", urns)], {u: [] for u in urns})
+    assert asyncio.run(p._compute_ancestor_chains_bulk_cypher(urns)) == {}
+    assert p.queried == []
+
+
+def test_only_answered_chains_are_cached():
+    p = _walker()
+
+    async def _bulk(urns):
+        return {LEAF: [PARENT, ROOT]}
+
+    p._compute_ancestor_chains_bulk_cypher = _bulk
+    result = asyncio.run(p._compute_and_store_ancestors_bulk([LEAF, COLUMN]))
+    assert result == {LEAF: [PARENT, ROOT]}
+    assert p._redis.written == [LEAF]
+
+
+def test_the_per_urn_fallback_caches_no_failure():
+    p = _walker()
+
+    async def _bulk(urns):
+        raise RuntimeError("planner hiccup")
+
+    async def _one(urn):
+        if urn == COLUMN:
+            raise RuntimeError("still failing")
+        return [PARENT, ROOT]
+
+    p._compute_ancestor_chains_bulk_cypher = _bulk
+    p._compute_ancestor_chain = _one
+    result = asyncio.run(p._compute_and_store_ancestors_bulk([LEAF, COLUMN]))
+    assert result == {LEAF: [PARENT, ROOT]}
+    assert p._redis.written == [LEAF]
+
+
+def test_a_shed_is_not_asked_again_one_urn_at_a_time():
+    """The per-urn fallback after a shed would multiply one refusal by up to
+    a thousand, each refused in turn."""
+    from backend.common.adapters import ProviderBusy
+
+    p = _walker()
+    per_urn: List[str] = []
+
+    async def _bulk(urns):
+        raise ProviderBusy("falkordb", "shed")
+
+    async def _one(urn):
+        per_urn.append(urn)
+        return []
+
+    p._compute_ancestor_chains_bulk_cypher = _bulk
+    p._compute_ancestor_chain = _one
+    with pytest.raises(ProviderBusy):
+        asyncio.run(p._compute_and_store_ancestors_bulk([LEAF, COLUMN]))
+    assert per_urn == []
+
+
+def test_a_single_urn_read_caches_nothing_it_could_not_answer():
+    p = _walker()
+
+    async def _bulk(urns):
+        return {}
+
+    p._compute_ancestor_chains_bulk_cypher = _bulk
+    assert asyncio.run(p._get_ancestor_chain(LEAF)) == []
+    assert p._redis.written == []
+
+
+def test_chains_cached_before_the_fix_are_not_read():
+    """Those entries include [] for urns the walk failed on; a new key
+    abandons them, and the ':ancestors:*' sweeps still match it."""
+    assert ":ancestors:v2:" in _walker()._ancestors_cache_key()

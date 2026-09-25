@@ -524,7 +524,8 @@ def test_bulk_ancestor_chains_are_label_driven():
     ))
     assert chains["urn:a3"] == ["urn:a2", "urn:a1", "urn:a0"]
     assert chains["urn:b2"] == ["urn:b1", "urn:b0"]
-    assert chains["urn:nonexistent"] == []
+    # No row came back for it: unknown, never a root.
+    assert "urn:nonexistent" not in chains
 
     # The per-URN path delegates to the same label-driven query.
     assert _run(p._compute_ancestor_chain("urn:b3")) == [

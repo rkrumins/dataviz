@@ -792,6 +792,11 @@ def _retry_wall_clock(budget: float, *, read_only: bool):
 #: request tier fired first and nothing structured was served.
 _READ_QUEUE_SHARE = 0.5
 
+#: The most urns an ancestor-chain walk anchors UNLABELED (a full node scan).
+#: A residue larger than this means label resolution failed wholesale; those
+#: urns are left unknown, to be asked again, rather than scanned for.
+_ANCESTOR_UNLABELED_MAX = 100
+
 
 def _refused_endpoint(exc: BaseException) -> Optional[str]:
     """The ``host:port`` a refusal names, walking the cause chain.
@@ -7548,6 +7553,11 @@ class FalkorDBProvider(GraphDataProvider):
         that flat-graph aggregations reuse safely. Identical
         configurations (across jobs, across caller paths) reuse the
         same key — full intra- and cross-job caching preserved.
+
+        ``v2``: entries written before it include ``"[]"`` for urns the walk
+        failed on, and the hash's TTL is re-armed on every write, so they
+        never expired. A new key abandons them; the ``:ancestors:*`` sweeps
+        still match it.
         """
         import hashlib
 
@@ -7556,7 +7566,7 @@ class FalkorDBProvider(GraphDataProvider):
             types = set()
         normalised = ",".join(sorted(t.upper() for t in types))
         digest = hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:12]
-        return f"{self._cache_ns}:ancestors:{digest}"
+        return f"{self._cache_ns}:ancestors:v2:{digest}"
 
     async def _get_ancestor_chain(self, urn: str) -> List[str]:
         """Get pre-computed ancestor chain from Redis Hash, or compute + cache it.
@@ -7576,6 +7586,10 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Cache miss — compute from graph and store
         ancestors = await self._compute_ancestor_chain(urn)
+        if ancestors is None:
+            # The walk could not answer. Callers keep their list, but "[]"
+            # cached here would read as "a root" for the hash's lifetime.
+            return []
         try:
             await self._redis.execute_command(
                 "HSET", cache_key, urn, json.dumps(ancestors)
@@ -7586,7 +7600,7 @@ class FalkorDBProvider(GraphDataProvider):
             logger.debug(f"Failed to cache ancestor chain for {urn}: {e}")
         return ancestors
 
-    async def _compute_ancestor_chain(self, urn: str) -> List[str]:
+    async def _compute_ancestor_chain(self, urn: str) -> Optional[List[str]]:
         """Single Cypher query to walk containment edges upward (1 query instead of N).
 
         Variable-length depth bound is the number of entity-type levels
@@ -7594,12 +7608,14 @@ class FalkorDBProvider(GraphDataProvider):
         cold caches). This is tighter and more correct than the legacy
         hardcoded ``*1..10`` for shallow ontologies, and extends to
         deeper ones without code edits.
+
+        ``None`` when the walk could not answer (never ``[]``, a root).
         """
         # Delegates to the label-driven bulk path — the previous
         # unlabeled ``WHERE child.urn = $urn`` was a full node scan per
         # call on servers without unlabeled-index support.
         chains = await self._compute_ancestor_chains_bulk_cypher([urn])
-        return chains.get(urn, [])
+        return chains.get(urn)
 
     async def _compute_and_store_ancestors_bulk(
         self,
@@ -7618,6 +7634,9 @@ class FalkorDBProvider(GraphDataProvider):
         On bulk-Cypher failure, falls back to the per-URN path with
         bounded concurrency so a single planner hiccup doesn't fail the
         whole outer batch.
+
+        A URN the walk could not answer is ABSENT from the result and is
+        not cached: every reader takes ``[]`` for a root.
         """
         cache_key = self._ancestors_cache_key()
         result: Dict[str, List[str]] = {}
@@ -7648,6 +7667,10 @@ class FalkorDBProvider(GraphDataProvider):
             try:
                 computed = await self._compute_ancestor_chains_bulk_cypher(missing_urns)
             except Exception as exc:
+                # A shed means "ask again in a moment". Asking once per urn
+                # instead would multiply one refusal by up to a thousand.
+                if _is_load_shed(exc):
+                    raise
                 logger.warning(
                     "Bulk ancestor Cypher failed for %d urns (%s); "
                     "falling back to per-URN computation.",
@@ -7656,7 +7679,7 @@ class FalkorDBProvider(GraphDataProvider):
                 _MAX_ANCESTOR_CONCURRENCY = 4
                 sem = asyncio.Semaphore(_MAX_ANCESTOR_CONCURRENCY)
 
-                async def _compute_with_sem(urn: str) -> tuple[str, list]:
+                async def _compute_with_sem(urn: str) -> tuple[str, Optional[list]]:
                     async with sem:
                         try:
                             return urn, await self._compute_ancestor_chain(urn)
@@ -7664,15 +7687,15 @@ class FalkorDBProvider(GraphDataProvider):
                             logger.warning(
                                 "Failed to compute ancestor chain for %s: %s", urn, e,
                             )
-                            return urn, []
+                            return urn, None
 
                 pairs = await asyncio.gather(
                     *(_compute_with_sem(u) for u in missing_urns),
                 )
-                computed = {u: chain for u, chain in pairs}
+                computed = {u: chain for u, chain in pairs if chain is not None}
 
-            for u in missing_urns:
-                result[u] = computed.get(u, [])
+            # Only what the walk ANSWERED is returned and cached.
+            result.update(computed)
 
             # Batch-store all computed chains in one pipeline.
             #
@@ -7686,11 +7709,11 @@ class FalkorDBProvider(GraphDataProvider):
             # `truncated: ancestors_failed` and a trace with NO containment tree
             # — i.e. a cache outage silently broke the graph read path, the exact
             # inverse of the decoupling's intent.
-            if self._redis is not None:
+            if self._redis is not None and computed:
                 store_pipe = self._redis.pipeline(transaction=False)
-                for u in missing_urns:
+                for u, chain in computed.items():
                     store_pipe.execute_command(
-                        "HSET", cache_key, u, json.dumps(result.get(u, [])),
+                        "HSET", cache_key, u, json.dumps(chain),
                     )
                 # TTL so the ancestors hash stays evictable (see _cache_urn_label).
                 store_pipe.expire(cache_key, self._ancestor_cache_ttl())
@@ -7721,15 +7744,19 @@ class FalkorDBProvider(GraphDataProvider):
         round-trip is paid per chunk regardless of how many URNs miss
         the cache. This is the fix for the per-URN scan amplification
         documented in the aggregation hardening plan.
+
+        Only urns the query returned a row for are in the result; an absent
+        urn is UNKNOWN (its bucket failed, or no row came back), never a
+        root. A root still comes back as a row, with chain ``[]``.
         """
-        out: Dict[str, List[str]] = {u: [] for u in urns}
+        out: Dict[str, List[str]] = {}
         if not urns:
             return out
 
         containment = list(self._get_containment_edge_types())
         if not containment:
             # Flat graph — no ancestors for any URN.
-            return out
+            return {u: [] for u in urns}
 
         containment_cypher = "|".join(_sanitize_label(t) for t in containment)
         max_depth = self._containment_hop_bound()
@@ -7748,8 +7775,8 @@ class FalkorDBProvider(GraphDataProvider):
         # per-URN full scans). Every ontology label has a URN index, so
         # each chunk is classified per label (indexed IN lookups) and
         # the path expansion anchors on ``(child:Label)`` — index seeks
-        # end to end. URNs matching no ontology label sit outside the
-        # containment hierarchy and keep their pre-initialized [] chain.
+        # end to end. URNs the query returns no row for are left out of
+        # the result: unknown, never a root.
         def _chain_cypher(label_clause: str) -> str:
             return (
                 f"MATCH (child{label_clause}) WHERE child.urn IN $urns "
@@ -7773,6 +7800,13 @@ class FalkorDBProvider(GraphDataProvider):
             buckets = await self._label_buckets(chunk)
 
             async def _chain_for(label: str, bucket: List[str]) -> list:
+                if not label and len(bucket) > _ANCESTOR_UNLABELED_MAX:
+                    logger.warning(
+                        "ancestor chains: %d urns have no resolved label; "
+                        "left unknown rather than scanned for",
+                        len(bucket),
+                    )
+                    return []
                 clause = f":{label}" if label else ""
                 try:
                     res = await self._ro_query(
