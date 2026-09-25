@@ -1067,6 +1067,11 @@ export interface GroupActions {
   layerName: string
   /** Every group in the layer, with its path — the targets the pickers offer. */
   groups: Array<{ id: string; name: string; path: string }>
+  /** Is `name` already used by a group directly inside `parentId` (null = the layer's top level),
+   *  other than `exceptId`? Two groups side by side can't share a name. */
+  nameTaken: (name: string, parentId: string | null, exceptId?: string) => boolean
+  /** The group a group sits in (null = the layer's top level). */
+  parentOf: (groupId: string) => string | null
   /** A group's own subtree (it can't move into any of these). */
   subtreeOf: (groupId: string) => string[]
   create: (name: string, parentGroupId?: string) => void
@@ -1092,7 +1097,12 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
   const [mode, setMode] = useState<'idle' | 'rename' | 'inside' | 'confirm' | 'move' | 'contents'>('idle')
   const [draft, setDraft] = useState('')
   const stop = (e: React.SyntheticEvent) => e.stopPropagation()
-  const commit = () => {
+  // A name already used beside it is refused by the operation itself; say so while typing.
+  const taken = draft.trim() !== '' && (mode === 'inside'
+    ? actions.nameTaken(draft, groupId)
+    : mode === 'rename' && actions.nameTaken(draft, actions.parentOf(groupId), groupId))
+  const commit = (fromBlur = false) => {
+    if (taken) { if (fromBlur) setMode('idle'); return }
     if (mode === 'rename') actions.rename(groupId, draft)
     if (mode === 'inside' && draft.trim()) actions.create(draft, groupId)
     setMode('idle')
@@ -1100,17 +1110,27 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
   const iconBtn = 'p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors'
   if (mode === 'rename' || mode === 'inside') {
     return (
-      <input
-        autoFocus
-        value={draft}
-        placeholder={mode === 'inside' ? `Group inside ${name}` : 'Group name'}
-        aria-label={mode === 'inside' ? `Name a new group inside ${name}` : `Rename group ${name}`}
-        onChange={(e) => setDraft(e.target.value)}
-        onClick={stop}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commit(); if (e.key === 'Escape') setMode('idle') }}
-        onBlur={commit}
-        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none placeholder:text-ink-muted"
-      />
+      <span className="mt-1 flex flex-col gap-0.5" onClick={stop}>
+        <input
+          autoFocus
+          value={draft}
+          placeholder={mode === 'inside' ? `Group inside ${name}` : 'Group name'}
+          aria-label={mode === 'inside' ? `Name a new group inside ${name}` : `Rename group ${name}`}
+          aria-invalid={taken || undefined}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commit(); if (e.key === 'Escape') setMode('idle') }}
+          onBlur={() => commit(true)}
+          className={cn(
+            'w-full px-2 py-0.5 rounded-md bg-canvas-overlay border text-[11.5px] text-ink outline-none placeholder:text-ink-muted',
+            taken ? 'border-red-400' : 'border-violet-400/60',
+          )}
+        />
+        {taken && (
+          <span role="alert" className="text-[10.5px] text-red-500">
+            There's already a group called “{draft.trim()}” {mode === 'inside' ? `in ${name}` : 'beside it'}.
+          </span>
+        )}
+      </span>
     )
   }
   if (mode === 'move' || mode === 'contents') {

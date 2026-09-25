@@ -745,6 +745,14 @@ class CommitResponse(_ApiModel):
     commit_id: str = Field(alias="commitId")
 
 
+class RevisionModel(_ApiModel):
+    """The main commit a side of the watermark is at — so "version #12" names a real revision."""
+    commit_id: str = Field(alias="commitId")
+    created_at: Optional[str] = Field(default=None, alias="createdAt")
+    actor: Optional[str] = None
+    message: Optional[str] = None
+
+
 class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
@@ -761,6 +769,9 @@ class WatermarkModel(_ApiModel):
     last_projected_at: Optional[str] = Field(default=None, alias="lastProjectedAt")
     progress_done: Optional[int] = Field(default=None, alias="progressDone")
     progress_total: Optional[int] = Field(default=None, alias="progressTotal")
+    # The main revision each side is at: the system of record's head, and what the graph holds.
+    committed_revision: Optional[RevisionModel] = Field(default=None, alias="committedRevision")
+    projected_revision: Optional[RevisionModel] = Field(default=None, alias="projectedRevision")
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -1757,7 +1768,16 @@ def _watermark_model(wm: dict) -> WatermarkModel:
                           last_error=wm.get("last_error"),
                           last_projected_at=wm.get("last_projected_at"),
                           progress_done=wm.get("progress_done"),
-                          progress_total=wm.get("progress_total"))
+                          progress_total=wm.get("progress_total"),
+                          committed_revision=_revision_model(wm.get("committed_revision")),
+                          projected_revision=_revision_model(wm.get("projected_revision")))
+
+
+def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
+    return None if not rev else RevisionModel(
+        commit_id=rev["commit_id"], created_at=rev.get("created_at"),
+        actor=rev.get("actor"), message=rev.get("message"),
+    )
 
 
 @router.post("/graphs/{graph_id}/projection/rebuild", response_model=RebuildResponse)

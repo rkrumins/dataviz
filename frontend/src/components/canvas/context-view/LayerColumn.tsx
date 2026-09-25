@@ -29,7 +29,7 @@ import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/ty
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
 import type { PlacedOut, PlacementInfo } from './placement'
-import { groupSubtreeIds, listGroups } from './layerMutations'
+import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -426,6 +426,8 @@ export const LayerColumn = React.memo(function LayerColumn({
       layerId: layer.id,
       layerName: layer.name,
       groups: listGroups([layer], layer.id),
+      nameTaken: (name, parentId, exceptId) => !!groupNameClash([layer], layer.id, parentId, [name], exceptId ? [exceptId] : []),
+      parentOf: (groupId) => parentGroupOf([layer], layer.id, groupId) ?? null,
       otherLayers: (groupDestinations ?? []).filter((d) => d.layerId !== layer.id),
       subtreeOf: (groupId) => groupSubtreeIds([layer], layer.id, groupId),
       create: (name, parentGroupId) => onCreateGroup(layer.id, name, parentGroupId),
@@ -439,6 +441,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     } : undefined,
   [layer, groupDestinations, onCreateGroup, onRenameGroup, onDeleteGroup, onPlaceInGroup, onMoveGroup, onMoveGroupContents, onUngroup])
   const [draftGroupName, setDraftGroupName] = useState('')
+  const headerNameTaken = draftGroupName.trim() !== '' && !!groupNameClash([layer], layer.id, null, [draftGroupName])
   const [draftName, setDraftName] = useState(layer.name)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
@@ -1831,15 +1834,21 @@ export const LayerColumn = React.memo(function LayerColumn({
                   value={draftGroupName}
                   placeholder="New group name"
                   aria-label={`Name the new group in ${layer.name}`}
+                  aria-invalid={headerNameTaken || undefined}
+                  title={headerNameTaken ? `There's already a group called “${draftGroupName.trim()}” in ${layer.name}` : undefined}
                   onChange={(e) => setDraftGroupName(e.target.value)}
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => {
                     e.stopPropagation()
-                    if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }
+                    // A taken name is refused with a notice saying why; the field stays open to fix it.
+                    if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); if (!headerNameTaken) setIsNamingGroup(false) }
                     if (e.key === 'Escape') setIsNamingGroup(false)
                   }}
-                  onBlur={() => { if (draftGroupName.trim()) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
-                  className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-violet-400/60 text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal"
+                  onBlur={() => { if (draftGroupName.trim() && !headerNameTaken) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
+                  className={cn(
+                    "flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal",
+                    headerNameTaken ? "border-red-400" : "border-violet-400/60",
+                  )}
                 />
               ) : isRenaming && onRenameLayer ? (
                 <input

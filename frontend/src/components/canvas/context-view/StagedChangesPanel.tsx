@@ -117,12 +117,19 @@ function timeAgo(ts: number): string {
 export interface SaveConfirmationModalProps {
   /** Called when the user confirms — implementer should run applyAll + saveToBackend. */
   onConfirm: () => void | Promise<void>
+  /** Words a change from the CURRENT state when its staged summary can go out of date — a
+   *  placement names its group and layer, and the group may since have been renamed or moved to
+   *  another layer. Returns undefined to keep the staged summary. */
+  describe?: (change: StagedChange) => string | undefined
 }
 
-export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
+export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModalProps) {
   const isOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const close = useStagedChangesStore(s => s.closeReviewPanel)
-  const changes = useStagedChangesStore(s => s.changes)
+  const stagedChanges = useStagedChangesStore(s => s.changes)
+  const changes = useMemo(() => (describe
+    ? stagedChanges.map(c => { const now = describe(c); return now && now !== c.summary ? { ...c, summary: now } : c })
+    : stagedChanges), [stagedChanges, describe])
   const discard = useStagedChangesStore(s => s.discard)
   const discardAll = useStagedChangesStore(s => s.discardAll)
   const applyStatus = useStagedChangesStore(s => s.applyStatus)

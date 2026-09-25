@@ -2311,6 +2311,232 @@ async def get_neighborhood_map(
     return result
 
 
+class _SyncRevision(BaseModel):
+    commit_id: str = Field(alias="commitId")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    actor: Optional[str] = None
+    actor_name: Optional[str] = Field(None, alias="actorName")
+    message: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncVersioned(BaseModel):
+    """A managed (versioned) graph: the system of record's head vs what the graph holds."""
+    graph_id: str = Field(alias="graphId")
+    committed: int
+    projected: int
+    fresh: bool
+    status: str
+    last_error: Optional[str] = Field(None, alias="lastError")
+    last_projected_at: Optional[str] = Field(None, alias="lastProjectedAt")
+    progress_done: Optional[int] = Field(None, alias="progressDone")
+    progress_total: Optional[int] = Field(None, alias="progressTotal")
+    committed_revision: Optional[_SyncRevision] = Field(None, alias="committedRevision")
+    projected_revision: Optional[_SyncRevision] = Field(None, alias="projectedRevision")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncSummaries(BaseModel):
+    """The derived lineage summaries (rollups) and the automation that keeps them current —
+    the same row the Freshness cockpit reads, trimmed to what a viewer needs."""
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    last_built_at: Optional[str] = Field(None, alias="lastBuiltAt")
+    job_id: Optional[str] = Field(None, alias="jobId")
+    job_status: Optional[str] = Field(None, alias="jobStatus")          # pending | running
+    job_progress: Optional[int] = Field(None, alias="jobProgress")      # 0-100
+    job_phase: Optional[str] = Field(None, alias="jobPhase")
+    job_started_at: Optional[str] = Field(None, alias="jobStartedAt")
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    auto_refresh: Optional[bool] = Field(None, alias="autoRefresh")
+    cooldown_until: Optional[str] = Field(None, alias="cooldownUntil")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    # The newest job, whatever its outcome — so a failure is shown WITH its date (a two-month-old
+    # failure must not read as current), and the last success is a real completion time.
+    # An operator hold (fleet / provider / this source, or drift auto-rebuild switched off) —
+    # when set, the automation evaluates but does NOT act, so the UI must not promise it will.
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
+    last_job_status: Optional[str] = Field(None, alias="lastJobStatus")
+    last_job_at: Optional[str] = Field(None, alias="lastJobAt")
+    last_success_at: Optional[str] = Field(None, alias="lastSuccessAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncCounts(BaseModel):
+    """What the graph held the last time the stats service actually read it."""
+    nodes: int
+    edges: int                                   # raw connections (rollups excluded)
+    read_at: Optional[str] = Field(None, alias="readAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncSource(BaseModel):
+    """An externally hosted graph: when this app last checked it, and last caught up with it."""
+    last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
+    stale_since: Optional[str] = Field(None, alias="staleSince")
+    stale_reason: Optional[str] = Field(None, alias="staleReason")
+    # Computed NOW from the latest counts against the baseline the last refresh adopted — the
+    # stored drift verdict survives skipped evaluations and can be weeks old. None = can't tell
+    # (no baseline yet, or no counts read).
+    changed_since_refresh: Optional[bool] = Field(None, alias="changedSinceRefresh")
+
+    class Config:
+        populate_by_name = True
+
+
+class SyncStatusResponse(BaseModel):
+    kind: str                                   # "versioned" | "external"
+    data_source_id: str = Field(alias="dataSourceId")
+    checked_at: str = Field(alias="checkedAt")
+    versioned: Optional[_SyncVersioned] = None
+    source: Optional[_SyncSource] = None
+    summaries: Optional[_SyncSummaries] = None
+    counts: Optional[_SyncCounts] = None
+
+    class Config:
+        populate_by_name = True
+
+
+@router.get("/sync-status", response_model=SyncStatusResponse, response_model_by_alias=True)
+async def get_sync_status(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="The data source whose sync to report."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Is what this view reads in sync with where it comes from? For a VERSIONED graph: the
+    system of record's published head vs the version the graph holds (with both revisions). For
+    an EXTERNAL graph: when the app last checked the source and last caught up with it. Both: the
+    lineage summaries and the automation keeping them current (queued / running / cooling down).
+
+    Cheap by construction — Postgres rows and the freshness row the cockpit already serves; no
+    FalkorDB or provider call — so the view header can show it to everyone who can open the view."""
+    from backend.app.services.aggregation.models import AggregationJobORM
+    from backend.app.services.aggregation.service import assemble_fleet_freshness
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.app.db.repositories.view_repo import resolve_user_ids
+
+    row = None
+    try:
+        fleet = await assemble_fleet_freshness(
+            session, workspace_id=ws_id, data_source_id=dataSourceId, page_size=1)
+        row = fleet.rows[0] if fleet.rows else None
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: freshness row unavailable for %s", dataSourceId, exc_info=True)
+
+    # Evidence the stored verdicts can't be trusted to carry: the latest counts actually read from
+    # the graph, the baseline the last refresh adopted, and the newest job's real outcome + time.
+    from sqlalchemy import select as _select
+    from backend.app.db.models import DataSourceStatsORM
+    from backend.app.services.aggregation.fingerprint import raw_fingerprint_from_counts
+    from backend.app.services.aggregation.models import AggregationDataSourceStateORM
+
+    counts = None
+    live_fp = None
+    try:
+        st = (await session.execute(_select(DataSourceStatsORM).where(
+            DataSourceStatsORM.data_source_id == dataSourceId))).scalar_one_or_none()
+        if st is not None:
+            live_fp, _agg, raw_edges = raw_fingerprint_from_counts(
+                json.loads(st.entity_type_counts or "{}"), json.loads(st.edge_type_counts or "{}"))
+            counts = _SyncCounts(nodes=int(st.node_count or 0), edges=int(raw_edges), read_at=st.updated_at)
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: stats unreadable for %s", dataSourceId, exc_info=True)
+    state = await session.get(AggregationDataSourceStateORM, dataSourceId)
+    changed = (None if live_fp is None or state is None or not state.raw_fingerprint
+               else live_fp != state.raw_fingerprint)
+    newest = (await session.execute(
+        _select(AggregationJobORM).where(AggregationJobORM.data_source_id == dataSourceId)
+        .order_by(AggregationJobORM.created_at.desc()).limit(1))).scalar_one_or_none()
+    last_success = (await session.execute(
+        _select(AggregationJobORM.completed_at).where(
+            AggregationJobORM.data_source_id == dataSourceId, AggregationJobORM.status == "completed")
+        .order_by(AggregationJobORM.completed_at.desc().nullslast()).limit(1))).scalar_one_or_none()
+
+    summaries = None
+    if row is not None:
+        job = None
+        if row.running_job_id:
+            job = await session.get(AggregationJobORM, row.running_job_id)
+        summaries = _SyncSummaries(
+            aggregation_status=row.aggregation_status,
+            last_built_at=row.last_aggregated_at,
+            job_id=row.running_job_id,
+            job_status=job.status if job else None,
+            job_progress=job.progress if job else None,
+            job_phase=job.current_phase if job else None,
+            job_started_at=job.started_at if job else None,
+            drift_state=row.drift_state,
+            auto_refresh=row.auto_reconcile,
+            cooldown_until=row.cooldown_until,
+            paused_until=row.paused_until,
+            last_failure_reason=getattr(row, "last_failure_reason", None),
+            held_kind=getattr(row, "held_kind", None),
+            held_by=getattr(row, "held_by", None),
+            held_until=getattr(row, "held_until", None),
+            last_job_status=newest.status if newest else None,
+            last_job_at=(newest.completed_at or newest.updated_at or newest.created_at) if newest else None,
+            last_success_at=last_success,
+        )
+
+    svc = GraphVersioningService()
+    graph = await svc.get_graph_by_data_source(dataSourceId)
+    if graph and str(graph.get("workspace_id")) == str(ws_id):
+        wm = await svc.projection_watermark(str(graph["graph_id"]))
+        revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision")) if r]
+        actors = {r["actor"] for r in revs if r.get("actor")}
+        names = {}
+        if actors:
+            resolved = await resolve_user_ids(session, actors)
+            names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
+
+        def _rev(r):
+            return None if not r else _SyncRevision(
+                commit_id=r["commit_id"], created_at=r.get("created_at"), actor=r.get("actor"),
+                actor_name=names.get(r.get("actor")), message=r.get("message"))
+        return SyncStatusResponse(
+            kind="versioned", data_source_id=dataSourceId,
+            checked_at=datetime.now(timezone.utc).isoformat(),
+            versioned=_SyncVersioned(
+                graph_id=str(graph["graph_id"]),
+                committed=int(wm["committed"]), projected=int(wm["projected"]),
+                fresh=bool(wm["fresh"]), status=str(wm["status"]),
+                last_error=wm.get("last_error"), last_projected_at=wm.get("last_projected_at"),
+                progress_done=wm.get("progress_done"), progress_total=wm.get("progress_total"),
+                committed_revision=_rev(wm.get("committed_revision")),
+                projected_revision=_rev(wm.get("projected_revision")),
+            ),
+            summaries=summaries, counts=counts,
+        )
+
+    source = None if row is None else _SyncSource(
+        last_checked_at=row.last_checked_at,
+        last_reconciled_at=row.last_reconciled_at,
+        last_reconcile_reason=row.last_reconcile_reason,
+        check_interval_secs=getattr(row, "resolved_probe_interval_secs", None),
+        stale_since=row.stale_since,
+        stale_reason=row.stale_reason,
+        changed_since_refresh=changed,
+    )
+    return SyncStatusResponse(
+        kind="external", data_source_id=dataSourceId,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        source=source, summaries=summaries, counts=counts,
+    )
+
+
 @router.get("/stats", deprecated=True)
 async def get_graph_stats(
     ws_id: Optional[str] = None,

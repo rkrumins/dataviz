@@ -171,17 +171,35 @@ const editTree = (groups: GroupNode[], fn: (g: GroupNode) => GroupNode | null): 
     return [{ ...next, ...(next.children ? { children: editTree(next.children, fn) } : {}) }]
   })
 
-/** Add a group to a layer — at its top, or inside `parentGroupId` (a group of groups). */
+const sameName = (a: string, b: string) => a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase()
+
+/** The first of `names` already taken by a group directly under `parentId` in a layer (null = its
+ *  top level), ignoring `ignoreIds`. Two groups side by side with one name can't be told apart in
+ *  any list or picker, so no operation may leave them — each refuses (returns its input) instead,
+ *  and the UI says why with this. Groups under DIFFERENT parents may share a name: their paths differ. */
+export function groupNameClash(
+  layers: ViewLayerConfig[], layerId: string, parentId: string | null, names: string[], ignoreIds: string[] = [],
+): string | null {
+  const top = layers.find((l) => l.id === layerId)?.logicalNodes
+  const siblings = (parentId ? findGroup(top, parentId)?.children : top) ?? []
+  const taken = siblings.filter((g) => !ignoreIds.includes(g.id))
+  return names.find((n) => taken.some((g) => sameName(g.name, n))) ?? null
+}
+
+/** Add a group to a layer — at its top, or inside `parentGroupId` (a group of groups). Refused
+ *  when a group beside it already has its name. */
 export function addGroup(
   layers: ViewLayerConfig[], layerId: string, group: GroupNode, parentGroupId?: string,
 ): ViewLayerConfig[] {
+  if (groupNameClash(layers, layerId, parentGroupId ?? null, [group.name])) return layers
   if (!parentGroupId) return mapGroups(layers, layerId, (gs) => [...gs, group])
   return mapGroups(layers, layerId, (gs) =>
     editTree(gs, (g) => (g.id === parentGroupId ? { ...g, children: [...(g.children ?? []), group] } : g)))
 }
 
-/** Rename one group anywhere in a layer's tree. */
+/** Rename one group anywhere in a layer's tree (refused when a group beside it has that name). */
 export function renameGroup(layers: ViewLayerConfig[], layerId: string, groupId: string, name: string): ViewLayerConfig[] {
+  if (groupNameClash(layers, layerId, parentGroupOf(layers, layerId, groupId) ?? null, [name], [groupId])) return layers
   return mapGroups(layers, layerId, (gs) => editTree(gs, (g) => (g.id === groupId ? { ...g, name } : g)))
 }
 
@@ -241,13 +259,16 @@ export function moveGroup(
 ): ViewLayerConfig[] {
   if (newParentId && groupSubtreeIds(layers, layerId, groupId).includes(newParentId)) return layers
   const moving = findGroup(layers.find((l) => l.id === layerId)?.logicalNodes, groupId)
-  if (!moving) return layers
+  if (!moving || groupNameClash(layers, layerId, newParentId, [moving.name], [groupId])) return layers
   return addGroup(removeGroup(layers, layerId, groupId), layerId, moving, newParentId ?? undefined)
 }
 
 /** Dismantle a group: it disappears and its sub-groups move up one level, in its place. (Its
- *  entities are lifted by `reassignGroupMembers` — to the parent group, or the layer.) */
+ *  entities are lifted by `reassignGroupMembers` — to the parent group, or the layer.) Refused when
+ *  a lifted sub-group would sit beside a group of the same name. */
 export function ungroup(layers: ViewLayerConfig[], layerId: string, groupId: string): ViewLayerConfig[] {
+  const lifted = (findGroup(layers.find((l) => l.id === layerId)?.logicalNodes, groupId)?.children ?? []).map((g) => g.name)
+  if (groupNameClash(layers, layerId, parentGroupOf(layers, layerId, groupId) ?? null, lifted, [groupId])) return layers
   const lift = (gs: GroupNode[]): GroupNode[] => gs.flatMap((g) =>
     g.id === groupId ? (g.children ?? []) : [{ ...g, ...(g.children ? { children: lift(g.children) } : {}) }])
   return mapGroups(layers, layerId, lift)
@@ -260,7 +281,7 @@ export function moveGroupContents(
 ): ViewLayerConfig[] {
   if (fromId === toId || groupSubtreeIds(layers, layerId, fromId).includes(toId)) return layers
   const subs = findGroup(layers.find((l) => l.id === layerId)?.logicalNodes, fromId)?.children ?? []
-  if (subs.length === 0) return layers
+  if (subs.length === 0 || groupNameClash(layers, layerId, toId, subs.map((g) => g.name))) return layers
   const emptied = mapGroups(layers, layerId, (gs) => editTree(gs, (g) => (g.id === fromId ? { ...g, children: [] } : g)))
   return mapGroups(emptied, layerId, (gs) =>
     editTree(gs, (g) => (g.id === toId ? { ...g, children: [...(g.children ?? []), ...subs] } : g)))
@@ -280,6 +301,7 @@ export function moveGroupToLayer(
   const moving = findGroup(layout.layers.find((l) => l.id === fromLayerId)?.logicalNodes, groupId)
   if (!moving || !layout.layers.some((l) => l.id === toLayerId)) return layout
   if (newParentId && !findGroup(layout.layers.find((l) => l.id === toLayerId)?.logicalNodes, newParentId)) return layout
+  if (groupNameClash(layout.layers, toLayerId, newParentId, [moving.name])) return layout
   const carried = new Set(groupSubtreeIds(layout.layers, fromLayerId, groupId))
   const layers = addGroup(removeGroup(layout.layers, fromLayerId, groupId), toLayerId, moving, newParentId ?? undefined)
   const assignments = { ...layout.assignments }
@@ -290,4 +312,9 @@ export function moveGroupToLayer(
     }
   }
   return { ...layout, layers, assignments }
+}
+
+/** The names of the groups directly inside a group (what an ungroup or a move-everything lifts). */
+export function childGroupNames(layers: ViewLayerConfig[], layerId: string, groupId: string): string[] {
+  return (findGroup(layers.find((l) => l.id === layerId)?.logicalNodes, groupId)?.children ?? []).map((g) => g.name)
 }

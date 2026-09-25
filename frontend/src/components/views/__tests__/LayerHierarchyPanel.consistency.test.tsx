@@ -17,7 +17,7 @@ const layers: ViewLayerConfig[] = [{
 } as ViewLayerConfig]
 
 const logicalNodes = (): UseLogicalNodesReturn => ({
-  addNode: vi.fn(), renameNode: vi.fn(), deleteNode: vi.fn(), moveNode: vi.fn(), moveNodeToLayer: vi.fn(),
+  addNode: vi.fn(), renameNode: vi.fn(), deleteNode: vi.fn(), moveNode: vi.fn(), moveNodeToLayer: vi.fn(), nameTaken: () => false, parentOf: () => null,
   layerChoices: () => [
     { layerId: 'l1', layerName: 'Apps', groups: [] },
     { layerId: 'l3', layerName: 'Layer 3', groups: [{ id: 'g9', name: 'Gold', path: 'Gold' }] },
@@ -88,6 +88,15 @@ describe('View Wizard ↔ canvas: one set of group actions, one placement langua
     const select = screen.getByLabelText('Move group Critical into') as HTMLSelectElement
     fireEvent.change(select, { target: { value: select.options[4].value } })
     expect(ln.moveNodeToLayer).toHaveBeenCalledWith('l1', 'g1', 'l3', 'g9')
+  })
+
+  it('a refused move says why, in place', () => {
+    const ln = { ...logicalNodes(), moveNodeToLayer: vi.fn(() => 'Critical') }
+    renderPanel(ln)
+    fireEvent.click(screen.getByLabelText('Move group Critical'))
+    const select = screen.getByLabelText('Move group Critical into') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: select.options[3].value } })
+    expect(screen.getByRole('alert').textContent).toContain('already a group called “Critical” there')
   })
 
   it('an assigned entity with a parent in the data shows "Placed · Part of …"', () => {
