@@ -2276,7 +2276,11 @@ async def get_node_ancestors(
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    return await engine.get_ancestors(urn, limit=limit, offset=offset)
+    """Slot-bounded like /nodes/ancestor-chains: a burst sheds 429."""
+    async def compute() -> List[GraphNode]:
+        return await engine.get_ancestors(urn, limit=limit, offset=offset)
+
+    return await _bounded_compute(engine, compute)()
 
 
 class AncestorChainsRequest(BaseModel):
@@ -2483,8 +2487,12 @@ async def query_edges(
     query: EdgeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced edge query (bulk fetch)."""
-    return await engine.get_edges(query)
+    """Advanced edge query (bulk fetch). Slot-bounded like /edges/between:
+    a burst sheds 429."""
+    async def compute() -> List[GraphEdge]:
+        return await engine.get_edges(query)
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.post("/nodes/query", response_model=List[GraphNode], response_model_by_alias=True)
