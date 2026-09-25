@@ -24,13 +24,18 @@ depends_on = None
 def upgrade() -> None:
     bind = op.get_bind()
     schema = gv_config.graphver_schema()
-    bind.execute(sa.text(
-        f'CREATE INDEX IF NOT EXISTS ix_nv_qname ON "{schema}"."node_versions" (graph_id, qualified_name)'
-    ))
-    bind.execute(sa.text(
-        f'CREATE INDEX IF NOT EXISTS ix_import_rows_matched ON "{schema}"."import_rows" '
-        f"(job_id, matched_entity_id)"
-    ))
+    inspector = sa.inspect(bind)
+    # A database installed at head has no graphver schema until the versioning worker's bootstrap
+    # (create_schema_and_partitions) creates it, and that builds both indexes from the models.
+    if inspector.has_table("node_versions", schema=schema):
+        bind.execute(sa.text(
+            f'CREATE INDEX IF NOT EXISTS ix_nv_qname ON "{schema}"."node_versions" (graph_id, qualified_name)'
+        ))
+    if inspector.has_table("import_rows", schema=schema):
+        bind.execute(sa.text(
+            f'CREATE INDEX IF NOT EXISTS ix_import_rows_matched ON "{schema}"."import_rows" '
+            f"(job_id, matched_entity_id)"
+        ))
 
 
 def downgrade() -> None:
