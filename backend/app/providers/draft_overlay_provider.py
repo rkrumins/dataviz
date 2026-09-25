@@ -462,9 +462,10 @@ class DraftOverlayProvider:
                         "edge_count": new_count,
                         "edge_types": sorted(set(cur.edge_types) | {t for t in types if t})})
         edges = sorted(by_pair.values(), key=lambda e: e.edge_count, reverse=True)
-        return AggregatedEdgeResult(
-            aggregatedEdges=edges, totalSourceEdges=sum(e.edge_count for e in edges),
-            truncated=base.truncated, lastMaterializedAt=base.last_materialized_at)
+        # Everything else is the base's to say — stale, degraded detail, truncation
+        # reason: a partial base must not be cached as complete once overlaid.
+        return base.model_copy(update={
+            "aggregated_edges": edges, "total_source_edges": sum(e.edge_count for e in edges)})
 
     async def trace_at_level(
         self, urn: str, level: int, upstream_depth: int, downstream_depth: int,

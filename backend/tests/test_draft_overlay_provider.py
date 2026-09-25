@@ -202,6 +202,35 @@ def test_set_node_identity_reaches_the_base_provider():
     assert base.identity == (None, None)
 
 
+def test_a_lineage_delta_keeps_the_base_answers_freshness():
+    """With a lineage delta the overlay rebuilt the result from four fields,
+    dropping the rest: a base that gave up part of its read lost its
+    degraded detail and truncation reason, was cached as complete for the
+    full TTL, and an unmaterialized base never told the draft canvas so."""
+    from backend.app.services.graph_cache import _is_incomplete_result
+
+    class _ShortMain(StubMain):
+        async def get_aggregated_edges_between(self, *a, **kw):
+            base = await super().get_aggregated_edges_between(*a, **kw)
+            return base.model_copy(update={
+                "truncated": True, "stale": True, "stale_reason": "unmaterialized",
+                "stamp_version": 2, "regime": "boundary", "truncation_reason": "timeout",
+                "degraded_detail": {"kind": "timeout", "degradedBatches": 1},
+            })
+
+    p = _mk(_ShortMain(), {**_EMPTY, "edgesUpsert": [
+        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
+        adjust={("A", "B"): {"weight": +1, "types": {"LINEAGE"}}})
+    agg = asyncio.run(p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"]))
+
+    assert {(e.source_urn, e.target_urn): e.edge_count for e in agg.aggregated_edges} == {("A", "B"): 2}
+    assert agg.total_source_edges == 2
+    assert (agg.truncated, agg.stale, agg.stale_reason) == (True, True, "unmaterialized")
+    assert (agg.stamp_version, agg.regime, agg.last_materialized_at) == (2, "boundary", "t0")
+    assert agg.truncation_reason == "timeout" and agg.degraded_detail == {"kind": "timeout", "degradedBatches": 1}
+    assert _is_incomplete_result(agg)
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("draft overlay invariant + sparse delta: OK")
