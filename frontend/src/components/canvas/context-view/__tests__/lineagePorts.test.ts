@@ -32,6 +32,22 @@ describe('buildNodePorts — a port sits where the lines plug in', () => {
     expect(ports.get('src')!.right.out).toBe(1)
     expect(ports.get('ghost')!.left.in).toBe(1)
   })
+
+  it('a two-way bundle carries both directions on the side facing its partner', () => {
+    // Drawn once, oriented by id (src < wh), but data flows both ways.
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isBidirectional: true }], layerOf)
+    expect(ports.get('src')!.right).toEqual({ in: 1, out: 1 })
+    expect(ports.get('wh')!.left).toEqual({ in: 1, out: 1 })
+    expect(portView('right', ports.get('src'), undefined)).toEqual({ kind: 'here', dir: 'both' })
+    expect(portView('left', ports.get('wh'), undefined)).toEqual({ kind: 'here', dir: 'both' })
+  })
+
+  it('a line that stands aside for finer ones makes no port', () => {
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
+    expect(ports.get('src')!.right).toEqual({ in: 0, out: 0 })
+    expect(ports.get('wh')!.left).toEqual({ in: 0, out: 0 })
+    expect(portView('right', ports.get('src'), undefined)).toBeNull()
+  })
 })
 
 describe('portView — what each side shows', () => {
@@ -54,6 +70,12 @@ describe('portView — what each side shows', () => {
     // `src` has incoming on its right; its total in must not add a hollow
     // incoming port on the left as well.
     expect(portView('left', ports.get('src'), { in: 40, out: 0 })).toBeNull()
+  })
+
+  it('a line that stands aside still says the lineage is in view — no hollow port', () => {
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
+    expect(portView('right', ports.get('src'), { in: 0, out: 5 })).toBeNull()
+    expect(portView('left', ports.get('wh'), { in: 5, out: 0 })).toBeNull()
   })
 
   it('no lineage, or an unknown total: no port', () => {

@@ -31,6 +31,10 @@ export interface SideLines {
 export interface NodePorts {
   left: SideLines
   right: SideLines
+  /** Lines on the canvas that stand aside for their children's finer ones
+   *  (delegated): not drawn, so no port — but the lineage IS in view, so
+   *  they keep the card from reading hollow. */
+  delegated: SideLines
 }
 
 export interface PortView {
@@ -47,26 +51,43 @@ export interface PortView {
  * takes the convention — out on the right, in on the left.
  */
 export function buildNodePorts(
-  lines: Iterable<{ source: string; target: string }>,
+  lines: Iterable<{ source: string; target: string; isBidirectional?: boolean; isDelegated?: boolean }>,
   layerOf: (id: string) => number | undefined,
 ): Map<string, NodePorts> {
   const ports = new Map<string, NodePorts>()
   const at = (id: string): NodePorts => {
     let p = ports.get(id)
     if (!p) {
-      p = { left: { in: 0, out: 0 }, right: { in: 0, out: 0 } }
+      p = { left: { in: 0, out: 0 }, right: { in: 0, out: 0 }, delegated: { in: 0, out: 0 } }
       ports.set(id, p)
     }
     return p
   }
-  for (const { source, target } of lines) {
+  for (const { source, target, isBidirectional, isDelegated } of lines) {
     if (source === target) continue
+    if (isDelegated) {
+      at(source).delegated.out++
+      at(target).delegated.in++
+      if (isBidirectional) {
+        at(source).delegated.in++
+        at(target).delegated.out++
+      }
+      continue
+    }
     const s = layerOf(source)
     const t = layerOf(target)
     const rightward = s === undefined || t === undefined ? true : t > s
     const sameColumn = s !== undefined && s === t
-    at(source)[sameColumn || !rightward ? 'left' : 'right'].out++
-    at(target)[sameColumn || rightward ? 'left' : 'right'].in++
+    const sSide = sameColumn || !rightward ? 'left' : 'right'
+    const tSide = sameColumn || rightward ? 'left' : 'right'
+    at(source)[sSide].out++
+    at(target)[tSide].in++
+    // A two-way bundle is drawn once, oriented by id rather than by flow, so
+    // its other direction meets the very same sides.
+    if (isBidirectional) {
+      at(source)[sSide].in++
+      at(target)[tSide].out++
+    }
   }
   return ports
 }
@@ -83,8 +104,8 @@ export function portView(
   if (!total) return null
   // Lineage with nothing on this canvas — only when NONE of that direction
   // is here, on either side: some of it on the canvas already says it exists.
-  const canvasIn = (ports?.left.in ?? 0) + (ports?.right.in ?? 0)
-  const canvasOut = (ports?.left.out ?? 0) + (ports?.right.out ?? 0)
+  const canvasIn = (ports?.left.in ?? 0) + (ports?.right.in ?? 0) + (ports?.delegated.in ?? 0)
+  const canvasOut = (ports?.left.out ?? 0) + (ports?.right.out ?? 0) + (ports?.delegated.out ?? 0)
   if (side === 'left' && total.in > 0 && canvasIn === 0) return { kind: 'beyond', dir: 'in' }
   if (side === 'right' && total.out > 0 && canvasOut === 0) return { kind: 'beyond', dir: 'out' }
   return null
