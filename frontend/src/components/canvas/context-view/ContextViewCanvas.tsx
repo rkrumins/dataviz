@@ -6145,7 +6145,9 @@ export function ContextViewCanvas({
               // On Hover / Adaptive draw a hovered entity's lines from here.
               hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
               hoverBudget={autoStubThreshold}
-              offCanvasLineage={overlay.active ? undefined : offCanvasByNode}
+              // A stub is a missing-link alert: lineage that leaves the view.
+              // It follows the alerts switch, as the chip and the cue do.
+              offCanvasLineage={overlay.active || !showMissingConnectionIndicators ? undefined : offCanvasByNode}
               // During a trace the reveal itself refuses to write the store
               // (revealOnCanvas), so the click is safe to offer throughout.
               onBringInOffCanvas={(nodeId, side) => { void bringInOffCanvas(nodeId, side) }}
