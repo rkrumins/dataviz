@@ -14220,8 +14220,8 @@ class FalkorDBProvider(GraphDataProvider):
                         op="node_degrees",
                     )
                 except Exception as exc:
-                    # A shed is flow control, not "unknown": an unknown here
-                    # is cached with the answer for the full TTL.
+                    # A shed is flow control, not "unknown": the client is
+                    # told when to ask again (429 + Retry-After).
                     if _is_load_shed(exc):
                         raise
                     logger.warning(
