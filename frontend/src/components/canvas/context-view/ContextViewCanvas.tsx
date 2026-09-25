@@ -4983,7 +4983,7 @@ export function ContextViewCanvas({
   // In a CURATED view they also drive the "outside this view" cue: external
   // = total − internal(loaded). Absent totals mean UNKNOWN → no cue, never
   // a false "no lineage" claim.
-  const externalDegrees = useExternalDegrees(showLineageFlow)
+  const { totals: externalDegrees } = useExternalDegrees(showLineageFlow)
   const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   // Ambient per-node cue: external = total − internal(loaded), for every
   // loaded node with a KNOWN total. One O(E) pass builds internal
