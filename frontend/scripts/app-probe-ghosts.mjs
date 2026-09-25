@@ -9,12 +9,11 @@
  *
  *   node scripts/app-probe-ghosts.mjs [viewId] [--open <container>]
  *
- * Runs twice: with the defaults (nothing folds, nothing rolls up — the
- * product as it ships), then with `canvasLineageRollupEnabled` switched on
- * for THIS browser only, where lines to unloaded entities roll up and the
- * stubs give way. Requires the dev stack up.
+ * Runs once, with the defaults (nothing folds — the product as it ships).
+ * The chains that place unloaded entities are always asked for, so lines to
+ * them roll up where something drawn holds them. Requires the dev stack up.
  */
-import { connect, login, helpers, overrideFeatures, APP_ORIGIN } from './app-probe.mjs'
+import { connect, login, helpers, APP_ORIGIN } from './app-probe.mjs'
 
 const argv = process.argv.slice(2)
 const openFlag = argv.indexOf('--open')
@@ -80,7 +79,7 @@ try {
   await settle(3500)
   let s = await evalJs(STATE)
   check('nothing folds by default — every layer at full width, the canvas scrolls', s.folded === 0 && s.overflow > 0, `overflow ${s.overflow}px`)
-  check('no roll-up requests while the roll-up is off', chainCalls() === 0, `${chainCalls()} calls`)
+  check('the chains are asked for as it ships', chainCalls() > 0, `${chainCalls()} calls`)
 
   const portal = s.portals[0]
   const hidden = s.columns.filter(c => !c.visible).map(c => c.name)
@@ -124,19 +123,6 @@ try {
   check('...and the stub counts go down as they land', s.stubTotal < totalBefore, `${totalBefore} → ${s.stubTotal}`)
 
   await shot('/tmp/app-probe-ghosts-2.png')
-
-  // ── With roll-ups switched on, for this browser only ───────────────────
-  await overrideFeatures(conn, { canvasLineageRollupEnabled: true })
-  events.length = 0
-  await goto(`${APP_ORIGIN}/views/${VIEW}`)
-  await waitForCanvas()
-  await settle(2500)
-  await h.expand(OPEN)
-  await settle(4500)
-  s = await evalJs(STATE)
-  check('with the roll-up on, the chains are asked for', chainCalls() > 0, `${chainCalls()} calls`)
-  check('...and fewer lines are left without a place on the canvas', s.stubTotal < totalBefore, `stub total ${totalBefore} → ${s.stubTotal}`)
-  await shot('/tmp/app-probe-ghosts-3.png')
 } finally {
   close()
 }

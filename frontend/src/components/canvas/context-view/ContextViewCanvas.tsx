@@ -4344,12 +4344,11 @@ export function ContextViewCanvas({
   //
   // Keyed on `overlay.active`, not `traceActive`: during the walk the canvas
   // is still showing BROWSE and must keep its wires and its honest count.
-  // Where the lineage endpoints the canvas never loaded live, so their lines
-  // roll up to a container on screen rather than read as leaving the view.
-  // A preview behind `canvasLineageRollupEnabled` (off by default: a roll-up
-  // trades detail for coverage). Browse only, as the projection below.
-  const lineageRollup = useFeature('canvasLineageRollupEnabled')
-  const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge,
+  // Where the lineage endpoints the canvas does not draw live, so their lines
+  // roll up to a container on screen, or into the column they belong to,
+  // rather than read as leaving the view. Always on: it is how the canvas
+  // tells in-view from outside. Browse only, as the projection below.
+  const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge,
     renderMap, promotedAnchors, aggregatedEdges)
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
@@ -4368,9 +4367,7 @@ export function ContextViewCanvas({
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
-    // Chains already fetched stay cached, so switching the flag off must
-    // also stop them being USED.
-    ancestorChains: lineageRollup ? ancestorChains : undefined,
+    ancestorChains,
     // An anchor is drawn as its column: lineage naming it is in the view.
     promotedAnchors,
   })

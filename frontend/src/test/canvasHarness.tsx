@@ -100,6 +100,9 @@ export interface TraceCanvasHarness {
    *  the entities the canvas asked for roll-ups of. Debounced like the
    *  granularities above. */
   aggregatedSources(): string[][]
+  /** The URNs every `/nodes/ancestor-chains` request carried, in order.
+   *  Recorded only with `ancestorChains`, and debounced like the above. */
+  chainRequests(): string[][]
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -316,7 +319,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][] },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][]; chains: string[][] },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
@@ -408,6 +411,7 @@ function stubProvider(
     // unknown, as the server leaves out a URN it could not answer.
     ...(ancestorChains ? {
       getAncestorChains: async (urns: string[]) => {
+        calls.chains.push([...urns])
         const chains: Record<string, string[]> = {}
         for (const urn of urns) {
           if (!byUrn.has(urn)) continue
@@ -628,7 +632,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][] }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][], chains: [] as string[][] }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -918,6 +922,7 @@ export async function renderCanvasWithTrace(
     providerCalls: () => providerCalls.traceClosure,
     aggregatedGranularities: () => [...providerCalls.aggregated],
     aggregatedSources: () => providerCalls.aggregatedSources.map(urns => [...urns]),
+    chainRequests: () => providerCalls.chains.map(urns => [...urns]),
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })
