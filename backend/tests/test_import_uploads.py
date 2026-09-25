@@ -10,7 +10,6 @@ upload, once (asking again answers with the same import).
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
