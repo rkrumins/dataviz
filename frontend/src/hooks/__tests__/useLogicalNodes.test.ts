@@ -80,4 +80,17 @@ describe('View Wizard groups = the canvas group operations', () => {
     expect(next.assignments.x).toEqual({ layerId: 'M', logicalNodeId: 'a1' })   // inside a1, inside a
     expect(next.assignments.y).toEqual({ layerId: 'L', logicalNodeId: 'b' })
   })
+
+  it('refuses an ungroup or move-everything that would leave two same-named groups — members stay put', () => {
+    const commit = vi.fn()
+    // Top level: A (› A1), B, and another A1 — ungrouping A would lift its A1 beside the other.
+    const l = layout()
+    const twin = { ...l, layers: [{ ...l.layers[0], logicalNodes: [...l.layers[0].logicalNodes!, { id: 'x1', name: 'a1 ', type: 'group' }] }] } as NormalizedReferenceLayout
+    const { result } = renderHook(() => useLogicalNodes(twin, commit))
+    expect(result.current.ungroupNode('L', 'a')).toBe('A1')
+    expect(result.current.nameTaken('L', 'b', null)).toBe(true)
+    expect(result.current.nameTaken('L', 'B', null, 'b')).toBe(false)       // its own name is not a clash
+    expect(commit).not.toHaveBeenCalled()
+  })
 })
+

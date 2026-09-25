@@ -208,35 +208,48 @@ function InlineInput({
     placeholder = 'Group name…',
     onConfirm,
     onCancel,
+    takenIn,
 }: {
     defaultValue?: string
     placeholder?: string
     onConfirm: (value: string) => void
     onCancel: () => void
+    /** Where a name is already used beside this group ("Apps", "Critical") — refused, said while typing. */
+    takenIn?: (value: string) => string | null
 }) {
     const [value, setValue] = useState(defaultValue)
+    const clash = value.trim() ? takenIn?.(value.trim()) ?? null : null
 
     return (
-        <input
-            autoFocus
-            value={value}
-            placeholder={placeholder}
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => {
-                if (e.key === 'Enter' && value.trim()) onConfirm(value.trim())
-                if (e.key === 'Escape') onCancel()
-                e.stopPropagation()
-            }}
-            onBlur={() => {
-                if (value.trim()) onConfirm(value.trim())
-                else onCancel()
-            }}
-            className={cn(
-                'flex-1 min-w-0 bg-transparent border-b border-blue-400 outline-none',
-                'text-sm text-slate-800 dark:text-white placeholder:text-slate-400',
-                'py-0.5'
+        <span className="flex-1 min-w-0 flex flex-col">
+            <input
+                autoFocus
+                value={value}
+                placeholder={placeholder}
+                aria-invalid={!!clash || undefined}
+                onChange={e => setValue(e.target.value)}
+                onKeyDown={e => {
+                    if (e.key === 'Enter' && value.trim() && !clash) onConfirm(value.trim())
+                    if (e.key === 'Escape') onCancel()
+                    e.stopPropagation()
+                }}
+                onBlur={() => {
+                    if (value.trim() && !clash) onConfirm(value.trim())
+                    else onCancel()
+                }}
+                className={cn(
+                    'flex-1 min-w-0 bg-transparent border-b outline-none',
+                    clash ? 'border-red-400' : 'border-blue-400',
+                    'text-sm text-slate-800 dark:text-white placeholder:text-slate-400',
+                    'py-0.5'
+                )}
+            />
+            {clash && (
+                <span role="alert" className="text-[11px] text-red-500 mt-0.5">
+                    There's already a group called “{value.trim()}” in {clash}.
+                </span>
             )}
-        />
+        </span>
     )
 }
 
@@ -538,6 +551,10 @@ function LogicalNodeItem({
     const [isDragOver, setIsDragOver] = useState(false)
     // The same group actions the canvas offers (one set of operations — see useLogicalNodes).
     const [groupMode, setGroupMode] = useState<null | 'move' | 'contents' | 'confirmDelete'>(null)
+    // Why the last group action on this row was refused (a same-named group already sits there).
+    const [refusal, setRefusal] = useState<string | null>(null)
+    const refuse = (clash: string | null) => setRefusal(clash
+        ? `There's already a group called “${clash}” there — rename one of them first.` : null)
     const layerGroups = [{ id: layerId, logicalNodes: logicalNodes.nodesForLayer(layerId) }] as unknown as ViewLayerConfig[]
     const ownSubtree = new Set(groupSubtreeIds(layerGroups, layerId, node.id))
     const moveTargets = listGroups(layerGroups, layerId).filter(g => !ownSubtree.has(g.id))
@@ -628,6 +645,11 @@ function LogicalNodeItem({
                 {isRenaming ? (
                     <InlineInput
                         defaultValue={node.name}
+                        takenIn={name => {
+                            const parent = logicalNodes.parentOf(layerId, node.id)
+                            return logicalNodes.nameTaken(layerId, name, parent, node.id)
+                                ? (parent ? logicalNodes.nodePathLabel(layerId, parent) : layerName) : null
+                        }}
                         onConfirm={name => {
                             logicalNodes.renameNode(layerId, node.id, name)
                             setIsRenaming(false)
@@ -696,7 +718,7 @@ function LogicalNodeItem({
                         <ArrowRightLeft className="w-3 h-3" />
                     </button>
                     <button
-                        onClick={e => { e.stopPropagation(); logicalNodes.ungroupNode(layerId, node.id) }}
+                        onClick={e => { e.stopPropagation(); refuse(logicalNodes.ungroupNode(layerId, node.id)) }}
                         className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
                         title={`Ungroup ${node.name} — its contents move up a level`}
                         aria-label={`Ungroup ${node.name}`}
@@ -713,6 +735,16 @@ function LogicalNodeItem({
                     </button>
                 </div>
             </motion.div>
+
+            {refusal && (
+                <div style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }} className="px-2 py-1" role="alert">
+                    <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 bg-red-50 dark:bg-red-900/20 text-xs text-red-600 dark:text-red-400">
+                        <span className="flex-1">{refusal}</span>
+                        <button onClick={e => { e.stopPropagation(); setRefusal(null) }}
+                            className="px-1.5 rounded-md hover:bg-red-500/10" aria-label="Dismiss">OK</button>
+                    </div>
+                </div>
+            )}
 
             {/* Move group / move contents / delete — inline, as on the canvas */}
             {groupMode && (
@@ -736,8 +768,8 @@ function LogicalNodeItem({
                                 const v = e.target.value
                                 if (groupMode === 'move' && v) {
                                     const [toLayerId, parent] = JSON.parse(v) as [string, string | null]
-                                    logicalNodes.moveNodeToLayer(layerId, node.id, toLayerId, parent ?? undefined)
-                                } else if (v) logicalNodes.moveContents(layerId, node.id, v)
+                                    refuse(logicalNodes.moveNodeToLayer(layerId, node.id, toLayerId, parent ?? undefined))
+                                } else if (v) refuse(logicalNodes.moveContents(layerId, node.id, v))
                                 setGroupMode(null)
                             }}
                             className="w-full px-2 py-1 rounded-lg text-xs bg-white dark:bg-slate-800 border border-violet-300 dark:border-violet-500/50 text-slate-700 dark:text-slate-200 outline-none"
@@ -776,6 +808,7 @@ function LogicalNodeItem({
                             <Folder className="w-4 h-4 text-blue-400 shrink-0" />
                             <InlineInput
                                 placeholder="Sub-group name…"
+                                takenIn={name => logicalNodes.nameTaken(layerId, name, node.id) ? logicalNodes.nodePathLabel(layerId, node.id) : null}
                                 onConfirm={name => {
                                     logicalNodes.addNode(layerId, name, node.id)
                                     setShowAddChild(false)
@@ -1328,6 +1361,7 @@ function LayerRow({
                                                 <Folder className="w-4 h-4 text-blue-400 shrink-0" />
                                                 <InlineInput
                                                     placeholder="Group name…"
+                                                    takenIn={name => logicalNodes.nameTaken(layer.id, name, null) ? layer.name : null}
                                                     onConfirm={name => {
                                                         logicalNodes.addNode(layer.id, name)
                                                         setShowAddRoot(false)

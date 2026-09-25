@@ -2147,7 +2147,28 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, graph_id)
             committed = graph.main_head_commit_seq if graph else 0
             projected = ps.projected_commit_seq if ps else 0
+            # The revision each side is at — the main commit with that seq (one indexed read). The
+            # sync indicators show it, so "version #12" can be matched to a commit in History.
+            revisions: Dict[int, CommitORM] = {}
+            if graph and (committed or projected):
+                main_id = await self._main_branch_id(s, graph_id)
+                rows = (await s.execute(
+                    select(CommitORM).where(
+                        CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                        CommitORM.commit_seq.in_({committed, projected}),
+                    )
+                )).scalars().all()
+                revisions = {int(c.commit_seq): c for c in rows}
+
+            def _rev(seq: int) -> Optional[Dict[str, object]]:
+                c = revisions.get(int(seq))
+                return None if c is None else {
+                    "commit_id": c.id, "created_at": c.created_at,
+                    "actor": c.actor, "message": c.message,
+                }
             return {
+                "committed_revision": _rev(committed),
+                "projected_revision": _rev(projected),
                 "committed": committed,
                 "projected": projected,
                 "target": ps.target_commit_seq if ps else 0,
