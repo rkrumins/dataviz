@@ -7878,6 +7878,8 @@ class FalkorDBProvider(GraphDataProvider):
                         )
                         return res.result_set or []
                     except Exception as exc:
+                        if _is_load_shed(exc):
+                            raise   # "ask again in a moment", not "these are unknown"
                         logger.warning(
                             "ancestor chain bucket (%s, %d urns) failed: %s",
                             label or "<unlabeled>", len(bucket), exc,

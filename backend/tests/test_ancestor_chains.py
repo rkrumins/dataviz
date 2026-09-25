@@ -340,6 +340,23 @@ def test_a_shed_is_not_asked_again_one_urn_at_a_time():
     assert per_urn == []
 
 
+def test_a_shed_chain_query_is_raised_not_answered_short():
+    """Only a shed while bucketing labels was raised. A shed chain query was
+    swallowed like any failure, so /nodes/ancestor-chains answered 200 with
+    those urns missing instead of 429 + Retry-After."""
+    from backend.common.adapters import ProviderBusy
+
+    p = _walker([("Dataset", [LEAF])], {LEAF: [PARENT, ROOT]})
+
+    async def _shed(cypher, params=None, timeout=None, op=None):
+        raise ProviderBusy("falkordb", "queue")
+
+    p._ro_query = _shed
+    with pytest.raises(ProviderBusy):
+        asyncio.run(p._compute_and_store_ancestors_bulk([LEAF]))
+    assert p._redis.written == []
+
+
 def test_a_single_urn_read_caches_nothing_it_could_not_answer():
     p = _walker()
 
