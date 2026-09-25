@@ -167,6 +167,9 @@ interface PreferencesState {
    *  a small hint in their place, which opens the tray on a click. */
   showConnectedTrays: boolean
   toggleConnectedTrays: () => void
+  /** Arrowheads on lineage lines (Display › Direction). */
+  showEdgeDirection: boolean
+  toggleEdgeDirection: () => void
   /** Incoming (upstream) and outgoing (downstream) lineage colours — one pair
    *  for every surface (lib/lineageDirectionColors.ts). */
   lineageDirectionColors: LineageDirectionColors
@@ -394,6 +397,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
       showConnectedTrays: true,
       toggleConnectedTrays: () => set((state) => ({ showConnectedTrays: !state.showConnectedTrays })),
+      showEdgeDirection: true,
+      toggleEdgeDirection: () => set((state) => ({ showEdgeDirection: !(state.showEdgeDirection ?? true) })),
       lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS,
       setLineageDirectionColors: (lineageDirectionColors) => set({ lineageDirectionColors }),
       showLineageCounts: true,
@@ -475,6 +480,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,
         subtleCanvasTreeLines: false,
+        showMemoryUsage: false,
       }),
 
       // Lineage Lens body mode

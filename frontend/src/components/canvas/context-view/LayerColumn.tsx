@@ -306,7 +306,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   isTracing = false,
   highlightedNodes,
   isHighlightActive = false,
-  onAnimationComplete: _onAnimationComplete,
+  onAnimationComplete,
   onLoadMore,
   onRevealSearchHit,
   loadingNodes,
@@ -1343,6 +1343,11 @@ export const LayerColumn = React.memo(function LayerColumn({
     setRailFocusSeen(railFocusId)
     setOpenRail(null)
   }
+  // A tray and its hint are different places for the focused entity's lines
+  // to dock, so opening one or switching trays draws those lines again.
+  useEffect(() => {
+    onAnimationComplete?.()
+  }, [openRail, showConnectedTrays, onAnimationComplete])
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in

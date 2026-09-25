@@ -81,6 +81,19 @@ describe('DisplayMenu', () => {
     expect(props.onReset).toHaveBeenCalled()
   })
 
+  it('Reset is offered when only the memory gauge is pinned, and says what it puts back', async () => {
+    usePreferencesStore.setState({ showMemoryUsage: true })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const reset = screen.getByRole('button', { name: 'Reset' })
+    fireEvent.focus(reset)
+    expect(await screen.findByText(
+      'Put zoom, density, icons, badges, tree lines and the memory gauge back to their defaults',
+    )).toBeInTheDocument()
+    usePreferencesStore.setState({ showMemoryUsage: false })
+  })
+
   it('On Hover shows the per-entity cap, and the slider sets it', () => {
     usePreferencesStore.setState({ autoStubThreshold: 500 })
     render(<DisplayMenu {...baseProps()} />)

@@ -1489,8 +1489,10 @@ export function ContextViewCanvas({
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
 
-  // Edge direction toggle — controls arrowheads + animated mid-edge chevron
-  const [showEdgeDirection, setShowEdgeDirection] = useState(true)
+  // Edge direction toggle — controls arrowheads + animated mid-edge chevron.
+  // A preference, so it is remembered like every other Display switch.
+  const showEdgeDirection = usePreferencesStore((s) => s.showEdgeDirection) ?? true
+  const toggleEdgeDirection = usePreferencesStore((s) => s.toggleEdgeDirection)
 
   // Trace bottom dock — expanded vs compact. Lifted to the canvas so a
   // global Cmd/Ctrl+I shortcut can toggle it from anywhere.
@@ -5371,7 +5373,7 @@ export function ContextViewCanvas({
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
         showEdgeDirection={showEdgeDirection}
-        onToggleEdgeDirection={() => setShowEdgeDirection(v => !v)}
+        onToggleEdgeDirection={toggleEdgeDirection}
         lineageRenderMode={lineageRenderMode}
         onSetLineageRenderMode={setLineageRenderMode}
         traceActive={traceActive}

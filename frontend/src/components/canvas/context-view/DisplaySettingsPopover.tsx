@@ -76,13 +76,16 @@ export function isDefaultState(props: {
   subtleTreeLines: boolean
   /** Absent reads as the default (shown). */
   showEntityIcons?: boolean
+  /** Absent reads as the default (off). */
+  showMemoryUsage?: boolean
 }): boolean {
   return (
     Math.abs(props.canvasZoom - 1) < 0.001 &&
     props.canvasDensity === 'spacious' &&
     props.showTypeBadge === true &&
     props.subtleTreeLines === false &&
-    props.showEntityIcons !== false
+    props.showEntityIcons !== false &&
+    props.showMemoryUsage !== true
   )
 }
 

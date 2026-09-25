@@ -18,7 +18,7 @@ export interface FlowRibbon {
 export const MAX_FLOW_RIBBONS = 12
 
 export function aggregateFlowRibbons(
-  edges: Array<{ source: string; target: string; edgeCount?: number }>,
+  edges: Array<{ source: string; target: string; edgeCount?: number; isBidirectional?: boolean }>,
   nodeLayerMap: Map<string, string>,
   layerOrder: string[],
   top: number = MAX_FLOW_RIBBONS,
@@ -26,10 +26,16 @@ export function aggregateFlowRibbons(
   const order = new Map(layerOrder.map((id, i) => [id, i]))
   const byPair = new Map<string, FlowRibbon>()
   for (const e of edges) {
-    const sLayer = nodeLayerMap.get(e.source)
-    const tLayer = nodeLayerMap.get(e.target)
-    if (!sLayer || !tLayer || sLayer === tLayer) continue
-    if (!order.has(sLayer) || !order.has(tLayer)) continue
+    const from = nodeLayerMap.get(e.source)
+    const to = nodeLayerMap.get(e.target)
+    if (!from || !to || from === to) continue
+    if (!order.has(from) || !order.has(to)) continue
+    // A band reads left to right, and the overlay draws no other: a
+    // right-to-left pair would take a slot and draw nothing. A two-way
+    // bundle's ends are ordered by id, so it counts toward the forward band.
+    const forward = order.get(from)! < order.get(to)!
+    if (!forward && !e.isBidirectional) continue
+    const [sLayer, tLayer] = forward ? [from, to] : [to, from]
     const key = `${sLayer}->${tLayer}`
     const existing = byPair.get(key)
     const weight = e.edgeCount || 1
