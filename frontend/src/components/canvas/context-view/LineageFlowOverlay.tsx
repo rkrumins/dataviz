@@ -353,6 +353,10 @@ export function LineageFlowOverlay({
     }
     return hoverLinesMemo.current.lines
   }, [hoverPoolIndex, hoverBudget])
+  const poolById = useMemo(
+    () => (hoverPool ? new Map(hoverPool.map(line => [line.id, line])) : null),
+    [hoverPool],
+  )
 
   // Update paths function with optimizations
   const updateFlow = useCallback(() => {
@@ -516,6 +520,16 @@ export function LineageFlowOverlay({
       if (fromTgt) for (const e of fromTgt) candidateEdges.add(e)
     })
     for (const e of hoverLinesFor(hovered)) candidateEdges.add(e)
+    // A Flows-panel row lights its lines even where On Hover draws none:
+    // they come from the pool, capped like a hover.
+    if (isHighlightActive && highlightedEdges && poolById) {
+      let added = 0
+      for (const id of highlightedEdges) {
+        if (added >= hoverBudget) break
+        const line = poolById.get(id)
+        if (line) { candidateEdges.add(line); added++ }
+      }
+    }
 
     candidateEdges.forEach(edge => {
       const sourceId = `layer-node-${edge.source}`
@@ -1055,7 +1069,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, tints])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after

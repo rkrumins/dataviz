@@ -4500,6 +4500,15 @@ export function ContextViewCanvas({
     // (LineageNeighbors) falls back to raw `edges` when empty.
   }, [visibleLineageEdgesFingerprint, setVisibleEdges])
 
+  // The lines the canvas can draw. A line that stands aside for its
+  // children's finer ones (`isDelegated`) draws only while one of its ends is
+  // hovered, from the hover pool, so it takes no slot in a budget, adds to no
+  // count, and makes no ribbon or Flows row of its own.
+  const drawableLineageEdges = useMemo(
+    () => visibleLineageEdges.filter(e => !e.isDelegated),
+    [visibleLineageEdges],
+  )
+
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
   // suppresses ambient edges in favour of per-node indicators (hover /
   // selection materializes); `auto` renders everything below
@@ -4513,8 +4522,8 @@ export function ContextViewCanvas({
     if (overlay.active) return false
     if (lineageRenderMode === 'raw') return false
     if (lineageRenderMode === 'stubs') return true
-    return visibleLineageEdges.length > autoStubThreshold
-  }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
+    return drawableLineageEdges.length > autoStubThreshold
+  }, [overlay.active, lineageRenderMode, drawableLineageEdges.length, autoStubThreshold])
 
   // The ambient budget ranks by `bySignificance` (lineDensity.ts): how many
   // lines a line replaces, never the weight it stands for.
@@ -4529,8 +4538,8 @@ export function ContextViewCanvas({
   // readable; SVG path count stays bounded regardless of graph size.
   const rankedAmbientEdges = useMemo(() => {
     if (!isStubsMode || lineageRenderMode !== 'auto') return null
-    return [...visibleLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
-  }, [isStubsMode, lineageRenderMode, visibleLineageEdges, autoStubThreshold])
+    return [...drawableLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
+  }, [isStubsMode, lineageRenderMode, drawableLineageEdges, autoStubThreshold])
 
   // Effective edge set passed to the renderer, plus the shown/total
   // bookkeeping the status chips surface. Focus (selection / trace anchor)
@@ -4544,14 +4553,14 @@ export function ContextViewCanvas({
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
     }
     const ambient = rankedAmbientEdges ?? []
-    const ambientTotal = lineageRenderMode === 'auto' ? visibleLineageEdges.length : 0
+    const ambientTotal = lineageRenderMode === 'auto' ? drawableLineageEdges.length : 0
     const focusIds = new Set<string>()
     if (selectedNodeId) focusIds.add(selectedNodeId)
     if (overlay.active && canvasTrace.tracedUrn) focusIds.add(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     if (focusIds.size === 0) {
       return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
     }
-    const focusAll = visibleLineageEdges.filter(e =>
+    const focusAll = drawableLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
     const focus = focusAll.length > autoStubThreshold
@@ -4568,7 +4577,7 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
@@ -4690,26 +4699,28 @@ export function ContextViewCanvas({
     void revealPartners([...batch])
   }, [selectedNodeId, offCanvasByNode, revealPartners, traceWriteLocked])
 
-  // The panel reads the SAME array the overlay is handed, so "in view"
-  // means post-budget and the drawn set is a subset of the model.
+  // The panel lists every line the canvas can draw — not the budgeted
+  // subset the overlay is handed, which in On Hover is empty until something
+  // is hovered — minus lines that stand aside for finer ones. Hovering or
+  // pinning a row draws its lines from the hover pool (LineageFlowOverlay).
   const connectionModel = useMemo(
-    () => buildConnectionModel(effectiveLineageEdges),
-    [effectiveLineageEdges]
+    () => buildConnectionModel(drawableLineageEdges),
+    [drawableLineageEdges]
   )
 
   // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
-  // EVERY projected edge (not just the budgeted subset) so the bands show
+  // EVERY drawable line (not just the budgeted subset) so the bands show
   // the true totals the budget summarizes. Only in Adaptive's summarized
   // state; user-toggleable.
   const flowRibbons = useMemo(() => {
     if (!showFlowRibbons || !isStubsMode || lineageRenderMode !== 'auto') return undefined
     const ribbons = aggregateFlowRibbons(
-      visibleLineageEdges,
+      drawableLineageEdges,
       nodeLayerMap,
       sortedLayers.map(l => l.id),
     )
     return ribbons.length > 0 ? ribbons : undefined
-  }, [showFlowRibbons, isStubsMode, lineageRenderMode, visibleLineageEdges, nodeLayerMap, sortedLayers])
+  }, [showFlowRibbons, isStubsMode, lineageRenderMode, drawableLineageEdges, nodeLayerMap, sortedLayers])
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
@@ -4735,8 +4746,8 @@ export function ContextViewCanvas({
   // Per-node lineage counts. Drives the in/out indicators on each entity
   // card — computed in EVERY render mode so a node always communicates
   // "has lineage in/out" vs "has none" (full ribbons in stubs mode, a
-  // quiet tab otherwise; see LineageFlowOverlay). Counts come from the
-  // full projected set (not the hover-filtered slice) so the markers
+  // quiet tab otherwise; see LineageFlowOverlay). Counts come from every
+  // drawable line (not the hover-filtered slice) so the markers
   // reflect the entity's true lineage volume regardless of which edges
   // happen to be materialized for the current hover.
   // Where each card's lines plug in, by side and direction — its lineage
@@ -4755,7 +4766,7 @@ export function ContextViewCanvas({
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()
-    for (const e of visibleLineageEdges) {
+    for (const e of drawableLineageEdges) {
       const s = counts.get(e.source) ?? { in: 0, out: 0 }
       s.out++
       counts.set(e.source, s)
@@ -4764,7 +4775,7 @@ export function ContextViewCanvas({
       counts.set(e.target, t)
     }
     return counts
-  }, [visibleLineageEdges])
+  }, [drawableLineageEdges])
 
   // The entities with the most lineage on the canvas — the Adaptive guide
   // names them, each one click from all of its lines. Only while Adaptive is

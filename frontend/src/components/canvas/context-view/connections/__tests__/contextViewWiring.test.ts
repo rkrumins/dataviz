@@ -63,6 +63,23 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, autoStubThreshold\)/)
   })
 
+  it('the budget, the hubs, the ribbons and the panel read one list of drawable lines', () => {
+    // A line that stands aside for its children's finer ones draws only
+    // while one of its ends is hovered. Counted in a budget, it took a slot
+    // it never filled; listed in the panel, it was a flow nobody could see.
+    expect(source).toMatch(/drawableLineageEdges = useMemo\(\s*\(\) => visibleLineageEdges\.filter\(e => !e\.isDelegated\)/)
+    expect(source).toMatch(/\[\.\.\.drawableLineageEdges\]\.sort\(bySignificance\)/)
+    expect(source).toMatch(/aggregateFlowRibbons\(\s*drawableLineageEdges,/)
+    expect(source).toMatch(/for \(const e of drawableLineageEdges\) \{/)
+    // The panel lists every drawable line, not the budgeted subset the
+    // overlay is handed — in On Hover that subset is empty until a hover.
+    expect(source).toContain('buildConnectionModel(drawableLineageEdges)')
+    expect(source).not.toContain('buildConnectionModel(effectiveLineageEdges)')
+    // The hover pool keeps everything: hovering an end brings a delegated
+    // line back.
+    expect(source).toContain('hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}')
+  })
+
   it('the panel highlight reaches the overlay only — cards keep their own highlight', () => {
     expect(source).toContain(
       'isHighlightActive={connectionHighlight !== null || isHighlightActive}'
