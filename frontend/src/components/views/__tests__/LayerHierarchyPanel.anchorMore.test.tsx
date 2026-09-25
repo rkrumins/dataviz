@@ -24,7 +24,7 @@ const layers: ViewLayerConfig[] = [
   { id: 'l1', name: 'Financial Services', entityTypes: [], order: 0, anchorUrn: ANCHOR },
 ]
 const logicalNodes: UseLogicalNodesReturn = {
-  addNode: vi.fn(), renameNode: vi.fn(), deleteNode: vi.fn(), moveNode: vi.fn(), moveNodeToLayer: vi.fn(), layerChoices: () => [], ungroupNode: vi.fn(), moveContents: vi.fn(),
+  addNode: vi.fn(), renameNode: vi.fn(), deleteNode: vi.fn(), moveNode: vi.fn(), moveNodeToLayer: vi.fn(), layerChoices: () => [], nameTaken: () => false, parentOf: () => null, ungroupNode: vi.fn(), moveContents: vi.fn(),
   toggleCollapse: vi.fn(), nodesForLayer: () => [], nodePathLabel: (_l: string, n: string) => n,
   canUndo: false, canRedo: false, undo: vi.fn(), redo: vi.fn(),
 }

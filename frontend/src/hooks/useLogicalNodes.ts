@@ -28,13 +28,19 @@ export interface UseLogicalNodesReturn {
     moveNode: (layerId: string, nodeId: string, newParentId?: string) => void
     /** Move a group, with everything in it, to another layer — to its top level or into one of its
      *  groups. The entities placed in it (and in its sub-groups) go along. */
-    moveNodeToLayer: (fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => void
+    moveNodeToLayer: (fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => string | null
     /** Every layer with its groups — where a group can move to. */
     layerChoices: () => Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
     /** Dismantle a group: its sub-groups and entities move up one level */
-    ungroupNode: (layerId: string, nodeId: string) => void
+    ungroupNode: (layerId: string, nodeId: string) => string | null
     /** Move everything in one group (entities and sub-groups) into another */
-    moveContents: (layerId: string, fromId: string, toId: string) => void
+    moveContents: (layerId: string, fromId: string, toId: string) => string | null
+    /** Is `name` already used by a group directly inside `parentId` (null = the layer's top level),
+     *  other than `exceptId`? Two groups side by side can't share a name — every operation refuses
+     *  that, and the moves above return the clashing name (null when done). */
+    nameTaken: (layerId: string, name: string, parentId: string | null, exceptId?: string) => boolean
+    /** The group a group sits in (null = the layer's top level). */
+    parentOf: (layerId: string, nodeId: string) => string | null
     /** Toggle collapse/expand visual state */
     toggleCollapse: (layerId: string, nodeId: string) => void
 
@@ -95,7 +101,9 @@ export function useLogicalNodes(
 
     const moveNodeToLayer = useCallback((fromLayerId: string, nodeId: string, toLayerId: string, newParentId?: string) => {
         const next = layerOps.moveGroupToLayer(layout, fromLayerId, nodeId, toLayerId, newParentId ?? null)
-        if (next !== layout) commit(next)
+        if (next !== layout) { commit(next); return null }
+        const name = layerOps.listGroups(layout.layers, fromLayerId).find(g => g.id === nodeId)?.name
+        return name ? layerOps.groupNameClash(layout.layers, toLayerId, newParentId ?? null, [name], [nodeId]) : null
     }, [layout, commit])
 
     const layerChoices = useCallback(
@@ -105,14 +113,30 @@ export function useLogicalNodes(
 
     const ungroupNode = useCallback((layerId: string, nodeId: string) => {
         const parent = layerOps.parentGroupOf(layout.layers, layerId, nodeId) ?? null
+        const clash = layerOps.groupNameClash(layout.layers, layerId, parent, layerOps.childGroupNames(layout.layers, layerId, nodeId), [nodeId])
+        if (clash) return clash
         commit(reassignGroupMembers(withLayers(layerOps.ungroup(layout.layers, layerId, nodeId)), [nodeId], parent))
+        return null
     }, [layout, commit, withLayers])
 
     const moveContents = useCallback((layerId: string, fromId: string, toId: string) => {
+        const clash = layerOps.groupNameClash(layout.layers, layerId, toId, layerOps.childGroupNames(layout.layers, layerId, fromId))
+        if (clash) return clash
         const layers = layerOps.moveGroupContents(layout.layers, layerId, fromId, toId)
         const next = reassignGroupMembers(withLayers(layers), [fromId], toId)
         if (next.layers !== layout.layers || next.assignments !== layout.assignments) commit(next)
+        return null
     }, [layout, commit, withLayers])
+
+    const nameTaken = useCallback(
+        (layerId: string, name: string, parentId: string | null, exceptId?: string) =>
+            !!layerOps.groupNameClash(layout.layers, layerId, parentId, [name], exceptId ? [exceptId] : []),
+        [layout],
+    )
+    const parentOf = useCallback(
+        (layerId: string, nodeId: string) => layerOps.parentGroupOf(layout.layers, layerId, nodeId) ?? null,
+        [layout],
+    )
 
     const toggleCollapse = useCallback((layerId: string, nodeId: string) => {
         const toggle = (gs: LogicalNodeConfig[]): LogicalNodeConfig[] => gs.map(g => ({
@@ -135,7 +159,7 @@ export function useLogicalNodes(
     )
 
     return {
-        addNode, renameNode, deleteNode, moveNode, moveNodeToLayer, layerChoices, ungroupNode, moveContents, toggleCollapse,
+        addNode, renameNode, deleteNode, moveNode, moveNodeToLayer, layerChoices, nameTaken, parentOf, ungroupNode, moveContents, toggleCollapse,
         nodesForLayer, nodePathLabel,
         canUndo: history.canUndo, canRedo: history.canRedo, undo: history.undo, redo: history.redo,
     }

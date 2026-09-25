@@ -77,6 +77,7 @@ import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
+import { SyncStatusChip } from '@/features/sync-status/SyncStatusChip'
 import { cn } from '@/lib/utils'
 import {
     DynamicIcon, resolveViewIcon, viewTypeColor, viewTypeMeta, viewTypeLabel,
@@ -569,6 +570,16 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                         <span className="truncate">{builtOnLabel}</span>
                                     </button>
                                 </HoverTip>
+                                {/* Is what this view reads in sync with where it comes from?
+                                    Beside the source it describes. */}
+                                {view.workspaceId && (
+                                    <SyncStatusChip
+                                        workspaceId={view.workspaceId}
+                                        dataSourceId={view.dataSourceId}
+                                        viewId={viewId}
+                                        className="ml-1.5 hidden sm:inline-flex"
+                                    />
+                                )}
                             </>
                         )}
                     </div>
