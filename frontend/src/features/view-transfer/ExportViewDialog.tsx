@@ -34,7 +34,7 @@ import {
   type PackageDataVersion, type PackageScope,
 } from '@/services/viewTransferApiService'
 import type { ViewVersionSummary } from '@/services/viewVersionsApiService'
-import type { Job } from '@/services/importExportApiService'
+import { queuePosition, type Job } from '@/services/importExportApiService'
 import { recordEvent } from '@/services/telemetryService'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
@@ -110,6 +110,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
   const [dataVersion, setDataVersion] = useState<PackageDataVersion>('published')
   const [packaged, setPackaged] = useState<ExportedPackage | null>(null)
   const [job, setJob] = useState<Job | null>(null)
+  const queued = queuePosition(job)
   const tooMany = views.length > MAX_VIEWS_PER_FILE
   const preview = useExportPreview(views, !tooMany && phase === 'choose')
   const packageOption = usePackageOption(views, preview.data?.views)
@@ -227,6 +228,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
                 <p className="text-[11px] text-ink-muted">
                   {withData
                     ? (job?.status === 'running' ? 'Writing the graph data and packing it with the view. Large sources take a while.'
+                      : queued ? `Waiting to start: ${queued}`
                       : 'Recording the version and starting the export.')
                     : 'Recording the version and naming every entity it places.'} The download starts by itself.
                 </p>

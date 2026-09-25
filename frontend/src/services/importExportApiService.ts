@@ -2,16 +2,20 @@
  * Import/Export API Service — the bulk CRUD surface for a data source's graph.
  *
  * Backend-driven by design (so the same flow is scriptable/automatable): the browser uploads a
- * file to `POST /api/v1/{wsId}/versioning/graphs/{gid}/imports` (the file IS the request body,
- * options are query params), the server opens/append s a **draft**, resolves + applies the rows
- * onto it, and the changes become reviewable through the existing draft diff/publish endpoints.
- * Export is symmetric: ask what an export would hold (the plan), then the browser downloads it
- * as the server writes it, a re-importable artifact (a backup) of any size.
+ * file in parts to `…/graphs/{gid}/imports/uploads` (resumable, up to 10 GB; a script can instead
+ * send the whole file as the body of `POST …/imports`), the server opens/appends a **draft**,
+ * resolves + applies the rows onto it, and the changes become reviewable through the existing
+ * draft diff/publish endpoints.
+ * Export is symmetric: ask what an export would hold (the plan), then download it, a
+ * re-importable artifact (a backup). The server's workers prepare a data source with version
+ * control's export (up to 50 GB), and its download resumes; one without streams as it is read.
  *
  * Talks to the workspace-scoped versioning router, mirroring `versioningApiService`
  * (cookie + CSRF session via `fetchWithTimeout`, camelCase wire types).
  */
 import { authFetch } from './apiClient'
+import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
 
@@ -32,6 +36,9 @@ export interface ExportSummary {
   nodes: number
   edges: number
   bytes: number
+  /** While it runs: the passes over the records so far (a spreadsheet reads them all once for its
+   *  columns, then again to write them); `nodes` and `edges` count the current pass. */
+  passes?: number
 }
 
 export interface Job {
@@ -46,6 +53,18 @@ export interface Job {
   errorMessage?: string | null
   createdAt?: string
   completedAt?: string | null
+  /** Queued for the server's import/export workers: how many jobs are ahead of it; else absent. */
+  queuedAhead?: number | null
+  /** A finished export: whether its file is still kept to download (it is for a day). */
+  kept?: boolean
+}
+
+/** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
+export function queuePosition(job: Job | null | undefined): string | null {
+  const ahead = job?.queuedAhead
+  if (ahead == null) return null
+  if (ahead === 0) return 'It starts next.'
+  return `${ahead} ${ahead === 1 ? 'job is' : 'jobs are'} ahead of it.`
 }
 
 export interface CreateImportResult {
@@ -94,24 +113,118 @@ export function inferFormat(fileName: string): ImportFormat {
   return 'ndjson'
 }
 
-/** Upload a file and start the import job (the file is the raw request body). */
-export async function createImport(
+// ── Resumable upload ─────────────────────────────────────────────────────────
+// A large file goes up in parts, each its own request, several at once; a part that fails is sent
+// again, and an upload interrupted by a dropped connection or a reload resumes where it stopped.
+
+/** The most one import can be: a file read a row at a time (NDJSON, CSV, TSV) up to 10 GiB, a JSON
+ *  array or Excel workbook (read whole) up to 100 MB. The server holds the same limits. */
+export const MAX_IMPORT_BYTES = 10 * 1024 ** 3
+export const MAX_WHOLE_FILE_IMPORT_BYTES = 100 * 1024 ** 2
+
+export function importLimit(format: ImportFormat): number {
+  return format === 'json' || format === 'xlsx' ? MAX_WHOLE_FILE_IMPORT_BYTES : MAX_IMPORT_BYTES
+}
+
+/** An import's file on its way up in parts. */
+export interface ImportUpload {
+  uploadId: string
+  fileName: string
+  size: number
+  format: string
+  partBytes: number
+  parts: number
+  /** The parts that arrived whole: what a resumed upload doesn't send again. */
+  received: number[]
+  jobId?: string | null
+}
+
+const PART_CONCURRENCY = 3
+const PART_ATTEMPTS = 5
+
+const uploadsUrl = (wsId: string, graphId: string) => `${base(wsId)}/graphs/${graphId}/imports/uploads`
+
+function createImportUpload(wsId: string, graphId: string, file: File, format: ImportFormat): Promise<ImportUpload> {
+  return authFetch<ImportUpload>(uploadsUrl(wsId, graphId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName: file.name, size: file.size, format }),
+  })
+}
+
+/** Send one part, retrying a dropped connection or a server error with backoff; a refusal (4xx,
+ *  but for a timeout or a busy server) is final. */
+async function putPart(url: string, blob: Blob, signal?: AbortSignal): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    let res: Response | null = null
+    try {
+      res = await fetchWithTimeout(url, { method: 'PUT', body: blob, signal, timeoutMs: 120_000 })
+    } catch (err) {
+      if (signal?.aborted || attempt >= PART_ATTEMPTS) throw err
+    }
+    if (res?.ok) return
+    if (res && res.status < 500 && res.status !== 408 && res.status !== 429) {
+      throw new Error(extractErrorMessageFromText(await res.text(), res.statusText))
+    }
+    if (attempt >= PART_ATTEMPTS) throw new Error("Part of the file couldn't be sent. Try again: it resumes where it stopped.")
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+  }
+}
+
+function remembered(key: string): string | null {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+
+function remember(key: string, value: string | null): void {
+  try {
+    if (value) localStorage.setItem(key, value)
+    else localStorage.removeItem(key)
+  } catch { /* private mode: nothing is picked up again after a reload */ }
+}
+
+/**
+ * Import ``file`` through a resumable upload: send it in parts (several at once, each retried),
+ * then start the import from them. The same file (name, size and modification time) chosen again
+ * after a failure or a reload resumes the upload where it stopped. ``onProgress`` hears the bytes
+ * the server holds so far.
+ */
+export async function importInParts(
   wsId: string,
   graphId: string,
-  file: File | Blob,
-  opts: CreateImportOptions = {},
+  file: File,
+  opts: CreateImportOptions & { onProgress?: (sent: number, total: number) => void; signal?: AbortSignal } = {},
 ): Promise<CreateImportResult> {
-  const params = new URLSearchParams()
-  params.set('format', opts.format ?? 'ndjson')
-  params.set('reconcileMode', opts.reconcileMode ?? 'upsert')
+  const format = opts.format ?? 'ndjson'
+  const key = `import-upload:${wsId}:${graphId}:${file.name}:${file.size}:${file.lastModified}:${format}`
+  const earlier = remembered(key)
+  let found = earlier ? await authFetch<ImportUpload>(`${uploadsUrl(wsId, graphId)}/${earlier}`).catch(() => null) : null
+  if (found?.jobId) found = null                      // already imported: this is a new import
+  const upload = found ?? await createImportUpload(wsId, graphId, file, format)
+  remember(key, upload.uploadId)
+
+  const bytesOf = (n: number) => Math.min(upload.size, (n + 1) * upload.partBytes) - n * upload.partBytes
+  const arrived = new Set(upload.received)
+  let sent = [...arrived].reduce((sum, n) => sum + bytesOf(n), 0)
+  opts.onProgress?.(sent, upload.size)
+  const todo = Array.from({ length: upload.parts }, (_, n) => n).filter((n) => !arrived.has(n))
+  const partUrl = (n: number) => `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/parts/${n}`
+  const sender = async () => {
+    for (let n = todo.shift(); n !== undefined; n = todo.shift()) {
+      const start = n * upload.partBytes
+      await putPart(partUrl(n), file.slice(start, start + bytesOf(n)), opts.signal)
+      sent += bytesOf(n)
+      opts.onProgress?.(sent, upload.size)
+    }
+  }
+  await Promise.all(Array.from({ length: PART_CONCURRENCY }, sender))
+
+  const params = new URLSearchParams({ reconcileMode: opts.reconcileMode ?? 'upsert' })
   if (opts.branchId) params.set('branchId', opts.branchId)
   if (opts.viewId) params.set('viewId', opts.viewId)
-  if (opts.idempotencyKey) params.set('idempotencyKey', opts.idempotencyKey)
-  // Longer timeout: the upload streams the whole file in the request body.
-  return authFetch<CreateImportResult>(
-    `${base(wsId)}/graphs/${graphId}/imports?${params.toString()}`,
-    { method: 'POST', body: file, timeoutMs: 120_000 } as RequestInit,
-  )
+  const created = await authFetch<CreateImportResult>(
+    `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
+  remember(key, null)
+  return created
 }
 
 export function getImport(wsId: string, graphId: string, jobId: string): Promise<Job> {
@@ -223,6 +336,45 @@ function exportBase(target: ExportTarget): string {
 
 export function planExport(target: ExportTarget, format: ImportFormat): Promise<ExportPlan> {
   return authFetch<ExportPlan>(`${exportBase(target)}/plan?${exportQuery(target, format)}`)
+}
+
+export interface CreateExportResult {
+  jobId: string
+  resultUri: string
+  status: JobStatus
+}
+
+/** Have the server prepare an export of a data source with version control: its workers write
+ *  the file, then `downloadExportUrl` downloads it, a download the browser can resume. Follow it
+ *  with `getExport`. */
+export function createExport(
+  target: ExportTarget, format: ImportFormat, opts: { props?: string[]; filename?: string } = {},
+): Promise<CreateExportResult> {
+  return authFetch<CreateExportResult>(`${exportBase(target)}?${exportQuery(target, format, {
+    props: opts.props?.length ? opts.props.join(',') : undefined,
+    filename: opts.filename,
+  })}`, { method: 'POST' })
+}
+
+/** An export the server is preparing, remembered in this browser until its download starts, so
+ *  the dialog finds it again after being closed. */
+export interface PreparedExport {
+  jobId: string
+  fileName: string
+  format: ImportFormat
+  /** The records the plan counted (nodes and edges), for the progress; null when unknown. */
+  total: number | null
+  exact: boolean
+}
+
+const preparedKey = (wsId: string, graphId: string) => `graph-export:${wsId}:${graphId}`
+
+export function preparedExport(wsId: string, graphId: string): PreparedExport | null {
+  try { return JSON.parse(remembered(preparedKey(wsId, graphId)) ?? 'null') } catch { return null }
+}
+
+export function rememberExport(wsId: string, graphId: string, prepared: PreparedExport | null): void {
+  remember(preparedKey(wsId, graphId), prepared && JSON.stringify(prepared))
 }
 
 /** The streamed download itself: a plain GET the browser saves as it arrives (the session cookie

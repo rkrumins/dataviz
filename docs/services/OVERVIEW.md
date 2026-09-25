@@ -52,7 +52,8 @@ Two subsystems run outside the FastAPI process entirely:
   own scheduler + worker + health endpoint and does not serve the HTTP API.
 - **Versioning projection worker** — started with
   `python -m backend.app.services.versioning` (or in-process in dev via
-  `GRAPHVER_PROJECTION_INPROCESS=1`).
+  `GRAPHVER_PROJECTION_INPROCESS=1`). It also runs the import and export
+  jobs the API queues when `GRAPHVER_TRANSFER_INPROCESS=0`.
 
 Backing stores are shared across roles:
 

@@ -19,6 +19,8 @@ import inspect
 import logging
 from typing import Awaitable, Callable, Optional, Set, Union, TYPE_CHECKING
 
+from backend.app.services.background import spawn_detached
+
 from . import config
 from .messaging import (
     CONSUMER_GROUP,
@@ -31,10 +33,15 @@ from .projection import FalkorProjector
 
 if TYPE_CHECKING:
     from .bootstrap_worker import BootstrapRunner
+    from .import_export.runner import TransferRunner
     from .purge_worker import PurgeRunner, Reaper
     from .service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
+
+# How long a stopping worker lets its running import/export jobs finish: inside the
+# deployment's 60 s termination grace, with time left to record the cancelled ones.
+_TRANSFER_DRAIN_SECS = 40
 
 
 class ProjectionWorker:
@@ -51,6 +58,7 @@ class ProjectionWorker:
         bootstrap: Optional["BootstrapRunner"] = None,
         purge: Optional["PurgeRunner"] = None,
         reaper: Optional["Reaper"] = None,
+        transfers: Optional[TransferRunner] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -66,6 +74,7 @@ class ProjectionWorker:
         self._bootstrap = bootstrap              # enables the "enable version control" ingest loop
         self._purge = purge                      # enables reclaiming deleted graphs
         self._reaper = reaper                    # enables expiring the undo window
+        self._transfers = transfers              # enables running queued import/export jobs
 
     def stop(self) -> None:
         self._stop.set()
@@ -89,7 +98,8 @@ class ProjectionWorker:
         """One pass of the idle-draft janitor (plan §17 #8); no-op without a service. What a swept
         draft held in views goes with it, as on abandon, and any draft whose views were left
         unsettled by its publish or abandon is settled (``draft_views``). Import/export artifacts
-        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store."""
+        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store, and the staged rows
+        of imports finished more than ``STAGING_GC_DAYS`` ago from ``import_rows``."""
         if self._versioning is None:
             return []
         swept = await self._versioning.sweep_idle_drafts()
@@ -107,6 +117,12 @@ class ProjectionWorker:
             await prune_uploads()
         except Exception:  # noqa: BLE001 — tried again next pass
             logger.exception("pruning view package uploads failed")
+        try:
+            from .import_export.import_worker import sweep_staged_rows
+
+            await sweep_staged_rows(older_than_days=config.STAGING_GC_DAYS)
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("sweeping finished imports' staged rows failed")
         try:
             from backend.app.services.storage.object_store import get_object_store
 
@@ -155,6 +171,8 @@ class ProjectionWorker:
             loops.append(self._purge_loop())
         if self._reaper is not None:
             loops.append(self._reap_loop())
+        if self._transfers is not None:
+            loops.append(self._transfer_loop())
         await asyncio.gather(*loops)
 
     async def _ingest_loop(self) -> None:
@@ -208,6 +226,34 @@ class ProjectionWorker:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.REAP_POLL_SECS)
             except asyncio.TimeoutError:
                 pass
+
+    async def _transfer_loop(self) -> None:
+        """Run the import and export jobs API processes queued (``GRAPHVER_TRANSFER_INPROCESS``
+        off), ``TRANSFER_SLOTS`` at a time, each a task of its own. On stop it takes no more and
+        gives the running ones ``_TRANSFER_DRAIN_SECS`` to finish; any still running then is
+        cancelled, which marks its job failed ("start it again"), as a restart does in-process."""
+        running: Set[asyncio.Task] = set()
+        while not self._stop.is_set():
+            running = {t for t in running if not t.done()}
+            try:
+                while len(running) < config.TRANSFER_SLOTS:
+                    claimed = await self._transfers.claim_one()
+                    if claimed is None:
+                        break
+                    running.add(spawn_detached(self._transfers.run_job(*claimed),
+                                               name=f"transfer {claimed[0]}"))
+            except Exception:
+                logger.exception("transfer loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.TRANSFER_POLL_SECS)
+            except asyncio.TimeoutError:
+                pass                                    # not stopping: look for queued jobs again
+        running = {t for t in running if not t.done()}
+        if running:
+            _, late = await asyncio.wait(running, timeout=_TRANSFER_DRAIN_SECS)
+            for task in late:
+                task.cancel()
+            await asyncio.gather(*late, return_exceptions=True)
 
     async def _poll_loop(self) -> None:
         while not self._stop.is_set():

@@ -111,6 +111,39 @@ async def test_local_fs_reads_from_an_offset_and_sweeps_old_files(tmp_path):
     assert (await store.stat("ws1/job1/source.ndjson")).exists is True
 
 
+async def test_local_fs_failed_put_leaves_no_half_file(tmp_path, monkeypatch):
+    """A mount's reader must never take half a file for the whole one: a put that fails, while
+    writing or when closing (on a bucket mount, closing is the upload), leaves nothing."""
+    store = LocalFsObjectStore(tmp_path)
+
+    async def broken():
+        yield b"x" * 1000
+        raise RuntimeError("the client went away")
+
+    with pytest.raises(RuntimeError):
+        await store.put_stream("ws1/job1/source.ndjson", broken())
+    assert (await store.stat("ws1/job1/source.ndjson")).exists is False
+
+    real_open = open
+
+    class _FailsOnClose:
+        def __init__(self, f):
+            self._f = f
+
+        def write(self, data):
+            return self._f.write(data)
+
+        def close(self):
+            self._f.close()
+            raise OSError("the bucket refused the upload")
+
+    monkeypatch.setattr("builtins.open", lambda *a, **k: _FailsOnClose(real_open(*a, **k)))
+    with pytest.raises(OSError):
+        await store.put_stream("ws1/job2/export.ndjson", _chunks(b"all of it"))
+    monkeypatch.undo()
+    assert (await store.stat("ws1/job2/export.ndjson")).exists is False
+
+
 def test_the_database_is_the_default_store(monkeypatch, tmp_path):
     """Every API pod must see what another stored, so the shared database is the default."""
     monkeypatch.delenv("OBJECT_STORE_BACKEND", raising=False)

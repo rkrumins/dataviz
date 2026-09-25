@@ -31,9 +31,14 @@ editing dozens of nodes on the canvas.
    NDJSON, and JSON are all supported (older formats like `.xls` or Numbers
    files aren't — save as CSV first).
 2. **Edit it** anywhere — a spreadsheet, a script, whatever's convenient.
-3. **Upload it.** The import runs in the background, so you can keep working
-   while it processes. One file can be up to 100 MB; split a larger one and
-   import the parts one after another — each adds to the same draft.
+3. **Upload it.** A CSV, TSV or NDJSON file can be up to 10 GB; a JSON or
+   Excel file, which is read whole, up to 100 MB. The dialog shows how much of
+   the file is up. If the upload stops (a dropped connection, a closed tab),
+   choose the same file again and it picks up where it left off. The import
+   then runs in the background, so you can keep working. When the server is
+   busy with other imports and exports, yours waits its turn, and the dialog
+   says how many are ahead of it. A multi-GB import takes a while: allow about
+   an hour for every 5 million rows.
 4. **Review every change.** When it's done, you get a clear breakdown — how
    many items are new, updated, deleted, or need fixing — plus a preview of
    the actual rows, before anything touches the published graph.
@@ -71,11 +76,13 @@ backup, not just a report.
 
 Before anything downloads, {brand} checks what the export will hold. If it
 would hold nothing — say, none of the entities a View places are in this data
-source — it tells you why instead of downloading an empty file. Then your
-browser downloads the file **while it is being written**, so an export of any
-size starts at once and shows its progress in your browser's downloads, and
-you can close the dialog while it runs. A whole data source of several
-gigabytes takes a few minutes.
+source — it tells you why instead of downloading an empty file. Then the
+server **prepares the file**, up to 50 GB: the dialog shows its place in the
+queue, then how far it has got, and your browser downloads it once it's ready.
+You can close the dialog meanwhile: open it again and it picks the export up
+where it is. If the download breaks off, your browser can resume it from where
+it stopped, and the file is kept on the server for a day. A few hundred
+thousand entities take seconds to prepare; tens of gigabytes take hours.
 
 An export can always be brought back in through Import later, so it doubles
 as a safety net before a big change and as a way to work with your data
@@ -85,7 +92,7 @@ outside {brand}.
 
 Export works here too, in View mode as in Edit mode: it reads the data
 source's graph as it stands — every entity and relationship — as a **cold
-copy**. Its rows carry each entity's URN rather than {brand}'s own identity
+copy**, which your browser downloads while it is read. Its rows carry each entity's URN rather than {brand}'s own identity
 columns, so importing the file into a data source with version control (this
 one, once version control is on, or another) matches the entities by URN.
 Changes made to the graph while the file downloads may or may not be in it.
@@ -95,8 +102,9 @@ Changes made to the graph while the file downloads may or may not be in it.
 | Limit | Why |
 | --- | --- |
 | **Excel**: 1,048,575 rows per sheet (Nodes and Edges) | Excel's own limit. A larger export offers CSV instead, before anything downloads. |
-| **Import**: 100 MB per file | Uploads pass through the same proxies as every request. |
-| **Several exports at once** | Each server runs two exports at a time. Another waits for its turn, for up to 15 minutes: your browser shows the download once it begins. If no turn frees up, the download fails; try again later. |
+| **Import**: 10 GB per CSV, TSV or NDJSON file; 100 MB per JSON or Excel file | A JSON or Excel file is read whole. A larger file can be split and imported in parts, each adding to the same draft. |
+| **Export**: 50 GB per file | Preparing one that size takes hours. |
+| **Several exports at once** | Exports take turns on the server. One being prepared waits in the queue, and the dialog shows how many are ahead of it. A data source without version control runs two exports at a time on each server: another waits for up to 15 minutes, then fails; try again later. |
 
 CSV and TSV exports start with a UTF-8 byte-order mark, so Excel reads names
 with accents and other non-ASCII characters correctly. Import handles files

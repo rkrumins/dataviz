@@ -385,6 +385,11 @@ services:
       # versioning-worker service owns projection. Only set 1 for a
       # single-process dev run with no worker container.
       GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-0}"
+      # Import and export jobs are only queued here: the versioning-worker
+      # service claims them from the jobs table and runs them, so a large
+      # import or export never shares this container's CPU with requests.
+      # Only set 1 for a single-process dev run with no worker container.
+      GRAPHVER_TRANSFER_INPROCESS: "${GRAPHVER_TRANSFER_INPROCESS:-0}"
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -506,6 +511,9 @@ services:
     # a dedicated liveness endpoint is a follow-up.
     healthcheck:
       disable: true
+    # On stop it gives running import/export jobs 40 s to finish, then
+    # records the rest as interrupted: allow for that, as the Deployment does.
+    stop_grace_period: 60s
     depends_on:
       upgrade:
         condition: service_completed_successfully

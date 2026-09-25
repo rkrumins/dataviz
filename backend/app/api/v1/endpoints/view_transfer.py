@@ -52,7 +52,6 @@ from backend.app.auth.dependencies import get_optional_user, get_permission_clai
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.db.repositories import data_source_repo, view_activity_repo, view_repo
-from backend.app.services.background import spawn_detached
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.storage.object_store import storage_key
 from backend.app.services.view_transfer import importing, limits, package
@@ -256,10 +255,9 @@ async def export_view_package(
     prefix = created["result_uri"].rsplit("/", 1)[0]
     await ie.store.put_stream(f"{prefix}/view-bundle.json",
                               _package_bytes(json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")))
-    # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
-    spawn_detached(ie.run_export_safe(created["job_id"]), name=f"export {created['job_id']}")
+    status = await ie.start_export(created["job_id"])
     return {"jobId": created["job_id"], "graphId": graph["graph_id"], "workspaceId": first.workspace_id,
-            "fileName": filename, "bundleHash": bundle["bundleHash"], "status": "running",
+            "fileName": filename, "bundleHash": bundle["bundleHash"], "status": status,
             "views": [{"viewId": item.row.id, "version": item.version.version} for item in sealed]}
 
 
@@ -442,8 +440,7 @@ async def import_package_data(
         data = {**done, "jobId": created["job_id"], "attempt": attempt}
         await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
                                   _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
-        # Its own task: a BackgroundTasks task would be cancelled with this request at its timeout.
-        spawn_detached(ie.run_import_safe(created["job_id"]), name=f"import {created['job_id']}")
+        await ie.start_import(created["job_id"])
         return data
 
     workspace = await session.get(WorkspaceORM, body.workspaceId)
@@ -480,7 +477,7 @@ async def import_package_data(
     await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
                               _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
     await ie.store.delete(_upload_key(upload_id, package.UPLOAD_DATA))     # the job has its own copy
-    spawn_detached(ie.run_import_safe(created["job_id"]), name=f"import {created['job_id']}")
+    await ie.start_import(created["job_id"])
     return data
 
 

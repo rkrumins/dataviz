@@ -20,7 +20,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "20260925_1000_view_saved_queries"
-down_revision: Union[str, None] = "20260926_1000_object_store"
+down_revision: Union[str, None] = "20260927_1000_import_indexes"
 branch_labels = None
 depends_on = None
 

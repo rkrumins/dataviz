@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
@@ -2515,12 +2516,14 @@ class _TimeoutMiddleware:
     # the contract is explicit registration, not endswith heuristics.
     _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
-    # Downloads streamed while they are produced (a whole data source can be gigabytes). A
-    # deadline would cut one short, and T-2 would end it cleanly, so a truncated file would look
-    # complete. They pace themselves: bounded per process, and each page is a short query.
+    # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
+    # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
+    # short, and T-2 would end it cleanly, so a truncated file would look complete. They pace
+    # themselves: bounded per process, and each page is a short query or a read of the file.
     _STREAM_PATHS: tuple[re.Pattern, ...] = (
         re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/stream$"),
         re.compile(r"^/api/v1/[^/]+/graph/export/stream$"),
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/[^/]+/download$"),
         # A search export's file, streamed from the object store: it holds nothing else while
         # it streams (graph.search_export_download).
         re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
@@ -2774,6 +2777,9 @@ app.add_middleware(
     GZipMiddleware,
     minimum_size=1024,
     compresslevel=int(os.getenv("GZIP_COMPRESSLEVEL", "1")),
+    # A stored export's file downloads as it is: compressing it would drop its size, and a
+    # compressed download can't be resumed where it stopped.
+    exclude_content_types=DEFAULT_EXCLUDED_CONTENT_TYPES + ("application/octet-stream",),
 )
 
 # Structured JSON access log + X-Process-Time header

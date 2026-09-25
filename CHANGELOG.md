@@ -9,6 +9,147 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Exports up to 50 GB, with downloads that resume
+
+### Added
+
+**Exports of up to 50 GB, prepared on the server, with downloads that resume.** The Export dialog no
+longer streams a data source with version control from the web server while it downloads. The
+versioning workers write the file, the dialog shows its place in the queue and then how far it has
+got, and the browser downloads it once it's ready, with its size known. A download that breaks off
+picks up where it stopped: the download answers `Range` and `If-Range`, which is what a browser's
+Resume and `curl -C -` send. Close the dialog while the file is being prepared and it opens on that
+export again; the file is kept for a day. A data source without version control still streams its
+live graph as before.
+
+### Changed
+
+- **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
+- **A running export says how far it has got.** Its job's `summary` holds the records read or written
+  so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the
+  bytes, until the finished summary replaces it; a finished one says whether its file is still
+  `kept`. `POST …/exports` takes a `filename` for the download.
+- **A stored export downloads uncompressed**, so that the browser knows its size and can resume it.
+
+### Fixed
+
+- **A stored export's download could be cut short.** It was held to the API's two-minute deadline,
+  which ends a response cleanly, so a large file (a view package's, say) could arrive incomplete while
+  looking whole, and nginx buffered it to disk. It now runs as long as it takes, as the streamed
+  export does.
+- **Anyone who could read a workspace could download its export jobs.** Listing a graph's exports,
+  reading one and downloading it checked only workspace access, so another user's export of their
+  private draft, or of a view you can't read, was yours to download. Each now checks again what
+  creating the export checked: an export you may not read is a 404, and missing from the list.
+- The download of an export whose file was swept now says so (404) instead of failing once started.
+
+### Upgrading
+
+No migration. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
+(no buffering, an hour between reads): an nginx config of your own in front of the API needs the
+same. Exports are kept in the object store for a day: keep it on a mount
+(`OBJECT_STORE_BACKEND=local`) rather than in the database for exports of many gigabytes.
+
+### Known limitations
+
+- **Preparing a 50 GB export takes hours.** One export runs on one worker, at about 10 MB a second as
+  NDJSON and 3.5 as CSV, which reads everything twice. Nothing splits an export across workers yet,
+  or cancels one being prepared: "Export something else" leaves it to finish, and its file is swept.
+- **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
+  manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
+- **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
+
+---
+
+## [Unreleased] — Imports up to 10 GB
+
+### Added
+
+**Imports of up to 10 GB, uploaded in parts that resume.** A CSV, TSV or NDJSON file can now be
+10 GB (a JSON or Excel file, which is read whole, stays at 100 MB). The Import dialog sends the file
+in 16 MB parts, three at a time, retries a part that failed, and shows how much is up. If the upload
+stops (a dropped connection, a closed tab), choosing the same file again sends only what the server
+doesn't hold yet. A file too large for its format is refused before any of it is sent. Scripts can
+use the same routes (`…/imports/uploads`), or still send a file of up to 100 MB as one request.
+
+### Changed
+
+**Imports use a fraction of the memory, and run three to four times faster.** The importer held the
+data source's whole graph in memory (about 4.4 KB per entity) and every row of the file. It now
+works a window of 50,000 rows at a time, looking up only what the window names: 200,000 rows into a
+200,000-node graph peaked at 490 MB instead of 1.4 GB, and memory no longer grows with the graph.
+Rows, resolutions and entity versions are written in bulk rather than one statement each: that
+import took 2 to 3 minutes instead of 8½. Every commit writes its entity heads in bulk too, so
+large publishes, merges and reverts gain as well.
+
+### Fixed
+
+**An import's staged rows are cleared.** Every row of every import stayed in the database forever:
+the retention setting was never used. The versioning worker now deletes the rows of imports finished
+more than `IMPORT_STAGING_GC_DAYS` (7) ago.
+
+### Upgrading
+
+One migration, `20260927_1000_import_indexes`: an index on `node_versions (graph_id,
+qualified_name)` and one on `import_rows (job_id, matched_entity_id)`. It builds them with a plain
+`CREATE INDEX`, which holds writes to the table until it is done: on a large installation, run it in
+a quiet hour. New settings, both optional: `IMPORT_MAX_BYTES` (10 GiB) and
+`IMPORT_WHOLE_FILE_MAX_BYTES` (100 MB). The parts are kept in the object store: for multi-GB files,
+keep that on a mount (`OBJECT_STORE_BACKEND=local`) rather than in the database.
+
+### Known limitations
+
+- **A 10 GB import takes hours.** It writes about 1,500 to 2,500 rows a second, and a 10 GB NDJSON
+  file holds around 40 million rows. It runs on the worker, not in the web servers. The dialog shows
+  the upload's progress and the job's place in the queue, but not yet the import's own progress.
+- **An interrupted import starts over**, and an upload has a day to finish before its parts are
+  swept.
+- **A large import's staged rows take about the file's size again in Postgres** until they are swept.
+
+---
+
+## [Unreleased] — Imports and exports off the web servers
+
+### Changed
+
+**Imports and exports run on the versioning worker, not the web servers.** An import or export job
+ran inside the web server that took the request, sharing its CPU and memory with every other
+request. The web server now only queues the job, in Postgres, and the versioning worker runs it:
+two at a time per worker process (`GRAPHVER_TRANSFER_SLOTS`), oldest first, each job taken by one
+worker only. A job waiting its turn says so, with how many are ahead of it, in the canvas's Import
+dialog, a view package's export and a view package's data import. The compose and Kubernetes
+manifests run this way (`GRAPHVER_TRANSFER_INPROCESS=0`). Without a versioning worker (a single
+process, the Helm chart), jobs run in the web server as before.
+
+**Import and export files can live on a mount.** `OBJECT_STORE_BACKEND=local` keeps them as files
+under `IMPORT_STORE_ROOT`, and that can now be any directory every server mounts: a shared volume,
+or an S3 or GCS bucket through its FUSE driver (Mountpoint for Amazon S3, Cloud Storage FUSE). That
+keeps multi-GB files out of the database. A file is written once, front to back, and a write that
+fails now deletes what it wrote instead of leaving half a file.
+
+### Upgrading
+
+Nothing to migrate. The compose and Kubernetes manifests set `GRAPHVER_TRANSFER_INPROCESS=0` on the
+web tier, so imports and exports start only while their versioning worker runs. On stop the worker
+gives running jobs 40 s to finish, within its 60 s grace (compose now sets `stop_grace_period`).
+New settings, all optional: `GRAPHVER_TRANSFER_INPROCESS` (on unless set), `GRAPHVER_TRANSFER_SLOTS`
+(2 per worker process; an export job also takes one of its pod's `GRAPH_EXPORT_CONCURRENCY` turns,
+so raise the two together), `GRAPHVER_TRANSFER_POLL_SECS` (1) and
+`GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours; a job no worker starts in that time reads as
+failed).
+
+To keep import and export files on a mount, set `OBJECT_STORE_BACKEND=local` and `IMPORT_STORE_ROOT`
+to its path on the web servers and the versioning worker alike. Mountpoint for Amazon S3 needs
+`--allow-delete` and `--allow-overwrite`. Files already in the database store aren't moved, so jobs
+in flight when you switch need starting again.
+
+### Known limitations
+
+- **An interrupted job starts over.** A worker that stops mid-job (a deploy, a crash) takes the job
+  with it: the job reads as failed, and running it again redoes it from the start.
+
+---
+
 ## [Unreleased] — Views that travel between environments, and remember their versions
 
 ### Added

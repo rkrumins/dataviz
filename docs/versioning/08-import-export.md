@@ -42,7 +42,7 @@ graph LR
       F["File (csv/tsv/ndjson/json/xlsx)"]
     end
     subgraph Import["Import (async job on a DRAFT)"]
-      EP["POST /imports<br/>(file = raw body,<br/>opts = query params)"]
+      EP["POST /imports/uploads<br/>(16 MiB parts, resumable)<br/>or POST /imports (raw body)"]
       OS[("Object store<br/>ws/ds/graph/job/source.ext")]
       P["parse → normalize<br/>→ import_rows (cursor)"]
       R["resolve_rows<br/>match + field-diff + ontology gate"]
@@ -79,22 +79,37 @@ is (`service.py:86-88`). It inserts the `JobORM` row and mints a self-describing
 (`{ws}/{ds}/{graph}/{job}/source.<fmt>`) for the caller to stream the upload into
 (`service.py:102-105`).
 
-**Dispatch.** The endpoint streams the uploaded file into the object store, then runs the worker as
-a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI `BackgroundTasks`:
-those run inside the request's ASGI call, so the route's 120 s timeout tier cancelled any import
-that outlasted it. `run_import_safe` / `_run_safe` wrap the run so any exception, or a
-cancellation, marks the job `failed` with an `error_message` — the failure is durable on the job
-row.
+**Dispatch.** The endpoint stores the job's inputs (it streams the upload into the object store),
+then starts the job with `ImportExportService.start_import` / `start_export` (`service.py`). Where
+the job runs is `GRAPHVER_TRANSFER_INPROCESS`:
 
-> **Limitation — in-process dispatch.** v1 runs imports (detached tasks) and exports (**FastAPI
-> `BackgroundTasks`**) inside the web process, not a real async dispatcher (`service.py:9-11`). Two
-> consequences to know: a `uvicorn --reload` (or any process restart) **mid-import kills the job** —
-> it never reaches `completed`, and since a running import touches its `updated_at` every 15 s,
-> `get_job` reports a job silent for `JOB_STALE_AFTER_SECS` (default 900) as `failed` so the UI
-> stops waiting; and a very large import competes with request handling.
-> A Redis/Postgres dispatcher (mirroring the aggregation worker) slots in behind the same
-> `run_import_safe` call without touching the pipeline. Tracked in
-> [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
+- **On** (the code default, so a single-process stack needs nothing else): in the web process that
+  took the request, as a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI
+  `BackgroundTasks`: those run inside the request's ASGI call, so the route's 120 s timeout tier
+  cancelled any import that outlasted it.
+- **Off** (the compose and Kubernetes manifests): the web process only **queues** the job. It stays
+  `pending`, in phase `queued`, and the versioning worker claims queued jobs oldest first with
+  `FOR UPDATE SKIP LOCKED` (`import_export/runner.py`), so a job goes to one worker only. Each worker
+  process runs `GRAPHVER_TRANSFER_SLOTS` (2) at a time (`ProjectionWorker._transfer_loop`), so a
+  large import or export never shares a web pod's CPU and memory with interactive requests. A job
+  is queued only once its inputs are stored, so no worker takes one whose upload is still arriving.
+  While a job waits, `get_job` reports `queuedAhead`, the jobs queued before it, and the dialogs say
+  "Waiting to start… 2 jobs are ahead of it." A queued job no worker starts within
+  `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours) reads as failed, since no worker may be running.
+  A stopping worker takes no more jobs and gives its running ones 40 s to finish. Every worker
+  runs the transfer loop, whatever its own setting, so the switch only needs setting on the web
+  pods. An export job also takes one of its pod's export turns (`GRAPH_EXPORT_CONCURRENCY`, 2), so
+  raise the two together.
+
+Either way, `run_import_safe` / `_run_safe` wrap the run so any exception, or a cancellation, marks
+the job `failed` with an `error_message`: the failure is durable on the job row. A running job
+touches its `updated_at` every 15 s, and `get_job` reports one silent for `JOB_STALE_AFTER_SECS`
+(default 900) as `failed` so the UI stops waiting: its process went away (a restart, a killed pod).
+
+> **Limitation — an interrupted job starts over.** Nothing resumes a job whose process stopped
+> mid-run: it reads as failed ("Start it again"), and running it again redoes it from the start.
+> The web tier's restarts no longer touch jobs once they run on the worker, but a worker's do.
+> Tracked in [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
 
 The service is wired as a singleton (`get_import_export_service`, `versioning.py:1964-1972`) with two
 injected resolvers so the worker stays decoupled from the management DB: a **scope resolver**
@@ -110,34 +125,39 @@ per-row gate).
 
 ### 3a. Parse
 
-`_parse` (`import_worker.py:151-169`) streams `source_uri` from the object store through the format
-adapter's `parse`, calls `normalize(raw, kind)` per record, and bulk-inserts `ImportRowORM` rows in
-2,000-row flushes (`_PARSE_BATCH`) — **the whole file is never buffered** (except the buffered
-formats; see §5). Records whose `kind` is neither `node` nor `edge` are skipped, never fatal
-(`import_worker.py:159-160`).
+`_parse` streams the file through the format adapter's `parse`, calls `normalize(raw, kind)` per
+record, and stages the rows in `import_rows`, 2,000 at a time (`_PARSE_BATCH`, multi-row INSERTs):
+**the whole file is never buffered** (except the formats read whole; see §7). The file is one object,
+or a resumable upload's parts read in order as one stream (`uploads.open_source`, §3d). Records whose
+`kind` is neither `node` nor `edge` are skipped, never fatal. A JSON array or an Excel workbook larger
+than `IMPORT_WHOLE_FILE_MAX_BYTES` (100 MB) is refused, whatever the file was declared as.
 
-Before parsing a non-xlsx file, `_reject_binary` (`import_worker.py:136-149`) sniffs the first chunk
-for a ZIP (`PK\x03\x04`) or OLE (`\xd0\xcf\x11\xe0`) magic and fails fast with a friendly *"this is
-an Excel workbook — Save As CSV"* message — a very common mistake that would otherwise parse into
-garbage rows. xlsx is exempt (it *is* a PK zip and its adapter reads it natively).
+Before parsing a non-xlsx file, `_reject_binary` sniffs the first chunk for a ZIP (`PK\x03\x04`) or
+OLE (`\xd0\xcf\x11\xe0`) magic and fails fast with a friendly *"this is an Excel workbook — Save As
+CSV"* message — a very common mistake that would otherwise parse into garbage rows. xlsx is exempt
+(it *is* a PK zip and its adapter reads it natively).
 
-### 3b. Resolve
+### 3b. Resolve, a window at a time
 
-`_resolve_and_build` (`import_worker.py:175-206`) loads the staged rows, fetches the draft's
-composed state as **match indexes** via `entity_indexes(graph, branch)`, and calls `resolve_rows`
-(`resolve.py:125-228`) — a **pure, deterministic** function (the id minter is injected) that returns
-`(ops, resolutions)`.
+`_resolve_and_build` works through the staged rows in windows of `IMPORT_COMMIT_WINDOW` (50,000):
+**every node window first, then every edge window**, so an edge finds a node any row of the file
+creates, even a later one. A window looks up **only what its own rows name** in the draft's composed
+state (`snapshot.py`, the export's reader): nodes by `entity_id`, `urn` and `qualifiedName`, the
+live edges between its endpoints, and those entities' current payloads. The windows before it are
+already applied, so it sees them too. Nothing loads the whole graph or the whole file, so memory
+stays flat: 200,000 rows into a draft of a 200,000-node graph peak at about 490 MB, where the
+whole-state importer (~4.4 KB per entity) reached 1.4 GB.
 
-Two passes, so an edge can reference a node created earlier in the same file
-(`resolve.py:1-9, 149-150`):
+Each window goes through `resolve_rows` (`resolve.py`) — a **pure, deterministic** function (the id
+minter is injected) that returns `(ops, resolutions)`:
 
-- **Nodes** match an existing entity by **`entity_id` → `urn` → `qualifiedName`** (`_match_node`,
-  `resolve.py:231-239`); no match ⇒ mint a new `entity_id` and register it in the local indexes for
-  later edges (`resolve.py:180-188`).
-- **Edges** resolve each endpoint through those node indexes
-  (`entity_id` → `qualifiedName` → `urn`, `_resolve_endpoint`, `resolve.py:242-252`) and key on the
-  `(source_eid, target_eid, edge_type)` triple — the same keying `sync_ingest` uses
-  (`resolve.py:205`).
+- **Nodes** match an existing entity by **`entity_id` → `urn` → `qualifiedName`** (`_match_node`);
+  no match ⇒ mint a new `entity_id` and register it in the window's indexes for later rows.
+- **Edges** resolve each endpoint (`entity_id` → `qualifiedName` → `urn`, `_resolve_endpoint`) and
+  key on the `(source_eid, target_eid, edge_type)` triple — the same keying `sync_ingest` uses.
+
+The lookups by `qualifiedName`, and replace's check of which entities some row matched, use two
+indexes (migration `20260927_1000_import_indexes`).
 
 > **Invariant — partial acceptance.** An unresolvable or ontology-invalid row is **quarantined**
 > (`resolved_op = "invalid"` + a human reason), never aborting the batch (`resolve.py:14, 154-164`).
@@ -145,13 +165,41 @@ Two passes, so an edge can reference a node created earlier in the same file
 
 ### 3c. Apply
 
-Accepted ops are applied to the draft in `IMPORT_COMMIT_WINDOW`-sized windows (default 50,000) via
-`apply_ops(graph_id, ops=window, actor, branch_id=draft, message="import")`
-(`import_worker.py:198-200`). Each window is one commit on the draft — so a huge import becomes a
-sequence of ordinary checkpoints, and the engine's referential-integrity, edge-integrity,
-cascade-delete, and ontology gates all apply. The resolutions are persisted back onto `import_rows`
-(`_persist_resolutions`, `import_worker.py:208-217`), and `job.summary` tallies
-`{new, updated, unchanged, deleted, invalid}`.
+Each window's ops are applied to the draft before the next window is resolved, via
+`apply_ops(graph_id, ops, actor, branch_id=draft, message="import")`. Each window is one commit on the
+draft — so a huge import becomes a sequence of ordinary checkpoints, and the engine's
+referential-integrity, edge-integrity, cascade-delete, and ontology gates all apply. The resolutions
+are recorded on `import_rows` (`_persist_resolutions`, one `UPDATE … FROM unnest()` per 5,000 rows),
+and `job.summary` tallies `{new, updated, unchanged, deleted, invalid}`. A commit's entity heads are
+written in bulk too (`_write_deltas`: multi-row INSERTs for the versions, an `unnest()` UPDATE then
+INSERT for the heads, keeping the per-entity compare-and-swap), so an import writes about 1,500–2,500
+rows a second: six times the row-at-a-time rate.
+
+The versioning worker's sweep deletes the staged rows of imports finished more than
+`IMPORT_STAGING_GC_DAYS` (7) ago, a batch at a time. Until then a large import's rows take their
+space in Postgres: roughly the file's size again.
+
+### 3d. Resumable uploads
+
+A file of up to `IMPORT_MAX_BYTES` (10 GiB; NDJSON, CSV and TSV, which are read a row at a time)
+arrives in parts (`import_export/uploads.py`), since one request that size would outlast every proxy
+and timeout on the way, and a dropped connection would start it over:
+
+1. `POST …/imports/uploads` `{fileName, size, format}` → `{uploadId, partBytes, parts}` (16 MiB parts).
+   A file too large for its format is refused here (413), before any of it is sent.
+2. `PUT …/imports/uploads/{uploadId}/parts/{n}`, the part as the body: several at once, in any order.
+   Each is its own write-once object in the store (a bucket mount never appends or renames), and
+   must hold exactly its share of the file; sending a part again replaces it.
+3. `GET …/imports/uploads/{uploadId}` → `received`: what a resumed upload doesn't send again.
+4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId` → 202, the import job
+   (409 while a part is missing). It reads the parts in order as one file; asking again answers with
+   the same job.
+
+The Import dialog sends three parts at a time, retries a part the server failed on (not one it
+refused), shows how much is up, and resumes: the same file chosen again (name, size and modification
+time) after a failure or a reload sends only the missing parts. An upload is its owner's only, and
+its parts are swept with every other artifact after `OBJECT_STORE_TTL_HOURS` (24), so it has a day
+to finish. `POST …/imports` (the file as the request body, up to 100 MB) stays for scripts.
 
 ---
 
@@ -220,15 +268,15 @@ which Postgres JSONB rejects) and is stripped from `create` payloads, where it i
 | **`upsert`** | Never deletes on absence — only creates/updates the rows in the file. | Yes (safe) |
 | **`replace`** | The file is the **authoritative snapshot for its scope**: every existing in-scope entity that no file row matched is **deleted**. | Opt-in |
 
-Replace deletes are computed by `_append_replace_deletes` (`import_worker.py:70-90`): `universe −
-matched` → `delete` ops (edges first, then nodes; `apply_ops` cascades containment/incident edges).
-Derived deletes aren't file rows, so they're counted separately into `summary["deleted"]`.
+Replace deletes are computed after the file's rows are applied (`_delete_absent`): the draft is
+walked a page at a time, and every entity in scope that no row matched (`import_rows.matched_entity_id`)
+is deleted, edges first, then nodes (`apply_ops` cascades containment/incident edges). Derived deletes
+aren't file rows, so they're counted separately into `summary["deleted"]`.
 
-> **Invariant — scoped replace can't nuke the data source.** For a **view-scoped** replace,
-> `_view_scope_eids` (`import_worker.py:41-67`) restricts the deletable universe to the view's own
-> entities — the same rule as export scope: each assigned URN plus its containment descendants (when
-> the assignment inherits children), edges in-scope only when both endpoints are. `None` scope ⇒
-> whole graph. Because the review dialog always passes the active `viewId`, a replace from a view is
+> **Invariant — scoped replace can't nuke the data source.** For a **view-scoped** replace, only the
+> view's own entities are walked: the same rule as export scope (`stream.view_entities`), each
+> placement plus its containment descendants (when the placement inherits children), edges in scope
+> only when both endpoints are. No scope ⇒ whole graph. Because the review dialog always passes the active `viewId`, a replace from a view is
 > view-scoped by default. Whole-DS replace is still available and is guarded by a prominent
 > "N entities will be deleted" callout before publish.
 
@@ -281,14 +329,28 @@ as-of, draft, draft as-of and fork, many pages each).
 
 Three ways out, one pipeline:
 
-- **`GET /exports/plan` then `GET /exports/stream`** — what the Export dialog does: the plan says
-  what the export would hold (counts, emptiness, whether Excel can hold it), then the browser
-  downloads the stream natively. Nothing is stored; any pod serves it.
+- **`GET /exports/plan`, then `POST /exports`** — what the Export dialog does for a data source with
+  version control. The plan says what the export would hold (counts, emptiness, whether Excel can
+  hold it); then the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
+  file to the `result_uri` artifact, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB). While it runs, its
+  heartbeat (every 5 s) keeps its progress in `summary`: this pass's `nodes` and `edges`, the
+  `passes` so far (a spreadsheet reads everything once for its columns, then again to write it), and
+  the `bytes` written; the finished `{nodes, edges, bytes}` replaces it. Then
+  **`GET /exports/{job}/download`** serves the file as a download that resumes: `Content-Length`,
+  `Accept-Ranges: bytes`, a strong `ETag` and `Last-Modified`, and the part a `Range` asks for (206;
+  an `If-Range` naming another file gets all of it, a range past the end 416). Nothing compresses it
+  on the way (gzip would hide its size and move the ranges), and it is exempt from the request
+  deadline and from nginx's buffering, like the streams: a download that takes hours at the
+  client's pace ties up only a file read on the web pod.
+- **`GET /exports/stream`** — the same records, streamed as they are read: nothing is stored, and
+  any pod serves it. For scripts; a download that breaks off starts again.
 - **`GET /{ws}/graph/export/plan · /stream`** (`import_export/live.py`) — a data source **without**
   version control: the provider's `scan_nodes`/`scan_edges` (FalkorDB: internal-id windows, each
   one `NodeByIdSeek`) into the same rows, with no entity ids, so a re-import matches by URN.
-- **`POST /exports`** — the job (`ExportWorker.run`), for API clients: the same stream written to
-  the `result_uri` artifact, then a `{nodes, edges, bytes}` summary.
+
+Reading an export job (the list, its status, its download) checks again what creating it checked
+(`_check_export_access`): an export of a draft is for that draft's readers, and one of a view for
+the view's readers. Any other is a 404, as for a job that doesn't exist, and is left out of the list.
 
 All three take turns (`stream.Slots`). An export keeps about one CPU core busy, so a pod streams
 `GRAPH_EXPORT_CONCURRENCY` (2) at once, whichever of its worker processes serve them. A turn is an
@@ -359,11 +421,23 @@ one place every pod shares:
 - The versioning worker's daily sweep deletes objects older than `OBJECT_STORE_TTL_HOURS`
   (default 24), and chunks no object names once they are an hour old (a put that died mid-way).
 
-`OBJECT_STORE_BACKEND=local` keeps the filesystem store rooted at `IMPORT_STORE_ROOT`
-(`LocalFsObjectStore`, `object_store.py:79-173`) for a single-node stack; a path-escape guard
-rejects keys that resolve outside the root (`:85-91`), and the same sweep deletes its files by age.
+**Or files on a mount.** `OBJECT_STORE_BACKEND=local` keeps the files under `IMPORT_STORE_ROOT`
+instead (`LocalFsObjectStore`), which keeps multi-GB files out of the database. Point it at a
+directory that every pod serving the API or running the versioning worker mounts:
 
-> **Limitation — no cloud store yet.** `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
+- a shared volume: a `ReadWriteMany` PersistentVolumeClaim (NFS, Amazon EFS, Filestore);
+- a bucket through its FUSE driver: S3 through Mountpoint for Amazon S3 (with `--allow-delete` and
+  `--allow-overwrite`), GCS through Cloud Storage FUSE;
+- for one pod whose jobs run in-process, the pod's own disk (the default,
+  `/tmp/synodic-import-store`). Several pods can't share it, and neither can a separate worker.
+
+A file is written once, front to back, and never appended to or renamed, which is all a bucket
+mount supports. A write that fails, or whose upload fails when the file closes, deletes what it
+wrote, so a reader never takes half a file for the whole one. A path-escape guard rejects keys that
+resolve outside the root, and the same sweep deletes files by age.
+
+> **Limitation — no native cloud client yet.** A bucket is used through its mount (above).
+> `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
 > (`get_object_store`, `object_store.py:333-348`). Cloud backends implement the same `ObjectStore`
 > Protocol and differ only in `upload_target` (a presigned PUT vs the backend-streamed blob), so
 > callers don't change — but the presigned path is modeled, not yet backed (`UploadTarget`,
@@ -388,21 +462,34 @@ rejects keys that resolve outside the root (`:85-91`), and the same sweep delete
   can be deleted), uploads, polls the job (`pollJob`, `:215-228`), and shows a
   New/Updated/Deleted/Needs-fixing summary + changed-row preview with a "Review changes" handoff to
   the draft's Changes panel. The ExportDialog offers format, branch-vs-published (when on a draft),
-  view-vs-whole-DS (when in a view), and "add property columns"; `exportAndDownload`
-  (`:200-212`) creates → polls → downloads with a correct `.<format>` filename
-  (`triggerBrowserDownload`, `:169-177`). See [07 — Frontend Integration](07-frontend-integration.md).
+  view-vs-whole-DS (when in a view), and "add property columns"; it asks for the plan, then for a
+  data source with version control has the server prepare the file (`createExport`, then `getExport`
+  polled: its place in the queue, then its progress) and downloads it once ready
+  (`downloadExportUrl`), named `.<format>` (`triggerBrowserDownload`). The export being prepared is
+  remembered in the browser, so the dialog closed meanwhile opens on it again. A data source without
+  version control streams (`exportStreamUrl`). See [07 — Frontend Integration](07-frontend-integration.md).
 
 ---
 
 ## 11. Limitations & open items (candid)
 
-- **In-process dispatch**, not a durable async dispatcher — a process restart mid-import kills the
-  job, which is then reported `failed` once stale (`service.py:9-11`). Highest-priority hardening
-  item.
-- **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable); every
-  format *writes* streaming. Imports are capped at 100 MB per file anyway.
-- **No cloud object store yet**: artifacts live in the management database (§9); S3/GCS and the
-  presigned-upload path are stubbed (`object_store.py:333-348`).
+- **An interrupted job starts over.** A job whose process stops mid-run reads as failed and runs
+  again from the start (§2). With `GRAPHVER_TRANSFER_INPROCESS` on (the code default), jobs share
+  the web process with requests; the compose and Kubernetes manifests turn it off, so they run on
+  the versioning worker.
+- **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable), so they
+  stay at 100 MB; NDJSON, CSV and TSV go to 10 GB (§3d). Every format *writes* streaming.
+- **A 10 GB import takes hours**: about 1,500–2,500 rows a second (a 10 GB NDJSON file holds ~40M
+  rows). It runs on the worker and shows its place in the queue, not yet its progress.
+- **A large import's staged rows take their space in Postgres** until they are swept (§3c).
+- **A 50 GB export takes hours to prepare**: one job writes about 10 MB a second as NDJSON, 3.5 as
+  CSV (which reads everything twice), on one worker. Nothing splits an export across workers yet,
+  or cancels one being prepared; its file is swept a day after it is written.
+- **Exports download uncompressed**, so that their size is known and a download resumes: a 50 GB
+  CSV is 50 GB on the wire.
+- **No native cloud client yet**: artifacts live in the management database, or on a mount, which
+  can be a bucket's FUSE mount (§9); S3/GCS clients and the presigned-upload path are stubbed
+  (`get_object_store`).
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow
@@ -413,9 +500,6 @@ rejects keys that resolve outside the root (`:85-91`), and the same sweep delete
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
   dispatches the async worker.
-- **Staging retention.** `import_rows` and artifacts are meant to be GC'd after a terminal job
-  (`STAGING_GC_DAYS` = 7); confirm the sweeper is wired before relying on automatic cleanup — see
-  the retention discussion in [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
 
 ---
 

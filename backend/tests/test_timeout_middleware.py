@@ -305,8 +305,9 @@ async def test_sse_path_bypasses_timeout():
 
 
 async def test_streamed_export_bypasses_timeout():
-    """A streamed export runs as long as the file takes: a deadline would cut it short, and the
-    clean closing chunk would make the truncated file look complete."""
+    """A streamed export, or a stored export's download, runs as long as the file takes: a
+    deadline would cut it short, and the clean closing chunk would make the truncated file look
+    complete."""
 
     async def slow_download(scope, receive, send):
         await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -320,6 +321,9 @@ async def test_streamed_export_bypasses_timeout():
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
     await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1/download"), _Receiver(), sink := _Sink())
     assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
 
     # Only those routes: the export job's status is an ordinary request.

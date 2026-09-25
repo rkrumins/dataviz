@@ -7,10 +7,12 @@ file is never buffered whole.
 
 :class:`DatabaseObjectStore` keeps the blobs in the management database, in 1 MiB chunks, because
 production runs several API pods with no shared volume: an upload one pod stored must be there
-when the next request lands on another. :class:`LocalFsObjectStore` (one process's disk, rooted at
-``IMPORT_STORE_ROOT``) remains for a single-node stack. Cloud backends implement the same
-:class:`ObjectStore` Protocol and differ only in ``upload_target`` (a presigned PUT instead of the
-backend-streamed blob endpoint) — no caller rework.
+when the next request lands on another. :class:`LocalFsObjectStore` keeps them as files under
+``IMPORT_STORE_ROOT`` instead: a directory every pod mounts (a shared volume, or an S3/GCS bucket
+through its FUSE driver), which keeps multi-GB files out of the database, or one pod's own disk for
+a single-pod stack. Cloud backends implement the same :class:`ObjectStore` Protocol and differ only
+in ``upload_target`` (a presigned PUT instead of the backend-streamed blob endpoint) — no caller
+rework.
 """
 from __future__ import annotations
 
@@ -77,7 +79,12 @@ class ObjectStore(Protocol):
 
 
 class LocalFsObjectStore:
-    """Filesystem-backed object store rooted at ``root`` (``IMPORT_STORE_ROOT``)."""
+    """Filesystem-backed object store rooted at ``root`` (``IMPORT_STORE_ROOT``).
+
+    A file is written front to back in one go and never appended to or renamed: all a bucket
+    mounted through Mountpoint for Amazon S3 or Cloud Storage FUSE supports. Rewriting a key
+    truncates and rewrites its file (Mountpoint needs ``--allow-overwrite``, and ``--allow-delete``
+    for the sweep)."""
 
     def __init__(self, root: str | os.PathLike) -> None:
         self._root = Path(root)
@@ -96,11 +103,18 @@ class LocalFsObjectStore:
         size = 0
         f = await asyncio.to_thread(open, path, "wb")
         try:
-            async for chunk in chunks:
-                await asyncio.to_thread(f.write, chunk)
-                size += len(chunk)
-        finally:
-            await asyncio.to_thread(f.close)
+            try:
+                async for chunk in chunks:
+                    await asyncio.to_thread(f.write, chunk)
+                    size += len(chunk)
+            finally:
+                # On a bucket mount, closing is what uploads the file: it can fail too.
+                await asyncio.to_thread(f.close)
+        except BaseException:
+            # Never leave half a file under the key, where a reader would take it for the whole.
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(path.unlink, True)
+            raise
         return ObjectStat(key=key, size=size, exists=True)
 
     async def open_stream(
@@ -332,7 +346,7 @@ class DatabaseObjectStore:
 
 def get_object_store() -> ObjectStore:
     """Return the configured object store (``OBJECT_STORE_BACKEND``): the management database by
-    default, which every API pod shares; ``local`` for a single-node stack.
+    default, which every API pod shares; ``local`` for files under ``IMPORT_STORE_ROOT``.
 
     S3/GCS backends implement the same Protocol; they're wired here when added. Kept as a
     call-time factory (not a module constant) so env changes take effect without re-import."""
