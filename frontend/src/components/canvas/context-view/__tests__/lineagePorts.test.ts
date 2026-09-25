@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { buildNodePorts, portView } from '../lineagePorts'
+import type { OffCanvasFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
+import { buildNodePorts, columnEndLayer, portView, unloadedColumnLines } from '../lineagePorts'
 
 // Columns left to right: Source 0, Warehouse 3, Report 4.
 const layer: Record<string, number> = { src: 0, wh: 3, rep: 4, rep2: 4 }
@@ -101,5 +102,40 @@ describe('portView — a card whose lineage could not be counted', () => {
   it('never once its total is known', () => {
     expect(portView('left', undefined, { in: 0, out: 0 }, true)).toBeNull()
     expect(portView('left', undefined, { in: 3, out: 0 }, true)).toEqual({ kind: 'beyond', dir: 'in' })
+  })
+})
+
+describe('unloadedColumnLines — lineage into rows an anchored column has not drawn is IN the view', () => {
+  const flows = (inN: number, outN: number): OffCanvasFlows =>
+    ({ in: inN, out: outN, inPartners: new Set(), outPartners: new Set() })
+  const undrawn = (columns: Record<string, OffCanvasFlows>): OffCanvasLineage =>
+    ({ ...flows(0, 0), columns: new Map(Object.entries(columns)) })
+  // The anchored Warehouse column's id, placed like the columns above.
+  const columnAt: Record<string, number> = { WH: 3, REP: 4 }
+  const layerOfAny = (id: string) => layer[id] ?? columnAt[columnEndLayer(id) ?? '']
+
+  it('a row whose only lineage leads to rows Warehouse has not loaded is solid on the side facing it', () => {
+    const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: flows(0, 4) })]]))
+    const ports = buildNodePorts(lines, layerOfAny)
+    expect(ports.get('rep')!.left).toEqual({ in: 0, out: 1 })
+    expect(portView('left', ports.get('rep'), { in: 0, out: 4 })).toEqual({ kind: 'here', dir: 'out' })
+    // Not hollow on the conventional side: that would say "only outside".
+    expect(portView('right', ports.get('rep'), { in: 0, out: 4 })).toBeNull()
+  })
+
+  it("one line per row, column and direction; toward the row's own column it meets the left", () => {
+    const lines = unloadedColumnLines(new Map([
+      ['rep', undrawn({ WH: flows(2, 7), REP: flows(0, 1) })],
+      ['src', undrawn({ WH: flows(5, 0) })],
+    ]))
+    expect(lines).toHaveLength(4)
+    const ports = buildNodePorts(lines, layerOfAny)
+    expect(ports.get('rep')!.left).toEqual({ in: 1, out: 2 })
+    expect(ports.get('src')!.right).toEqual({ in: 1, out: 0 })
+  })
+
+  it('a row with nothing undrawn in any column adds no line', () => {
+    expect(unloadedColumnLines(new Map([['rep', undrawn({})]]))).toEqual([])
+    expect(unloadedColumnLines(new Map([['rep', undrawn({ WH: flows(0, 0) })]]))).toEqual([])
   })
 })

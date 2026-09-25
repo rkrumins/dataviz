@@ -23,6 +23,8 @@
  * UNKNOWN, on both sides, in neither direction colour, until a retry counts
  * it. Not while the first count is still on its way — every card would flash.
  */
+import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
+
 export type PortSide = 'left' | 'right'
 
 /** Lines on the canvas meeting one side of a card, by direction. */
@@ -119,6 +121,34 @@ export function portView(
   if (side === 'left' && total.in > 0 && canvasIn === 0) return { kind: 'beyond', dir: 'in' }
   if (side === 'right' && total.out > 0 && canvasOut === 0) return { kind: 'beyond', dir: 'out' }
   return null
+}
+
+/** A line's far end that is an anchored column, not a row of it. */
+const COLUMN_END = 'column:'
+
+/** The layer id a `unloadedColumnLines` end stands for; undefined for a row. */
+export function columnEndLayer(id: string): string | undefined {
+  return id.startsWith(COLUMN_END) ? id.slice(COLUMN_END.length) : undefined
+}
+
+/**
+ * Lineage into an anchored column that the canvas does not draw — rows past
+ * its loaded page, or its anchor, drawn as the column itself (the
+ * projection's `columns`). That lineage is IN the view, so the card's port is
+ * solid, on the side facing that column: one line per row, column and
+ * direction, whose far end is the column (`columnEndLayer`), never a row.
+ */
+export function unloadedColumnLines(
+  offCanvas: ReadonlyMap<string, OffCanvasLineage>,
+): Array<{ source: string; target: string }> {
+  const lines: Array<{ source: string; target: string }> = []
+  offCanvas.forEach(({ columns }, row) => {
+    columns.forEach((flows, layerId) => {
+      if (flows.out > 0) lines.push({ source: row, target: COLUMN_END + layerId })
+      if (flows.in > 0) lines.push({ source: COLUMN_END + layerId, target: row })
+    })
+  })
+  return lines
 }
 
 /** Lines meeting one side — the port's size and glow scale with it. */
