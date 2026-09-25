@@ -136,16 +136,18 @@ describe('the Context View canvas names the kind of thing it is counting', () =>
  * The edge banner reports a failed EDGE read, so its Retry refetches edges.
  * It used to re-run the whole view (every node batch, every anchored page,
  * /edges/between over everything) and drop every canvas's cached roll-ups,
- * on every mounted canvas, whatever had failed.
+ * on every mounted canvas, whatever had failed. For the roll-ups it asks
+ * again about the rows still missing, not the whole V × V set.
  */
 describe('the edge banner\'s Retry fetches the edges, not the whole view', () => {
-  it('refetches the edges, and this source\'s roll-ups only when those are what failed', () => {
+  it('refetches the edges, and the missing roll-ups only when those are what failed', () => {
     const start = source.indexOf('Some relationships could not be loaded')
     expect(start).toBeGreaterThan(-1)
     const block = source.slice(start, source.indexOf('</button>', start))
     expect(block).toContain('retryEdges()')
-    expect(block).toMatch(/if \(aggregationError\) invalidateAggregatedEdgesForScope\(provider\?\.scopeKey\)/)
+    expect(block).toMatch(/if \(aggregationError\) void retryAggregated\(\)/)
     expect(block).not.toContain('retryHydration()')
     expect(block).not.toContain('invalidateAggregatedEdges()')
+    expect(block).not.toContain('invalidateAggregatedEdgesForScope(')
   })
 })

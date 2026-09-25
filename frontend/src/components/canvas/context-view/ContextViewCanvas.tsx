@@ -277,7 +277,7 @@ import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
-import { invalidateAggregatedEdges, invalidateAggregatedEdgesForScope } from '@/hooks/useAggregatedLineage'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
 import { TraceWalkIndicator } from './TraceWalkIndicator'
@@ -809,6 +809,7 @@ export function ContextViewCanvas({
     error: aggregationError,
     loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
+    retryAggregated,
   } = useAggregatedLineage({ granularity: null })
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
   // when the visible container set (and so the URN key) hasn't changed. Scoped
@@ -5602,7 +5603,8 @@ export function ContextViewCanvas({
             relationships. That fetch is the RAW one, structural edges
             included, so the banner uses the covering word rather than
             "flows". Retry refetches the edges among what is loaded, and
-            this source's roll-ups only when those are what failed. */}
+            the roll-ups still missing only when those are what failed —
+            which is only once their own retries have run out. */}
         {(edgeFetchFailures > 0 || aggregationError) && (
           <div
             data-canvas-interactive
@@ -5612,7 +5614,7 @@ export function ContextViewCanvas({
             <button
               className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
               onClick={() => {
-                if (aggregationError) invalidateAggregatedEdgesForScope(provider?.scopeKey)
+                if (aggregationError) void retryAggregated()
                 if (edgeFetchFailures > 0) void retryEdges()
               }}
             >

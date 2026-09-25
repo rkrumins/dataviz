@@ -213,25 +213,14 @@ describe('useAggregatedLineage — a failed chunk', () => {
   const rows = Array.from({ length: 700 }, (_, i) => `r${String(i).padStart(4, '0')}`)
   const flows: Array<[string, string]> = [['r0001', 'r0600'], ['r0600', 'r0001'], ['r0650', 'r0002']]
 
-  it('keeps the pairs the other chunks answered, and leaves only its own rows to ask again', async () => {
-    let failing = true
-    const g = graph(flows, a => failing && a.sourceUrns.includes('r0600'))
+  it('keeps the pairs the other chunks answered', async () => {
+    // When its rows are asked again is useAggregatedLineage.retry.test.ts.
+    graph(flows, a => a.sourceUrns.includes('r0600'))
     const hook = render()
     await ask(hook, rows)
 
     // The first chunk answered r0001 → r0600; the second, which holds r0600
     // and r0650, did not.
     expect(shown(hook.result.current.aggregatedEdges)).toEqual(['agg-r0001-r0600'])
-
-    failing = false
-    const more = [...rows, 'r9999']
-    await ask(hook, more)
-    const delta = g.asks.slice(2)
-    const failed = rows.slice(500)
-    expect(sorted(delta[0].sourceUrns)).toEqual(sorted([...failed, 'r9999']))
-    expect(delta[0].targetUrns).toHaveLength(more.length)
-    expect(sorted(delta[1].sourceUrns)).toEqual(rows.slice(0, 500))
-    expect(sorted(delta[1].targetUrns)).toEqual(sorted([...failed, 'r9999']))
-    expect(shown(hook.result.current.aggregatedEdges)).toEqual(pairsAmong(flows, more))
   })
 })

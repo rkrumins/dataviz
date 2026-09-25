@@ -10,6 +10,9 @@
 
 export type CircuitState = 'closed' | 'open' | 'half-open'
 
+/** How long an open breaker refuses before it lets a probe through. */
+export const CIRCUIT_RESET_MS = 15_000
+
 export class CircuitBreaker {
   private state: CircuitState = 'closed'
   private consecutiveFailures = 0
@@ -18,7 +21,7 @@ export class CircuitBreaker {
 
   constructor(
     private readonly failureThreshold = 3,
-    private readonly resetTimeoutMs = 15_000,
+    private readonly resetTimeoutMs = CIRCUIT_RESET_MS,
   ) {}
 
   /** Check whether a request should be allowed through. */
