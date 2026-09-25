@@ -6139,6 +6139,8 @@ class FalkorDBProvider(GraphDataProvider):
                     # silently missing bucket of assigned entities.
                     raise
                 except Exception as e:
+                    if _is_load_shed(e):
+                        raise   # refused, not absent: never "these don't exist"
                     if await self._is_verified_missing_graph(e):
                         return []
                     logger.warning(f"get_nodes urn bucket failed: {e}")
@@ -7908,6 +7910,8 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             labels = await self._resolve_urn_labels_bulk(uniq)
         except Exception as exc:
+            if _is_load_shed(exc):
+                raise   # the unlabeled fallback is a full scan: more load
             logger.debug("label bucketing failed (%s) — unlabeled fallback", exc)
             return [("", uniq)]
         buckets: Dict[str, List[str]] = {}
@@ -7975,7 +7979,9 @@ class FalkorDBProvider(GraphDataProvider):
                         str(r[0]) for r in (lbl_res.result_set or [])
                         if r and r[0] and not str(r[0]).startswith("_")
                     ]
-                except Exception:
+                except Exception as exc:
+                    if _is_load_shed(exc):
+                        raise
                     observed = []
                 if observed:
                     unresolved = list(missing)
@@ -8030,6 +8036,10 @@ class FalkorDBProvider(GraphDataProvider):
                     except Exception:
                         pass
             except Exception as exc:
+                # A shed means "ask again in a moment". Falling back to the
+                # unlabeled MATCH would answer it with a full node scan.
+                if _is_load_shed(exc):
+                    raise
                 logger.warning(
                     "Bulk URN label resolution failed for %d URNs (will fall "
                     "back to unlabeled MATCH for these): %s",
@@ -14139,6 +14149,10 @@ class FalkorDBProvider(GraphDataProvider):
                         op="node_degrees",
                     )
                 except Exception as exc:
+                    # A shed is flow control, not "unknown": an unknown here
+                    # is cached with the answer for the full TTL.
+                    if _is_load_shed(exc):
+                        raise
                     logger.warning(
                         "get_node_degrees %s failed (%d urns, label=%r): %s",
                         direction, len(bucket_urns), label, exc,

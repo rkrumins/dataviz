@@ -309,3 +309,63 @@ async def test_a_graph_that_does_not_exist_yet_still_has_no_edges():
     p = _bucketed_edges_provider(ResponseError("Invalid graph operation on empty key"))
     edges = await p.get_edges(_between())
     assert [(e.source_urn, e.target_urn) for e in edges] == [("urn:a", "urn:b")]
+
+
+# ── a shed is never turned into a smaller (or a heavier) answer ──────────
+
+
+def _shedding_provider(shed, *, buckets=None):
+    """A provider whose every store read is refused with ``shed``, and which
+    records the cypher it was asked to run."""
+    p = fp.FalkorDBProvider(host="x", graph_name="g")
+    p.asked = []
+
+    async def _connected():
+        return None
+
+    async def _ro_query(cypher, params=None, timeout=None, **kw):
+        p.asked.append(cypher)
+        raise shed
+
+    p._ensure_connected = _connected
+    p._ro_query = _ro_query
+    if buckets is not None:
+        async def _buckets(urns):
+            return buckets
+        p._label_buckets = _buckets
+    return p
+
+
+async def test_a_shed_during_label_resolution_is_not_turned_into_a_full_scan():
+    """The unlabeled fallback is a full node scan: load turned into more load."""
+    p = _shedding_provider(ProviderBusy("falkordb", "shed"))
+    with pytest.raises(ProviderBusy):
+        await p._resolve_urn_labels_bulk(["u1"])
+    assert not [c for c in p.asked if c.startswith("MATCH (n) WHERE n.urn IN")]
+
+
+async def test_label_buckets_lets_a_shed_out():
+    p = fp.FalkorDBProvider(host="x", graph_name="g")
+
+    async def _resolve(urns):
+        raise ProviderBusy("falkordb", "shed")
+
+    p._resolve_urn_labels_bulk = _resolve
+    with pytest.raises(ProviderBusy):
+        await p._label_buckets(["u1"])
+
+
+async def test_a_shed_node_bucket_is_not_read_as_missing_entities():
+    from backend.common.models.graph import NodeQuery
+
+    p = _shedding_provider(QUEUE_FULL, buckets=[("A", ["u1"])])
+    with pytest.raises(ResponseError):
+        await p.get_nodes(NodeQuery(urns=["u1"], limit=1, include_child_count=False))
+
+
+async def test_a_shed_degree_bucket_is_not_cached_as_unknown():
+    """Absent means unknown, and /nodes/degree caches it for the full TTL:
+    those cards would never get their lineage markers."""
+    p = _shedding_provider(ProviderBusy("falkordb", "shed"), buckets=[("A", ["u1"])])
+    with pytest.raises(ProviderBusy):
+        await p.get_node_degrees(["u1"], ["FLOWS_TO"])
