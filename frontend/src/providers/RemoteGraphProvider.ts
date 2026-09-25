@@ -2,12 +2,12 @@ import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
-    MAX_READ_RETRIES,
     isClientTimeout,
     isIdempotentGraphRead,
     isNetworkError,
     isProviderOutageSignal,
     isRetryableGraphFailure,
+    readRetryBudget,
     retryDelayMs,
     toApiStatusError,
 } from '@/services/graphRequestFailure'
@@ -361,8 +361,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
                     const timedOut = isClientTimeout(err)
                     // A timeout already cost a full deadline — one more go
                     // is enough; a dropped connection gets the full budget.
-                    const budget = timedOut ? 1 : MAX_READ_RETRIES
-                    if (retryable && attempt < budget && isRetryableGraphFailure(err)) {
+                    if (retryable && attempt < readRetryBudget(err) && isRetryableGraphFailure(err)) {
                         await this._retryPause(err, attempt, fetchOptions.signal)
                         continue
                     }
@@ -387,7 +386,8 @@ export class RemoteGraphProvider implements GraphDataProvider {
                         // the client waits at least as long as it suggests.
                         circuitBreaker.recordFailure(error.retryAfterMs)
                     }
-                    if (retryable && attempt < MAX_READ_RETRIES && isRetryableGraphFailure(error)) {
+                    // A 504 is the same as a client timeout: one more go.
+                    if (retryable && attempt < readRetryBudget(error) && isRetryableGraphFailure(error)) {
                         await this._retryPause(error, attempt, fetchOptions.signal)
                         continue
                     }

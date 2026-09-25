@@ -91,12 +91,21 @@ describe('RemoteGraphProvider — in-place retries for idempotent reads', () => 
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('gives up after the retry budget and surfaces the last failure', async () => {
+  it('a 504 already cost a full deadline: one more go, then the failure surfaces', async () => {
     const provider = new RemoteGraphProvider({ workspaceId: 'ws_r5', dataSourceId: 'ds_r5' })
     fetchSpy.mockImplementation(async () =>
       jsonResponse(504, { detail: { code: 'REQUEST_TIMEOUT' } }, { 'Retry-After': '0' }),
     )
     await expect(provider.getEdgesBetween(['urn:a', 'urn:b'])).rejects.toMatchObject({ status: 504 })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('a shed 429 still gets the full retry budget', async () => {
+    const provider = new RemoteGraphProvider({ workspaceId: 'ws_r8', dataSourceId: 'ds_r8' })
+    fetchSpy.mockImplementation(async () =>
+      jsonResponse(429, { detail: { code: 'PROVIDER_BUSY' } }, { 'Retry-After': '0' }),
+    )
+    await expect(provider.getEdgesBetween(['urn:a', 'urn:b'])).rejects.toMatchObject({ status: 429 })
     expect(fetchSpy).toHaveBeenCalledTimes(3) // 1 + MAX_READ_RETRIES
   })
 
