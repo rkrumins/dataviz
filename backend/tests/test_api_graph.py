@@ -639,7 +639,8 @@ class _DegreeStub(_StubProvider):
         return {u: {"in": 1, "out": 2} for u in urns if u != "u2"}
 
 
-async def _post_degrees(test_client: AsyncClient, engine, monkeypatch, cache=None, urns=("u1", "u2")):
+async def _post_degrees(test_client: AsyncClient, engine, monkeypatch, cache=None, urns=("u1", "u2"),
+                        **extra):
     from backend.app.main import app
     from backend.app.api.v1.endpoints import graph as graph_module
 
@@ -652,7 +653,7 @@ async def _post_degrees(test_client: AsyncClient, engine, monkeypatch, cache=Non
     try:
         return await test_client.post(
             "/api/v1/test-ws/graph/nodes/degree",
-            json={"urns": list(urns), "edgeTypes": ["FLOWS_TO"]},
+            json={"urns": list(urns), "edgeTypes": ["FLOWS_TO"], **extra},
         )
     finally:
         app.dependency_overrides.pop(graph_module.get_context_engine, None)
@@ -713,6 +714,58 @@ async def test_a_complete_degree_answer_is_still_cached(test_client: AsyncClient
     writes = _answer_writes(redis)
     assert _gc._NEGATIVE_TTL not in [c.kwargs.get("ex") for c in writes]
     assert [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
+class _RollupStub(_StubProvider):
+    """Counts roll-up presence only when asked to."""
+
+    async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
+        out = {u: {"in": 0, "out": 0} for u in urns}
+        if include_rollups:
+            for v in out.values():
+                v.update(rollupIn=0, rollupOut=1)
+        return out
+
+
+class _ParamsCache:
+    """Records the params each answer is cached under, and computes it."""
+
+    def __init__(self):
+        self.params = []
+
+    async def get_or_compute(self, *, params, compute, **kw):
+        self.params.append(params)
+        return await compute()
+
+
+async def test_node_degrees_carry_rollup_presence_when_asked(test_client: AsyncClient, monkeypatch):
+    """A container whose lineage all sits below it has none of its own: its
+    marker needs to know it holds roll-ups. Opt-in, and cached apart from a
+    plain answer so neither is served for the other."""
+    engine, _, _ = _make_scoped_engine_and_cache(_RollupStub())
+    cache = _ParamsCache()
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1",), includeRollups=True)
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 0, "out": 0, "rollupIn": 0, "rollupOut": 1}}
+
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1",))
+    assert resp.json() == {"u1": {"in": 0, "out": 0}}
+    assert [p["includeRollups"] for p in cache.params] == [True, False]
+
+
+async def test_a_plain_degree_request_still_reaches_a_reader_without_rollups(
+    test_client: AsyncClient, monkeypatch,
+):
+    engine, _, _ = _make_scoped_engine_and_cache(_DegreeStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, _ParamsCache(), urns=("u1",))
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 1, "out": 2}}
+
+
+async def test_rollups_on_a_reader_that_cannot_count_are_501(test_client: AsyncClient, monkeypatch):
+    engine, cache, _ = _make_scoped_engine_and_cache(_StubProvider())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, includeRollups=True)
+    assert resp.status_code == 501
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────

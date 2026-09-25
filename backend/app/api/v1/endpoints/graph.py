@@ -2450,10 +2450,16 @@ class _DegreesResult(RootModel[Dict[str, Dict[str, int]]]):
         return f"{self._unanswered} urns could not be counted" if self._unanswered else None
 
 
+class NodeDegreeQuery(InternalEdgeQuery):
+    """``includeRollups`` adds ``rollupIn`` / ``rollupOut`` to each urn's
+    totals: 1 when it has a roll-up cell in that direction, else 0."""
+    include_rollups: bool = Field(False, alias="includeRollups")
+
+
 @router.post("/nodes/degree", response_model=Dict[str, Dict[str, int]])
 async def get_node_degrees(
     response: Response,
-    query: InternalEdgeQuery = Body(...),
+    query: NodeDegreeQuery = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """TOTAL lineage degree (in/out) per URN over the full graph.
@@ -2473,9 +2479,14 @@ async def get_node_degrees(
     An answer that left urns out is never cached as THE answer (see
     ``_DegreesResult``). A reader that cannot count at all (a draft, a
     versioned branch) is a 501, like /nodes/ancestor-chains.
+
+    ``includeRollups`` opts in to roll-up presence for container markers
+    (see ``NodeDegreeQuery``); a request without it is answered as before.
     """
     async def compute() -> _DegreesResult:
-        result = _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+        result = _DegreesResult(await engine.get_node_degrees(
+            query.urns, query.edge_types, include_rollups=query.include_rollups,
+        ))
         result._unanswered = len(set(query.urns) - result.root.keys())
         return result
 
@@ -2489,6 +2500,7 @@ async def get_node_degrees(
             params={
                 "urns": sorted(query.urns),
                 "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+                "includeRollups": query.include_rollups,
             },
             compute=_bounded_compute(engine, compute),
             model_cls=_DegreesResult,

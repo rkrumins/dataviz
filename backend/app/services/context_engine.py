@@ -838,16 +838,19 @@ class ContextEngine:
         """Get distinct values for a node property."""
         return await self.provider.get_distinct_values(property_name)
 
-    async def get_node_degrees(self, urns, edge_types=None):
+    async def get_node_degrees(self, urns, edge_types=None, include_rollups=False):
         """Total lineage degree per URN (see provider docstring). The draft
         and versioned-branch readers cannot count at all, and say so the way
         their other unsupported reads do (a 501 at the route): answering {}
-        read as "unknown" for every urn, which the canvas asked about again."""
+        read as "unknown" for every urn, which the canvas asked about again.
+        Roll-up presence is passed on only when asked for."""
         fn = getattr(self.provider, "get_node_degrees", None)
         if fn is None:
             raise NotImplementedError(
                 f"node degrees are not available on {type(self.provider).__name__}"
             )
+        if include_rollups:
+            return await fn(urns, edge_types, include_rollups=True)
         return await fn(urns, edge_types)
 
     async def save_custom_graph(

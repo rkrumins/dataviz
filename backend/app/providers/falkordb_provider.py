@@ -14265,6 +14265,7 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def get_node_degrees(
         self, urns: List[str], edge_types: Optional[List[str]] = None,
+        *, include_rollups: bool = False,
     ) -> Dict[str, Dict[str, int]]:
         """TOTAL lineage degree (in/out) per URN over the FULL graph.
 
@@ -14280,6 +14281,14 @@ class FalkorDBProvider(GraphDataProvider):
         query failed) — callers must not treat absence as zero. URNs in
         a successfully-queried bucket that simply have no edges are
         explicitly zero-filled.
+
+        ``include_rollups`` adds ``rollupIn`` / ``rollupOut``: 1 when the
+        node has a roll-up cell (:AGGREGATED, on the projection graph) in
+        that direction, else 0. That is how a collapsed container whose
+        lineage all sits below it shows it has some; the raw count reads the
+        source graph, which in dedicated mode holds no cells. Presence only:
+        a count of cells is not a count of flows, and an anchor's cells run
+        to thousands.
         """
         out: Dict[str, Dict[str, int]] = {}
         if not urns:
@@ -14290,20 +14299,28 @@ class FalkorDBProvider(GraphDataProvider):
         types = [t for t in self._alias_rel_types([t for t in (edge_types or []) if t]) if t]
         rel_alt = "|".join(_sanitize_label(t) for t in types)
         rel_frag = f":{rel_alt}" if rel_alt else ""
+        zero = {"in": 0, "out": 0, **({"rollupIn": 0, "rollupOut": 0} if include_rollups else {})}
         for label, bucket_urns in await self._label_buckets(urns):
             lbl_frag = f":{label}" if label else ""
             bucket_ok = True
             counts: Dict[str, Dict[str, int]] = {}
-            for direction, pattern in (
-                ("out", f"(n{lbl_frag})-[r{rel_frag}]->()"),
-                ("in", f"(n{lbl_frag})<-[r{rel_frag}]-()"),
-            ):
-                cypher = (
-                    f"MATCH {pattern} WHERE n.urn IN $urns "
-                    "RETURN n.urn AS urn, count(r) AS c"
-                )
+            count = "WHERE n.urn IN $urns RETURN n.urn AS urn, count(r) AS c"
+            asks = [
+                ("out", self._ro_query, f"MATCH (n{lbl_frag})-[r{rel_frag}]->() {count}"),
+                ("in", self._ro_query, f"MATCH (n{lbl_frag})<-[r{rel_frag}]-() {count}"),
+            ]
+            if include_rollups:
+                # A pattern predicate stops at the first cell (a Semi Apply).
+                seek = f"MATCH (n{lbl_frag}) WHERE n.urn IN $urns AND"
+                asks += [
+                    ("rollupOut", self._proj_ro_query,
+                     f"{seek} (n)-[:AGGREGATED]->() RETURN n.urn AS urn, 1 AS c"),
+                    ("rollupIn", self._proj_ro_query,
+                     f"{seek} (n)<-[:AGGREGATED]-() RETURN n.urn AS urn, 1 AS c"),
+                ]
+            for direction, run, cypher in asks:
                 try:
-                    result = await self._ro_query(
+                    result = await run(
                         cypher, params={"urns": bucket_urns}, timeout=2.0,
                         op="node_degrees",
                     )
@@ -14319,11 +14336,11 @@ class FalkorDBProvider(GraphDataProvider):
                     bucket_ok = False
                     break
                 for row in (result.result_set or []):
-                    counts.setdefault(str(row[0]), {"in": 0, "out": 0})[direction] = int(row[1] or 0)
+                    counts.setdefault(str(row[0]), dict(zero))[direction] = int(row[1] or 0)
             if not bucket_ok:
                 continue  # absent = unknown, never zero
             for urn in bucket_urns:
-                out[urn] = counts.get(urn, {"in": 0, "out": 0})
+                out[urn] = counts.get(urn, dict(zero))
         return out
 
     #: URNs per label-qualified seek in ``resolve_identities``.
