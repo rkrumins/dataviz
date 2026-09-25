@@ -14,6 +14,7 @@
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import { useEdgeProjection } from '../useEdgeProjection'
+import { bySignificance } from '@/components/canvas/context-view/lineDensity'
 import type { HierarchyNode } from '@/types/hierarchy'
 
 const hNode = (id: string, children: HierarchyNode[] = [], data: Record<string, unknown> = {}): HierarchyNode => ({
@@ -115,6 +116,8 @@ type Projected = {
   isAggregated: boolean
   isBidirectional: boolean
   edgeCount: number
+  bundleSize: number
+  data: { bundleSize: number }
   types: string[]
 }
 
@@ -291,9 +294,9 @@ describe('useEdgeProjection — hidden connection types', () => {
  * objects happened to land in its group. An AGGREGATED member arrives with
  * the real number of underlying relationships on `data.edgeCount`; counting
  * members threw it away, so the single most significant flow on the board
- * reported `1` and sorted below any pair carrying two raw edges — first out
- * when the adaptive budget culls (`bySignificance` in ContextViewCanvas
- * ranks on exactly this field).
+ * reported `1` and sorted below any pair carrying two raw edges. The line
+ * budgets do NOT rank on this field: `bySignificance` ranks on `bundleSize`,
+ * how many lines a line replaces, which the bundle carries beside it.
  */
 describe('useEdgeProjection — a bundle carries the weight it summarises', () => {
   it("an AGGREGATED bundle keeps the aggregate's own count, not its member count", () => {
@@ -333,7 +336,7 @@ describe('useEdgeProjection — a bundle carries the weight it summarises', () =
     expect(bundles(res)[0].edgeCount).toBe(8)
   })
 
-  it('a heavy rollup outranks a two-edge pair — the culling sort keeps it', () => {
+  it('a heavy rollup outweighs a two-edge pair', () => {
     const res = run({
       roots: [hNode('a'), hNode('b'), hNode('c'), hNode('d')],
       edges: [edge('e1', 'c', 'd'), edge('e2', 'c', 'd')],      // 2 raw edges
@@ -343,9 +346,30 @@ describe('useEdgeProjection — a bundle carries the weight it summarises', () =
     const pair = bundles(res).find(e => e.source === 'c')!
     expect(rollup.edgeCount).toBe(7)
     expect(pair.edgeCount).toBe(2)
-    // Descending edgeCount is the canvas's significance rank; before the fix
-    // the rollup came last at 1 and was the first thing dropped.
+    // Before the fix the rollup weighed 1, below the pair.
     expect(rollup.edgeCount).toBeGreaterThan(pair.edgeCount)
+  })
+
+  it('the budget ranks by lines replaced — at the top level, where bySignificance reads it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b'), hNode('c'), hNode('d')],
+      edges: [edge('e1', 'c', 'd'), edge('e2', 'c', 'd')],      // two lines on one
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),   // one line, weight 7
+    })
+    const pair = bundles(res).find(e => e.source === 'c')!
+    expect([...bundles(res)].sort(bySignificance)[0]).toBe(pair)
+    expect(pair.bundleSize).toBe(2)
+  })
+
+  it('a two-way pair replaces the lines of both directions', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')]),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].bundleSize).toBe(2)
+    expect(bundles(res)[0].data.bundleSize).toBe(2)
   })
 
   it('raw members still weigh one apiece — on the rows that hold them', () => {

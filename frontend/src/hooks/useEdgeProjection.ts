@@ -710,6 +710,8 @@ export function useEdgeProjection({
         isBundled: edgeCount > 1,
         isGhost,
         edgeCount,
+        // At the top level too: that is where `bySignificance` reads it.
+        bundleSize,
         types: typesArray,
         confidence: maxConfidence,
         isAggregated,
@@ -748,6 +750,8 @@ export function useEdgeProjection({
         ;(fwd.types as string[]).forEach(t => types.add(t))
         ;(rev.types as string[]).forEach(t => types.add(t))
         const edgeCount = (fwd.edgeCount as number) + (rev.edgeCount as number)
+        // One line now stands in for the lines of both directions.
+        const bundleSize = (fwd.bundleSize as number) + (rev.bundleSize as number)
         const typesArr = Array.from(types)
         merged.push({
           id: `bundle-bi-${canonical}`,
@@ -758,6 +762,7 @@ export function useEdgeProjection({
           // matching the OR its isAggregated sibling already uses.
           isGhost: fwd.isGhost || rev.isGhost,
           edgeCount,
+          bundleSize,
           types: typesArr,
           confidence: Math.max(fwd.confidence, rev.confidence),
           isAggregated: fwd.isAggregated || rev.isAggregated,
@@ -765,7 +770,7 @@ export function useEdgeProjection({
           isDelegated: false,
           isResidual: false,
           isBidirectional: true,
-          data: { edgeTypes: typesArr, confidence: Math.max(fwd.confidence, rev.confidence), edgeCount },
+          data: { edgeTypes: typesArr, confidence: Math.max(fwd.confidence, rev.confidence), edgeCount, bundleSize },
         })
         consumed.add(fwd)
         consumed.add(rev)
