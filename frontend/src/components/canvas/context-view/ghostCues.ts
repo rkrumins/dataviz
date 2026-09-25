@@ -34,10 +34,6 @@ export function portalLabel(names: readonly string[], total: number, layerNames:
   return `${total} entities`
 }
 
-/** How many a stub click brings in at once. The count left on the stub goes
- *  down as they arrive, so the next click brings the next batch. */
-export const BRING_IN_BATCH = 100
-
 /** Width of a stub — it lives in its row's HALF of the gap between two
  *  columns (48px), so the stub of a row and the stub of its neighbour across
  *  the gap never collide. */

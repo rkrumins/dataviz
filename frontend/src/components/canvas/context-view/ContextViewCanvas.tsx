@@ -58,6 +58,7 @@ import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
+import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
@@ -129,7 +130,6 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
-import { BRING_IN_BATCH } from './ghostCues'
 import { shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -689,6 +689,10 @@ export function ContextViewCanvas({
   // on-screen node map (so the edge drill resolves against what is drawn).
   const childLoadRef = useRef<{ cancel: (id: string) => void; loadingNodes: ReadonlySet<string> } | null>(null)
   const renderMapRef = useRef<Map<string, HierarchyNode>>(new Map())
+  // Every node drawn as a row of its own (`drawnRows`, below). A reveal asks
+  // this, not renderMap, which also holds the nodes folded inside closed rows.
+  const drawnRowsRef = useRef<ReadonlySet<string>>(new Set())
+  const isDrawnRow = useCallback((id: string) => drawnRowsRef.current.has(id), [])
 
   // Forward-ref for the duplicate-subtree layer wiring. onNodeCopied /
   // onNodeDuplicated fire from useDuplicateSubtree / useCanvasInteractions,
@@ -2714,6 +2718,18 @@ export function ContextViewCanvas({
   const renderByLayer = traceRender?.byLayer ?? nodesByLayer
   const renderFlat = traceRender?.flat ?? displayFlat
   const renderMap = traceRender?.map ?? displayMap
+  // The rows the columns draw: each column's roots and, below an open row,
+  // its children — LayerColumn's flat tree, without the column chrome.
+  const drawnRows = useMemo(() => {
+    const rows = new Set<string>()
+    const stack = [...renderByLayer.values()].flat()
+    while (stack.length > 0) {
+      const node = stack.pop()!
+      rows.add(node.id)
+      if (expandedForRender.has(node.id)) stack.push(...node.children)
+    }
+    return rows
+  }, [renderByLayer, expandedForRender])
 
 
   // Suppress parent AGGREGATED edges whose drill currently has at least one
@@ -3401,6 +3417,7 @@ export function ContextViewCanvas({
   useEffect(() => {
     childLoadRef.current = { cancel: cancelChildLoad, loadingNodes }
     renderMapRef.current = renderMap
+    drawnRowsRef.current = drawnRows
     // The keyboard handlers are assembled before the session exists, so
     // they reach it the same way they reach fit-to-width.
     searchRef.current = search
@@ -4632,43 +4649,43 @@ export function ContextViewCanvas({
     [sortedLayers],
   )
 
-  // An off-canvas stub's click: bring that row's partners onto the canvas, a
-  // batch at a time — the stub's count drops as they land, so the next click
-  // brings the next batch. Each is the drawer's reveal (its ancestors walked
-  // open) without the per-row scroll "Show all" does: a hundred scrolls in a
-  // row is a slideshow, not a reveal.
-  const bringInOffCanvas = useCallback(async (nodeId: string, side: 'in' | 'out') => {
-    const lineage = offCanvasByNode.get(nodeId)
-    const batch = lineage ? [...(side === 'out' ? lineage.outPartners : lineage.inPartners)].slice(0, BRING_IN_BATCH) : []
-    if (batch.length === 0) return
-    let next = 0
-    const worker = async () => {
-      while (next < batch.length) {
-        const id = batch[next++]
-        try { await revealOnCanvas(id, { skipFocus: true }) } catch { /* counted below */ }
+  // Selecting a card draws its lines, and a line needs a row at its far end.
+  // A partner that is a row of an anchored column past its loaded page is in
+  // the view (the card's port says so) but has none, so selecting the card
+  // brings those partners in along their paths (useRevealPartners), quietly:
+  // there is nothing to announce, the lines just draw. At most
+  // REVEAL_PARTNERS_CAP per selection, whether they are placed at once or
+  // later, as their chains arrive (`partnersAskedRef` keeps count, and asks
+  // no partner twice); never while a trace holds the canvas.
+  const revealPartners = useRevealPartners({
+    provider,
+    setExpandedNodes,
+    markFirstPageHandled,
+    chainOf: (urn) => ancestorChains?.get(urn),
+    isVisible: isDrawnRow,
+    isAnchor: (urn) => promotedAnchors.has(urn),
+    containmentEdgeTypes,
+  })
+  const partnersAskedRef = useRef<{ nodeId: string | null; asked: Set<string> }>({ nodeId: null, asked: new Set() })
+  useEffect(() => {
+    if (partnersAskedRef.current.nodeId !== selectedNodeId) {
+      partnersAskedRef.current = { nodeId: selectedNodeId, asked: new Set() }
+    }
+    const { asked } = partnersAskedRef.current
+    if (!selectedNodeId || traceWriteLocked()) return
+    const columns = offCanvasByNode.get(selectedNodeId)?.columns
+    if (!columns) return
+    const batch = new Set<string>()
+    for (const flows of columns.values()) {
+      for (const partner of [...flows.inPartners, ...flows.outPartners]) {
+        if (asked.size + batch.size >= REVEAL_PARTNERS_CAP) break
+        if (!asked.has(partner)) batch.add(partner)
       }
     }
-    await Promise.all(Array.from({ length: Math.min(6, batch.length) }, worker))
-    const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
-    const landed = batch.filter(id => loaded.has(id))
-    if (landed.length < batch.length) {
-      useNotificationStore.getState().add({
-        type: landed.length === 0 ? 'error' : 'warning',
-        message: landed.length === 0
-          ? `Couldn't bring any of those ${batch.length} entities onto the canvas`
-          : `Brought ${landed.length} of ${batch.length} entities onto the canvas — the rest could not be placed`,
-      })
-    }
-    // Show where they went only when none of them landed in sight: the
-    // batch can take seconds, and a scroll that arrives after the reader has
-    // moved on takes them somewhere they did not ask to go.
-    const box = horizontalScrollRef.current?.getBoundingClientRect()
-    const inSight = box && landed.some(id => {
-      const r = paintedRow(id)?.getBoundingClientRect()
-      return r && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right
-    })
-    if (landed[0] && !inSight) scrollHitIntoView(landed[0])
-  }, [offCanvasByNode, revealOnCanvas, scrollHitIntoView])
+    if (batch.size === 0) return
+    batch.forEach(partner => asked.add(partner))
+    void revealPartners([...batch])
+  }, [selectedNodeId, offCanvasByNode, revealPartners, traceWriteLocked])
 
   // The panel reads the SAME array the overlay is handed, so "in view"
   // means post-budget and the drawn set is a subset of the model.
@@ -5048,8 +5065,8 @@ export function ContextViewCanvas({
     loading: boolean
     records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
   } | null>(null)
-  const handlePreviewExternal = useCallback(async () => {
-    const urn = selectedNodeId
+  const handlePreviewExternal = useCallback(async (target?: string) => {
+    const urn = target ?? selectedNodeId
     if (!urn) return
     setExternalPreview({ nodeId: urn, loading: true, records: [] })
     openLens(urn)
@@ -5089,6 +5106,15 @@ export function ContextViewCanvas({
       setExternalPreview({ nodeId: urn, loading: false, records: [] })
     }
   }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
+
+  // A stub's click. Its lineage leaves the view, so there is nothing to bring
+  // in: the Focus Lens on its row shows where it goes — with the external
+  // preview's partners badged, when that is on. Declared below both, which a
+  // callback naming them must be.
+  const openOffCanvasInLens = useCallback((nodeId: string) => {
+    if (externalLineagePreview) void handlePreviewExternal(nodeId)
+    else openLens(nodeId)
+  }, [externalLineagePreview, handlePreviewExternal, openLens])
 
   // The Anchor Rail — the focused entity's off-screen partners as chips in
   // their columns — is decided by the overlay (the selection at once, a
@@ -6148,9 +6174,9 @@ export function ContextViewCanvas({
               // A stub is a missing-link alert: lineage that leaves the view.
               // It follows the alerts switch, as the chip and the cue do.
               offCanvasLineage={overlay.active || !showMissingConnectionIndicators ? undefined : offCanvasByNode}
-              // During a trace the reveal itself refuses to write the store
-              // (revealOnCanvas), so the click is safe to offer throughout.
-              onBringInOffCanvas={(nodeId, side) => { void bringInOffCanvas(nodeId, side) }}
+              // Opening the Lens writes nothing to the canvas, so the click is
+              // safe to offer throughout.
+              onOpenOffCanvas={openOffCanvasInLens}
               layerNames={layerNameById}
             />
           )}

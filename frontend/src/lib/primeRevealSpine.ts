@@ -10,9 +10,9 @@
  * longer than that. `viaReveal` marks these out-of-band nodes so
  * `loadChildren` doesn't count them as a loaded page (see useGraphHydration).
  *
- * Taken out of the search reveal (useRevealSearchHit) so another reveal can
- * share it. Never throws: a failed step costs the reveal what it would have
- * attached, and the caller lands as far as it can.
+ * Shared by the search reveal (useRevealSearchHit) and the partner reveal
+ * (useRevealPartners). Never throws: a failed step costs the reveal what it
+ * would have attached, and the caller lands as far as it can.
  */
 import { useCanvasStore } from '@/store/canvas'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'

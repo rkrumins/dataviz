@@ -111,7 +111,7 @@ export function LineageFlowOverlay({
   hoverPool,
   hoverBudget = 500,
   offCanvasLineage,
-  onBringInOffCanvas,
+  onOpenOffCanvas,
   layerNames,
 }: {
   nodes: any[],
@@ -165,8 +165,8 @@ export function LineageFlowOverlay({
   /** Per row: lineage whose far end is outside this view — drawn as a stub
    *  beside the row. See ghostCues. */
   offCanvasLineage?: ReadonlyMap<string, OffCanvasLineage>,
-  /** A stub's click: bring that row's off-canvas partners in. */
-  onBringInOffCanvas?: (nodeId: string, side: 'in' | 'out') => void,
+  /** A stub's click: show where that row's lineage goes (the Focus Lens). */
+  onOpenOffCanvas?: (nodeId: string) => void,
   /** Layer display names by id — a portal chip names where lineage goes. */
   layerNames?: ReadonlyMap<string, string>,
 }) {
@@ -1993,7 +1993,7 @@ export function LineageFlowOverlay({
           partners={stub.partners}
           x={stub.x}
           y={stub.y}
-          onOpen={onBringInOffCanvas ? () => onBringInOffCanvas(stub.nodeId, stub.side) : undefined}
+          onOpen={onOpenOffCanvas ? () => onOpenOffCanvas(stub.nodeId) : undefined}
         />
       ))}
     </div>

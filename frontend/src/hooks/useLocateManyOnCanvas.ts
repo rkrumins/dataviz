@@ -44,7 +44,7 @@ export interface UseLocateManyOnCanvasOptions {
 /** Resolve as soon as `check` passes, giving up after `budgetMs`. Polled on
  *  animation frames: the row is painted by React and the virtualizer, so a
  *  frame is the granularity at which the answer can change. */
-async function appearsWithin(check: () => boolean, budgetMs: number): Promise<boolean> {
+export async function appearsWithin(check: () => boolean, budgetMs: number): Promise<boolean> {
   const deadline = Date.now() + budgetMs
   for (;;) {
     await new Promise<void>((r) => requestAnimationFrame(() => r()))

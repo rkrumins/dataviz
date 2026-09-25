@@ -392,6 +392,13 @@ function stubProvider(
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
     getEdges: async () => [],
+    // Containment among the URNs asked — what a reveal primes its paths with.
+    getEdgesBetween: async (urns: string[]) => {
+      const asked = new Set(urns)
+      return estate.model.containmentEdges
+        .filter(c => asked.has(c.sourceUrn) && asked.has(c.targetUrn))
+        .map(c => ({ id: `c:${c.sourceUrn}>${c.targetUrn}`, sourceUrn: c.sourceUrn, targetUrn: c.targetUrn, edgeType: 'CONTAINS' }))
+    },
     // The aggregated fan-out the browse canvas fires for its visible
     // containers. It answers nothing — what a test reads is what the canvas
     // asked for: the LEVEL, which is the whole blast radius of the
