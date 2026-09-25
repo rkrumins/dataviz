@@ -21,7 +21,7 @@ export interface UseLocateManyOnCanvasOptions {
   /** Expand a target's collapsed ancestors. Always called with
    *  `skipFocus: true` — N per-node scrolls would fight each other; this
    *  hook does its own scrolling, one target at a time. */
-  revealAndFocus: (nodeId: string, opts: RevealOptions) => Promise<void>
+  revealAndFocus: (nodeId: string, opts: RevealOptions) => Promise<unknown>
   /** The virtualizer-aware single-target reveal pulse (the same one a
    *  lone search hit uses). */
   scrollHitIntoView: (nodeId: string) => void

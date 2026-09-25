@@ -3669,6 +3669,9 @@ export function ContextViewCanvas({
     loadChildren: loadChildrenSorted,
     provider,
     focus: scrollHitIntoView,
+    // Drawn, not merely loaded: the drawer hears 'unavailable' for an entity
+    // the store holds and no column draws.
+    isRendered: isDrawnRow,
   })
   const revealOnCanvas = useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
     if (traceWriteLocked()) {
@@ -3678,7 +3681,7 @@ export function ContextViewCanvas({
       if (expandTraceChain(nodeId) && !revealOpts?.skipFocus) scrollHitIntoView(nodeId)
       return
     }
-    await revealAndFocus(nodeId, revealOpts)
+    return revealAndFocus(nodeId, revealOpts)
   }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked])
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed

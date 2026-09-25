@@ -585,7 +585,7 @@ interface CardCtx {
   onToggleFrameAll?: (openKey: string) => void
   /** Re-kick a failed "everything inside" fetch. */
   onRetryFrameAll?: (openKey: string) => void
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<unknown>
   onOpenDetails?: (nodeId: string) => void
   /** Move the keyboard cursor inside a frame. `urn` null parks it. */
   onRowCursor: (frameKey: string, urn: string | null) => void
@@ -690,7 +690,7 @@ interface FocusGraphViewProps {
   frameQueryFor?: (openKey: string) => string
   onToggleFrameAll?: (openKey: string) => void
   onRetryFrameAll?: (openKey: string) => void
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<unknown>
   onOpenDetails?: (nodeId: string) => void
   onRevealMore?: (key: string) => void
   onExtend?: (key: string, nodeId: string, dir: 'in' | 'out', anchor?: { cardId: string; nodeId: string }) => void

@@ -400,3 +400,51 @@ describe('useRevealNode — pulse on arrival', () => {
     expect(useCanvasStore.getState().pulseNodeIds.has(TARGET)).toBe(true)
   })
 })
+
+describe('useRevealNode — a target the store holds but no column draws', () => {
+  it('is unavailable: nothing is focused or pulsed', async () => {
+    // In the store, drawn nowhere — above the view's roots, or in no layer.
+    useCanvasStore.setState({ nodes: [makeLineageNode(TARGET)] })
+    const focus = vi.fn()
+
+    const { result } = renderHook(() =>
+      useRevealNode({
+        parentMap: new Map(),
+        setExpandedNodes: vi.fn(),
+        loadChildren: vi.fn(),
+        focus,
+        provider: makeProviderStub(),
+        isRendered: () => false,
+      }),
+    )
+
+    let outcome: string | undefined
+    await act(async () => { outcome = await result.current(TARGET) })
+
+    expect(outcome).toBe('unavailable')
+    expect(focus).not.toHaveBeenCalled()
+    expect(useCanvasStore.getState().pulseNodeIds.has(TARGET)).toBe(false)
+  })
+
+  it('is revealed once a column draws it', async () => {
+    useCanvasStore.setState({ nodes: [makeLineageNode(TARGET)] })
+    const focus = vi.fn()
+
+    const { result } = renderHook(() =>
+      useRevealNode({
+        parentMap: new Map(),
+        setExpandedNodes: vi.fn(),
+        loadChildren: vi.fn(),
+        focus,
+        provider: makeProviderStub(),
+        isRendered: (id) => id === TARGET,
+      }),
+    )
+
+    let outcome: string | undefined
+    await act(async () => { outcome = await result.current(TARGET) })
+
+    expect(outcome).toBe('revealed')
+    expect(focus).toHaveBeenCalledWith(TARGET)
+  })
+})

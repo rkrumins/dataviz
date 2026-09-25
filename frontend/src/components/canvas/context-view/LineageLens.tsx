@@ -334,7 +334,7 @@ export interface LineageLensProps {
   onShowPathOnCanvas?: (ids: string[]) => void
   onClose: () => void
   /** Reveal the node on the canvas (expand ancestors + scroll) without closing the lens. */
-  onRevealOnCanvas?: (nodeId: string) => void | Promise<void>
+  onRevealOnCanvas?: (nodeId: string) => void | Promise<unknown>
   /** Open the entity drawer for a node. */
   onOpenDetails?: (nodeId: string) => void
   /** Reveal a set of neighbors and frame them on the canvas (closes the lens). */
