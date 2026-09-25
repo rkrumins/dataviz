@@ -113,6 +113,12 @@ export interface UseEdgeProjectionOptions {
    * what the loaded rows under the holder do not carry.
    */
   holderEdges?: ReadonlyMap<string, AggregatedEdgeInfo>
+  /**
+   * The view holds its whole data source (entityScope 'all'). Nothing in it
+   * leaves the view, so an end the canvas cannot place is in it, column
+   * unknown: never outside, never a stub.
+   */
+  openScope?: boolean
 }
 
 // ============================================
@@ -278,6 +284,7 @@ export function useEdgeProjection({
   ancestorChains,
   promotedAnchors,
   holderEdges,
+  openScope,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -446,13 +453,16 @@ export function useEdgeProjection({
     // the canvas never loaded is filed under its nearest ancestor that IS
     // drawn (see `ancestorChains`); an anchor on the way stops the walk, even
     // with something above it drawn elsewhere, because that column is where
-    // the partner is.
+    // the partner is. In a view open to its whole data source nothing is
+    // outside: an end it cannot place is in the view, column unknown (a feed
+    // row past its page, an entity no rule places).
+    const nowhere = openScope ? UNKNOWN : OUTSIDE
     const place = (end: string): Place => {
       const row = rowOf(end)
       if (row) return { at: 'row', id: row }
       const column = promotedAnchors?.get(end)
       if (column) return { at: 'column', layerId: column }
-      if (!ancestorChains) return OUTSIDE
+      if (!ancestorChains) return nowhere
       const chain = ancestorChains.get(end)
       if (!chain) return PENDING
       if (chain === NO_PLACE_FOUND) return UNKNOWN
@@ -462,7 +472,7 @@ export function useEdgeProjection({
         const layerId = promotedAnchors?.get(ancestor)
         if (layerId) return { at: 'column', layerId }
       }
-      return OUTSIDE
+      return nowhere
     }
 
     // The containment ancestors of one end: its loaded parents, else its
@@ -956,7 +966,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope])
 
   const projectedEdges = projection.edges
 

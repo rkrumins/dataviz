@@ -39,6 +39,7 @@ function run(opts: {
   edges: ReturnType<typeof edge>[]
   chains?: Record<string, readonly string[]>
   expandedNodes?: Set<string>
+  openScope?: boolean
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -61,6 +62,7 @@ function run(opts: {
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
       ancestorChains: opts.chains ? new Map(Object.entries(opts.chains)) : undefined,
+      openScope: opts.openScope,
     }),
   )
   return {
@@ -157,5 +159,32 @@ describe('useEdgeProjection — an end whose place is not known', () => {
     const root = run({ roots: [hNode('fact')], edges: [edge('e1', 'fact', 'far')], chains: { far: [] } })
     expect(root.offCanvasByNode.get('fact')).toMatchObject({ out: 1, unplaced: { in: 0, out: 0 } })
     expect(root.unresolvedEdgeCount).toBe(1)
+  })
+})
+
+describe('useEdgeProjection — a view open to its whole data source', () => {
+  it('never files an end outside: one whose chain reaches nothing drawn is in the view, column unknown', () => {
+    const res = run({
+      roots: [hNode('fact'), hNode('warehouse')],
+      edges: [
+        edge('e1', 'fact', 'feed-row-201'),
+        edge('e2', 'a-root', 'fact'),
+        edge('e3', 'fact', 'in-warehouse'),
+      ],
+      chains: { 'feed-row-201': ['unloaded-schema'], 'a-root': [], 'in-warehouse': ['warehouse'] },
+      openScope: true,
+    })
+    const fact = res.offCanvasByNode.get('fact')!
+    expect(fact.in + fact.out).toBe(0)
+    expect(fact.unplaced).toEqual({ in: 1, out: 1 })
+    expect(res.unresolvedEdgeCount).toBe(0)
+    // An end a drawn container holds still rolls up to it.
+    expect(res.lines.map(l => [l.source, l.target])).toEqual([['fact', 'warehouse']])
+  })
+
+  it('nor with no chain source at all', () => {
+    const res = run({ roots: [hNode('fact')], edges: [edge('e1', 'fact', 'far')], openScope: true })
+    expect(res.offCanvasByNode.get('fact')).toMatchObject({ out: 0, unplaced: { in: 0, out: 1 } })
+    expect(res.unresolvedEdgeCount).toBe(0)
   })
 })

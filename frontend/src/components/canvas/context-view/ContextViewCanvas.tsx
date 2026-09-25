@@ -4435,6 +4435,8 @@ export function ContextViewCanvas({
     // An anchor is drawn as its column: lineage naming it is in the view.
     promotedAnchors,
     holderEdges: overlay.active ? NO_HOLDER_EDGES : holderEdges,
+    // A view open to its whole data source holds every partner somewhere.
+    openScope: activeEntityScope === 'all',
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation

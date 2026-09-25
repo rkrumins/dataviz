@@ -160,4 +160,29 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
     expect(h.chainRequests().flat()).toContain('ghost')
     expect(ports('SRC.quiet')).toEqual({ left: null, right: null })
   }, 20_000)
+
+  it('in a view open to its whole data source, an end no column holds is not outside', async () => {
+    const estate = anchoredPortsEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      entityScope: 'all',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { dash: { in: 1, out: 0 }, uncounted: { in: 1, out: 0 } },
+    })
+
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('far', 'dash')] as never)
+    })
+    await waitFor(() => {
+      expect(h.chainRequests().flat()).toContain('far')
+      // No edge of uncounted's is loaded at all, so it reads hollow as soon
+      // as the totals are in.
+      expect(ports('uncounted')).toEqual({ left: 'beyond:in', right: null })
+    }, { timeout: 8000 })
+    await h.settle()
+    // `far` is a root no column holds: in the view, column unknown.
+    expect(ports('dash')).toEqual({ left: null, right: null })
+    expect([...(projection.offCanvas ?? new Map()).values()].some(l => l.in + l.out > 0)).toBe(false)
+  }, 20_000)
 })

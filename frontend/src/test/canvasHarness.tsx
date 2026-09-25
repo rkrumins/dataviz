@@ -460,13 +460,13 @@ function stubProvider(
  *  ERR_INVALID_URL (a relative path with no origin) swallowed into a
  *  `console.error`. Answer it with the layout the store already holds, so the
  *  effect finds nothing to change and returns. */
-function stubFetch(estate: TraceEstate): () => void {
+function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated'): () => void {
   const original = globalThis.fetch
   const view = {
     id: 'harness-view',
     config: {
       layout: { type: 'reference', referenceLayout: { layers: estate.layers, assignments: estate.assignments } },
-      content: { entityScope: 'curated' },
+      content: { entityScope },
     },
   }
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -530,6 +530,7 @@ function seedView(
   estate: TraceEstate,
   entityTypes: readonly unknown[] = [],
   dataSourceId?: string,
+  entityScope: 'all' | 'curated' = 'curated',
 ): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
@@ -543,7 +544,7 @@ function seedView(
         ...(dataSourceId ? { dataSourceId } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
-          defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
+          defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope,
         },
         layout: {
           type: 'reference',
@@ -596,6 +597,9 @@ export async function renderCanvasWithTrace(
      *  those from one of its sources to one of its targets, as the server
      *  does. `aggregatedExtra.aggregatedEdges` overrides them. */
     aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
+    /** The view's entityScope. Curated by default; 'all' opens the view to
+     *  its whole data source. */
+    entityScope?: 'all' | 'curated'
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -608,7 +612,7 @@ export async function renderCanvasWithTrace(
     if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
   }
   releaseFetch?.()
-  releaseFetch = stubFetch(estate)
+  releaseFetch = stubFetch(estate, opts.entityScope)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
   // anything: with no draft open (or edit mode off) every connect/edit path
@@ -627,7 +631,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate, opts.entityTypes, opts.dataSourceId)
+  seedView(estate, opts.entityTypes, opts.dataSourceId, opts.entityScope)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
