@@ -149,10 +149,12 @@ COLUMN = "urn:test:column"
 
 
 class _FakeRedis:
-    """The chain hash: every pipelined HGET misses, and HSETs are recorded."""
+    """The chain hash: a pipelined HGET answers from ``stored`` (else misses),
+    and HSETs are recorded."""
 
-    def __init__(self):
+    def __init__(self, stored=None):
         self.written: List[str] = []
+        self.stored = stored or {}
 
     async def execute_command(self, cmd, key, urn, *value):
         if cmd == "HSET":
@@ -167,7 +169,7 @@ class _FakeRedis:
 
         class _Pipe:
             def execute_command(self, cmd, key, urn, *value):
-                queued.append(None)
+                queued.append(redis.stored.get(urn) if cmd == "HGET" else None)
                 if cmd == "HSET":
                     redis.written.append(urn)
 
@@ -321,3 +323,84 @@ def test_chains_cached_before_the_fix_are_not_read():
     """Those entries include [] for urns the walk failed on; a new key
     abandons them, and the ':ancestors:*' sweeps still match it."""
     assert ":ancestors:v2:" in _walker()._ancestors_cache_key()
+
+
+# ── a chain deeper than the hop bound is walked on, not cut ──────────────
+#
+# The chain query climbs at most _containment_hop_bound() hops — 16 for a
+# folder nested in folders. A deeper row's chain stopped there, so the drawn
+# container above the cut never appeared in it: the canvas filed the row
+# "outside this view", and the aggregated read lost its roll-ups.
+
+def _folders(depth):
+    """f0 ⊃ f1 ⊃ … ⊃ f{depth-1}, one label: parent map child → parent."""
+    return {f"f{i}": f"f{i - 1}" for i in range(1, depth)}
+
+
+def _deep_walker(parent, *, stored=None):
+    """A provider over a single-parent containment map whose chain query
+    climbs no further than the ``*1..N`` bound in its Cypher, as FalkorDB's."""
+    import re
+    from types import SimpleNamespace
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p._entity_type_levels = {"Folder": 0}                  # bound: max(2, 16)
+    p._redis = _FakeRedis(stored)
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p.queried = []
+
+    async def _buckets(urns):
+        return [("Folder", list(urns))]
+
+    async def _ro(cypher, params=None, timeout=None, op=None):
+        bound = int(re.search(r"\*1\.\.(\d+)", cypher).group(1))
+        p.queried.append(list(params["urns"]))
+        rows = []
+        for u in params["urns"]:
+            chain, cur = [], parent.get(u)
+            while cur is not None and len(chain) < bound:
+                chain.append(cur)
+                cur = parent.get(cur)
+            rows.append([u, chain])
+        return SimpleNamespace(result_set=rows)
+
+    p._label_buckets = _buckets
+    p._ro_query = _ro
+    return p
+
+
+def test_a_chain_deeper_than_the_hop_bound_reaches_its_root():
+    p = _deep_walker(_folders(50))
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher(["f49", "f10"]))
+    assert chains["f49"] == [f"f{i}" for i in range(48, -1, -1)]
+    assert chains["f10"] == [f"f{i}" for i in range(9, -1, -1)]
+    # One pass for both, then one per further 16 hops, from the top reached.
+    assert p.queried == [["f49", "f10"], ["f33"], ["f17"], ["f1"]]
+
+
+def test_the_walk_goes_on_from_an_ancestor_chain_already_cached():
+    import json
+
+    p = _deep_walker(_folders(50), stored={"f33": json.dumps([f"f{i}" for i in range(32, -1, -1)])})
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher(["f49"]))
+    assert chains["f49"] == [f"f{i}" for i in range(48, -1, -1)]
+    assert p.queried == [["f49"]]
+
+
+def test_a_containment_cycle_ends_the_walk():
+    """Only the materializer breaks cycles; a read path that walked on until
+    a chain came back shorter would never stop."""
+    parent = {f"c{i}": f"c{(i + 1) % 40}" for i in range(40)}
+    p = _deep_walker(parent)
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher(["c0"]))
+    assert chains["c0"] == [f"c{i}" for i in range(1, 40)]
+
+
+def test_a_chain_still_going_at_the_hard_cap_is_unknown_never_a_root(monkeypatch):
+    from backend.app.providers import falkordb_provider as fp
+
+    monkeypatch.setattr(fp, "_ANCESTOR_CHAIN_HOP_CAP", 40)
+    p = _deep_walker(_folders(50))
+    chains = asyncio.run(p._compute_and_store_ancestors_bulk(["f49", "f10"]))
+    assert "f49" not in chains
+    assert p._redis.written == ["f10"]

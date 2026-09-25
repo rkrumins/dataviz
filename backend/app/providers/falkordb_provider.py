@@ -797,6 +797,11 @@ _READ_QUEUE_SHARE = 0.5
 #: urns are left unknown, to be asked again, rather than scanned for.
 _ANCESTOR_UNLABELED_MAX = 100
 
+#: The most hops an ancestor chain is walked. A chain as long as the chain
+#: query's hop bound is walked on from its topmost ancestor; one still going
+#: here is left unknown rather than walked forever.
+_ANCESTOR_CHAIN_HOP_CAP = 1024
+
 
 def _refused_endpoint(exc: BaseException) -> Optional[str]:
     """The ``host:port`` a refusal names, walking the cause chain.
@@ -7671,23 +7676,8 @@ class FalkorDBProvider(GraphDataProvider):
             return result
 
         # First, try to fetch all from cache in one pipeline
-        try:
-            pipe = self._redis.pipeline(transaction=False)
-            for u in urns:
-                pipe.execute_command("HGET", cache_key, u)
-            cached = await pipe.execute()
-
-            missing_urns = []
-            for i, u in enumerate(urns):
-                if cached[i]:
-                    try:
-                        result[u] = json.loads(cached[i])
-                    except Exception:
-                        missing_urns.append(u)
-                else:
-                    missing_urns.append(u)
-        except Exception:
-            missing_urns = list(urns)
+        result = await self._cached_ancestor_chains(urns)
+        missing_urns = [u for u in urns if u not in result]
 
         if missing_urns:
             try:
@@ -7755,6 +7745,27 @@ class FalkorDBProvider(GraphDataProvider):
     def _ancestor_cache_ttl(self) -> int:
         return int(os.getenv("FALKORDB_ANCESTOR_CACHE_TTL_S", "604800"))  # 7d
 
+    async def _cached_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """The chain hash's entries for ``urns``, in one pipelined read.
+        Empty when the cache cannot be read; an entry that does not parse is
+        a miss."""
+        cache_key = self._ancestors_cache_key()
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for u in urns:
+                pipe.execute_command("HGET", cache_key, u)
+            cached = await pipe.execute()
+        except Exception:
+            return {}
+        out: Dict[str, List[str]] = {}
+        for u, raw in zip(urns, cached):
+            if raw:
+                try:
+                    out[u] = json.loads(raw)
+                except Exception:
+                    pass
+        return out
+
     async def _compute_ancestor_chains_bulk_cypher(
         self,
         urns: List[str],
@@ -7779,6 +7790,12 @@ class FalkorDBProvider(GraphDataProvider):
         Only urns the query returned a row for are in the result; an absent
         urn is UNKNOWN (its bucket failed, or no row came back), never a
         root. A root still comes back as a row, with chain ``[]``.
+
+        The query climbs at most ``_containment_hop_bound()`` hops — 16 for
+        folders nested in folders — and a chain cut there filed a deep row
+        "outside the view" and lost its roll-ups. A chain that long is now
+        walked on from its topmost ancestor until it ends, O(depth / bound)
+        more queries, without changing the bound the materializer shares.
 
         ``deadline`` is an aggregated read's wall clock: each bucket query's
         budget is capped by what is left of it, and a bucket it no longer
@@ -7825,50 +7842,84 @@ class FalkorDBProvider(GraphDataProvider):
                 "RETURN u, coalesce(candidates[0], []) AS chain"
             )
 
-        for i in range(0, len(urns), chunk_size):
-            chunk = urns[i : i + chunk_size]
-            # Bucket via the urn→label cache (per-label bootstrap on miss)
-            # instead of the previous per-label MEMBERSHIP query + chain
-            # query run SEQUENTIALLY per ontology label (2·L round trips
-            # per chunk — the dominant sequential amplifier of trace
-            # hydration). One chain query per non-empty bucket, GATHERED;
-            # the unresolved-label residue keeps the unlabeled fallback.
-            buckets = await self._label_buckets(chunk)
+        async def _walk(batch: List[str]) -> Dict[str, List[str]]:
+            walked: Dict[str, List[str]] = {}
+            for i in range(0, len(batch), chunk_size):
+                chunk = batch[i : i + chunk_size]
+                # Bucket via the urn→label cache (per-label bootstrap on miss)
+                # instead of the previous per-label MEMBERSHIP query + chain
+                # query run SEQUENTIALLY per ontology label (2·L round trips
+                # per chunk — the dominant sequential amplifier of trace
+                # hydration). One chain query per non-empty bucket, GATHERED;
+                # the unresolved-label residue keeps the unlabeled fallback.
+                buckets = await self._label_buckets(chunk)
 
-            async def _chain_for(label: str, bucket: List[str]) -> list:
-                if not label and len(bucket) > _ANCESTOR_UNLABELED_MAX:
-                    logger.warning(
-                        "ancestor chains: %d urns have no resolved label; "
-                        "left unknown rather than scanned for",
-                        len(bucket),
-                    )
-                    return []
-                if _read_spent(deadline):
-                    if pressure is not None:
-                        pressure.degrade("timeout")
-                    return []
-                clause = f":{label}" if label else ""
-                try:
-                    res = await self._ro_query(
-                        _chain_cypher(clause), params={"urns": bucket},
-                        timeout=_within(self._READ_TIMEOUT, deadline), op="trace.chains",
-                    )
-                    return res.result_set or []
-                except Exception as exc:
-                    logger.warning(
-                        "ancestor chain bucket (%s, %d urns) failed: %s",
-                        label or "<unlabeled>", len(bucket), exc,
-                    )
-                    return []
+                async def _chain_for(label: str, bucket: List[str]) -> list:
+                    if not label and len(bucket) > _ANCESTOR_UNLABELED_MAX:
+                        logger.warning(
+                            "ancestor chains: %d urns have no resolved label; "
+                            "left unknown rather than scanned for",
+                            len(bucket),
+                        )
+                        return []
+                    if _read_spent(deadline):
+                        if pressure is not None:
+                            pressure.degrade("timeout")
+                        return []
+                    clause = f":{label}" if label else ""
+                    try:
+                        res = await self._ro_query(
+                            _chain_cypher(clause), params={"urns": bucket},
+                            timeout=_within(self._READ_TIMEOUT, deadline), op="trace.chains",
+                        )
+                        return res.result_set or []
+                    except Exception as exc:
+                        logger.warning(
+                            "ancestor chain bucket (%s, %d urns) failed: %s",
+                            label or "<unlabeled>", len(bucket), exc,
+                        )
+                        return []
 
-            for rows in await asyncio.gather(*[
-                _chain_for(lbl, bucket) for lbl, bucket in buckets
-            ]):
-                for row in rows:
-                    # Drop None entries (node lacked .urn) so callers
-                    # don't defend against them.
-                    out[row[0]] = [c for c in (row[1] or []) if c]
+                for rows in await asyncio.gather(*[
+                    _chain_for(lbl, bucket) for lbl, bucket in buckets
+                ]):
+                    for row in rows:
+                        # Drop None entries (node lacked .urn) so callers
+                        # don't defend against them.
+                        walked[row[0]] = [c for c in (row[1] or []) if c]
+            return walked
 
+        out = await _walk(urns)
+        # A chain as long as the hop bound may have been cut there: walk on
+        # from its topmost ancestor, taking that ancestor's cached chain
+        # whole when there is one, until a segment comes back shorter. Only
+        # the materializer breaks containment cycles, so a repeated node
+        # ends the walk (every ancestor is then in the chain), and a chain
+        # still going at _ANCESTOR_CHAIN_HOP_CAP is unknown, never a root.
+        cut = {u: c for u, c in out.items() if len(c) >= max_depth}
+        while cut:
+            tops = list(dict.fromkeys(c[-1] for c in cut.values()))
+            whole = await self._cached_ancestor_chains(tops)
+            above = {**await _walk([t for t in tops if t not in whole]), **whole}
+            for u, chain in list(cut.items()):
+                del cut[u]
+                top = chain[-1]
+                if top not in above:
+                    del out[u]              # the walk above it failed: unknown
+                    continue
+                seen, ext = {u, *chain}, []
+                for a in above[top]:
+                    if a in seen:
+                        break               # a containment cycle closes here
+                    seen.add(a)
+                    ext.append(a)
+                out[u] = chain = chain + ext
+                if top in whole or len(ext) < max_depth:
+                    continue
+                if len(chain) >= _ANCESTOR_CHAIN_HOP_CAP:
+                    del out[u]
+                    continue
+                cut[u] = chain
         return out
 
     # ------------------------------------------------------------------ #

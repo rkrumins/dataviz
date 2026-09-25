@@ -30,11 +30,12 @@ from backend.common.models.graph import (
 )
 
 
-#: Bounds on the derived-rollup containment descent (see
-#: ``get_aggregated_edges_between``). A branch is draft-scale, so these are a
-#: runaway guard, not a paging scheme — when either bites, the answer is
-#: reported ``truncated``/``stale`` rather than quietly returned short.
-_DERIVE_HOP_BOUND = 16
+#: Bound on the derived-rollup containment descent (see
+#: ``get_aggregated_edges_between``). A branch is draft-scale, so this is a
+#: runaway guard, not a paging scheme — when it bites, the answer is
+#: reported ``truncated``/``stale`` rather than quietly returned short. The
+#: descent has no hop bound: a deep but narrow tree is small, and the scope
+#: set already stops a containment cycle.
 _DERIVE_SCOPE_CAP = 20_000
 
 #: Surfaced verbatim as the 501 body, so it is product copy: what
@@ -403,11 +404,10 @@ class VersionedBranchProvider:
         child, plus the coarse container cell the canvas stamps ``isDelegated`` so it does
         not double-draw over them.
 
-        Bounded, and honest about it: the descent stops at ``_DERIVE_HOP_BOUND`` hops and
-        ``_DERIVE_SCOPE_CAP`` nodes — and a single edge read stops at that same cap — and
-        each of the three says ``truncated``/``stale`` with the bound that bit as the
-        reason, never a short answer that reads as a complete one, which was the whole
-        defect."""
+        Bounded, and honest about it: the descent stops at ``_DERIVE_SCOPE_CAP`` nodes —
+        and a single edge read stops at that same cap — and either says
+        ``truncated``/``stale`` with the bound that bit as the reason, never a short
+        answer that reads as a complete one, which was the whole defect."""
         from backend.common.providers.pair_rules import ancestor_closure, cube_pairs
 
         srcs = [u for u in (source_urns or []) if u]
@@ -444,9 +444,7 @@ class VersionedBranchProvider:
         parents: Dict[str, List[str]] = {}
         scope = set(srcs) | set(tgts)
         frontier = list(scope)
-        for _ in range(_DERIVE_HOP_BOUND if ctypes else 0):
-            if not frontier or bound:
-                break
+        while ctypes and frontier and not bound:
             nxt: List[str] = []
             for e in await _out_edges(frontier, ctypes):
                 # Containment is a DAG — a node can have several parents, and the
@@ -462,11 +460,6 @@ class VersionedBranchProvider:
                 scope.add(e.target_urn)
                 nxt.append(e.target_urn)
             frontier = nxt
-        # A live frontier means the chain runs deeper than the hop bound: the
-        # lineage under it never entered `scope` and the answer is short. This
-        # was the silent half — falling out of the loop said nothing at all.
-        if ctypes and frontier:
-            bound = bound or "derive_hop_bound"
 
         # ── Roll the raw lineage inside that scope up to the requested pairs.
         asked_src, asked_tgt = set(srcs), set(tgts)

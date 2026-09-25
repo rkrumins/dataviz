@@ -190,12 +190,13 @@ class _FakeGraph:
             for par, kids in self.children.items():
                 for k in kids:
                     parent[k] = par
+            bound = int(re.search(r"\*1\.\.(\d+)", cypher).group(1))  # FalkorDB climbs no further
             rows = []
             for u in params["urns"]:
                 if self.labels.get(u) != lbl:
                     continue
                 chain, cur = [], parent.get(u)
-                while cur is not None:
+                while cur is not None and len(chain) < bound:
                     chain.append(cur)
                     cur = parent.get(cur)
                 rows.append([u, chain])
@@ -1755,3 +1756,19 @@ def test_leafness_is_an_existence_probe_not_a_child_count():
     shapes = [c for c, _ in asked]
     assert not [c for c in shapes if "count(ch)" in c]
     assert [c for c in shapes if "AND (n)-[:CONTAINS]->() RETURN n.urn" in c]
+
+
+def test_a_row_fifty_levels_down_still_rolls_up_to_a_shallow_container():
+    """Folders nested in folders: one level in the level map, so the chain
+    query climbs at most 16 hops. The partner's chain used to stop 16 levels
+    above it, and every container higher up lost the roll-up."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=50)
+    p, _ = _clocked_provider(fake, {"lvl0": 0})
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a49"], ["urn:b1", "urn:b40"], granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS"],
+    ))
+    got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+    assert got == {("urn:a49", "urn:b1"): 2, ("urn:a49", "urn:b40"): 2}
+    assert result.truncated is False

@@ -162,26 +162,27 @@ def test_a_bounded_derivation_says_stale_instead_of_answering_short(monkeypatch)
     assert r.stale_reason == "derive_scope_cap", r.stale_reason
 
 
-def test_a_chain_deeper_than_the_hop_bound_says_stale_too(monkeypatch):
-    """THE OTHER BOUND, AND THE SILENT ONE. The scope cap sets the flag on its
-    way out; the hop bound simply fell out of ``for _ in range(...)`` with
-    ``truncated`` still False, so a containment chain deeper than the bound
-    produced the very wire shape the guard above exists to eliminate — ``cells:
-    [], truncated: False, stale: False, reason: None`` — while the docstring
-    claimed both bounds report.
+class _DeepStateSvc(_FakeStateSvc):
+    """top ⊃ d1 ⊃ … ⊃ d30, and d30 —L→ sink: nearly twice the 16 hops the
+    descent used to stop at."""
 
-    Squeeze the hop bound to 1 against the 2-deep ``snowflake ⊃ sf_db ⊃
-    sf_table`` chain: the descent reaches sf_db and stops, so sf_table — the
-    source endpoint of every lineage edge — never enters the scope."""
-    import backend.app.providers.versioned_branch_provider as vbp
+    EDGES = [
+        *[{"id": f"c:{i}", "sourceUrn": f"d{i}" if i else "top", "targetUrn": f"d{i + 1}",
+           "edgeType": "CONTAINS"} for i in range(30)],
+        {"id": "l:deep", "sourceUrn": "d30", "targetUrn": "sink", "edgeType": "FLOWS_TO"},
+    ]
 
-    monkeypatch.setattr(vbp, "_DERIVE_HOP_BOUND", 1)
-    r = _agg(_provider(), EXPANDED)
 
-    assert r.aggregated_edges == [], "premise: one hop short of sf_table hides the lineage"
-    assert r.truncated is True, "the hop bound bit and the answer went out unmarked"
-    assert r.stale is True
-    assert r.stale_reason == "derive_hop_bound", r.stale_reason
+def test_a_chain_deeper_than_sixteen_levels_is_derived_whole():
+    """The descent stopped at 16 hops and said so (``derive_hop_bound``), so a
+    deep but narrow tree never rolled up at all. The scope cap is the runaway
+    guard, and the scope set already stops a containment cycle."""
+    r = _run(_provider(_DeepStateSvc()).get_aggregated_edges_between(
+        source_urns=["top"], target_urns=["sink"], granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS_TO"]))
+
+    assert _cells(r) == {("top", "sink"): 1}
+    assert r.truncated is False and r.stale is False and r.stale_reason is None
 
 
 def test_an_edge_read_that_fills_its_page_says_stale_even_with_cells(monkeypatch):
