@@ -515,6 +515,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const res = await this.fetch<{ chains: Record<string, string[]> }>('/nodes/ancestor-chains', {
             method: 'POST',
             body: JSON.stringify({ urns }),
+            timeoutMs: TIMEOUTS.ANCESTOR_CHAINS_MS,
         })
         return res.chains
     }

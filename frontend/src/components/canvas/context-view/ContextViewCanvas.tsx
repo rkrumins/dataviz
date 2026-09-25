@@ -4349,7 +4349,8 @@ export function ContextViewCanvas({
   // A preview behind `canvasLineageRollupEnabled` (off by default: a roll-up
   // trades detail for coverage). Browse only, as the projection below.
   const lineageRollup = useFeature('canvasLineageRollupEnabled')
-  const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge)
+  const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge,
+    renderMap, promotedAnchors, aggregatedEdges)
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
