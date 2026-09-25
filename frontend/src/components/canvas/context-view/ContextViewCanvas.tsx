@@ -251,7 +251,7 @@ import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { bySignificance } from './lineDensity'
-import { buildNodePorts, columnEndLayer, unloadedColumnLines } from './lineagePorts'
+import { buildNodePorts, columnEndLayer, unloadedColumnLines, unplacedLines } from './lineagePorts'
 import { PortHoverTip } from './PortHoverTip'
 import { LineageGuide } from './LineageGuide'
 import { zoomScalesPercentages } from '@/lib/cssZoom'
@@ -4797,12 +4797,15 @@ export function ContextViewCanvas({
   // ports (lineagePorts.ts). Sides follow the columns' left-to-right order,
   // exactly as lineRoute.ts attaches the lines themselves. Lineage into an
   // anchored column's rows that are not drawn is in the view too: it plugs
-  // in on the side facing that column (unloadedColumnLines). Browse only, as
-  // the stubs are — a trace's wires are its own.
+  // in on the side facing that column (unloadedColumnLines). Lineage whose
+  // far end has no known place yet keeps the card from reading hollow
+  // (unplacedLines). Browse only, as the stubs are — a trace's wires are its
+  // own.
   const nodePorts = useMemo(() => {
     const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
     return buildNodePorts(
-      overlay.active ? visibleLineageEdges : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode)],
+      overlay.active ? visibleLineageEdges
+        : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode)],
       (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
     )
   }, [visibleLineageEdges, overlay.active, offCanvasByNode, nodeLayerIndexMap, sortedLayers])

@@ -8,8 +8,9 @@
  * time, two chunks in flight, one update per settle. An end the server left
  * out, or whose chunk failed, is asked again on the hook's own backoff; after
  * five attempts its place is given up on. A reader with no containment walk
- * (501) or no right to ask (403) is left alone, and then — like a provider
- * with no chain route, or the hook switched off — there is no chain source.
+ * (501) is left alone, and then — like a provider with no chain route, or
+ * the hook switched off — there is no chain source. A 403 is asked again on
+ * the backoff like any failure.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -263,8 +264,8 @@ describe('useAncestorChains — failures', () => {
     expect(result.current?.get('far-y')).toBe(NO_PLACE_FOUND)
   })
 
-  it.each([501, 403])('leaves a reader that answers %i alone, with no chain source', async (status) => {
-    const getAncestorChains = vi.fn().mockRejectedValue(Object.assign(new Error('nope'), { status }))
+  it('leaves a reader that answers 501 alone, with no chain source', async () => {
+    const getAncestorChains = vi.fn().mockRejectedValue(Object.assign(new Error('nope'), { status: 501 }))
     holder.current = { getAncestorChains }
 
     const { result } = render()
@@ -272,6 +273,24 @@ describe('useAncestorChains — failures', () => {
     seed(2)
     await new Promise(r => setTimeout(r, 450))
     expect(getAncestorChains).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks again after a 403 on its own clock: a refusal seen once is not for the session', async () => {
+    vi.useFakeTimers()
+    const getAncestorChains = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }))
+      .mockImplementation(async (urns: string[]) => answerAll(urns))
+    holder.current = { getAncestorChains }
+
+    const { result } = render()
+    await settle()
+    expect(result.current).toBeDefined()
+    expect(result.current?.has('far-x')).toBe(false)   // pending, never outside
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000) })
+    await settle()
+    expect(getAncestorChains).toHaveBeenCalledTimes(2)
+    expect(result.current?.get('far-x')).toEqual(['warehouse'])
   })
 
   it('has no chain source when the provider has no chain route', () => {

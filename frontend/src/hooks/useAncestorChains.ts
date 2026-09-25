@@ -21,9 +21,11 @@
  * the projection holds it back rather than flash a stub. One the server
  * left out, or whose request failed, is asked again on this hook's own
  * backoff (lookupRetryDelayMs), not on the next canvas change; after
- * MAX_ATTEMPTS it is published as NO_PLACE_FOUND. `undefined` means there
+ * MAX_ATTEMPTS it is published as NO_PLACE_FOUND. A 403 is asked again the
+ * same way: the route is always answered now, so a refusal is passing (a
+ * rolling deploy), not a verdict for the session. `undefined` means there
  * is no chain source at all — the hook is off, the provider has no chain
- * route, or it answered 501/403 — and the projection then reads an end it
+ * route, or it answered 501 — and the projection then reads an end it
  * cannot place as leading outside, as it did before.
  */
 import { useEffect, useRef, useState } from 'react'
@@ -47,8 +49,8 @@ const MAX_ATTEMPTS = 5
 const NO_CHAINS: ReadonlyMap<string, readonly string[]> = new Map()
 
 /** The chain published for an end the server never placed in MAX_ATTEMPTS
- *  asks: no ancestors, so it reads as leading outside the view. Its own
- *  identity, so "could not be placed" can be told from a real root. */
+ *  asks: no ancestors. Its own identity, so the projection tells "could not
+ *  be placed" from a real root: its place is unknown, never outside. */
 export const NO_PLACE_FOUND: readonly string[] = Object.freeze([])
 
 type AggregatedEnds = ReadonlyMap<string, {
@@ -68,7 +70,7 @@ export function useAncestorChains(
   const provider = useGraphProvider()
   const canvasVersion = useCanvasVersion()
   const [chains, setChains] = useState<ReadonlyMap<string, readonly string[]>>(NO_CHAINS)
-  // The provider that answered 501/403. Keyed on it, so a switch clears it.
+  // The provider that answered 501. Keyed on it, so a switch clears it.
   const [unsupportedBy, setUnsupportedBy] = useState<unknown>(null)
   // Bumped to run the settle again: a retry is due, or a change arrived
   // while a settle was in flight.
@@ -140,10 +142,9 @@ export function useAncestorChains(
               else unanswered.push(urn)
             }
           } else {
-            const status = (result.reason as { status?: number }).status
-            // No containment walk on this reader (501), or no right to ask
-            // (403): nothing to gain from asking again.
-            if (status === 501 || status === 403) unsupported = true
+            // No containment walk on this reader (501): nothing to gain from
+            // asking again. Anything else, a 403 included, is asked again.
+            if ((result.reason as { status?: number }).status === 501) unsupported = true
             else unanswered.push(...chunks[i])
           }
         })

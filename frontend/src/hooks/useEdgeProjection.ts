@@ -15,6 +15,7 @@ import { useMemo, useRef } from 'react'
 import type { AggregatedEdgeInfo } from '@/providers/GraphDataProvider'
 import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
+import { NO_PLACE_FOUND } from './useAncestorChains'
 
 // ============================================
 // Types
@@ -94,7 +95,8 @@ export interface UseEdgeProjectionOptions {
    * counted as leading outside the view. Consulted only when the endpoint
    * itself does not resolve. A URN missing from a map that IS given is
    * pending: its place is still being asked, so it makes no stub and is not
-   * counted. With no map at all there is no chain source, and such an end
+   * counted. One published as NO_PLACE_FOUND is unknown, the same way, for
+   * good. With no map at all there is no chain source, and such an end
    * leads outside.
    */
   ancestorChains?: ReadonlyMap<string, readonly string[]>
@@ -219,9 +221,13 @@ export interface OffCanvasFlows {
  * layer id, the flows into an anchored column that are not drawn yet: a row
  * of it past its loaded page, or its anchor, which has no partner to bring
  * in because it is drawn as the column. Those are in the view, never a stub.
+ * `unplaced` counts the flows whose far end has no known place: still being
+ * asked (pending), or never found (unknown). Neither in the view nor out of
+ * it as far as anyone can tell, so never a stub, and never a hollow port.
  */
 export interface OffCanvasLineage extends OffCanvasFlows {
   columns: ReadonlyMap<string, OffCanvasFlows>
+  unplaced: { readonly in: number; readonly out: number }
 }
 
 /** Where one end of a line lands (see `place` in the projection). */
@@ -230,9 +236,11 @@ type Place =
   | { at: 'column'; layerId: string }
   | { at: 'outside' }
   | { at: 'pending' }
+  | { at: 'unknown' }
 
 const OUTSIDE: Place = { at: 'outside' }
 const PENDING: Place = { at: 'pending' }
+const UNKNOWN: Place = { at: 'unknown' }
 
 type MutableFlows = { in: number; out: number; inPartners: Set<string>; outPartners: Set<string> }
 const noFlows = (): MutableFlows => ({ in: 0, out: 0, inPartners: new Set(), outPartners: new Set() })
@@ -432,11 +440,13 @@ export function useEdgeProjection({
     // Where one end lands, one answer for all three sections below: a row;
     // an anchored column (its anchor, drawn AS the column, or a row of it
     // not loaded yet — in the view, with no row to draw to); outside the
-    // view; or pending, while its chain is still being asked. An end the
-    // canvas never loaded is filed under its nearest ancestor that IS drawn
-    // (see `ancestorChains`); an anchor on the way stops the walk, even with
-    // something above it drawn elsewhere, because that column is where the
-    // partner is.
+    // view; pending, while its chain is still being asked; or unknown, when
+    // no chain for it was ever found (after every retry, or cut short at the
+    // server's hop cap), which is no evidence that it leaves the view. An end
+    // the canvas never loaded is filed under its nearest ancestor that IS
+    // drawn (see `ancestorChains`); an anchor on the way stops the walk, even
+    // with something above it drawn elsewhere, because that column is where
+    // the partner is.
     const place = (end: string): Place => {
       const row = rowOf(end)
       if (row) return { at: 'row', id: row }
@@ -445,6 +455,7 @@ export function useEdgeProjection({
       if (!ancestorChains) return OUTSIDE
       const chain = ancestorChains.get(end)
       if (!chain) return PENDING
+      if (chain === NO_PLACE_FOUND) return UNKNOWN
       for (const ancestor of chain) {
         const up = rowOf(ancestor)
         if (up) return { at: 'row', id: up }
@@ -513,21 +524,25 @@ export function useEdgeProjection({
 
     // An edge with ONE end on a row and the other not drawn: the row carries
     // it (see OffCanvasLineage). Only an end OUTSIDE the view is counted as
-    // missing; one in an anchored column is in the view; a pending one waits
-    // for its chain rather than flash a stub.
-    const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows> }>()
+    // missing; one in an anchored column is in the view; one with no known
+    // place (pending or unknown) is held, neither a stub nor a hollow port.
+    const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows>; unplaced: { in: number; out: number } }>()
     let unresolvedThisPass = 0
     const fileUndrawn = (S: Place, T: Place, sUrn: string, tUrn: string,
       types: readonly string[], weight: number, wholeColumn: boolean) => {
       const side = S.at === 'row' ? 'out' : 'in'
       const [near, far, farUrn] = side === 'out' ? [S, T, tUrn] : [T, S, sUrn]
-      if (near.at !== 'row' || far.at === 'row' || far.at === 'pending' || allHidden(types)) return
+      if (near.at !== 'row' || far.at === 'row' || allHidden(types)) return
       const isAnchor = promotedAnchors?.has(farUrn) ?? false
       // A roll-up naming an anchor that still counts its loaded rows' flows
       // summarises the whole column; the rows' own roll-ups carry those.
       if (far.at === 'column' && isAnchor && wholeColumn) return
       let entry = offCanvas.get(near.id)
-      if (!entry) { entry = { ...noFlows(), columns: new Map() }; offCanvas.set(near.id, entry) }
+      if (!entry) { entry = { ...noFlows(), columns: new Map(), unplaced: { in: 0, out: 0 } }; offCanvas.set(near.id, entry) }
+      if (far.at === 'pending' || far.at === 'unknown') {
+        entry.unplaced[side] += weight
+        return
+      }
       if (far.at === 'outside') {
         note(entry, side, farUrn, weight)
         unresolvedThisPass += weight

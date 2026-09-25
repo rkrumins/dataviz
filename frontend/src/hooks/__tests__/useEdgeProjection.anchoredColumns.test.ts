@@ -147,9 +147,10 @@ describe('useEdgeProjection — lineage into another column', () => {
 })
 
 describe('useEdgeProjection — an end whose place is still being asked', () => {
-  it('is pending: no stub, not counted', () => {
+  it('is pending: no stub, not counted, held on its row so the port waits too', () => {
     const res = run({ edges: [edge('e1', 'r1', 'far')], chains: {} })
-    expect(res.offCanvasByNode.size).toBe(0)
+    expect(res.offCanvasByNode.get('r1')).toMatchObject({ in: 0, out: 0, unplaced: { in: 0, out: 1 } })
+    expect(res.offCanvasByNode.get('r1')?.columns.size).toBe(0)
     expect(res.unresolvedEdgeCount).toBe(0)
   })
 })

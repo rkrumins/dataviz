@@ -139,4 +139,25 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
       }
     }
   }, 20_000)
+
+  it('a card whose partner has no known place yet is neither solid nor hollow', async () => {
+    const estate = anchoredPortsEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.quiet': { in: 0, out: 1 }, dash: { in: 1, out: 0 } },
+    })
+
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('SRC.quiet', 'ghost'), flow('far', 'dash')] as never)
+    })
+    // `far` is a root, so its card is hollow: the totals and the chains are in.
+    await waitFor(() => {
+      expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
+    }, { timeout: 8000 })
+    // `ghost` is no entity the chains know, so its place is still being asked.
+    expect(h.chainRequests().flat()).toContain('ghost')
+    expect(ports('SRC.quiet')).toEqual({ left: null, right: null })
+  }, 20_000)
 })

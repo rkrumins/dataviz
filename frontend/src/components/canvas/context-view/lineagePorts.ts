@@ -38,7 +38,8 @@ export interface NodePorts {
   right: SideLines
   /** Lines on the canvas that stand aside for their children's finer ones
    *  (delegated): not drawn, so no port — but the lineage IS in view, so
-   *  they keep the card from reading hollow. */
+   *  they keep the card from reading hollow. Lineage whose far end has no
+   *  known place yet counts here too (unplacedLines). */
   delegated: SideLines
 }
 
@@ -147,6 +148,27 @@ export function unloadedColumnLines(
       if (flows.out > 0) lines.push({ source: row, target: COLUMN_END + layerId })
       if (flows.in > 0) lines.push({ source: COLUMN_END + layerId, target: row })
     })
+  })
+  return lines
+}
+
+/** A line's far end whose place is not known. */
+const UNPLACED_END = 'unplaced:'
+
+/**
+ * Lineage whose far end has no known place: still being asked, or never
+ * found (the projection's `unplaced`). Nothing says it leaves the view, so
+ * the card must not read hollow on its account, and nothing says where it
+ * goes, so it draws no port: like a delegated line, one per row and
+ * direction.
+ */
+export function unplacedLines(
+  offCanvas: ReadonlyMap<string, OffCanvasLineage>,
+): Array<{ source: string; target: string; isDelegated: true }> {
+  const lines: Array<{ source: string; target: string; isDelegated: true }> = []
+  offCanvas.forEach(({ unplaced }, row) => {
+    if (unplaced.out > 0) lines.push({ source: row, target: UNPLACED_END, isDelegated: true })
+    if (unplaced.in > 0) lines.push({ source: UNPLACED_END, target: row, isDelegated: true })
   })
   return lines
 }

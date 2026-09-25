@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OffCanvasFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
-import { buildNodePorts, columnEndLayer, portView, unloadedColumnLines } from '../lineagePorts'
+import { buildNodePorts, columnEndLayer, portView, unloadedColumnLines, unplacedLines } from '../lineagePorts'
 
 // Columns left to right: Source 0, Warehouse 3, Report 4.
 const layer: Record<string, number> = { src: 0, wh: 3, rep: 4, rep2: 4 }
@@ -109,7 +109,7 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
   const flows = (inN: number, outN: number): OffCanvasFlows =>
     ({ in: inN, out: outN, inPartners: new Set(), outPartners: new Set() })
   const undrawn = (columns: Record<string, OffCanvasFlows>): OffCanvasLineage =>
-    ({ ...flows(0, 0), columns: new Map(Object.entries(columns)) })
+    ({ ...flows(0, 0), columns: new Map(Object.entries(columns)), unplaced: { in: 0, out: 0 } })
   // The anchored Warehouse column's id, placed like the columns above.
   const columnAt: Record<string, number> = { WH: 3, REP: 4 }
   const layerOfAny = (id: string) => layer[id] ?? columnAt[columnEndLayer(id) ?? '']
@@ -137,5 +137,27 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
   it('a row with nothing undrawn in any column adds no line', () => {
     expect(unloadedColumnLines(new Map([['rep', undrawn({})]]))).toEqual([])
     expect(unloadedColumnLines(new Map([['rep', undrawn({ WH: flows(0, 0) })]]))).toEqual([])
+  })
+})
+
+describe('unplacedLines — lineage whose far end is not placed yet never reads hollow', () => {
+  const held = (inN: number, outN: number): OffCanvasLineage => ({
+    in: 0, out: 0, inPartners: new Set(), outPartners: new Set(), columns: new Map(), unplaced: { in: inN, out: outN },
+  })
+  const layerOfRow = (id: string) => (id === 'rep' ? 4 : undefined)
+
+  it('keeps that direction from reading hollow, and draws no port for it', () => {
+    const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow)
+    expect(portView('right', ports.get('rep'), { in: 0, out: 2 })).toBeNull()
+    expect(portView('left', ports.get('rep'), { in: 0, out: 2 })).toBeNull()
+  })
+
+  it('leaves the other direction to say what it knows', () => {
+    const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow)
+    expect(portView('left', ports.get('rep'), { in: 1, out: 2 })).toEqual({ kind: 'beyond', dir: 'in' })
+  })
+
+  it('adds no line for a row with nothing held', () => {
+    expect(unplacedLines(new Map([['rep', held(0, 0)]]))).toEqual([])
   })
 })
