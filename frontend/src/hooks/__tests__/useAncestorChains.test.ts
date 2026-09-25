@@ -33,6 +33,7 @@ const isContainment = (t: string) => t === 'CONTAINS'
 const PLACED: ReadonlyMap<string, unknown> = new Map([['loaded-a', {}], ['loaded-b', {}]])
 const NO_ANCHORS: ReadonlyMap<string, string> = new Map()
 const NO_AGG = new Map()
+const NO_ROWS: readonly string[] = []
 
 function seed(version: number, edges = [
   link('e1', 'loaded-a', 'far-x'),
@@ -62,13 +63,15 @@ function render(opts: {
   placed?: ReadonlyMap<string, unknown>
   anchors?: ReadonlyMap<string, string>
   aggregated?: Map<string, unknown>
+  unparented?: readonly string[]
 } = {}) {
   const placed = opts.placed ?? PLACED
   const anchors = opts.anchors ?? NO_ANCHORS
   const aggregated = (opts.aggregated ?? NO_AGG) as Parameters<typeof useAncestorChains>[4]
+  const unparented = opts.unparented ?? NO_ROWS
   const published: Array<ReturnType<typeof useAncestorChains>> = []
   const hook = renderHook(() => {
-    const chains = useAncestorChains(opts.enabled ?? true, isContainment, placed, anchors, aggregated)
+    const chains = useAncestorChains(opts.enabled ?? true, isContainment, placed, anchors, aggregated, unparented)
     if (published[published.length - 1] !== chains) published.push(chains)
     return chains
   })
@@ -127,6 +130,16 @@ describe('useAncestorChains — what it asks for', () => {
     render({ anchors: new Map([['anchor-y', 'L2']]) })
     await waitFor(() => expect(getAncestorChains).toHaveBeenCalledTimes(1))
     expect(getAncestorChains.mock.calls[0][0]).toEqual(['far-x'])
+  })
+
+  it('asks for drawn rows whose parent is not loaded: another drawn row may hold them', async () => {
+    seed(2, [])
+    const getAncestorChains = vi.fn(async (urns: string[]) => answerAll(urns))
+    holder.current = { getAncestorChains }
+
+    const { result } = render({ unparented: ['loaded-a'] })
+    await waitFor(() => expect(result.current?.get('loaded-a')).toEqual(['warehouse']))
+    expect(getAncestorChains.mock.calls[0][0]).toEqual(['loaded-a'])
   })
 
   it('asks for the ends of aggregated roll-ups and their drilled edges', async () => {

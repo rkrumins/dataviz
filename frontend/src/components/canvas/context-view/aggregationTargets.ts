@@ -32,3 +32,25 @@ export function renderedAggregationTargets(
   }
   return [...targets]
 }
+
+/**
+ * The drawn rows whose containment parent is not loaded: the top rows of
+ * each column, and a logical group's members, that no loaded parent holds.
+ * Another drawn row may still hold one further up (a child placed in another
+ * column, its parent's parent drawn elsewhere), and only its chain can say
+ * so. The projection needs that to keep the two rows' roll-ups apart.
+ */
+export function unparentedRows(
+  nodesByLayer: ReadonlyMap<string, readonly HierarchyNode[]>,
+  parentMap: ReadonlyMap<string, string>,
+): string[] {
+  const rows: string[] = []
+  const stack: HierarchyNode[] = []
+  nodesByLayer.forEach(roots => { for (const root of roots) stack.push(root) })
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (node.isLogical) for (const member of node.children) stack.push(member)
+    else if (!parentMap.has(node.id)) rows.push(node.urn || node.id)
+  }
+  return rows
+}

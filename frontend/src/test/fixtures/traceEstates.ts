@@ -215,3 +215,30 @@ export function anchoredPortsEstate() {
   const assignments = { SRC: { layerId: 'src' }, STG: { layerId: 'stg' }, REP: { layerId: 'rep' } }
   return { model, layers, assignments }
 }
+
+/**
+ * A container drawn across three columns:
+ *
+ *   P ⊃ {P.c1, P.C, A}   P in "Left", P.c1 with it
+ *   P.C                  placed in "Right", beside R
+ *   A ⊃ {A.a1}           the anchor of "Anchored": nested under P
+ */
+export function splitChildEstate() {
+  const nodes = [
+    wn('P', 'container', 3), wn('P.c1', 'dataset'), wn('P.C', 'dataset'),
+    wn('A', 'container', 1), wn('A.a1', 'dataset'), wn('R', 'dataset'),
+  ]
+  const containmentEdges = [has('P', 'P.c1'), has('P', 'P.C'), has('P', 'A'), has('A', 'A.a1')]
+  const model: LensWalkModel = {
+    focusUrn: 'R', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'left', name: 'Left', order: 0, entityTypes: [] },
+    { id: 'right', name: 'Right', order: 1, entityTypes: [] },
+    { id: 'anch', name: 'Anchored', order: 2, entityTypes: [], anchorUrn: 'A' },
+  ]
+  const assignments = { P: { layerId: 'left' }, 'P.C': { layerId: 'right' }, R: { layerId: 'right' }, A: { layerId: 'anch' } }
+  return { model, layers, assignments }
+}

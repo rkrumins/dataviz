@@ -14,6 +14,10 @@
  *     a faint (residual) line to the container.
  *   - A row's own anchor is a roll-up of itself and says nothing: partners in
  *     a row's OWN column past the page cannot be told from its own flows.
+ *
+ * A closed row holds what is under it the same way, and a child of it placed
+ * in another column is a row of its own: each cell keeps only its own flows,
+ * by inclusion–exclusion over the rows nearest under each end.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
@@ -158,5 +162,78 @@ describe('an open container holding children not loaded yet', () => {
     })
     expect(res.lines).toEqual([['R', 'C', 4, true], ['R', 'a2', 1, false], ['R', 'c1', 2, false]])
     expect(res.offCanvasByNode.get('R')!.columns.get('L2')).toMatchObject({ out: 3 })
+  })
+})
+
+describe('a row drawn apart from the row that holds it', () => {
+  // P is closed in L1; its child C is placed in L2. Both are rows, so the
+  // server's cell for P counts C's flows too.
+  const layers = { L1: [hNode('P')], L2: [hNode('C')], L3: [hNode('R'), hNode('Q'), hNode('D')] }
+
+  it("keeps on the holder only what the nested row does not carry, and draws nothing between the two", () => {
+    const res = run({
+      layers,
+      parentMap: { C: 'P' },
+      rows: [rowCell('P', 'R', 5), rowCell('C', 'R', 3), rowCell('C', 'P', 1)],
+    })
+    expect(res.lines).toEqual([['C', 'R', 3, false], ['P', 'R', 2, false]])
+  })
+
+  it('works on both ends at once', () => {
+    // Q holds D the same way. Flows: p→q 1, c→q 2, p→d 4, c→d 8.
+    const res = run({
+      layers,
+      parentMap: { C: 'P', D: 'Q' },
+      rows: [rowCell('P', 'Q', 15), rowCell('C', 'Q', 10), rowCell('P', 'D', 12), rowCell('C', 'D', 8)],
+    })
+    expect(res.lines).toEqual([['C', 'D', 8, false], ['C', 'Q', 2, false], ['P', 'D', 4, false], ['P', 'Q', 1, false]])
+  })
+
+  it('finds the holder through a chain when the rows between are not loaded', () => {
+    const { result } = renderHook(() => useEdgeProjection({
+      edges: [],
+      aggregatedEdges: new Map([rowCell('P', 'R', 5), rowCell('C', 'R', 3)]) as Map<string, unknown>,
+      nodesByLayer: new Map(Object.entries(layers)),
+      expandedNodes: new Set(),
+      displayFlat: Object.values(layers).flat(),
+      displayMap: new Map(Object.values(layers).flat().map(n => [n.id, n])),
+      urnToIdMap: new Map(Object.values(layers).flat().map(n => [n.urn!, n.id])),
+      showLineageFlow: true,
+      isTracing: false,
+      traceContextSet: new Set(),
+      isContainmentEdge: () => false,
+      browseBundleParentMap: new Map(),
+      ancestorChains: new Map([['C', ['M', 'P']]]),
+    }))
+    const lines = (result.current.visibleLineageEdges as Array<{ source: string; target: string; edgeCount: number }>)
+      .map(l => [l.source, l.target, l.edgeCount])
+    expect(lines).toContainEqual(['P', 'R', 2])
+    expect(lines).toContainEqual(['C', 'R', 3])
+  })
+})
+
+describe('an open container with a child drawn in another column', () => {
+  it('counts that child as loaded: its lines stand aside for the children, not faint', () => {
+    // P holds c1 (drawn under it) and C (drawn in L2): both loaded, so P is not partial.
+    const res = renderHook(() => useEdgeProjection({
+      edges: [
+        { id: 'e1', source: 'P', target: 'R', data: { edgeType: 'FLOWS_TO' } },
+        { id: 'e2', source: 'c1', target: 'R', data: { edgeType: 'FLOWS_TO' } },
+      ],
+      aggregatedEdges: new Map(),
+      nodesByLayer: new Map([['L1', [hNode('P', [hNode('c1')], { childCount: 2 })]], ['L2', [hNode('C')]], ['L3', [hNode('R')]]]),
+      expandedNodes: new Set(['P']),
+      displayFlat: [hNode('P', [hNode('c1')], { childCount: 2 }), hNode('c1'), hNode('C'), hNode('R')],
+      displayMap: new Map([['P', hNode('P', [hNode('c1')], { childCount: 2 })], ['c1', hNode('c1')], ['C', hNode('C')], ['R', hNode('R')]]),
+      urnToIdMap: new Map([['P', 'P'], ['c1', 'c1'], ['C', 'C'], ['R', 'R']]),
+      showLineageFlow: true,
+      isTracing: false,
+      traceContextSet: new Set(),
+      isContainmentEdge: () => false,
+      browseBundleParentMap: new Map([['c1', 'P'], ['C', 'P']]),
+    })).result.current
+    const pr = (res.visibleLineageEdges as Array<{ source: string; target: string; isDelegated: boolean; isResidual: boolean }>)
+      .find(l => l.source === 'P' && l.target === 'R')
+    expect(pr).toMatchObject({ isDelegated: true, isResidual: false })
   })
 })

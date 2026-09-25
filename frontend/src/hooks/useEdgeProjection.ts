@@ -592,25 +592,38 @@ export function useEdgeProjection({
       return total > (loadedChildCounts.get(id) ?? node?.children.length ?? 0)
     }
 
-    // A holder's cell counts every flow into it, its loaded rows' included,
-    // and those rows carry theirs on their own lines and columns. So the
-    // holder keeps only the rest: w(row, holder) − Σ w(row, X) over the cell
-    // ends X whose nearest cell end above them is that holder, floored at 0
+    // A cell counts every flow between two SUBTREES, so one whose end holds
+    // another end counts that end's flows too: a holder's loaded rows, or a
+    // row placed in another column than the closed row above it. Those carry
+    // theirs on their own lines and columns, so each cell keeps only its own,
+    // by inclusion–exclusion over the ends nearest under each of its ends:
+    // w'(A, B) = w(A, B) − Σ w(a, B) − Σ w(A, b) + Σ w(a, b), floored at 0
     // (containment that is not a tree can overlap). An anchor's rest is
     // lineage into its rows past the page; an open container's, into its
-    // children not loaded yet. A holder cannot say which rows of a row's OWN
-    // column it means: that cell is the row summarised against itself.
+    // children not loaded yet. An open container that is fully loaded is not
+    // an end here: its lines stand aside for its children (delegation).
+    // Between an end and one it holds there is no line: that cell is the end
+    // summarised against itself (its own flows are in it), so a row's
+    // partners in its OWN anchored column, or in the closed row it was
+    // placed apart from, cannot be told.
     const ends = new Set<string>()
     for (const c of cells.values()) { ends.add(c.sourceUrn); ends.add(c.targetUrn) }
-    const nearestEnd = (urn: string) => upPath(urn).find(up => ends.has(up))
+    // A closed row or a holder stands for what is under it; an open row that
+    // is fully loaded stands for nothing but itself.
+    const holds = (urn: string) => isHolder(urn) || !expandedNodes.has(idOf(urn))
+    const nearestEnd = (urn: string) => {
+      const up = upPath(urn).find(u => ends.has(u))
+      return up !== undefined && holds(up) ? up : undefined
+    }
     const pairKey = (s: string, t: string) => `${s}->${t}`
     const loadedShare = new Map<string, number>()
     const share = (s: string, t: string, w: number) => loadedShare.set(pairKey(s, t), (loadedShare.get(pairKey(s, t)) ?? 0) + w)
     cells.forEach(c => {
       const aboveT = nearestEnd(c.targetUrn)
-      if (aboveT !== undefined && isHolder(aboveT)) share(c.sourceUrn, aboveT, cellWeight(c))
+      if (aboveT !== undefined) share(c.sourceUrn, aboveT, cellWeight(c))
       const aboveS = nearestEnd(c.sourceUrn)
-      if (aboveS !== undefined && isHolder(aboveS)) share(aboveS, c.targetUrn, cellWeight(c))
+      if (aboveS !== undefined) share(aboveS, c.targetUrn, cellWeight(c))
+      if (aboveS !== undefined && aboveT !== undefined) share(aboveS, aboveT, -cellWeight(c))
     })
 
     cells.forEach((agg, id) => {
@@ -985,8 +998,10 @@ export function useEdgeProjection({
       const totalChildCount = (node.data?.childCount as number) || (node.data?._collapsedChildCount as number) || 0
       const loadedChildCount = node.children?.length ?? 0
       if (loadedChildCount > 0) {
+        // Partly loaded counts the STORE's children: one drawn in another
+        // column is loaded all the same.
         expandedParentInfo.set(nodeId, {
-          isPartiallyLoaded: totalChildCount > 0 && loadedChildCount < totalChildCount,
+          isPartiallyLoaded: totalChildCount > 0 && (loadedChildCounts.get(nodeId) ?? loadedChildCount) < totalChildCount,
         })
       }
     })
@@ -1005,7 +1020,7 @@ export function useEdgeProjection({
       }
     }
     return { expandedParentInfo, coveredPairs }
-  }, [projectedEdges, expandedNodes, displayMap, browseBundleParentMap, traceBundleParentMap])
+  }, [projectedEdges, expandedNodes, displayMap, browseBundleParentMap, traceBundleParentMap, loadedChildCounts])
 
   // ── Edge delegation ──
   //

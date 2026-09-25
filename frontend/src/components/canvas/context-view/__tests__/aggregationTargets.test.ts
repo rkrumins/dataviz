@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from 'vitest'
 
-import { renderedAggregationTargets } from '../aggregationTargets'
+import { renderedAggregationTargets, unparentedRows } from '../aggregationTargets'
 import type { HierarchyNode } from '@/types/hierarchy'
 
 const row = (id: string, children: HierarchyNode[] = [], extra: Partial<HierarchyNode> = {}): HierarchyNode => ({
@@ -50,5 +50,19 @@ describe('renderedAggregationTargets', () => {
   it('asks by urn, once each', () => {
     const a = row('node-a', [], { urn: 'urn:a' })
     expect(targets({ L1: [a], L2: [{ ...a, id: 'node-a-2' }] })).toEqual(['urn:a'])
+  })
+})
+
+describe('unparentedRows — drawn rows whose containment parent is not loaded', () => {
+  const unparented = (byLayer: Record<string, HierarchyNode[]>, parents: Record<string, string>) =>
+    unparentedRows(new Map(Object.entries(byLayer)), new Map(Object.entries(parents))).sort()
+
+  it("names the columns' top rows (and a group's members) that no loaded parent holds", () => {
+    // `split` is placed apart from a parent that is not loaded; `anchored`
+    // sits under its column's anchor, which is.
+    expect(unparented(
+      { A: [row('top', [row('child')])], B: [row('split'), row('anchored')], C: [group('logical:g', [row('member')])] },
+      { child: 'top', anchored: 'ANCHOR' },
+    )).toEqual(['member', 'split', 'top'])
   })
 })

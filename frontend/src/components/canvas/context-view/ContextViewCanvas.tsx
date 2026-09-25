@@ -75,7 +75,7 @@ import {
 } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
-import { renderedAggregationTargets } from './aggregationTargets'
+import { renderedAggregationTargets, unparentedRows } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
@@ -4270,6 +4270,20 @@ export function ContextViewCanvas({
       // The walk still seeds from ``nodeId`` so its descendants get
       // enumerated; we just skip adding ``nodeId`` to the removal
       // set itself.
+      //
+      // Only what the node DRAWS goes. A descendant drawn somewhere else — a
+      // child placed in another column or group, or the anchor of another
+      // column, with everything under it — is its own column's row, not
+      // this one's, and stays with its lines.
+      const drawnHere = new Set<string>()
+      const drawnStack = [...(displayMap.get(nodeId)?.children ?? [])]
+      while (drawnStack.length > 0) {
+        const child = drawnStack.pop()!
+        drawnHere.add(child.id)
+        drawnStack.push(...child.children)
+      }
+      const drawnElsewhere = (id: string) => (displayMap.has(id) && !drawnHere.has(id))
+        || promotedAnchors.has((nodeMap.get(id)?.data?.urn as string | undefined) ?? id)
       const subtreeIds = new Set<string>()
       const stack: string[] = [nodeId]
       while (stack.length > 0) {
@@ -4277,6 +4291,7 @@ export function ContextViewCanvas({
         const children = childMap.get(id)
         if (!children) continue
         for (const cid of children) {
+          if (drawnElsewhere(cid)) continue
           if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
         }
       }
@@ -4363,7 +4378,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
+  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon, promotedAnchors, nodeMap])
 
 
 
@@ -4412,8 +4427,11 @@ export function ContextViewCanvas({
   // roll up to a container on screen, or into the column they belong to,
   // rather than read as leaving the view. Always on: it is how the canvas
   // tells in-view from outside. Browse only, as the projection below.
+  // Drawn rows with no loaded parent are asked too: a row placed in another
+  // column than the closed row above it must not be counted twice.
+  const unparented = useMemo(() => unparentedRows(nodesByLayer, parentMap), [nodesByLayer, parentMap])
   const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge,
-    renderMap, promotedAnchors, aggregatedEdges)
+    renderMap, promotedAnchors, aggregatedEdges, unparented)
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,

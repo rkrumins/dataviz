@@ -15,7 +15,8 @@
  * see, or into the column whose anchor the chain reaches. The ends asked
  * for are those of the store's lineage edges and of the aggregated roll-ups
  * that are not rendered, not an anchor (drawn as its column) and not a
- * logical group.
+ * logical group; and the drawn rows whose parent is not loaded, since
+ * another drawn row may hold one further up.
  *
  * Contract: an end missing from the map is PENDING, still being asked, and
  * the projection holds it back rather than flash a stub. One the server
@@ -47,6 +48,7 @@ const SETTLE_MS = 300
 const MAX_ATTEMPTS = 5
 
 const NO_CHAINS: ReadonlyMap<string, readonly string[]> = new Map()
+const NO_ROWS: readonly string[] = []
 
 /** The chain published for an end the server never placed in MAX_ATTEMPTS
  *  asks: no ancestors. Its own identity, so the projection tells "could not
@@ -66,6 +68,8 @@ export function useAncestorChains(
   /** Anchors drawn as their column (useLayerAssignment). */
   promotedAnchors: ReadonlyMap<string, string>,
   aggregatedEdges: AggregatedEnds,
+  /** Drawn rows whose containment parent is not loaded (unparentedRows). */
+  unparented: readonly string[] = NO_ROWS,
 ): ReadonlyMap<string, readonly string[]> | undefined {
   const provider = useGraphProvider()
   const canvasVersion = useCanvasVersion()
@@ -120,6 +124,7 @@ export function useAncestorChains(
         want(aggregated.targetUrn)
         detailedEdges?.forEach(e => { want(e.sourceUrn); want(e.targetUrn) })
       })
+      for (const row of unparented) if (!askedRef.current.has(row)) wanted.add(row)
       if (wanted.size === 0) return
 
       const generation = generationRef.current
@@ -178,7 +183,7 @@ export function useAncestorChains(
       }
     }, SETTLE_MS)
     return () => clearTimeout(timer)
-  }, [supported, provider, canvasVersion, isContainmentEdge, placed, promotedAnchors, aggregatedEdges, wake])
+  }, [supported, provider, canvasVersion, isContainmentEdge, placed, promotedAnchors, aggregatedEdges, unparented, wake])
 
   return supported ? chains : undefined
 }
