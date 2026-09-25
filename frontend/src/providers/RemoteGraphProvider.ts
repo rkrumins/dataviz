@@ -23,6 +23,7 @@ import type {
     URN,
     NodeQuery,
     NodePage,
+    NodeDegree,
     EdgeQuery,
     LineageResult,
     ContainmentResult,
@@ -500,13 +501,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
         }
     }
 
-    async getNodeDegrees(urns: string[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>> {
+    async getNodeDegrees(
+        urns: string[], edgeTypes?: string[], options?: { includeRollups?: boolean },
+    ): Promise<Record<string, NodeDegree>> {
         // Total lineage degree per URN over the FULL graph. A URN absent
         // from the response is UNKNOWN (its provider bucket failed) —
         // callers must never treat absence as zero.
-        return await this.fetch<Record<string, { in: number; out: number }>>('/nodes/degree', {
+        return await this.fetch<Record<string, NodeDegree>>('/nodes/degree', {
             method: 'POST',
-            body: JSON.stringify({ urns, edgeTypes }),
+            body: JSON.stringify({ urns, edgeTypes, ...(options?.includeRollups ? { includeRollups: true } : {}) }),
         })
     }
 

@@ -49,7 +49,7 @@ import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
-import type { GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
+import type { GraphDataProvider, GraphNode, NodeDegree, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -334,7 +334,7 @@ function stubProvider(
    *  other observable. */
   aggregatedExtra?: Record<string, unknown>,
   /** Totals `/nodes/degree` answers with (see `renderCanvasWithTrace`). */
-  nodeDegrees?: Record<string, { in: number; out: number } | 'fail'>,
+  nodeDegrees?: Record<string, NodeDegree | 'fail'>,
   /** Answer `/nodes/ancestor-chains` from the estate's containment. */
   ancestorChains?: boolean,
   /** Parents whose children page never answers (see `renderCanvasWithTrace`). */
@@ -423,12 +423,16 @@ function stubProvider(
       return { aggregatedEdges: cells, totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
     },
     // The server answers every URN it could count, so every URN asked about
-    // is answered here: one the test did not list has no lineage, and one
-    // listed as 'fail' is left out, as a URN the server could not count is.
+    // is answered here: one the test did not list has no lineage (nor any
+    // roll-up cell, when asked), and one listed as 'fail' is left out, as a
+    // URN the server could not count is.
     ...(nodeDegrees ? {
-      getNodeDegrees: async (urns: string[]) => Object.fromEntries(urns
-        .filter(urn => nodeDegrees[urn] !== 'fail')
-        .map(urn => [urn, nodeDegrees[urn] ?? { in: 0, out: 0 }])),
+      getNodeDegrees: async (urns: string[], _types?: string[], options?: { includeRollups?: boolean }) => {
+        const none = options?.includeRollups ? { in: 0, out: 0, rollupIn: 0, rollupOut: 0 } : { in: 0, out: 0 }
+        return Object.fromEntries(urns
+          .filter(urn => nodeDegrees[urn] !== 'fail')
+          .map(urn => [urn, nodeDegrees[urn] ?? none]))
+      },
     } : {}),
     // Parent first, root last. A URN the estate does not hold is left out —
     // unknown, as the server leaves out a URN it could not answer.
@@ -583,10 +587,11 @@ export async function renderCanvasWithTrace(
      *  inert without one. Absent by default. */
     dataSourceId?: string
     /** Lineage totals per URN for `/nodes/degree`. Every URN the canvas asks
-     *  about is answered, and one not listed has none ({ in: 0, out: 0 });
-     *  one listed as 'fail' is never answered (its count failed). Absent by
-     *  default: the provider then cannot count degrees at all. */
-    nodeDegrees?: Record<string, { in: number; out: number } | 'fail'>
+     *  about is answered, and one not listed has none ({ in: 0, out: 0 }, and
+     *  no roll-up cell when asked); one listed as 'fail' is never answered
+     *  (its count failed). Absent by default: the provider then cannot count
+     *  degrees at all. */
+    nodeDegrees?: Record<string, NodeDegree | 'fail'>
     /** Answer `/nodes/ancestor-chains` from the estate's containment. Off by
      *  default: the provider then cannot walk containment. */
     ancestorChains?: boolean

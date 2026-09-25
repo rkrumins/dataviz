@@ -242,3 +242,27 @@ export function splitChildEstate() {
   const assignments = { P: { layerId: 'left' }, 'P.C': { layerId: 'right' }, R: { layerId: 'right' }, A: { layerId: 'anch' } }
   return { model, layers, assignments }
 }
+
+/**
+ * A curated column holding a view-only group:
+ *
+ *   Group ⊃ {g.a, g.b}   a logical group in "Left"
+ *   solo                 beside it
+ */
+export function groupedEstate() {
+  const nodes = [wn('g.a', 'dataset'), wn('g.b', 'dataset'), wn('solo', 'dataset')]
+  const model: LensWalkModel = {
+    focusUrn: 'solo', nodes, lineageEdges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'left', name: 'Left', order: 0, entityTypes: [], logicalNodes: [{ id: 'grp', name: 'Group', type: 'group' }] },
+  ]
+  const assignments = {
+    'g.a': { layerId: 'left', logicalNodeId: 'grp' },
+    'g.b': { layerId: 'left', logicalNodeId: 'grp' },
+    solo: { layerId: 'left' },
+  }
+  return { model, layers, assignments }
+}

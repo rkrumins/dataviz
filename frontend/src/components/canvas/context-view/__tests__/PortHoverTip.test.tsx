@@ -45,6 +45,14 @@ describe('PortHoverTip', () => {
     expect(tip).not.toMatch(/load|canvas|render/i)
   })
 
+  it('a container whose only lineage outside sits below it says so, with no count', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'beyond', 'data-dir': 'out', 'data-out': '0' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('Lineage inside it leads to entities outside this view')
+    expect(tip).not.toMatch(/\b0\b/)
+  })
+
   it('a solid port still counts its lines', () => {
     render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'here', 'data-dir': 'out', 'data-out': '3' }} />)
     fireEvent.pointerOver(screen.getByTestId('port'))

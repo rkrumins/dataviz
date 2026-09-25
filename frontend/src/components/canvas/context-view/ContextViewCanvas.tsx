@@ -251,7 +251,7 @@ import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { bySignificance } from './lineDensity'
-import { buildNodePorts, columnEndLayer, unloadedColumnLines, unplacedLines } from './lineagePorts'
+import { buildNodePorts, columnEndLayer, portTotals, unloadedColumnLines, unplacedLines } from './lineagePorts'
 import { PortHoverTip } from './PortHoverTip'
 import { LineageGuide } from './LineageGuide'
 import { zoomScalesPercentages } from '@/lib/cssZoom'
@@ -5088,6 +5088,16 @@ export function ContextViewCanvas({
   // a false "no lineage" claim. A card whose count FAILED says so on its
   // ports until the hook's retry counts it.
   const { totals: externalDegrees, failed: degreeFailures } = useExternalDegrees(showLineageFlow)
+  // What the ports read (portTotals): a container's roll-up cells only while
+  // it is closed, a closed logical group's members summed, and no hollow
+  // port while a hidden flow type — one the totals count — could explain it.
+  const portHiddenTypes = overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes
+  const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() => {
+    const counted = new Set(lineageEdgeTypes.map(t => t.toUpperCase()))
+    const hiddenCouldExplain = [...portHiddenTypes].some(t => counted.size === 0 || counted.has(t))
+    return portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
+      id => expandedForRender.has(id), hiddenCouldExplain)
+  }, [renderByLayer, externalDegrees, degreeFailures, expandedForRender, portHiddenTypes, lineageEdgeTypes])
   const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   // Ambient per-node cue: external = total − internal(loaded), for every
   // loaded node with a KNOWN total. One O(E) pass builds internal
@@ -6445,8 +6455,8 @@ export function ContextViewCanvas({
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
                 externalCue={externalCueByNode}
-                lineageTotals={externalDegrees}
-                lineageUnknown={degreeFailures}
+                lineageTotals={lineagePortTotals}
+                lineageUnknown={lineagePortUnknown}
                 lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}

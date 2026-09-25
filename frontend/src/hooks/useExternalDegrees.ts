@@ -20,17 +20,24 @@
  * send the rest to a struggling server; they are failed with it and
  * asked on the retry. A reader that cannot count (501) is left alone:
  * nothing is asked again and nothing reads as failed.
+ *
+ * Flows are counted by type, never the stored :AGGREGATED roll-up cells
+ * (the store holds none, so the cue compares flows with flows). Whether a
+ * card holds roll-up cells is asked for besides (`includeRollups`): that is
+ * how a collapsed container whose lineage all sits below it says it has
+ * some. A server that ignores the flag answers flows alone.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { lookupRetryDelayMs } from '@/config/polling'
 import { useGraphProvider } from '@/providers'
+import type { NodeDegree } from '@/providers/GraphDataProvider'
 import { useCanvasStore, useCanvasVersion } from '@/store/canvas'
 import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 
 const CHUNK_SIZE = 400
 const SETTLE_MS = 800
 
-type Degree = { in: number; out: number }
+type Degree = NodeDegree
 
 const NO_TOTALS: ReadonlyMap<string, Degree> = new Map()
 const NONE_FAILED: ReadonlySet<string> = new Set()
@@ -45,6 +52,10 @@ export interface ExternalDegrees {
 export function useExternalDegrees(enabled: boolean): ExternalDegrees {
   const provider = useGraphProvider()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
+  const flowTypes = useMemo(
+    () => lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED'),
+    [lineageEdgeTypes],
+  )
   const canvasVersion = useCanvasVersion()
   const [totals, setTotals] = useState<ReadonlyMap<string, Degree>>(NO_TOTALS)
   const [failed, setFailed] = useState<ReadonlySet<string>>(NONE_FAILED)
@@ -95,7 +106,8 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
         try {
           res = await provider.getNodeDegrees!(
             chunk,
-            lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
+            flowTypes.length > 0 ? flowTypes : undefined,
+            { includeRollups: true },
           )
         } catch (err) {
           if (generation !== generationRef.current) return
@@ -134,7 +146,7 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
       }
     }, SETTLE_MS)
     return () => clearTimeout(timer)
-  }, [supported, provider, lineageEdgeTypes, canvasVersion, wake])
+  }, [supported, provider, flowTypes, canvasVersion, wake])
 
   return { totals, failed }
 }

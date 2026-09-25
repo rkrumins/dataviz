@@ -32,12 +32,16 @@ function describe(tip: Tip): { lead: string; detail: string } {
     }
   }
   if (tip.view.kind === 'beyond') {
-    // The count is the degree's — flows in the data, as the stubs say.
+    // The count is the degree's — flows in the data, as the stubs say. A
+    // container whose own count is 0 is hollow for what its roll-up cells
+    // say of the rows inside it: that it has some, not how many.
     const n = tip.view.dir === 'in' ? tip.inCount : tip.outCount
+    const said = n > 0 ? formatUnitCount(n, 'flows') : 'Lineage inside it'
+    const one = n <= 1
     return {
       lead: tip.view.dir === 'in'
-        ? `${formatUnitCount(n, 'flows')} ${n === 1 ? 'arrives' : 'arrive'} from entities outside this view`
-        : `${formatUnitCount(n, 'flows')} ${n === 1 ? 'leads' : 'lead'} to entities outside this view`,
+        ? `${said} ${one ? 'arrives' : 'arrive'} from entities outside this view`
+        : `${said} ${one ? 'leads' : 'lead'} to entities outside this view`,
       detail: 'None of its other ends is in this view — trace it to see where it leads.',
     }
   }

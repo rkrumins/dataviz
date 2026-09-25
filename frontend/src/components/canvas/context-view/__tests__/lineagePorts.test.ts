@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OffCanvasFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
-import { buildNodePorts, columnEndLayer, portView, unloadedColumnLines, unplacedLines } from '../lineagePorts'
+import { buildNodePorts, columnEndLayer, portTotals, portView, unloadedColumnLines, unplacedLines } from '../lineagePorts'
 
 // Columns left to right: Source 0, Warehouse 3, Report 4.
 const layer: Record<string, number> = { src: 0, wh: 3, rep: 4, rep2: 4 }
@@ -159,5 +159,70 @@ describe('unplacedLines — lineage whose far end is not placed yet never reads 
 
   it('adds no line for a row with nothing held', () => {
     expect(unplacedLines(new Map([['rep', held(0, 0)]]))).toEqual([])
+  })
+})
+
+describe('portView — a container whose lineage sits below it', () => {
+  it('roll-up cells say it has lineage: hollow when none of it is on the canvas', () => {
+    expect(portView('right', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toEqual({ kind: 'beyond', dir: 'out' })
+    expect(portView('left', undefined, { in: 0, out: 0, rollupIn: 1, rollupOut: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+    expect(portView('left', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toBeNull()
+  })
+
+  it('never when some of it is on the canvas', () => {
+    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf)
+    expect(portView('right', ports.get('src'), { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toEqual({ kind: 'here', dir: 'out' })
+  })
+})
+
+describe('portTotals — what each card reads for the lineage it has no line for', () => {
+  type Node = { id: string; isLogical?: boolean; children: Node[] }
+  const entity = (id: string, children: Node[] = []): Node => ({ id, children })
+  const group = (id: string, children: Node[]): Node => ({ id, isLogical: true, children })
+  const closed = () => false
+
+  it('a closed group reads its members\' totals, summed', () => {
+    const { totals } = portTotals(
+      [group('logical:g', [entity('a'), entity('b'), group('logical:inner', [entity('c')])])],
+      new Map([['a', { in: 1, out: 0 }], ['b', { in: 0, out: 2 }], ['c', { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }]]),
+      new Set(), closed, false,
+    )
+    expect(totals.get('logical:g')).toEqual({ in: 1, out: 2, rollupIn: 0, rollupOut: 1 })
+    expect(totals.get('logical:inner')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect(portView('right', undefined, totals.get('logical:g'))).toEqual({ kind: 'beyond', dir: 'out' })
+  })
+
+  it('only once every member is counted; a member whose count failed makes it unknown', () => {
+    const roots = [group('logical:g', [entity('a'), entity('b')])]
+    const waiting = portTotals(roots, new Map([['a', { in: 1, out: 0 }]]), new Set(), closed, false)
+    expect(waiting.totals.has('logical:g')).toBe(false)
+    expect(waiting.failed.has('logical:g')).toBe(false)
+    const failed = portTotals(roots, new Map([['a', { in: 1, out: 0 }]]), new Set(['b']), closed, false)
+    expect(failed.totals.has('logical:g')).toBe(false)
+    expect(failed.failed.has('logical:g')).toBe(true)
+  })
+
+  it('an open group, or an open container, leaves it to what it holds', () => {
+    const open = (id: string) => id === 'logical:g' || id === 'box'
+    const { totals } = portTotals(
+      [group('logical:g', [entity('a')]), entity('box', [entity('box.t')])],
+      new Map([['a', { in: 1, out: 0 }], ['box', { in: 0, out: 0, rollupIn: 1, rollupOut: 1 }]]),
+      new Set(), open, false,
+    )
+    expect(totals.has('logical:g')).toBe(false)
+    // Its own flows still count; its roll-up cells summarise rows it now shows.
+    expect(totals.get('box')).toEqual({ in: 0, out: 0 })
+    expect(portView('left', undefined, totals.get('box'))).toBeNull()
+    expect(totals.get('a')).toEqual({ in: 1, out: 0 })
+  })
+
+  it('a hidden flow type could explain any gap: no card reads hollow', () => {
+    const { totals, failed } = portTotals(
+      [entity('a'), entity('b')],
+      new Map([['a', { in: 3, out: 0 }]]), new Set(['b']), closed, true,
+    )
+    expect(portView('left', undefined, totals.get('a'))).toBeNull()
+    // A count that failed still says so.
+    expect(portView('left', undefined, totals.get('b'), failed.has('b'))).toEqual({ kind: 'unknown', dir: 'both' })
   })
 })

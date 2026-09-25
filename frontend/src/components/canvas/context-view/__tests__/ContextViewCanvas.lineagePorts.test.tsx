@@ -18,9 +18,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { anchoredPortsEstate } from '@/test/fixtures/traceEstates'
+import { anchoredPortsEstate, groupedEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
+import { useConnectionVisibilityStore } from '@/store/connectionVisibility'
 
 // The stubs' own data, as the canvas hands it to the overlay. jsdom gives
 // every row the same box, so the overlay never has room to paint a stub;
@@ -184,5 +185,82 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
     // `far` is a root no column holds: in the view, column unknown.
     expect(ports('dash')).toEqual({ left: null, right: null })
     expect([...(projection.offCanvas ?? new Map()).values()].some(l => l.in + l.out > 0)).toBe(false)
+  }, 20_000)
+})
+
+describe('a card whose lineage sits below it, or that the reader hid', () => {
+  it('a closed container holding roll-up cells is hollow; open, it leaves that to its rows', async () => {
+    const estate = anchoredPortsEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      // Neither has a flow of its own; the rows inside them do.
+      nodeDegrees: {
+        'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 },
+        'SRC.DB_B': { in: 0, out: 0, rollupIn: 1, rollupOut: 0 },
+      },
+    })
+    await h.toggle('SRC.DB_B')
+
+    await waitFor(() => {
+      expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'beyond:out' })
+    }, { timeout: 8000 })
+    expect(ports('SRC.DB_B')).toEqual({ left: null, right: null })
+  }, 20_000)
+
+  it('a hidden flow type never makes a card hollow', async () => {
+    const estate = anchoredPortsEstate()
+    await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { dash: { in: 1, out: 0 } },
+    })
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('far', 'dash')] as never)
+    })
+    await waitFor(() => {
+      expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
+    }, { timeout: 8000 })
+
+    // Its total counts every type; with one hidden, that one could be all of it.
+    act(() => { useConnectionVisibilityStore.getState().setHidden('harness-view', ['TRANSFORMS']) })
+    try {
+      await waitFor(() => {
+        expect(ports('dash')).toEqual({ left: null, right: null })
+      }, { timeout: 8000 })
+    } finally {
+      act(() => { useConnectionVisibilityStore.getState().setHidden('harness-view', []) })
+    }
+  }, 20_000)
+
+  it('a closed logical group reads its members: hollow from theirs', async () => {
+    const h = await renderCanvasWithTrace(groupedEstate(), {
+      focus: 'solo',
+      nodeDegrees: { 'g.a': { in: 0, out: 2 }, 'g.b': { in: 0, out: 0 } },
+    })
+    // Open, its members speak for themselves.
+    await waitFor(() => {
+      expect(ports('g.a')).toEqual({ left: null, right: 'beyond:out' })
+    }, { timeout: 8000 })
+    expect(ports('logical:grp')).toEqual({ left: null, right: null })
+
+    await h.toggle('logical:grp')
+    await waitFor(() => {
+      expect(ports('logical:grp')).toEqual({ left: null, right: 'beyond:out' })
+    }, { timeout: 8000 })
+    expect(ports('solo')).toEqual({ left: null, right: null })
+  }, 20_000)
+
+  it('a closed logical group whose member could not be counted says unknown', async () => {
+    const h = await renderCanvasWithTrace(groupedEstate(), {
+      focus: 'solo',
+      nodeDegrees: { 'g.a': { in: 0, out: 2 }, 'g.b': 'fail' },
+    })
+    await h.toggle('logical:grp')
+    await waitFor(() => {
+      expect(ports('logical:grp')).toEqual({ left: 'unknown:both', right: 'unknown:both' })
+    }, { timeout: 8000 })
   }, 20_000)
 })

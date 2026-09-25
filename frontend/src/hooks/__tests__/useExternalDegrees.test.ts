@@ -18,7 +18,9 @@ vi.mock('@/providers', async (original) => ({
   ...(await original<typeof import('@/providers')>()),
   useGraphProvider: () => holder.current,
 }))
-const LINEAGE = ['FLOWS_TO']
+// The view's lineage types include the roll-up cells' own type, as the
+// server's system edge types do.
+const LINEAGE = ['FLOWS_TO', 'AGGREGATED']
 vi.mock('@/hooks/useViewSchema', () => ({ useViewLineageEdgeTypes: () => LINEAGE }))
 
 import { useExternalDegrees } from '../useExternalDegrees'
@@ -67,7 +69,9 @@ describe('useExternalDegrees — answers are kept', () => {
     const { result } = render()
     await settle()
     expect(getNodeDegrees).toHaveBeenCalledTimes(1)
-    expect(getNodeDegrees.mock.calls[0]).toEqual([['a', 'b'], LINEAGE])
+    // Flows by type, never the roll-up cells as flows; whether a container
+    // holds cells is asked for on its own.
+    expect(getNodeDegrees.mock.calls[0]).toEqual([['a', 'b'], ['FLOWS_TO'], { includeRollups: true }])
     expect(result.current.totals.get('a')).toEqual({ in: 1, out: 2 })
     expect(result.current.failed.size).toBe(0)
 
@@ -127,6 +131,23 @@ describe('useExternalDegrees — answers are kept', () => {
     await settle()
     expect(after.getNodeDegrees).toHaveBeenCalledTimes(1)
     expect(result.current.totals.get('a')).toEqual({ in: 1, out: 2 })
+  })
+})
+
+describe('useExternalDegrees — roll-up presence', () => {
+  it('keeps whether a container holds roll-up cells, and a server that does not say is fine', async () => {
+    const getNodeDegrees = vi.fn(async () => ({
+      a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 },
+      // A server from before the flag answers flows alone.
+      b: { in: 1, out: 2 },
+    }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect(result.current.totals.get('b')).toEqual({ in: 1, out: 2 })
+    expect(result.current.failed.size).toBe(0)
   })
 })
 

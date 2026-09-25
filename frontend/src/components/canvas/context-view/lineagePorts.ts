@@ -22,8 +22,11 @@
  * has no line of its own to answer the question, the port says just that:
  * UNKNOWN, on both sides, in neither direction colour, until a retry counts
  * it. Not while the first count is still on its way — every card would flash.
+ * A container's roll-up cells count as lineage too (NodeDegree): its own
+ * flows may be none while the rows inside it have plenty.
  */
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
+import type { NodeDegree } from '@/providers/GraphDataProvider'
 
 export type PortSide = 'left' | 'right'
 
@@ -102,7 +105,7 @@ export function buildNodePorts(
 export function portView(
   side: PortSide,
   ports: NodePorts | undefined,
-  total: { in: number; out: number } | undefined,
+  total: NodeDegree | undefined,
   /** Counting this card's total failed; it is being asked again. */
   unknown = false,
 ): PortView | null {
@@ -119,9 +122,70 @@ export function portView(
   // is here, on either side: some of it on the canvas already says it exists.
   const canvasIn = (ports?.left.in ?? 0) + (ports?.right.in ?? 0) + (ports?.delegated.in ?? 0)
   const canvasOut = (ports?.left.out ?? 0) + (ports?.right.out ?? 0) + (ports?.delegated.out ?? 0)
-  if (side === 'left' && total.in > 0 && canvasIn === 0) return { kind: 'beyond', dir: 'in' }
-  if (side === 'right' && total.out > 0 && canvasOut === 0) return { kind: 'beyond', dir: 'out' }
+  const hasIn = total.in > 0 || (total.rollupIn ?? 0) > 0
+  const hasOut = total.out > 0 || (total.rollupOut ?? 0) > 0
+  if (side === 'left' && hasIn && canvasIn === 0) return { kind: 'beyond', dir: 'in' }
+  if (side === 'right' && hasOut && canvasOut === 0) return { kind: 'beyond', dir: 'out' }
   return null
+}
+
+const NO_TOTALS: ReadonlyMap<string, NodeDegree> = new Map()
+
+/**
+ * The totals each card's ports read (portView), from the server's.
+ *
+ * Roll-up cells speak for a CLOSED container only. Open, its rows carry
+ * their own lines and ports, and the cells it holds to them — its own flows,
+ * summarised against itself — would read as lineage leaving the view.
+ *
+ * A logical group is no entity, so the server has no total for it. Closed,
+ * it stands for its members (and a nested group's): its total is theirs,
+ * summed, once every one is counted, and unknown when one's count failed.
+ * Open, its members speak for themselves.
+ *
+ * A hidden flow type never turns a port hollow. The totals count every
+ * type, so when one the reader hid could explain the gap, no card says its
+ * lineage only leaves the view; a failed count still says so.
+ */
+export function portTotals<N extends { id: string; isLogical?: boolean; children: readonly N[] }>(
+  roots: Iterable<N>,
+  totals: ReadonlyMap<string, NodeDegree>,
+  failed: ReadonlySet<string>,
+  isOpen: (id: string) => boolean,
+  hiddenCouldExplain: boolean,
+): { totals: ReadonlyMap<string, NodeDegree>; failed: ReadonlySet<string> } {
+  const read = new Map<string, NodeDegree>()
+  if (!hiddenCouldExplain) {
+    totals.forEach((t, id) => {
+      read.set(id, isOpen(id) && (t.rollupIn !== undefined || t.rollupOut !== undefined) ? { in: t.in, out: t.out } : t)
+    })
+  }
+  const failedGroups: string[] = []
+  const sum = (group: N): NodeDegree | 'unknown' | undefined => {
+    const acc = { in: 0, out: 0, rollupIn: 0, rollupOut: 0 }
+    let unknown = false
+    let uncounted = false
+    for (const member of group.children) {
+      const t = member.isLogical ? sum(member) : failed.has(member.id) ? 'unknown' : totals.get(member.id)
+      if (t === 'unknown') unknown = true
+      else if (t === undefined) uncounted = true
+      else {
+        acc.in += t.in; acc.out += t.out
+        acc.rollupIn += t.rollupIn ?? 0; acc.rollupOut += t.rollupOut ?? 0
+      }
+    }
+    const answer = unknown ? 'unknown' : uncounted ? undefined : acc
+    if (!isOpen(group.id)) {
+      if (answer === 'unknown') failedGroups.push(group.id)
+      else if (answer && !hiddenCouldExplain) read.set(group.id, answer)
+    }
+    return answer
+  }
+  for (const root of roots) if (root.isLogical) sum(root)
+  return {
+    totals: read.size > 0 ? read : NO_TOTALS,
+    failed: failedGroups.length > 0 ? new Set([...failed, ...failedGroups]) : failed,
+  }
 }
 
 /** A line's far end that is an anchored column, not a row of it. */

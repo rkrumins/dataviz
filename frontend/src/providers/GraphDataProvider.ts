@@ -457,6 +457,20 @@ export interface NodeQuery {
 /** One page of a node query. `nextOffset` is where the next page starts, in the
  *  PROVIDER's order — a draft overlay adds and drops rows around the page it
  *  read, so counting the rows returned would skip or repeat rows. */
+/**
+ * One entity's lineage total (`getNodeDegrees`). `in`/`out` count its own
+ * flows. `rollupIn`/`rollupOut`, when asked for, say whether it holds a
+ * roll-up cell in that direction (1) or not (0): presence, not a count, so a
+ * collapsed container can say it has lineage below it. A server that does
+ * not know the flag leaves them out.
+ */
+export interface NodeDegree {
+    in: number
+    out: number
+    rollupIn?: number
+    rollupOut?: number
+}
+
 export interface NodePage {
     nodes: GraphNode[]
     hasMore: boolean
@@ -780,9 +794,12 @@ export interface GraphDataProvider {
      * TOTAL lineage degree (in/out) per URN over the full graph —
      * optional capability. Absent URNs in the result are UNKNOWN, never
      * zero. The canvas derives "lineage outside this view" as
-     * total − internal(loaded).
+     * total − internal(loaded). `includeRollups` asks, besides, whether
+     * each holds roll-up cells (see NodeDegree).
      */
-    getNodeDegrees?(urns: URN[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>>
+    getNodeDegrees?(
+        urns: URN[], edgeTypes?: string[], options?: { includeRollups?: boolean },
+    ): Promise<Record<string, NodeDegree>>
 
     /**
      * Containment chains for many URNs — optional capability. Each chain is
