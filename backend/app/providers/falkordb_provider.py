@@ -786,6 +786,13 @@ def _retry_wall_clock(budget: float, *, read_only: bool):
     return asyncio.timeout(budget + sum(window))
 
 
+#: The share of a read's budget it may spend waiting for a query slot before
+#: it is shed as busy (429 + Retry-After). The rest is the query's. Without
+#: it a read queued without limit and then ran its whole budget, so the
+#: request tier fired first and nothing structured was served.
+_READ_QUEUE_SHARE = 0.5
+
+
 def _refused_endpoint(exc: BaseException) -> Optional[str]:
     """The ``host:port`` a refusal names, walking the cause chain.
 
@@ -4486,15 +4493,35 @@ class FalkorDBProvider(GraphDataProvider):
         await self._refresh_if_graph_rebuilt()
         queued_at = time.monotonic()
         read_only = kind.endswith("ro")
-        async with self._query_semaphore:
+        # A read waits for its slot inside its own budget, and is shed as
+        # busy when its share of it runs out — see _READ_QUEUE_SHARE. Writes
+        # keep waiting, so workers are not pushed into park loops.
+        try:
+            async with asyncio.timeout(budget * _READ_QUEUE_SHARE if read_only else None):
+                await self._query_semaphore.acquire()
+        except TimeoutError:
+            from backend.common.adapters import ProviderBusy
+            raise ProviderBusy(
+                provider_name=self._graph_name,
+                reason=(
+                    f"{op or kind}: every query slot in this process stayed "
+                    f"busy for {time.monotonic() - queued_at:.1f}s"
+                ),
+                retry_after_seconds=1,
+            ) from None
+        try:
             started = time.monotonic()
+            waited = started - queued_at
             rows: Optional[int] = None
             err: Optional[str] = None
             try:
                 # ONE wall clock over the call AND its retries — see
                 # _retry_wall_clock. Without it each retry drew a fresh full
-                # budget from inside the retried callable.
-                async with _retry_wall_clock(budget, read_only=read_only):
+                # budget from inside the retried callable. A read's wait for
+                # its slot is spent from that budget.
+                async with _retry_wall_clock(
+                    budget - waited if read_only else budget, read_only=read_only,
+                ):
                     result = await self._run_guarded(
                         runner, read_only=read_only, pinned=pinned,
                     )
@@ -4506,8 +4533,13 @@ class FalkorDBProvider(GraphDataProvider):
                 err = type(exc).__name__
                 # A pinned call is aimed at a replica the router chose; the
                 # replica has its own penalty box, and the streak below is
-                # evidence about the node this provider otherwise reads.
-                if not pinned and isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                # evidence about the node this provider otherwise reads. A
+                # deadline the queue shortened is saturation, not evidence.
+                if (
+                    not pinned
+                    and waited * 1000 < FALKORDB_SLOW_QUERY_MS
+                    and isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                ):
                     failover = self._deadline_streak_verdict(exc)
                     if failover is not None:
                         err = type(failover).__name__
@@ -4527,6 +4559,8 @@ class FalkorDBProvider(GraphDataProvider):
                         )
                 except Exception:  # pragma: no cover — telemetry must not mask results
                     pass
+        finally:
+            self._query_semaphore.release()
 
     def _deadline_streak_verdict(self, exc: BaseException) -> Optional[Exception]:
         """One more deadline miss against this provider's node — and the
