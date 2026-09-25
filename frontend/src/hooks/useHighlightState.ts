@@ -14,6 +14,8 @@ import type { HierarchyNode } from '@/types/hierarchy'
 
 export interface UseHighlightStateOptions {
   selectedNodeId: string | null
+  /** Every selected node. With more than one, each one's lines are lit. */
+  selectedNodeIds?: readonly string[]
   visibleLineageEdges: any[]
   isTracing: boolean
   displayMap: Map<string, HierarchyNode>
@@ -81,6 +83,7 @@ function computeConnected(
 
 export function useHighlightState({
   selectedNodeId,
+  selectedNodeIds,
   visibleLineageEdges,
   isTracing,
   displayMap,
@@ -89,8 +92,17 @@ export function useHighlightState({
 
   const highlightState = useMemo(() => {
     if (isTracing || !selectedNodeId) return EMPTY
-    return computeConnected(selectedNodeId, visibleLineageEdges, displayMap, childMap)
-  }, [selectedNodeId, visibleLineageEdges, isTracing, displayMap, childMap])
+    if (!selectedNodeIds || selectedNodeIds.length < 2) {
+      return computeConnected(selectedNodeId, visibleLineageEdges, displayMap, childMap)
+    }
+    const union: HighlightSet = { nodes: new Set(), edges: new Set() }
+    for (const id of selectedNodeIds) {
+      const { nodes, edges } = computeConnected(id, visibleLineageEdges, displayMap, childMap)
+      nodes.forEach(n => union.nodes.add(n))
+      edges.forEach(e => union.edges.add(e))
+    }
+    return union
+  }, [selectedNodeId, selectedNodeIds, visibleLineageEdges, isTracing, displayMap, childMap])
 
   const isHighlightActive = highlightState.edges.size > 0
 

@@ -220,7 +220,7 @@ export function CanvasStatusChips({
             <div>
               <p className="font-semibold mb-1">Large flow fan</p>
               <p className="text-ink-muted">
-                This entity touches {focusTotal!.toLocaleString()}{' '}
+                The selection touches {focusTotal!.toLocaleString()}{' '}
                 {unitNoun(focusTotal!, 'lines')} — showing the{' '}
                 {focusShown!.toLocaleString()} strongest on canvas. The Lens lists every
                 one, grouped and searchable.

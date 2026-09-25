@@ -114,6 +114,12 @@ describe('every surface names the unit it shows', () => {
     expect(src).not.toMatch(/entity has \{focusTotal/)
   })
 
+  it('the fan chip speaks for the whole selection, one entity or several', () => {
+    const src = read('../../CanvasStatusChips.tsx')
+    expect(src).toContain('The selection touches {focusTotal')
+    expect(src).not.toMatch(/This entity touches/)
+  })
+
   it('the column periphery counts lines, and says so', () => {
     const src = read('../../LayerColumn.tsx')
     expect(src).not.toMatch(/connection\{periphery/)

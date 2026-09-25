@@ -51,4 +51,17 @@ describe('On Hover', () => {
     fireEvent.mouseEnter(row)
     await waitFor(() => expect(drawn(h)).toContain('SRC.orders>DST.revenue'), { timeout: 4000 })
   }, 20_000)
+
+  it('selecting several entities draws all of their lines', async () => {
+    const h = await openView()
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('SRC.customers', 'DST.revenue')] as never)
+    })
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().setSelection(['SRC.orders', 'SRC.customers']) })
+
+    await waitFor(() => expect(drawn(h).sort()).toEqual(['SRC.customers>DST.revenue', 'SRC.orders>DST.revenue']),
+      { timeout: 4000 })
+  }, 20_000)
 })

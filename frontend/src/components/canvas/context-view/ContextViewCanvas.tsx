@@ -4542,8 +4542,8 @@ export function ContextViewCanvas({
   }, [isStubsMode, lineageRenderMode, drawableLineageEdges, autoStubThreshold])
 
   // Effective edge set passed to the renderer, plus the shown/total
-  // bookkeeping the status chips surface. Focus (selection / trace anchor)
-  // materializes incident edges in every stub-y mode, but a hub's fan is
+  // bookkeeping the status chips surface. Focus (every selected entity /
+  // trace anchor) materializes incident edges in every stub-y mode, but a hub's fan is
   // ALSO capped at the strongest `autoStubThreshold` — 650 curves at once is
   // noise; the Lineage Lens enumerates the full fan properly and the chip
   // points there. A HOVERED entity's lines follow the same rule, drawn by
@@ -4554,8 +4554,7 @@ export function ContextViewCanvas({
     }
     const ambient = rankedAmbientEdges ?? []
     const ambientTotal = lineageRenderMode === 'auto' ? drawableLineageEdges.length : 0
-    const focusIds = new Set<string>()
-    if (selectedNodeId) focusIds.add(selectedNodeId)
+    const focusIds = new Set<string>(selectedNodeIds)
     if (overlay.active && canvasTrace.tracedUrn) focusIds.add(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     if (focusIds.size === 0) {
       return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
@@ -4577,7 +4576,7 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
@@ -5199,7 +5198,7 @@ export function ContextViewCanvas({
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
-    selectedNodeId, visibleLineageEdges: effectiveLineageEdges,
+    selectedNodeId, selectedNodeIds, visibleLineageEdges: effectiveLineageEdges,
     isTracing: traceActive, displayMap, childMap,
   })
 
