@@ -14,6 +14,7 @@ import { fnv1a64 } from './lib/lineageCache'
 import type {
     AggregatedEdgeInfo,
     AggregatedEdgeResult,
+    GraphDataProvider,
     GraphEdge, AggregatedDegradedDetail } from '@/providers/GraphDataProvider'
 
 // ============================================
@@ -150,11 +151,20 @@ interface CacheEntry {
     timestamp: number
     sourceUrns: string[]
     targetUrns?: string[]
-    granularity: string
+    granularity: string | null
 }
 
 const aggregatedEdgeCache = new Map<string, CacheEntry>()
 const CACHE_MAX_ENTRIES = 200
+
+function rememberResult(cacheKey: string, entry: CacheEntry): void {
+    if (aggregatedEdgeCache.size >= CACHE_MAX_ENTRIES) {
+        const oldestKey = aggregatedEdgeCache.keys().next().value
+        if (oldestKey !== undefined) aggregatedEdgeCache.delete(oldestKey)
+    }
+    aggregatedEdgeCache.set(cacheKey, entry)
+}
+
 const AGGREGATED_FETCH_BATCH_SIZE = 500
 /** Page size for aggregated-edge detail expansion. The backend EdgeQuery
  *  default is 100, which silently under-delivered on large bundles. */
@@ -175,6 +185,11 @@ const GLOBAL_SCOPE = '*'
 const useAggregatedCacheVersion = create<{ versions: Record<string, number> }>(
     () => ({ versions: {} }),
 )
+
+/** The version a canvas reading `scopeKey` sees: the global one plus its own. */
+function versionFor(versions: Record<string, number>, scopeKey?: string): number {
+    return (versions[GLOBAL_SCOPE] ?? 0) + (scopeKey ? (versions[scopeKey] ?? 0) : 0)
+}
 
 function bumpScope(scope: string): void {
     useAggregatedCacheVersion.setState((s) => ({
@@ -241,9 +256,7 @@ function noteMaterializedEpoch(epoch: string | null | undefined): void {
  *  scope alone; without it only the global ones are seen. The sum re-renders
  *  the caller on either, and never on another scope's. */
 export function useAggregatedEdgesCacheVersion(scopeKey?: string): number {
-    return useAggregatedCacheVersion(
-        (s) => (s.versions[GLOBAL_SCOPE] ?? 0) + (scopeKey ? (s.versions[scopeKey] ?? 0) : 0),
-    )
+    return useAggregatedCacheVersion((s) => versionFor(s.versions, scopeKey))
 }
 
 /**
@@ -261,13 +274,130 @@ const AGGREGATED_FETCH_CONCURRENCY = (() => {
 // Cache key helper. The FNV-1a hash itself lives in hooks/lib/lineageCache
 // so useLineageStubs and any future lineage hook share the same compact-key
 // implementation. The shape of the key is per-hook (this one is per-pair).
-function getCacheKey(scope: string, sourceUrns: string[], targetUrns: string[] | undefined, granularity: string): string {
-    const srcHash = fnv1a64([...sourceUrns].sort().join(''))
-    const tgtHash = targetUrns ? fnv1a64([...targetUrns].sort().join('')) : '0'
+// The hashes come in already made: a ledger ask hashes its (large) target
+// list once for all of its chunks.
+function urnSetHash(urns: readonly string[]): string {
+    return fnv1a64([...urns].sort().join(''))
+}
+
+function getCacheKey(scope: string, srcHash: string, tgtHash: string, granularity: string | null): string {
     // ``scope`` = provider (workspace, data source, branch) identity. Without
     // it the module-global cache serves one graph's aggregated edges for an
     // identical URN set in ANOTHER graph — the same URN can exist in both.
     return `${scope}:${granularity}:${srcHash}:${tgtHash}`
+}
+
+/** Chunk answers merged into one: pairs deduped by id (a later chunk wins),
+ *  any truncated or stale chunk marks the whole, the first reason and detail
+ *  win, and the OLDEST materialisation epoch is reported — undefined when no
+ *  chunk carried one, so an answer without it moves no epoch. */
+function mergeAggregatedResults(results: AggregatedEdgeResult[]): AggregatedEdgeResult {
+    const mergedEdgesById = new Map<string, AggregatedEdgeInfo>()
+    let mergedTotalSourceEdges = 0
+    let mergedTruncated = false
+    let mergedStale = false
+    let mergedStaleReason: string | null = null
+    let mergedDegradedDetail: AggregatedDegradedDetail | null = null
+    let mergedLastMaterializedAt: string | null | undefined = undefined
+    let mergedMaterializationTriggered = false
+    for (const r of results) {
+        for (const agg of r.aggregatedEdges) mergedEdgesById.set(agg.id, agg)
+        mergedTotalSourceEdges += r.totalSourceEdges ?? 0
+        if (r.truncated) mergedTruncated = true
+        if (r.stale) mergedStale = true
+        if (mergedStaleReason === null && r.staleReason != null) mergedStaleReason = r.staleReason
+        if (mergedDegradedDetail === null && r.degradedDetail != null) mergedDegradedDetail = r.degradedDetail
+        if (r.materializationTriggered) mergedMaterializationTriggered = true
+        if (r.lastMaterializedAt !== undefined) {
+            if (mergedLastMaterializedAt === undefined || mergedLastMaterializedAt === null) {
+                mergedLastMaterializedAt = r.lastMaterializedAt
+            } else if (r.lastMaterializedAt && r.lastMaterializedAt < mergedLastMaterializedAt) {
+                mergedLastMaterializedAt = r.lastMaterializedAt
+            }
+        }
+    }
+    return {
+        aggregatedEdges: Array.from(mergedEdgesById.values()),
+        totalSourceEdges: mergedTotalSourceEdges,
+        truncated: mergedTruncated,
+        stale: mergedStale,
+        staleReason: mergedStaleReason,
+        degradedDetail: mergedDegradedDetail,
+        lastMaterializedAt: mergedLastMaterializedAt,
+        materializationTriggered: mergedMaterializationTriggered,
+    }
+}
+
+// ============================================
+// The pair ledger
+// ============================================
+//
+// Every canvas asks for the roll-ups among the rows it draws: the same list as
+// sources and targets. That list changes with every page that lands and every
+// expand or collapse, and asking the whole V × V set again each time sent
+// ceil(V / 500) requests, each carrying all V targets, and repeated the
+// server's target-side work for every one of them.
+//
+// A pair's answer depends only on that pair (the server reads s IN sources,
+// t IN targets), so the ledger keeps what it has been told and asks only the
+// delta: the new rows out to every row, and the rows it kept in to the new
+// ones. Together with the pairs among the kept rows, that is every pair.
+// Rows that leave take their pairs with them and ask nothing.
+//
+// One ledger per canvas, for one graph at one level: a new scope, level or
+// cache version (an invalidation) starts an empty one.
+
+interface PairLedger {
+    /** `${scopeKey}:${granularity}:${version}` — what the pairs were asked of. */
+    key: string
+    /** Rows whose pairs with every other covered row are known. */
+    covered: Set<string>
+    /** The known pairs, by the server's own id (agg-{source}-{target}). */
+    pairs: Map<string, AggregatedEdgeInfo>
+}
+
+const emptyLedger = (key: string): PairLedger => ({ key, covered: new Set(), pairs: new Map() })
+
+/** Forget the rows `gone` names: they are no longer covered, and every pair
+ *  touching one goes. True when a pair went. */
+function forgetRows(ledger: PairLedger, gone: (urn: string) => boolean): boolean {
+    for (const urn of ledger.covered) if (gone(urn)) ledger.covered.delete(urn)
+    let dropped = false
+    for (const [id, p] of ledger.pairs) {
+        if (gone(p.sourceUrn) || gone(p.targetUrn)) {
+            ledger.pairs.delete(id)
+            dropped = true
+        }
+    }
+    return dropped
+}
+
+function chunked(urns: string[]): string[][] {
+    const chunks: string[][] = []
+    for (let i = 0; i < urns.length; i += AGGREGATED_FETCH_BATCH_SIZE) {
+        chunks.push(urns.slice(i, i + AGGREGATED_FETCH_BATCH_SIZE))
+    }
+    return chunks
+}
+
+/** One ledger ask, answered from the module cache when it can be. Only a
+ *  complete answer is cached. */
+async function askPairs(
+    provider: GraphDataProvider,
+    granularity: string | null,
+    cacheTtl: number,
+    sourceUrns: string[],
+    targetUrns: string[],
+    targetHash: string,
+): Promise<AggregatedEdgeResult> {
+    const cacheKey = getCacheKey(provider.scopeKey ?? '', urnSetHash(sourceUrns), targetHash, granularity)
+    const cached = aggregatedEdgeCache.get(cacheKey)
+    if (cached && (Date.now() - cached.timestamp) < cacheTtl) return cached.result
+    const result = await provider.getAggregatedEdges({ sourceUrns, targetUrns, granularity })
+    if (!result.truncated) {
+        rememberResult(cacheKey, { result, timestamp: Date.now(), sourceUrns, granularity })
+    }
+    return result
 }
 
 // ============================================
@@ -302,35 +432,148 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     const currentSourceUrnsRef = useRef<string[]>([])
     const currentTargetUrnsRef = useRef<string[] | undefined>(undefined)
 
+    // The pair ledger (see above) and what its next sync asks about. Read at
+    // sync time, not at render: a level change must reach a sync the old
+    // callback started.
+    const ledgerRef = useRef<PairLedger>(emptyLedger(''))
+    const rowsRef = useRef<Set<string>>(new Set())
+    const askerRef = useRef<{ provider: GraphDataProvider; cacheTtl: number } | null>(null)
+    const granularityRef = useRef(granularity)
+    // One sync at a time; a change that arrives meanwhile runs it again.
+    const runningRef = useRef(false)
+    const againRef = useRef(false)
+
+    const showPairs = useCallback((pairs: Iterable<AggregatedEdgeInfo>) => {
+        // Functional update: no dependency on aggregatedEdges, and an open
+        // edge keeps its expansion.
+        setAggregatedEdges(prev => {
+            const edgeMap = new Map<string, AggregatedEdgeState>()
+            for (const agg of pairs) {
+                const existing = prev.get(agg.id)
+                edgeMap.set(agg.id, {
+                    aggregated: agg,
+                    state: existing?.state ?? 'collapsed',
+                    detailedEdges: existing?.detailedEdges ?? [],
+                })
+            }
+            return edgeMap
+        })
+    }, [])
+
+    const showFlags = useCallback((result: AggregatedEdgeResult) => {
+        setTruncated(result.truncated ?? false)
+        setStale(result.stale ?? false)
+        setStaleReason(result.staleReason ?? null)
+        setDegradedDetail(result.degradedDetail ?? null)
+        setLastMaterializedAt(result.lastMaterializedAt ?? null)
+        setMaterializationTriggered(result.materializationTriggered ?? false)
+    }, [])
+
+    // Bring the ledger up to the rows in rowsRef: forget the rows that left,
+    // then ask about the new ones. A chunk that fails, or comes back cut
+    // short, leaves its rows uncovered, so the next sync asks about them
+    // again; the pairs the rest answered are kept.
+    const syncPairs = useCallback(async () => {
+        if (runningRef.current) { againRef.current = true; return }
+        const syncOnce = async () => {
+            const asker = askerRef.current
+            if (!asker) return
+            const { provider, cacheTtl } = asker
+            const granularity = granularityRef.current
+            const scopeKey = provider.scopeKey
+            const key = `${scopeKey ?? ''}:${granularity}:${versionFor(useAggregatedCacheVersion.getState().versions, scopeKey)}`
+            if (ledgerRef.current.key !== key) ledgerRef.current = emptyLedger(key)
+            const ledger = ledgerRef.current
+            const rows = rowsRef.current
+            if (forgetRows(ledger, urn => !rows.has(urn))) showPairs([...ledger.pairs.values()])
+
+            const added = [...rows].filter(urn => !ledger.covered.has(urn))
+            if (added.length === 0) return
+            const all = [...rows]
+            const allHash = urnSetHash(all)
+            const addedHash = urnSetHash(added)
+            // `about`: the rows whose pairs this ask completes.
+            const asks = [
+                ...chunked(added).map(sources => ({ sources, targets: all, targetHash: allHash, about: sources })),
+                ...chunked([...ledger.covered]).map(sources => ({ sources, targets: added, targetHash: addedHash, about: added })),
+            ]
+
+            setIsLoading(true)
+            setError(null)
+            try {
+                // Bound parallel chunks: every chunk competes for the same
+                // single-threaded Cypher slot.
+                const settled = await mapWithConcurrency(
+                    asks,
+                    AGGREGATED_FETCH_CONCURRENCY,
+                    (a) => askPairs(provider, granularity, cacheTtl, a.sources, a.targets, a.targetHash),
+                )
+                const fulfilled: AggregatedEdgeResult[] = []
+                const unanswered = new Set<string>()
+                let firstErr: unknown = undefined
+                settled.forEach((s, i) => {
+                    if (s.status === 'fulfilled') {
+                        fulfilled.push(s.value)
+                        for (const agg of s.value.aggregatedEdges) ledger.pairs.set(agg.id, agg)
+                        if (!s.value.truncated) return
+                    } else if (firstErr === undefined) {
+                        firstErr = s.reason
+                    }
+                    asks[i].about.forEach(urn => unanswered.add(urn))
+                })
+                for (const urn of added) if (!unanswered.has(urn)) ledger.covered.add(urn)
+                // Rows that left while this was out.
+                const latest = rowsRef.current
+                forgetRows(ledger, urn => !latest.has(urn))
+                showPairs([...ledger.pairs.values()])
+
+                if (fulfilled.length > 0) {
+                    const merged = mergeAggregatedResults(fulfilled)
+                    noteMaterializedEpoch(merged.lastMaterializedAt)
+                    showFlags(merged)
+                }
+                if (firstErr !== undefined) {
+                    setError(firstErr instanceof Error ? firstErr.message : 'Failed to fetch some aggregated edges')
+                }
+            } finally {
+                setIsLoading(false)
+            }
+        }
+        runningRef.current = true
+        try {
+            do {
+                againRef.current = false
+                await syncOnce()
+            } while (againRef.current)
+        } finally {
+            runningRef.current = false
+        }
+    }, [showPairs, showFlags])
+
     // Fetch aggregated edges from backend
     const fetchAggregated = useCallback(async (sourceUrns: string[], targetUrns?: string[]) => {
         if (!provider || sourceUrns.length === 0) return
 
+        // The pairs among a set of rows — what every canvas asks for — go
+        // through the ledger, which asks only about what changed.
+        if (targetUrns === sourceUrns) {
+            askerRef.current = { provider, cacheTtl }
+            rowsRef.current = new Set(sourceUrns)
+            currentSourceUrnsRef.current = sourceUrns
+            currentTargetUrnsRef.current = targetUrns
+            return syncPairs()
+        }
+
         // Check cache first (scoped by provider identity — the same URN set
         // in a different data source must not collide in the module cache).
-        const cacheKey = getCacheKey(provider.scopeKey ?? '', sourceUrns, targetUrns, granularity)
+        const cacheKey = getCacheKey(
+            provider.scopeKey ?? '', urnSetHash(sourceUrns), targetUrns ? urnSetHash(targetUrns) : '0', granularity,
+        )
         const cached = aggregatedEdgeCache.get(cacheKey)
 
         if (cached && (Date.now() - cached.timestamp) < cacheTtl) {
-            // Use cached result with functional update to avoid dependency on aggregatedEdges
-            setAggregatedEdges(prev => {
-                const edgeMap = new Map<string, AggregatedEdgeState>()
-                for (const agg of cached.result.aggregatedEdges) {
-                    const existing = prev.get(agg.id)
-                    edgeMap.set(agg.id, {
-                        aggregated: agg,
-                        state: existing?.state ?? 'collapsed',
-                        detailedEdges: existing?.detailedEdges ?? [],
-                    })
-                }
-                return edgeMap
-            })
-            setTruncated(cached.result.truncated ?? false)
-            setStale(cached.result.stale ?? false)
-            setStaleReason(cached.result.staleReason ?? null)
-            setDegradedDetail(cached.result.degradedDetail ?? null)
-            setLastMaterializedAt(cached.result.lastMaterializedAt ?? null)
-            setMaterializationTriggered(cached.result.materializationTriggered ?? false)
+            showPairs(cached.result.aggregatedEdges)
+            showFlags(cached.result)
             return
         }
 
@@ -340,14 +583,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         try {
             // Chunk source URNs above the per-request budget so a 100k-node
             // canvas doesn't hand the backend a single 100k-URN payload.
-            const chunks: string[][] = []
-            if (sourceUrns.length > AGGREGATED_FETCH_BATCH_SIZE) {
-                for (let i = 0; i < sourceUrns.length; i += AGGREGATED_FETCH_BATCH_SIZE) {
-                    chunks.push(sourceUrns.slice(i, i + AGGREGATED_FETCH_BATCH_SIZE))
-                }
-            } else {
-                chunks.push(sourceUrns)
-            }
+            const chunks = chunked(sourceUrns)
 
             // Bound parallel chunks so a 200-chunk fan-out doesn't blow
             // up the FalkorDB Cypher thread (single-threaded — every
@@ -368,42 +604,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             const rejected = settled.filter(s => s.status === 'rejected') as PromiseRejectedResult[]
 
             // Dedupe-merge by agg.id; later chunks with same id win (last-write).
-            const mergedEdgesById = new Map<string, AggregatedEdgeInfo>()
-            let mergedTotalSourceEdges = 0
-            let mergedTruncated = false
-            let mergedStale = false
-            let mergedStaleReason: string | null = null
-            let mergedDegradedDetail: AggregatedDegradedDetail | null = null
-            let mergedLastMaterializedAt: string | null | undefined = undefined
-            let mergedMaterializationTriggered = false
-            for (const r of fulfilled) {
-                for (const agg of r.aggregatedEdges) mergedEdgesById.set(agg.id, agg)
-                mergedTotalSourceEdges += r.totalSourceEdges ?? 0
-                if (r.truncated) mergedTruncated = true
-                if (r.stale) mergedStale = true
-                if (mergedStaleReason === null && r.staleReason != null) mergedStaleReason = r.staleReason
-                if (mergedDegradedDetail === null && r.degradedDetail != null) mergedDegradedDetail = r.degradedDetail
-                if (r.materializationTriggered) mergedMaterializationTriggered = true
-                if (r.lastMaterializedAt !== undefined) {
-                    if (mergedLastMaterializedAt === undefined || mergedLastMaterializedAt === null) {
-                        mergedLastMaterializedAt = r.lastMaterializedAt
-                    } else if (r.lastMaterializedAt && r.lastMaterializedAt < mergedLastMaterializedAt) {
-                        mergedLastMaterializedAt = r.lastMaterializedAt
-                    }
-                }
-            }
-            noteMaterializedEpoch(mergedLastMaterializedAt)
-            const mergedResult: AggregatedEdgeResult = {
-                aggregatedEdges: Array.from(mergedEdgesById.values()),
-                totalSourceEdges: mergedTotalSourceEdges,
-                truncated: mergedTruncated,
-                stale: mergedStale,
-                staleReason: mergedStaleReason,
-                degradedDetail: mergedDegradedDetail,
-                lastMaterializedAt: mergedLastMaterializedAt ?? null,
-
-                materializationTriggered: mergedMaterializationTriggered,
-            }
+            const merged = mergeAggregatedResults(fulfilled)
+            noteMaterializedEpoch(merged.lastMaterializedAt)
+            const mergedResult: AggregatedEdgeResult = { ...merged, lastMaterializedAt: merged.lastMaterializedAt ?? null }
 
             // Cache the merged result (LRU eviction when full) — but only when
             // it's a COMPLETE answer. A truncated merge, or one missing a chunk
@@ -412,12 +615,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             // while a rebuild runs every response is stale-flagged, so skipping
             // the cache for stale would refetch continuously and defeat
             // stale-while-revalidate.
-            if (!mergedTruncated && rejected.length === 0) {
-                if (aggregatedEdgeCache.size >= CACHE_MAX_ENTRIES) {
-                    const oldestKey = aggregatedEdgeCache.keys().next().value
-                    if (oldestKey !== undefined) aggregatedEdgeCache.delete(oldestKey)
-                }
-                aggregatedEdgeCache.set(cacheKey, {
+            if (!mergedResult.truncated && rejected.length === 0) {
+                rememberResult(cacheKey, {
                     result: mergedResult,
                     timestamp: Date.now(),
                     sourceUrns,
@@ -426,26 +625,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 })
             }
 
-            // Update state with functional update to avoid dependency on aggregatedEdges
-            setAggregatedEdges(prev => {
-                const edgeMap = new Map<string, AggregatedEdgeState>()
-                for (const agg of mergedResult.aggregatedEdges) {
-                    const existing = prev.get(agg.id)
-                    edgeMap.set(agg.id, {
-                        aggregated: agg,
-                        state: existing?.state ?? 'collapsed',
-                        detailedEdges: existing?.detailedEdges ?? [],
-                    })
-                }
-                return edgeMap
-            })
-
-            setTruncated(mergedResult.truncated ?? false)
-            setStale(mergedResult.stale ?? false)
-            setStaleReason(mergedResult.staleReason ?? null)
-            setDegradedDetail(mergedResult.degradedDetail ?? null)
-            setLastMaterializedAt(mergedResult.lastMaterializedAt ?? null)
-            setMaterializationTriggered(mergedResult.materializationTriggered ?? false)
+            showPairs(mergedResult.aggregatedEdges)
+            showFlags(mergedResult)
 
             // Partial-success: surface the failure but keep applied chunks.
             if (rejected.length > 0) {
@@ -464,7 +645,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         }
         // cacheVersion: identity-busting dep — see invalidateAggregatedEdges.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [provider, granularity, cacheTtl, cacheVersion])
+    }, [provider, granularity, cacheTtl, cacheVersion, syncPairs, showPairs, showFlags])
 
     // Expand an aggregated edge to show detailed edges
     const expandEdge = useCallback(async (aggregatedEdgeId: string) => {
@@ -615,6 +796,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     const handleSetGranularity = useCallback((newGranularity: string | null) => {
         if (newGranularity === granularity) return
 
+        granularityRef.current = newGranularity
         setGranularity(newGranularity)
 
         // Refetch with new granularity if we have current sources
@@ -631,6 +813,8 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         setAggregatedEdges(new Map())
         currentSourceUrnsRef.current = []
         currentTargetUrnsRef.current = undefined
+        ledgerRef.current = emptyLedger('')
+        rowsRef.current = new Set()
         setTruncated(false)
         setStale(false)
         setStaleReason(null)
@@ -645,6 +829,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     const purgeEdgesIncidentToUrns = useCallback((urns: Iterable<string>) => {
         const urnSet = urns instanceof Set ? urns : new Set(urns)
         if (urnSet.size === 0) return
+        // The ledger forgets them too, so they are asked about again if
+        // they come back before the next sync sees them leave.
+        forgetRows(ledgerRef.current, urn => urnSet.has(urn))
         setAggregatedEdges(prev => {
             let removed = 0
             const next = new Map(prev)
