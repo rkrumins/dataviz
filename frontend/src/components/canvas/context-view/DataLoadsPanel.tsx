@@ -172,7 +172,10 @@ function useConnectionsCatchUp(dataSourceId: string | null | undefined, enabled:
 
     const check = async () => {
       try {
-        const res = await aggregationService.getReadiness(dataSourceId)
+        // projection-health, not readiness: the same field from a TTL-cached
+        // control-plane read. Readiness reads the graph store to answer, and
+        // this poll runs while the store is already struggling.
+        const res = await aggregationService.getProjectionHealth(dataSourceId)
         errors = 0
         const now = Date.now()
         // Recorded BEFORE the cancelled check, deliberately. A teardown may
