@@ -2,7 +2,8 @@
  * The lineage ports a column draws on its cards.
  *
  * A port glows brighter the more lines meet it, against THIS column's busiest
- * card — one hub in another column must not dim every port in this one.
+ * card — one hub in another column must not dim every port in this one. A
+ * card whose lineage could not be counted says so, in neither colour.
  */
 import { render } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -30,7 +31,7 @@ const outRight = (n: number): NodePorts => ({
   left: { in: 0, out: 0 }, right: { in: 0, out: n }, delegated: { in: 0, out: 0 },
 })
 
-function renderColumn(lineagePorts: ReadonlyMap<string, NodePorts>) {
+function renderColumn(lineagePorts: ReadonlyMap<string, NodePorts>, lineageUnknown?: ReadonlySet<string>) {
   installJsdomLayout()
   const session = stubSession({})
   render(
@@ -54,6 +55,7 @@ function renderColumn(lineagePorts: ReadonlyMap<string, NodePorts>) {
           onRevealSearchHit={vi.fn()}
           overscan={200}
           lineagePorts={lineagePorts}
+          lineageUnknown={lineageUnknown}
           showLineageIndicators
         />
       </ViewRowSearchContext.Provider>
@@ -74,5 +76,13 @@ describe('LayerColumn — lineage ports', () => {
     ]))
     expect(port('b', 'right')!.style.getPropertyValue('--port-strength')).toBe('1')
     expect(Number(port('a', 'right')!.style.getPropertyValue('--port-strength'))).toBeCloseTo(Math.log2(3) / Math.log2(5))
+  })
+
+  it('a card whose count failed says unknown on both sides; the others say nothing', () => {
+    renderColumn(new Map(), new Set(['a']))
+    expect(port('a', 'left')!.dataset.port).toBe('unknown')
+    expect(port('a', 'right')!.dataset.port).toBe('unknown')
+    expect(port('b', 'left')).toBeNull()
+    expect(port('b', 'right')).toBeNull()
   })
 })

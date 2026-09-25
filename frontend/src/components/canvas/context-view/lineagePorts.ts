@@ -18,7 +18,10 @@
  * exists at all. Lineage with nothing on this canvas has no side to plug
  * into, so it takes the conventional one — incoming left, outgoing right —
  * as a HOLLOW port. An UNKNOWN total (not fetched yet, or its query failed)
- * is never read as zero, nor as some.
+ * is never read as zero, nor as some. Once counting has FAILED, and the card
+ * has no line of its own to answer the question, the port says just that:
+ * UNKNOWN, on both sides, in neither direction colour, until a retry counts
+ * it. Not while the first count is still on its way — every card would flash.
  */
 export type PortSide = 'left' | 'right'
 
@@ -39,8 +42,9 @@ export interface NodePorts {
 
 export interface PortView {
   /** `here` — lines to entities on this canvas; `beyond` — lineage in the
-   *  data, none of it to anything on this canvas. */
-  kind: 'here' | 'beyond'
+   *  data, none of it to anything on this canvas; `unknown` — its lineage
+   *  could not be counted. */
+  kind: 'here' | 'beyond' | 'unknown'
   dir: 'in' | 'out' | 'both'
 }
 
@@ -96,12 +100,18 @@ export function portView(
   side: PortSide,
   ports: NodePorts | undefined,
   total: { in: number; out: number } | undefined,
+  /** Counting this card's total failed; it is being asked again. */
+  unknown = false,
 ): PortView | null {
   const here = ports?.[side]
   if (here && here.in + here.out > 0) {
     return { kind: 'here', dir: here.in > 0 && here.out > 0 ? 'both' : here.in > 0 ? 'in' : 'out' }
   }
-  if (!total) return null
+  if (!total) {
+    const anyLine = sideVolume(ports, 'left') + sideVolume(ports, 'right')
+      + (ports ? ports.delegated.in + ports.delegated.out : 0) > 0
+    return unknown && !anyLine ? { kind: 'unknown', dir: 'both' } : null
+  }
   // Lineage with nothing on this canvas — only when NONE of that direction
   // is here, on either side: some of it on the canvas already says it exists.
   const canvasIn = (ports?.left.in ?? 0) + (ports?.right.in ?? 0) + (ports?.delegated.in ?? 0)

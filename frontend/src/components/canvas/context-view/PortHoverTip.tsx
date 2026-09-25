@@ -25,6 +25,12 @@ interface Tip {
 
 function describe(tip: Tip): { lead: string; detail: string } {
   const lines = (n: number) => `${n.toLocaleString()} ${unitNoun(n, 'lines')}`
+  if (tip.view.kind === 'unknown') {
+    return {
+      lead: 'Lineage for this entity could not be counted — retrying',
+      detail: 'Grey says neither direction yet. The port takes its colours when the count comes back.',
+    }
+  }
   if (tip.view.kind === 'beyond') {
     const n = tip.view.dir === 'in' ? tip.inCount : tip.outCount
     return {

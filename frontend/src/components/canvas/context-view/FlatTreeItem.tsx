@@ -96,6 +96,9 @@ interface FlatTreeItemProps {
   /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
    *  known. Shows a hollow port for lineage with nothing on this canvas. */
   lineageTotals?: { in: number; out: number }
+  /** Counting `lineageTotals` failed and is being retried: with no line of
+   *  its own, the card's ports say its lineage is unknown. */
+  lineageUnknown?: boolean
   /** Out-of-view lineage cue (curated views) — sky dashed marks. */
   externalIn?: number
   externalOut?: number
@@ -152,6 +155,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   portStrengthLeft = 0,
   portStrengthRight = 0,
   lineageTotals,
+  lineageUnknown = false,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -282,8 +286,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
-  const leftPort = portView('left', ports, lineageTotals)
-  const rightPort = portView('right', ports, lineageTotals)
+  const leftPort = portView('left', ports, lineageTotals, lineageUnknown)
+  const rightPort = portView('right', ports, lineageTotals, lineageUnknown)
   const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
@@ -977,7 +981,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           incoming, outgoing, or split when a side carries both
           (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
           brighter the more they carry. Hollow: lineage in the data, none of
-          it on this canvas. No rail: no lineage that way. ── */}
+          it on this canvas. Grey: its lineage could not be counted. No rail:
+          no lineage that way. ── */}
       {leftPort && (
         <LineagePortGlyph
           side="left" view={leftPort} strength={portStrengthLeft}

@@ -742,6 +742,12 @@
     background-color: var(--nx-bg-canvas);
     box-shadow: inset 0 0 0 1.25px rgb(var(--port-c));
   }
+  /* Unknown — its lineage could not be counted. Grey, in neither direction
+   * colour: it says nothing about which way anything flows. */
+  .nx-lineage-port[data-port="unknown"] .nx-lineage-port-body {
+    background-color: var(--nx-bg-canvas);
+    box-shadow: inset 0 0 0 1.25px var(--nx-text-muted);
+  }
 }
 
 @layer components {

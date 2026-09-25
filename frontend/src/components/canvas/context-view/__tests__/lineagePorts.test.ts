@@ -83,3 +83,23 @@ describe('portView — what each side shows', () => {
     expect(portView('right', undefined, undefined)).toBeNull()
   })
 })
+
+describe('portView — a card whose lineage could not be counted', () => {
+  it('says unknown on both sides, in neither direction colour', () => {
+    expect(portView('left', undefined, undefined, true)).toEqual({ kind: 'unknown', dir: 'both' })
+    expect(portView('right', undefined, undefined, true)).toEqual({ kind: 'unknown', dir: 'both' })
+  })
+
+  it('never when a line of its own already says it has lineage', () => {
+    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf)
+    expect(portView('left', ports.get('src'), undefined, true)).toBeNull()
+    expect(portView('right', ports.get('src'), undefined, true)).toEqual({ kind: 'here', dir: 'out' })
+    const standing = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
+    expect(portView('left', standing.get('src'), undefined, true)).toBeNull()
+  })
+
+  it('never once its total is known', () => {
+    expect(portView('left', undefined, { in: 0, out: 0 }, true)).toBeNull()
+    expect(portView('left', undefined, { in: 3, out: 0 }, true)).toEqual({ kind: 'beyond', dir: 'in' })
+  })
+})

@@ -188,6 +188,8 @@ interface LayerColumnProps {
    *  absent = not known. Lets a card's port say "lineage exists" even when
    *  none of it leads to anything on this canvas. */
   lineageTotals?: ReadonlyMap<string, { in: number; out: number }>
+  /** Entities whose total could not be counted (being asked again). */
+  lineageUnknown?: ReadonlySet<string>
   /** Where each card's lines plug in, by side and direction (lineagePorts.ts). */
   lineagePorts?: ReadonlyMap<string, NodePorts>
   /** Render the per-row ambient in/out hairlines (follows the lineage-
@@ -347,6 +349,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   lineageCounts,
   externalCue,
   lineageTotals,
+  lineageUnknown,
   lineagePorts,
   showLineageIndicators = false,
   showDensityGutter = false,
@@ -2787,6 +2790,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
                         portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
                         lineageTotals={showLineageIndicators ? lineageTotals?.get(node.id) : undefined}
+                        lineageUnknown={showLineageIndicators && (lineageUnknown?.has(node.id) ?? false)}
                         externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
                         externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />

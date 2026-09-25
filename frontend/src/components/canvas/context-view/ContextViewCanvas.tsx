@@ -4982,8 +4982,9 @@ export function ContextViewCanvas({
   // whose lineage all leads to entities not on this canvas still shows it.
   // In a CURATED view they also drive the "outside this view" cue: external
   // = total − internal(loaded). Absent totals mean UNKNOWN → no cue, never
-  // a false "no lineage" claim.
-  const { totals: externalDegrees } = useExternalDegrees(showLineageFlow)
+  // a false "no lineage" claim. A card whose count FAILED says so on its
+  // ports until the hook's retry counts it.
+  const { totals: externalDegrees, failed: degreeFailures } = useExternalDegrees(showLineageFlow)
   const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   // Ambient per-node cue: external = total − internal(loaded), for every
   // loaded node with a KNOWN total. One O(E) pass builds internal
@@ -6330,6 +6331,7 @@ export function ContextViewCanvas({
                 lineageCounts={nodeStubCounts}
                 externalCue={externalCueByNode}
                 lineageTotals={externalDegrees}
+                lineageUnknown={degreeFailures}
                 lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
