@@ -99,7 +99,8 @@ interface FlatTreeItemProps {
   /** Counting `lineageTotals` failed and is being retried: with no line of
    *  its own, the card's ports say its lineage is unknown. */
   lineageUnknown?: boolean
-  /** Out-of-view lineage cue (curated views) — sky dashed marks. */
+  /** Out-of-view lineage cue (curated views) — dashed marks in the
+   *  lineage direction colours. */
   externalIn?: number
   externalOut?: number
 }
@@ -998,14 +999,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
-          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
+          style={{ borderColor: 'rgb(var(--nx-lineage-in-rgb))', opacity: 0.55 }}
           title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
-          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
+          style={{ borderColor: 'rgb(var(--nx-lineage-out-rgb))', opacity: 0.55 }}
           title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}

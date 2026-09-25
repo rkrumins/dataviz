@@ -1804,13 +1804,12 @@ export function LineageLens({
                             className="flex items-center"
                             title={`${meta.edgeType ? edgeLabelFor(meta.edgeType.toUpperCase(), edgeTypeInfo) : 'Connection'} — walked ${meta.downstream ? 'downstream' : 'upstream'}`}
                           >
-                            {/* Amber is DOWNSTREAM everywhere else in the
-                                lens — the band arrows, the focal's "out"
-                                tally, the Data Consumers column. Sky
-                                upstream, amber down. */}
+                            {/* The lineage direction pair, as everywhere
+                                else in the lens: in for upstream, out for
+                                downstream (lib/lineageDirectionColors.ts). */}
                             {meta.downstream
-                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-amber-500/80', isForward && 'opacity-50')} />
-                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-sky-500/80', isForward && 'opacity-50')} />}
+                              ? <LucideIcons.MoveRight className={cn('w-3.5 h-3.5 text-lineage-out/80', isForward && 'opacity-50')} />
+                              : <LucideIcons.MoveLeft className={cn('w-3.5 h-3.5 text-lineage-in/80', isForward && 'opacity-50')} />}
                           </span>
                         ) : (
                           <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/40" />
@@ -2256,11 +2255,11 @@ export function LineageLens({
                             <span className="truncate max-w-[180px]">{selectedInfo.parentLabel}</span>
                           </span>
                         )}
-                        <span className="flex items-center gap-1 text-sky-600 dark:text-sky-400">
+                        <span className="flex items-center gap-1 text-lineage-in">
                           <LucideIcons.ArrowDownLeft className="w-3 h-3" />
                           {selectedInfo.inCount} in
                         </span>
-                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                        <span className="flex items-center gap-1 text-lineage-out">
                           <LucideIcons.ArrowUpRight className="w-3 h-3" />
                           {selectedInfo.outCount} out
                         </span>

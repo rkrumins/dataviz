@@ -361,12 +361,12 @@
     animation: nx-trace-sounding-glint 1.6s linear infinite;
   }
   .nx-trace-sounding-up {
-    background-image: linear-gradient(to left, rgba(6, 182, 212, 0.9), rgba(6, 182, 212, 0.18), rgba(6, 182, 212, 0.9));
+    background-image: linear-gradient(to left, rgb(var(--nx-lineage-in-rgb) / 0.9), rgb(var(--nx-lineage-in-rgb) / 0.18), rgb(var(--nx-lineage-in-rgb) / 0.9));
     transform-origin: right center;
     animation-direction: reverse;
   }
   .nx-trace-sounding-down {
-    background-image: linear-gradient(to right, rgba(245, 158, 11, 0.9), rgba(245, 158, 11, 0.18), rgba(245, 158, 11, 0.9));
+    background-image: linear-gradient(to right, rgb(var(--nx-lineage-out-rgb) / 0.9), rgb(var(--nx-lineage-out-rgb) / 0.18), rgb(var(--nx-lineage-out-rgb) / 0.9));
     transform-origin: left center;
   }
   /* Nothing has been found yet, so the line has not reached out. */

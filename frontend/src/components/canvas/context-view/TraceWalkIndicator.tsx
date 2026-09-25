@@ -333,7 +333,7 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
 
                 {SOUNDS.has(phase) && (
                     <div className="flex items-center gap-2.5" aria-hidden="true">
-                        <span className="flex-none w-[4.5rem] text-right text-[10px] font-medium text-cyan-600 dark:text-cyan-400 tabular-nums">
+                        <span className="flex-none w-[4.5rem] text-right text-[10px] font-medium text-lineage-in tabular-nums">
                             {phase === 'loading' ? '' : `↑ ${fmt(upCount)}${floor}`}
                         </span>
                         <span className="nx-trace-sounding">
@@ -344,7 +344,7 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
                                 count so the animation restarts each time. */}
                             {requests > 0 && computing && <span key={requests} data-beat={requests} className="nx-trace-sounding-beat" />}
                         </span>
-                        <span className="flex-none w-[4.5rem] text-[10px] font-medium text-amber-600 dark:text-amber-400 tabular-nums">
+                        <span className="flex-none w-[4.5rem] text-[10px] font-medium text-lineage-out tabular-nums">
                             {phase === 'loading' ? '' : `${fmt(downCount)}${floor} ↓`}
                         </span>
                     </div>
