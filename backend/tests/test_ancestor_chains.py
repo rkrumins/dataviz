@@ -48,20 +48,6 @@ class _BulkStub(_ChainStub):
         return {u: ["urn:bulk:parent"] for u in urns}
 
 
-def _rollup(on: bool) -> None:
-    """The route answers only while `canvasLineageRollupEnabled` is on — an
-    experimental flag, seeded OFF. Primed in the cache, which is the path the
-    gate reads in production (see conftest's `signup_enabled`)."""
-    feature_flags._cache = {**(feature_flags._cache or {}), "canvasLineageRollupEnabled": on}
-    feature_flags._cache_ts = time.monotonic()
-
-
-@pytest.fixture(autouse=True)
-def rollup_on():
-    _rollup(True)
-    yield
-
-
 async def _post(client: AsyncClient, engine: ContextEngine, body):
     from backend.app.main import app
     from backend.app.api.v1.endpoints.graph import get_context_engine
@@ -119,12 +105,15 @@ async def test_a_reader_with_no_containment_walk_says_so(test_client: AsyncClien
     assert resp.status_code == 501
 
 
-async def test_the_route_is_closed_while_the_rollup_is_off(test_client: AsyncClient):
-    """Off means off: the canvas stops asking, and anyone who knows the URL is
-    refused too — a flag that only hides a button is a lie."""
-    _rollup(False)
+async def test_the_route_answers_every_reader(test_client: AsyncClient):
+    """Where an unloaded lineage end sits is how the canvas tells lineage in
+    the view from lineage that leaves it, so `canvasLineageRollupEnabled` is
+    retired: a deployment whose stored value is still off is answered too."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "canvasLineageRollupEnabled": False}
+    feature_flags._cache_ts = time.monotonic()
     resp = await _post(test_client, ContextEngine(provider=_ChainStub()), {"urns": [LEAF]})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json() == {"chains": {LEAF: [PARENT, ROOT]}}
 
 
 def test_falkordb_answers_from_its_bulk_chain_path():

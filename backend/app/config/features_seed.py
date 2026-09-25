@@ -67,9 +67,6 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "traceEnabled":
         "Lineage tracing is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
-    "canvasLineageRollupEnabled":
-        "Rolling lineage up to entities that are not loaded is turned off for this deployment. "
-        "An administrator can enable it under Admin → Features.",
     "editModeEnabled":
         "Editing is turned off for this deployment, so views are read-only. "
         "An administrator can enable it under Admin → Features.",
@@ -852,14 +849,13 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "key": "canvasLineageRollupEnabled",
         "name": "Roll up lineage to unloaded entities",
         "description": (
-            "When a line's far end is an entity the canvas has not loaded — inside a collapsed "
-            "container, say — draw it to the nearest container that is on screen, as a dashed "
-            "roll-up, instead of leaving it undrawn."
+            "Retired: this switch no longer does anything. A line whose far end is an entity the "
+            "canvas has not loaded — inside a collapsed container, say — always rolls up to the "
+            "nearest container on screen, because where that entity sits is how the canvas tells "
+            "lineage inside the view from lineage that leaves it."
         ),
         "impact_when_off": (
-            "No roll-ups: every line on the canvas joins two entities exactly. A row whose lineage "
-            "reaches entities that are not loaded shows a ghost stub with the count, and a click "
-            "brings those entities in. This is a preview; it ships off until you switch it on."
+            "None. The switch is retired and nothing reads it; roll-ups are always on."
         ),
         "category_id": "experimental",
         "type": "boolean",
@@ -867,9 +863,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "options": None,
         "help_url": None,
         "admin_hint": (
-            "Roll-ups trade detail for coverage: one line between two containers can stand for "
-            "hundreds of flows between what they hold. Useful on sources whose aggregation has not "
-            "run; switch off where exact lines matter more."
+            "Nothing to decide: the switch is retired and will be removed in a later release."
         ),
         "sort_order": 2,
         "deprecated": False,

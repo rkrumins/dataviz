@@ -567,23 +567,11 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
     "canvasLineageRollupEnabled": FeatureWiring(
         key="canvasLineageRollupEnabled",
         posture="capability",
-        # Preview. A roll-up summarises lineage the canvas has not loaded into
-        # lines between the containers that hold it — useful, but it trades
-        # detail for coverage, so it ships OFF and every line stays exact.
-        stage="experimental",
-        server_gates=(
-            "POST /graph/nodes/ancestor-chains — where unloaded lineage ends sit in the "
-            "containment hierarchy",
-        ),
-        ui_surfaces=(
-            "Lines to entities that are not loaded roll up to their nearest container on the "
-            "Context View canvas",
-        ),
-        still_allowed=(
-            "Every line between entities on the canvas is drawn exactly as before",
-            "A row whose lineage reaches entities that are not loaded says how many, and brings "
-            "them in on a click",
-        ),
+        # Retired. Where an unloaded lineage end sits is how the canvas tells
+        # lineage inside the view from lineage that leaves it, so it is no
+        # longer optional: switched off, in-view partners read as outside.
+        # The definition goes in a later release.
+        stage="deprecated",
     ),
 }
 

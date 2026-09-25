@@ -87,7 +87,6 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # feature. Both fail OPEN (a database hiccup must not black out a product area); only the
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
-require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
 
 
@@ -2292,7 +2291,6 @@ class AncestorChainsRequest(BaseModel):
 @router.post(
     "/nodes/ancestor-chains",
     response_model=Dict[str, Dict[str, List[str]]],
-    dependencies=[Depends(require_lineage_rollup)],
 )
 async def get_node_ancestor_chains(
     body: AncestorChainsRequest,
