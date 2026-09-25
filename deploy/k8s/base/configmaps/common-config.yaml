@@ -50,6 +50,11 @@ data:
   # caching/state. DB index 1 segregates this traffic from REDIS_URL
   # (DB 0) on the same dedicated Redis service.
   CACHE_REDIS_URL: "redis://redis:6379/1"
+  # Largest response the shared graph cache stores, the same in every role
+  # that holds a cache client, as compose sets it. The code default (4 MiB)
+  # is smaller than the view-open edge read and a wide trace-closure page,
+  # so those were never stored and every open recomputed them.
+  GRAPH_CACHE_MAX_PAYLOAD_BYTES: "8388608"
   # RATELIMIT_STORAGE_URI is deliberately NOT set here. Rate-limit
   # counters resolve through the central Redis resolver on the STREAMS
   # role — the same path revocation and the providers take — so they

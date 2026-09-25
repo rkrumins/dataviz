@@ -55,6 +55,7 @@ tests/test_falkordb_store_outage.py
 tests/test_freshness_endpoints.py
 tests/test_freshness_source_doc.py
 tests/test_graph_cache.py
+tests/test_graph_cache_deploy_config.py
 tests/test_graph_export_api.py
 tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
@@ -94,6 +95,7 @@ tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
+tests/test_timeout_middleware.py
 tests/test_top_level_provider_kwargs.py
 tests/test_transfer_jobs.py
 tests/test_versioned_branch_resolve_identities.py

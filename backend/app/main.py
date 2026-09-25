@@ -2671,6 +2671,11 @@ class _TimeoutMiddleware:
                 # it as "this request was too slow, retry" — a per-request
                 # signal — rather than as evidence the graph provider is
                 # down (reachability is reported by the 503 handlers).
+                logger.warning(
+                    "Request timed out before a response: %s %s (tier=%.0fs); "
+                    "the handler was cancelled and nothing was served",
+                    scope.get("method", "-"), path, timeout,
+                )
                 response = JSONResponse(
                     {
                         "detail": {
