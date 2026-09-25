@@ -1320,6 +1320,27 @@ _READ_FLOOR_RETRY_S = 1.0
 _READ_TIMEOUT_NARROWINGS = 2
 
 
+def _read_spent(deadline: Optional[float]) -> bool:
+    """True when a read's wall clock (a ``time.monotonic()`` deadline) has too
+    little left to start another query: the read then answers what it has,
+    marked short, instead of starting a query the tier above would cancel.
+    A read with no clock is never spent."""
+    from ..config.resilience import FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS
+
+    return (
+        deadline is not None
+        and deadline - time.monotonic() < FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS
+    )
+
+
+def _within(timeout: Optional[float], deadline: Optional[float]) -> Optional[float]:
+    """``timeout`` capped by what is left of a read's wall clock."""
+    if deadline is None:
+        return timeout
+    left = deadline - time.monotonic()
+    return left if timeout is None else min(timeout, left)
+
+
 class _ReadPressure:
     """What the read-side ladder did on one aggregated read — pages and URN
     batches narrowed, batches given up at the floor, which pressure it met
@@ -7620,6 +7641,9 @@ class FalkorDBProvider(GraphDataProvider):
     async def _compute_and_store_ancestors_bulk(
         self,
         urns: List[str],
+        *,
+        deadline: Optional[float] = None,
+        pressure: Optional["_ReadPressure"] = None,
     ) -> Dict[str, List[str]]:
         """Compute and cache ancestor chains for multiple URNs at once.
 
@@ -7636,7 +7660,9 @@ class FalkorDBProvider(GraphDataProvider):
         whole outer batch.
 
         A URN the walk could not answer is ABSENT from the result and is
-        not cached: every reader takes ``[]`` for a root.
+        not cached: every reader takes ``[]`` for a root. ``deadline`` and
+        ``pressure`` put the walk on an aggregated read's clock (see
+        ``_compute_ancestor_chains_bulk_cypher``).
         """
         cache_key = self._ancestors_cache_key()
         result: Dict[str, List[str]] = {}
@@ -7665,7 +7691,9 @@ class FalkorDBProvider(GraphDataProvider):
 
         if missing_urns:
             try:
-                computed = await self._compute_ancestor_chains_bulk_cypher(missing_urns)
+                computed = await self._compute_ancestor_chains_bulk_cypher(
+                    missing_urns, deadline=deadline, pressure=pressure,
+                )
             except Exception as exc:
                 # A shed means "ask again in a moment". Asking once per urn
                 # instead would multiply one refusal by up to a thousand.
@@ -7730,6 +7758,9 @@ class FalkorDBProvider(GraphDataProvider):
     async def _compute_ancestor_chains_bulk_cypher(
         self,
         urns: List[str],
+        *,
+        deadline: Optional[float] = None,
+        pressure: Optional["_ReadPressure"] = None,
     ) -> Dict[str, List[str]]:
         """Compute ancestor chains for many URNs in a single Cypher.
 
@@ -7748,6 +7779,11 @@ class FalkorDBProvider(GraphDataProvider):
         Only urns the query returned a row for are in the result; an absent
         urn is UNKNOWN (its bucket failed, or no row came back), never a
         root. A root still comes back as a row, with chain ``[]``.
+
+        ``deadline`` is an aggregated read's wall clock: each bucket query's
+        budget is capped by what is left of it, and a bucket it no longer
+        fits is not queried — its urns are unknown, and the loss is recorded
+        on ``pressure`` as a ``timeout``.
         """
         out: Dict[str, List[str]] = {}
         if not urns:
@@ -7807,11 +7843,15 @@ class FalkorDBProvider(GraphDataProvider):
                         len(bucket),
                     )
                     return []
+                if _read_spent(deadline):
+                    if pressure is not None:
+                        pressure.degrade("timeout")
+                    return []
                 clause = f":{label}" if label else ""
                 try:
                     res = await self._ro_query(
                         _chain_cypher(clause), params={"urns": bucket},
-                        op="trace.chains",
+                        timeout=_within(self._READ_TIMEOUT, deadline), op="trace.chains",
                     )
                     return res.result_set or []
                 except Exception as exc:
@@ -9365,7 +9405,7 @@ class FalkorDBProvider(GraphDataProvider):
         raw_rows, mixed_rows, synth_degraded, stale_reason = (
             await self._synthesize_ondemand_lineage_pairs(
                 source_urns, target_urns, containment_edges, lineage_edges,
-                meta=meta, timeout=timeout, pressure=pressure,
+                meta=meta, timeout=timeout, pressure=pressure, deadline=read_deadline,
             )
         )
         if raw_rows or mixed_rows:
@@ -9460,12 +9500,20 @@ class FalkorDBProvider(GraphDataProvider):
         meta: Optional["AggRunMeta"] = None,
         timeout: Optional[float] = None,
         pressure: Optional["_ReadPressure"] = None,
+        deadline: Optional[float] = None,
     ) -> Tuple[list, list, bool, Optional[str]]:
         """Complete the materialized cells for the requested (bounded) URN
         sets WITHOUT walking containment in Cypher. Returns
         ``(leaf_rows, mixed_rows, degraded, stale_reason)``; a loss under
         the store's per-query pressure is recorded on ``pressure`` (the
         read's shared record) as well as in ``degraded``.
+
+        ``deadline`` is the read's wall clock (see
+        ``get_aggregated_edges_between``). Every query here — leafness,
+        depth stamps, Q1/Q2/Q3 and the chain read-through — draws from it,
+        and one that no longer fits is not started: it is recorded as a
+        ``timeout`` loss. These ran one after another at up to ``timeout``
+        each with no shared clock, so one request could outlive the tier.
 
         The previous implementation ran, on EVERY read in boundary regime:
         a per-node inbound path enumeration (``*1..16`` — the depth
@@ -9515,6 +9563,7 @@ class FalkorDBProvider(GraphDataProvider):
         if meta.regime != "boundary" or meta.stamp_version < 2:
             rows = await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout, pressure=pressure,
+                deadline=deadline,
             )
             reason = None
             if meta.regime == "unknown":
@@ -9536,6 +9585,7 @@ class FalkorDBProvider(GraphDataProvider):
         if not containment:
             rows = await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout, pressure=pressure,
+                deadline=deadline,
             )
             return rows, [], pressure.degraded_batches > 0, None
         c_pattern = "|".join(_sanitize_label(t) for t in containment)
@@ -9543,6 +9593,9 @@ class FalkorDBProvider(GraphDataProvider):
         cap = AGGREGATED_EDGE_RESULT_CAP
         batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
         degraded = {"v": False}
+        # Losses the helpers record on ``pressure`` alone (depth stamps,
+        # chain walks) count towards ``degraded`` too.
+        lost_before = pressure.degraded_batches
         batch_keys = ("urns", "xs", "ys", "sourceUrns")
 
         async def _ladder(runner, cypher: str, params: Dict[str, Any], *, op: str, what: str) -> list:
@@ -9552,8 +9605,11 @@ class FalkorDBProvider(GraphDataProvider):
             key = next((k for k in batch_keys if isinstance(params.get(k), list)), None)
 
             async def issue(sub: Optional[List[str]]) -> list:
+                if _read_spent(deadline):
+                    pressure.degrade("timeout")
+                    return []
                 p = {**params, key: sub} if key is not None else params
-                res = await runner(cypher, params=p, timeout=timeout, op=op)
+                res = await runner(cypher, params=p, timeout=_within(timeout, deadline), op=op)
                 return res.result_set or []
 
             before = pressure.degraded_batches
@@ -9583,12 +9639,16 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         async def _profile(urns: List[str]) -> Dict[str, Tuple[bool, int]]:
-            """urn → (is_container, containment depth). Leaf detection is
-            a single-hop child-count probe; depth comes from the node's
-            own stamped incident cells (depth-index seek). Nodes with no
-            stamped cell get depth 0 — they cannot contribute mixed-depth
-            derivation (no cells to derive from), which is exactly the
-            correct degradation."""
+            """urn → (is_container, containment depth), for containers;
+            a urn absent is a leaf. Leaf detection asks whether a node has
+            a child at all — a pattern predicate FalkorDB answers with a
+            Semi Apply that stops at the first child, where the previous
+            ``count(ch)`` walked every child of every target (an anchored
+            column's whole contents) on every chunk. Depth comes from the
+            node's own stamped incident cells (depth-index seek). A
+            container with no stamped cell gets depth 0 — it cannot
+            contribute mixed-depth derivation (no cells to derive from),
+            which is exactly the correct degradation."""
             out: Dict[str, Tuple[bool, int]] = {}
             uniq = list(dict.fromkeys(u for u in urns if u))
             if not uniq:
@@ -9598,13 +9658,14 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(bucket), batch):
                     for row in await _run(
                         f"MATCH {anchor} WHERE n.urn IN $urns "
-                        f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
-                        f"RETURN n.urn, count(ch)",
+                        f"AND (n)-[:{c_pattern}]->() RETURN n.urn",
                         {"urns": bucket[i:i + batch]},
                     ):
                         if row and row[0]:
-                            out[str(row[0])] = (int(row[1] or 0) > 0, 0)
-            depths = await self._frontier_depths_from_stamps(uniq)
+                            out[str(row[0])] = (True, 0)
+            depths = await self._frontier_depths_from_stamps(
+                list(out), deadline=deadline, pressure=pressure,
+            )
             for u, d in depths.items():
                 if u in out:
                     out[u] = (out[u][0], int(d))
@@ -9627,9 +9688,11 @@ class FalkorDBProvider(GraphDataProvider):
             browse of a container set pays a bounded, one-time ancestor
             walk; every subsequent read hits the cache. This is NOT the old
             full-graph synthesis (10-26s) — it is bounded to the visible
-            far-endpoints and cached."""
+            far-endpoints and cached. The walk runs on the read's clock."""
             req = set(requested)
-            chains = await self._compute_and_store_ancestors_bulk(far_urns)
+            chains = await self._compute_and_store_ancestors_bulk(
+                far_urns, deadline=deadline, pressure=pressure,
+            )
             out: Dict[str, List[str]] = {}
             for u, chain in chains.items():
                 hits = [a for a in dict.fromkeys(chain or []) if a in req and a != u]
@@ -9755,7 +9818,7 @@ class FalkorDBProvider(GraphDataProvider):
         # so container roll-up pairs always resolve — there is no
         # chain_cache_miss staleness and nothing to self-heal here. A true
         # sub-query failure is surfaced via ``degraded`` instead.
-        return rows, mixed_rows, degraded["v"], None
+        return rows, mixed_rows, degraded["v"] or pressure.degraded_batches > lost_before, None
 
     async def _mixed_depth_pairs(
         self,
@@ -9786,6 +9849,10 @@ class FalkorDBProvider(GraphDataProvider):
         directly-materialized canonical cell for the same pair — the
         caller must therefore ADD a derived row's weight to a
         materialized row, not drop it.
+
+        Every query here goes through ``run_proj`` and ``chain_resolve``,
+        which run on the read's clock: once it is spent, a depth group
+        costs nothing and is recorded as a ``timeout`` loss.
 
         Known bound (multi-parent diamonds only): a raw edge whose far
         endpoint sits under TWO stored reps that both resolve up to the
@@ -9867,12 +9934,15 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         timeout: Optional[float] = None,
         pressure: Optional["_ReadPressure"] = None,
+        deadline: Optional[float] = None,
     ) -> list:
         """Aggregate raw lineage edges between the requested URN sets into
         the same row shape as the AGGREGATED read (sUrn, tUrn, weight,
         types) — one row per (s, t) pair, weight = parallel-edge count.
         Under the store's per-query pressure a batch is split by URN
-        (``_read_with_ladder``) and a loss recorded on ``pressure``.
+        (``_read_with_ladder``) and a loss recorded on ``pressure``; a
+        batch the read's clock (``deadline``) no longer fits is not started
+        and is recorded as a ``timeout`` loss.
 
         This is the read-side replacement for the leaf↔leaf mirror pairs
         the pipeline stopped materializing. Runs on the SOURCE graph
@@ -9916,8 +9986,12 @@ class FalkorDBProvider(GraphDataProvider):
                 base["targetUrns"] = target_urns
 
             async def issue(sub: List[str]) -> list:
+                if _read_spent(deadline):
+                    record.degrade("timeout")
+                    return []
                 result = await self._ro_query(
-                    _cypher_for(label), params={**base, "sourceUrns": sub}, timeout=timeout,
+                    _cypher_for(label), params={**base, "sourceUrns": sub},
+                    timeout=_within(timeout, deadline),
                 )
                 return result.result_set or []
 
@@ -12884,22 +12958,36 @@ class FalkorDBProvider(GraphDataProvider):
         return None
 
     async def _frontier_depths_from_stamps(
-        self, urns: List[str],
+        self, urns: List[str], *,
+        deadline: Optional[float] = None,
+        pressure: Optional["_ReadPressure"] = None,
     ) -> Dict[str, int]:
         """urn → containment depth, read from any stamped incident
         :AGGREGATED cell (two bounded relation-anchored queries — no
         containment walk). Nodes with no stamped incident cell are
-        absent; callers fall back to type/label filters for those."""
+        absent; callers fall back to type/label filters for those.
+
+        With ``pressure`` (an aggregated read's record), a probe that failed,
+        or that the read's clock (``deadline``) no longer fits, is recorded
+        as a loss: its urns read as depth 0, which drops their mixed-depth
+        pairs, so the answer is short and must say so."""
         out: Dict[str, int] = {}
 
         async def _probe(cypher: str, bucket: List[str], key: str) -> list:
+            if _read_spent(deadline):
+                if pressure is not None:
+                    pressure.degrade("timeout")
+                return []
             try:
                 res = await self._proj_ro_query(
-                    cypher, params={"urns": bucket}, op="trace.frontier_depths",
+                    cypher, params={"urns": bucket},
+                    timeout=_within(self._READ_TIMEOUT, deadline), op="trace.frontier_depths",
                 )
                 return res.result_set or []
             except Exception as exc:
                 logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
+                if pressure is not None:
+                    pressure.degrade(_lost_batch_kind(exc))
                 return []
 
         # Both directions × all label buckets GATHERED — these ran

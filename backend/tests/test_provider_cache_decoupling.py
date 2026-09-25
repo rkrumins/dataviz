@@ -76,7 +76,7 @@ def test_ancestor_chains_survive_a_cache_outage():
     provider = FalkorDBProvider(host="x", graph_name="g")
     provider._redis = None   # build_cache_client returns None with no cache URL
 
-    async def _chains(urns):
+    async def _chains(urns, **kw):
         return {u: [f"parent-of-{u}"] for u in urns}
 
     provider._compute_ancestor_chains_bulk_cypher = _chains

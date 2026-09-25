@@ -227,6 +227,22 @@ def test_a_root_is_still_answered_as_a_root():
     assert asyncio.run(p._compute_ancestor_chains_bulk_cypher([ROOT])) == {ROOT: []}
 
 
+def test_a_walk_on_a_spent_read_clock_asks_nothing_and_says_why():
+    """The aggregated read's chain read-through runs on the read's clock:
+    once too little is left to start a query, a bucket is not asked, its
+    urns stay unknown, and the loss is recorded as a timeout."""
+    from backend.app.providers import falkordb_provider as fp
+
+    p = _walker([("Dataset", [LEAF])], {LEAF: [PARENT, ROOT]})
+    pressure = fp._ReadPressure()
+    chains = asyncio.run(p._compute_ancestor_chains_bulk_cypher(
+        [LEAF], deadline=time.monotonic(), pressure=pressure,
+    ))
+    assert chains == {}
+    assert p.queried == []
+    assert pressure.truncation_reason == "timeout"
+
+
 def test_a_large_unlabeled_residue_is_never_scanned():
     """An unlabeled anchor is a full node scan. A residue this large means
     label resolution failed wholesale: better unknown, and asked again."""
@@ -241,7 +257,7 @@ def test_a_large_unlabeled_residue_is_never_scanned():
 def test_only_answered_chains_are_cached():
     p = _walker()
 
-    async def _bulk(urns):
+    async def _bulk(urns, **kw):
         return {LEAF: [PARENT, ROOT]}
 
     p._compute_ancestor_chains_bulk_cypher = _bulk
@@ -253,7 +269,7 @@ def test_only_answered_chains_are_cached():
 def test_the_per_urn_fallback_caches_no_failure():
     p = _walker()
 
-    async def _bulk(urns):
+    async def _bulk(urns, **kw):
         raise RuntimeError("planner hiccup")
 
     async def _one(urn):
@@ -276,7 +292,7 @@ def test_a_shed_is_not_asked_again_one_urn_at_a_time():
     p = _walker()
     per_urn: List[str] = []
 
-    async def _bulk(urns):
+    async def _bulk(urns, **kw):
         raise ProviderBusy("falkordb", "shed")
 
     async def _one(urn):
@@ -293,7 +309,7 @@ def test_a_shed_is_not_asked_again_one_urn_at_a_time():
 def test_a_single_urn_read_caches_nothing_it_could_not_answer():
     p = _walker()
 
-    async def _bulk(urns):
+    async def _bulk(urns, **kw):
         return {}
 
     p._compute_ancestor_chains_bulk_cypher = _bulk

@@ -142,6 +142,15 @@ class _FakeGraph:
                 [t, s, w, list(ty)] for s, t, w, ty, sd, td in self.agg
                 if t in params["ys"] and sd <= td
             ])
+        if "max(r.sourceDepth)" in cypher or "max(r.targetDepth)" in cypher:
+            # Depth-stamp probe: urn → the deepest stamp on its own cells.
+            out_side = "max(r.sourceDepth)" in cypher
+            best = {}
+            for s, t, w, ty, sd, td in self.agg:
+                u, d = (s, sd) if out_side else (t, td)
+                if u in params["urns"]:
+                    best[u] = max(best.get(u, -1), d)
+            return _Result([[u, d] for u, d in best.items()])
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
     async def ro_query(self, cypher, params=None, timeout=None, **kw):
@@ -154,14 +163,14 @@ class _FakeGraph:
             raise AssertionError(
                 f"containment walk issued on the read path: {cypher}"
             )
-        if "count(ch)" in cypher and "OPTIONAL MATCH" in cypher:
-            # Leafness probe: urn → child count. Single hop, no depth —
-            # depth now comes from the stamped incident cells. (Checked
-            # BEFORE the classify regex, whose label-anchored prefix the
-            # probe shares.)
+        if re.search(r"AND \(n\)-\[:[\w|]+\]->\(\)", cypher):
+            # Leafness probe: the urns that have a child at all. Single
+            # hop, no depth — depth comes from the stamped incident cells.
+            # (Checked BEFORE the classify regex, whose label-anchored
+            # prefix the probe shares.)
             return _Result([
-                [u, len(self.children.get(u, ()))]
-                for u in params["urns"] if u in self.labels
+                [u] for u in params["urns"]
+                if u in self.labels and self.children.get(u)
             ])
         m = _CLASSIFY_RE.search(cypher)
         if m:
@@ -259,7 +268,7 @@ def _make_provider(fake, levels):
             by.setdefault(fake.labels.get(u) or "", []).append(u)
         return sorted(by.items())
 
-    async def _ancestors_read_through(urns):
+    async def _ancestors_read_through(urns, **kw):
         # Read-THROUGH ancestor resolution, exactly as the reader now calls
         # it: a cache hit is free, a miss COMPUTES (and caches) the chain —
         # it never returns a miss, so chain_cache_down (a cold cache) does
@@ -277,7 +286,7 @@ def _make_provider(fake, levels):
             out[u] = chain
         return out
 
-    async def _stamp_depths(urns):
+    async def _stamp_depths(urns, **kw):
         want = set(urns)
         out = {}
         for s_, t_, w, ty, sd, td in fake.agg:
@@ -1639,3 +1648,110 @@ def test_pressure_kind_is_one_classifier_for_both_ladders():
     ):
         assert _fp._pressure_kind(exc) == kind
         assert mat._pressure_kind(exc) == kind
+
+
+# ── the read's wall clock covers the on-demand phase ────────────────
+#
+# Only the stored-cell pager consulted the read's deadline. The on-demand
+# phase after it (leafness, depth stamps, Q1/Q2/Q3, the chain read-through)
+# ran one query after another at up to 30s each, so one request could outlive
+# the 45s tier and come back a 504 the client retried.
+
+import pytest
+
+
+def _clocked_provider(fake, levels, *, depth_fails=False):
+    """A provider whose chain read-through and depth-stamp probes are the
+    real ones, recording every query after the regime read as (cypher,
+    timeout). Stored cells: none."""
+    p = _make_provider(fake, levels)
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p._compute_and_store_ancestors_bulk = FalkorDBProvider._compute_and_store_ancestors_bulk.__get__(p)
+    p._frontier_depths_from_stamps = FalkorDBProvider._frontier_depths_from_stamps.__get__(p)
+    asked = []
+
+    async def noop_connect():
+        return None
+
+    async def ro_query(cypher, params=None, timeout=None, **kw):
+        asked.append((cypher, timeout))
+        return await fake.ro_query(cypher, params=params, timeout=timeout)
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "_AggMeta" in cypher:
+            return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+        asked.append((cypher, timeout))
+        if params and "sourceUrns" in params:
+            return _Result([])
+        if depth_fails and "max(r." in cypher:
+            raise RuntimeError("depth stamps unreadable")
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._ro_query = ro_query
+    p._proj_ro_query = proj_ro_query
+    return p, asked
+
+
+def _seed_mixed(fake):
+    """a1 (container) and a2 (leaf) → b0 (container) and b2 (leaf), with a
+    stored a1→b1 cell: every on-demand query shape runs."""
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)
+    return levels
+
+
+def _clocked_read(p, *, timeout=None):
+    return _run(p.get_aggregated_edges_between(
+        ["urn:a2", "urn:a1"], ["urn:b0", "urn:b2"], granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS"], timeout=timeout,
+    ))
+
+
+@pytest.mark.parametrize("regime", ["boundary", "cube"])
+def test_a_spent_read_clock_starts_no_on_demand_query(monkeypatch, regime):
+    monkeypatch.setattr(_resilience, "FALKORDB_AGGREGATED_READ_BUDGET_SECS", 1.0)  # under the 2s attempt floor
+    fake = _FakeGraph()
+    fake.set_meta(regime, 2)
+    p, asked = _clocked_provider(fake, _seed_mixed(fake))
+    result = _clocked_read(p, timeout=30.0)
+    assert asked == []
+    assert result.truncated and result.truncation_reason == "timeout"
+    assert result.stale_reason == "timeout"
+
+
+def test_on_demand_queries_are_capped_by_what_is_left_of_the_read_clock(monkeypatch):
+    monkeypatch.setattr(_resilience, "FALKORDB_AGGREGATED_READ_BUDGET_SECS", 5.0)
+    fake = _FakeGraph()
+    p, asked = _clocked_provider(fake, _seed_mixed(fake))
+    result = _clocked_read(p, timeout=30.0)
+    got = {(e.source_urn, e.target_urn) for e in result.aggregated_edges}
+    assert got == {("urn:a2", "urn:b2"), ("urn:a2", "urn:b0"), ("urn:a1", "urn:b2"), ("urn:a1", "urn:b0")}
+    assert result.truncated is False
+    shapes = " ".join(c for c, _ in asked)
+    assert "child.urn IN $urns" in shapes and "max(r.sourceDepth)" in shapes and "(t2)" in shapes
+    assert all(t is not None and t <= 5.0 for _, t in asked), [t for _, t in asked]
+
+
+def test_a_depth_stamp_read_that_failed_marks_the_answer_short():
+    """Without its depth a container reads as depth 0, and its mixed-depth
+    pairs are dropped. That answer is short, and must say so rather than be
+    cached as complete."""
+    fake = _FakeGraph()
+    p, _ = _clocked_provider(fake, _seed_mixed(fake), depth_fails=True)
+    result = _clocked_read(p)
+    assert result.truncated and result.truncation_reason == "failed"
+    assert result.stale_reason == "degraded"
+
+
+def test_leafness_is_an_existence_probe_not_a_child_count():
+    """count(ch) walks every child of every target, an anchored column's
+    whole contents, on every chunk. Whether a node has a child at all stops
+    at the first one: FalkorDB 4.18 runs the pattern predicate as a Semi
+    Apply (5 ms against 320 ms for a container of a million children)."""
+    fake = _FakeGraph()
+    p, asked = _clocked_provider(fake, _seed_mixed(fake))
+    _clocked_read(p)
+    shapes = [c for c, _ in asked]
+    assert not [c for c in shapes if "count(ch)" in c]
+    assert [c for c in shapes if "AND (n)-[:CONTAINS]->() RETURN n.urn" in c]
