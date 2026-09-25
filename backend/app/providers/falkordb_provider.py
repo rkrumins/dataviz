@@ -6428,8 +6428,13 @@ class FalkorDBProvider(GraphDataProvider):
                     # returning a silently incomplete edge set as if complete.
                     raise
                 except Exception as exc:
-                    logger.warning("get_edges bucket query failed: %s", exc)
-                    return []
+                    if await self._is_verified_missing_graph(exc):
+                        return []
+                    # Any other failure fails the whole read. Answering with
+                    # the other buckets was a 200 missing a label's edges,
+                    # cached for the full TTL; raised, the breaker proxy
+                    # relabels a full queue as 429 and nothing is cached.
+                    raise
 
             rows_per_bucket = await asyncio.gather(*[
                 _run_bucket(label, bucket)

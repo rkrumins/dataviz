@@ -257,3 +257,55 @@ def test_a_batch_lost_to_anything_else_keeps_its_prefix_and_says_why(monkeypatch
     assert result.truncated and result.stale
     assert result.stale_reason == "degraded"       # the stale vocabulary is unchanged
     assert result.truncation_reason == "failed"    # …and the cache now has a reason
+
+
+# ── /edges/between: one label bucket failing fails the read ──────────────
+
+
+def _bucketed_edges_provider(fail_with):
+    """``get_edges`` over two label buckets, where urn:b's bucket raises."""
+    from types import SimpleNamespace
+
+    p = fp.FalkorDBProvider(host="x", graph_name="g")
+
+    async def _connected():
+        return None
+
+    async def _buckets(urns):
+        return [("A", ["urn:a"]), ("B", ["urn:b"])]
+
+    async def _ro_query(cypher, params=None, timeout=None, **kw):
+        if params["anchorUrns"] == ["urn:b"]:
+            raise fail_with
+        return SimpleNamespace(result_set=[["urn:a", "urn:b", "FLOWS_TO", {}]])
+
+    p._ensure_connected = _connected
+    p._label_buckets = _buckets
+    p._ro_query = _ro_query
+    return p
+
+
+def _between():
+    from backend.common.models.graph import EdgeQuery
+
+    return EdgeQuery(source_urns=["urn:a", "urn:b"], target_urns=["urn:a", "urn:b"])
+
+
+async def test_a_failed_label_bucket_fails_edges_between_instead_of_answering_part_of_it():
+    """Answering with the other buckets' edges was a 200 missing a whole
+    label's lineage, which the response cache kept for its full TTL."""
+    p = _bucketed_edges_provider(QUEUE_FULL)
+    with pytest.raises(ResponseError):
+        await p.get_edges(_between())
+
+
+async def test_through_the_breaker_a_full_bucket_is_a_429_not_a_short_200():
+    proxy = CircuitBreakerProxy(_bucketed_edges_provider(QUEUE_FULL), name="p")
+    with pytest.raises(ProviderBusy):
+        await proxy.get_edges(_between())
+
+
+async def test_a_graph_that_does_not_exist_yet_still_has_no_edges():
+    p = _bucketed_edges_provider(ResponseError("Invalid graph operation on empty key"))
+    edges = await p.get_edges(_between())
+    assert [(e.source_urn, e.target_urn) for e in edges] == [("urn:a", "urn:b")]
