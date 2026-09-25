@@ -19,6 +19,11 @@
  * whose partner is not on the canvas does not resolve (the projection rolls
  * it up to a visible ancestor where it can, and counts it where it cannot),
  * and a failure costs those rows their flows, not the reveal or the page.
+ *
+ * Flows only. The stored :AGGREGATED roll-up cells are never asked for (the
+ * rows on screen get theirs from /edges/aggregated), and when the view
+ * declares no lineage types the read is untyped, so its containment and
+ * roll-up cells are dropped here.
  */
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { LineageEdge } from '@/store/canvas'
@@ -31,10 +36,13 @@ export async function primeLineageFor(
   provider: GraphDataProvider | null | undefined,
   urns: readonly string[],
   lineageEdgeTypes: readonly string[],
+  containmentEdgeTypes: readonly string[] = [],
   limit: number = PRIME_LINEAGE_LIMIT,
 ): Promise<LineageEdge[]> {
   if (!provider || typeof provider.getEdges !== 'function' || urns.length === 0) return []
-  const types = lineageEdgeTypes.length > 0 ? [...lineageEdgeTypes] : undefined
+  const lineage = lineageEdgeTypes.filter((t) => t.toUpperCase() !== 'AGGREGATED')
+  const types = lineage.length > 0 ? lineage : undefined
+  const notFlows = new Set(['AGGREGATED', ...containmentEdgeTypes.map((t) => t.toUpperCase())])
   const [out, incoming] = await Promise.all([
     provider.getEdges({ sourceUrns: [...urns], edgeTypes: types, limit }),
     provider.getEdges({ targetUrns: [...urns], edgeTypes: types, limit }),
@@ -44,6 +52,7 @@ export async function primeLineageFor(
   for (const e of [...out, ...incoming]) {
     if (seen.has(e.id)) continue
     seen.add(e.id)
+    if (notFlows.has(String(e.edgeType ?? '').toUpperCase())) continue
     edges.push(toCanvasEdge(e))
   }
   return edges

@@ -866,9 +866,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Fetch edges between all loaded nodes. Pass the backend
                     // hard maximum so the user's assigned set is never
                     // truncated at the 50k default on large graphs.
+                    //
+                    // Containment and lineage only, never the stored :AGGREGATED
+                    // cells: the rows on screen get their roll-ups from
+                    // /edges/aggregated, and a cell here names containers nobody
+                    // drew — an anchored column's own anchor among them, which
+                    // became a stub on that column's rows. Untyped only while the
+                    // view has not declared both kinds, and a cell that arrives
+                    // anyway is dropped below.
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch((err: unknown) => {
+                    const lineageOnly = lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
+                    const betweenTypes = containmentEdgeTypes.length > 0 && lineageOnly.length > 0
+                        ? [...containmentEdgeTypes, ...lineageOnly]
+                        : undefined
+                    const allEdges = await provider.getEdgesBetween(allUrns, betweenTypes, 200_000).catch((err: unknown) => {
                         // Nodes still render (graceful), but record the
                         // failure so the canvas can say edges are missing.
                         useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
@@ -887,7 +899,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Replace with complete dataset atomically
                     writeGraph(
                         allNodes.map(n => toCanvasNode(n)),
-                        allEdges.map(e => toCanvasEdge(e)),
+                        allEdges
+                            .filter(e => String(e.edgeType ?? '').toUpperCase() !== 'AGGREGATED')
+                            .map(e => toCanvasEdge(e)),
                     )
                     seedAnchorPagers()
 
@@ -1570,16 +1584,23 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // their wires follow; a failure costs those rows their
                     // flows, not the page.
                     if (nodesToAdd.length > 0) {
+                        const pageIds = new Set(nodesToAdd.map((n) => n.id))
                         void primeLineageFor(
                             provider,
-                            nodesToAdd.map((n) => n.id),
+                            [...pageIds],
                             lineageEdgeTypes,
+                            containmentEdgeTypes,
                         ).then((extra) => {
                             // stale(), not only the signal: flows read for a graph
                             // that has since been replaced do not belong in the new one.
-                            if (extra.length > 0 && !stale()) {
-                                useCanvasStore.getState().addGraph([], extra)
-                            }
+                            if (stale()) return
+                            // Nor on rows removed while they were read (a sort flip
+                            // refetches the page, a collapse prunes it): a flow
+                            // keeps only while its end on this page is still held.
+                            const held = useCanvasStore.getState()._nodeIndex
+                            const kept = extra.filter((e) =>
+                                [e.source, e.target].every((end) => !pageIds.has(end) || held.has(end)))
+                            if (kept.length > 0) useCanvasStore.getState().addGraph([], kept)
                         }).catch((e) => {
                             console.warn('[children] lineage priming failed', e)
                         })

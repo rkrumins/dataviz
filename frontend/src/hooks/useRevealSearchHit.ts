@@ -209,7 +209,7 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView,
         // canvas that had never loaded its lineage arrived with none: the
         // drawer listed its connections while the canvas drew nothing, and
         // Trace or the Focus Lens were the only ways to see them.
-        await primeLineageFor(provider, spineUrns as string[], lineageEdgeTypes)
+        await primeLineageFor(provider, spineUrns as string[], lineageEdgeTypes, containmentEdgeTypes)
             .then((edges) => { if (edges.length > 0) useCanvasStore.getState().addGraph([], edges) })
             .catch((e) => console.warn('[reveal] lineage priming failed', e))
 
@@ -334,7 +334,7 @@ export function usePrefetchSearchHitSpine(provider: GraphDataProvider) {
         }
         // Same reason as the reveal itself: a prefetched spine with no flows
         // would paint the hit and none of its lineage.
-        await primeLineageFor(provider, spineUrns as string[], lineageEdgeTypes)
+        await primeLineageFor(provider, spineUrns as string[], lineageEdgeTypes, containmentEdgeTypes)
             .then((edges) => { if (edges.length > 0) useCanvasStore.getState().addGraph([], edges) })
             .catch((e) => console.warn('[reveal] lineage priming failed', e))
     }, [provider, containmentEdgeTypes, lineageEdgeTypes])
