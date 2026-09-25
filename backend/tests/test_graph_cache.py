@@ -252,6 +252,47 @@ async def test_in_process_singleflight_coalesces_concurrent_calls() -> None:
     assert call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_does_not_strand_its_followers(caplog) -> None:
+    """The request tier cancels a handler that runs too long, and
+    CancelledError is not an Exception, so it slips past every clause that
+    resolves the leader's future. Followers wait on ``shield(existing)``,
+    which their own cancellation cannot end: each one hung until its own
+    tier fired. They must fall through and compute for themselves, and the
+    log must say a leader was cancelled."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    leading = asyncio.Event()
+
+    async def never_answers() -> _Result:
+        leading.set()
+        await asyncio.Event().wait()
+        return _Result(value=0)  # pragma: no cover
+
+    def call(compute):
+        return cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "cancelled"}, compute=compute, model_cls=_Result,
+        )
+
+    leader = asyncio.create_task(call(never_answers))
+    await leading.wait()
+    follower = asyncio.create_task(call(AsyncMock(return_value=_Result(value=5))))
+    await asyncio.sleep(0.01)       # the follower parks on the leader's future
+    with caplog.at_level("WARNING", logger=graph_cache.logger.name):
+        leader.cancel()
+        result = await asyncio.wait_for(follower, 1.0)
+
+    assert result.value == 5
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    assert cache._inflight == {}
+    assert any(
+        "leader" in r.getMessage() and ENDPOINT_CHILDREN in r.getMessage()
+        for r in caplog.records if r.levelname == "WARNING"
+    )
+
+
 # ─── cross-process singleflight (the election) ─────────────────────────
 #
 # In-process singleflight coalesces the callers inside ONE worker. The fleet
