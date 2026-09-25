@@ -233,6 +233,9 @@ const EMPTY_LAYER_NODES: HierarchyNode[] = []
  *  click; without this each of those rewrites the entry (and its
  *  localStorage line) several times over for a single gesture. */
 const TRACE_EXPANSION_RECORD_MS = 250
+/** The longest the aggregated fetch waits for child loads to settle after
+ *  the rows it is for changed. */
+const AGGREGATION_SETTLE_CEILING_MS = 2000
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { ColumnGeometryApi } from './types'
@@ -1779,6 +1782,8 @@ export function ContextViewCanvas({
 
   // Track previous aggregation target fingerprint to avoid redundant fetches
   const prevAggregationKeyRef = useRef<string>('')
+  // When the first change the aggregated fetch has not yet run for arrived.
+  const aggregationPendingSinceRef = useRef<number | null>(null)
 
   // The latest nodes, for callbacks that must not depend on `nodes`
   const nodesRef = useRef(nodes)
@@ -3438,9 +3443,13 @@ export function ContextViewCanvas({
   // children that lands. Without the quiescence gate, draining a large container
   // one page at a time produced one aggregated fan-out per page.
   //
-  //   1. Skip entirely while any child load is in flight. The tree is mid-flight;
+  //   1. Wait while any child load is in flight. The tree is mid-flight;
   //      whatever we computed now would be superseded the moment the page lands.
   //      `loadingNodes` is in the dep array, so settling re-runs the effect.
+  //      But never past AGGREGATION_SETTLE_CEILING_MS after the change: one
+  //      slow page, or columns paging as the reader scrolls, held back the
+  //      roll-ups of every other row for as long as it lasted. The fetch
+  //      asks only about the rows that changed, so going early is cheap.
   //   2. Debounce, so expanding a spine (several parents loading back-to-back)
   //      collapses into a single fetch once the dust settles.
   //
@@ -3451,10 +3460,15 @@ export function ContextViewCanvas({
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
     if (traceActive) return
-    // Wait for the tree to settle. Re-runs when loadingNodes empties.
-    if (loadingNodes.size > 0) return
+    // Wait for the tree to settle (re-runs when loadingNodes empties), but
+    // not past the ceiling.
+    const now = Date.now()
+    aggregationPendingSinceRef.current ??= now
+    const untilCeiling = Math.max(0, aggregationPendingSinceRef.current + AGGREGATION_SETTLE_CEILING_MS - now)
+    const delay = loadingNodes.size > 0 ? untilCeiling : Math.min(300, untilCeiling)
 
     const fetchDebounced = setTimeout(() => {
+      aggregationPendingSinceRef.current = null
       const aggregationTargets = renderedAggregationTargets(nodesByLayer, expandedNodes)
 
       // Only fetch if the target set actually changed
@@ -3465,7 +3479,7 @@ export function ContextViewCanvas({
       if (aggregationTargets.length > 0) {
         fetchAggregated(aggregationTargets, aggregationTargets)
       }
-    }, 300)
+    }, delay)
 
     return () => clearTimeout(fetchDebounced)
   }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes])

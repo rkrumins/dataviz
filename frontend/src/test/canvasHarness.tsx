@@ -334,6 +334,8 @@ function stubProvider(
   nodeDegrees?: Record<string, { in: number; out: number } | 'fail'>,
   /** Answer `/nodes/ancestor-chains` from the estate's containment. */
   ancestorChains?: boolean,
+  /** Parents whose children page never answers (see `renderCanvasWithTrace`). */
+  holdChildren?: readonly string[],
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -372,16 +374,19 @@ function stubProvider(
       return closure
     },
     getChildren: async (parentUrn: string) => childrenFor(parentUrn),
-    getChildrenWithEdges: async (parentUrn: string) => ({
-      children: childrenFor(parentUrn),
-      containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
-        id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
-      })),
-      lineageEdges: [],
-      totalChildren: (kids.get(parentUrn) ?? []).length,
-      hasMore: false,
-      nextCursor: null,
-    }),
+    getChildrenWithEdges: async (parentUrn: string) => {
+      if (holdChildren?.includes(parentUrn)) await new Promise<never>(() => {})
+      return {
+        children: childrenFor(parentUrn),
+        containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
+          id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
+        })),
+        lineageEdges: [],
+        totalChildren: (kids.get(parentUrn) ?? []).length,
+        hasMore: false,
+        nextCursor: null,
+      }
+    },
     getParent: async (childUrn: string) => byUrn.get(parentMap.get(childUrn) ?? '') ?? null,
     // The NAME LOOKUP the server serves: exactly the urns asked for, and
     // counted — a caller that asks twice for the same name is a defect.
@@ -575,6 +580,9 @@ export async function renderCanvasWithTrace(
     /** Answer `/nodes/ancestor-chains` from the estate's containment. Off by
      *  default: the provider then cannot walk containment. */
     ancestorChains?: boolean
+    /** Parents whose children page never answers, so opening one leaves a
+     *  child load in flight for as long as the test runs. */
+    holdChildren?: readonly string[]
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -651,7 +659,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains),
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
