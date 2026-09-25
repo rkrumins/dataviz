@@ -4517,9 +4517,23 @@ class FalkorDBProvider(GraphDataProvider):
         separately on purpose: ``queue_ms`` is the saturation signal (work
         waiting for a slot), ``query_ms`` attributes cost to the query
         shape. Zero overhead below the threshold beyond three monotonic
-        reads; never raises from the logging path.
+        reads; never raises from the logging path. A read shed while queued
+        writes the line too, with ``query_ms=0`` and ``err=ProviderBusy``.
         """
         from ..config.resilience import FALKORDB_SLOW_QUERY_MS
+
+        def _log_if_slow(query_ms: int, queue_ms: int, rows: Optional[int], err: Optional[str]) -> None:
+            try:
+                if max(query_ms, queue_ms) >= FALKORDB_SLOW_QUERY_MS:
+                    logger.warning(
+                        "falkordb slow %s: graph=%s op=%s query_ms=%d queue_ms=%d "
+                        "budget_s=%.1f rows=%s err=%s cypher=%.80s",
+                        kind, self._graph_name, op or "-", query_ms, queue_ms,
+                        budget, "-" if rows is None else rows, err or "-",
+                        " ".join(cypher.split()),
+                    )
+            except Exception:  # pragma: no cover — telemetry must not mask results
+                pass
 
         await self._refresh_if_graph_rebuilt()
         queued_at = time.monotonic()
@@ -4532,11 +4546,13 @@ class FalkorDBProvider(GraphDataProvider):
                 await self._query_semaphore.acquire()
         except TimeoutError:
             from backend.common.adapters import ProviderBusy
+            waited = time.monotonic() - queued_at
+            _log_if_slow(0, int(waited * 1000), None, ProviderBusy.__name__)
             raise ProviderBusy(
                 provider_name=self._graph_name,
                 reason=(
                     f"{op or kind}: every query slot in this process stayed "
-                    f"busy for {time.monotonic() - queued_at:.1f}s"
+                    f"busy for {waited:.1f}s"
                 ),
                 retry_after_seconds=1,
             ) from None
@@ -4577,19 +4593,10 @@ class FalkorDBProvider(GraphDataProvider):
                         raise failover from exc
                 raise
             finally:
-                try:
-                    query_ms = int((time.monotonic() - started) * 1000)
-                    queue_ms = int((started - queued_at) * 1000)
-                    if max(query_ms, queue_ms) >= FALKORDB_SLOW_QUERY_MS:
-                        logger.warning(
-                            "falkordb slow %s: graph=%s op=%s query_ms=%d queue_ms=%d "
-                            "budget_s=%.1f rows=%s err=%s cypher=%.80s",
-                            kind, self._graph_name, op or "-", query_ms, queue_ms,
-                            budget, "-" if rows is None else rows, err or "-",
-                            " ".join(cypher.split()),
-                        )
-                except Exception:  # pragma: no cover — telemetry must not mask results
-                    pass
+                _log_if_slow(
+                    int((time.monotonic() - started) * 1000),
+                    int((started - queued_at) * 1000), rows, err,
+                )
         finally:
             self._query_semaphore.release()
 

@@ -50,6 +50,29 @@ async def test_a_read_that_cannot_get_a_slot_in_time_is_shed_not_queued():
     holder.cancel()
 
 
+async def test_a_read_shed_while_queued_still_writes_the_slow_line(caplog, monkeypatch):
+    """The shed is the saturation signal, and the 504-attribution checklist
+    reads 'falkordb slow … queue_ms': only reads that got a slot wrote it."""
+    import logging
+    import re
+
+    from backend.app.config import resilience
+
+    monkeypatch.setattr(resilience, "FALKORDB_SLOW_QUERY_MS", 50)
+    p = _make_provider()
+    sem = _one_slot(p)
+    holder = asyncio.create_task(_hold(sem, 1.0))
+    await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ProviderBusy):
+        await p._ro_query("MATCH (n) RETURN n", timeout=0.2, op="nodes.get")
+    lines = [r.getMessage() for r in caplog.records if "falkordb slow" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "op=nodes.get" in lines[0] and "query_ms=0 " in lines[0] and "err=ProviderBusy" in lines[0]
+    assert int(re.search(r"queue_ms=(\d+)", lines[0]).group(1)) >= 90
+    holder.cancel()
+
+
 async def test_the_wait_is_spent_from_the_reads_budget(monkeypatch):
     monkeypatch.setattr(fp, "_TRANSIENT_RETRY_BACKOFFS", ())
     p = _make_provider(delay_s=5)
