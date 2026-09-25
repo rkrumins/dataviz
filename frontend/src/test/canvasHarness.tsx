@@ -100,6 +100,9 @@ export interface TraceCanvasHarness {
    *  the entities the canvas asked for roll-ups of. Debounced like the
    *  granularities above. */
   aggregatedSources(): string[][]
+  /** The `targetUrns` every `/edges/aggregated` request carried, in order
+   *  (empty when it named none). Debounced like the sources above. */
+  aggregatedTargets(): string[][]
   /** The URNs every `/nodes/ancestor-chains` request carried, in order.
    *  Recorded only with `ancestorChains`, and debounced like the above. */
   chainRequests(): string[][]
@@ -319,7 +322,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][]; chains: string[][] },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][]; aggregatedTargets: string[][]; chains: string[][] },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
@@ -336,6 +339,8 @@ function stubProvider(
   ancestorChains?: boolean,
   /** Parents whose children page never answers (see `renderCanvasWithTrace`). */
   holdChildren?: readonly string[],
+  /** Roll-up cells `/edges/aggregated` answers with (see `renderCanvasWithTrace`). */
+  aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -408,10 +413,14 @@ function stubProvider(
     // containers. It answers nothing — what a test reads is what the canvas
     // asked for: the LEVEL, which is the whole blast radius of the
     // granularity it auto-selects, and the entities it asked about.
-    getAggregatedEdges: async (request: { granularity?: string | null; sourceUrns?: string[] }) => {
+    getAggregatedEdges: async (request: { granularity?: string | null; sourceUrns?: string[]; targetUrns?: string[] }) => {
       calls.aggregated.push(request?.granularity ?? null)
       calls.aggregatedSources.push([...(request?.sourceUrns ?? [])])
-      return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
+      calls.aggregatedTargets.push([...(request?.targetUrns ?? [])])
+      const S = new Set(request?.sourceUrns ?? [])
+      const T = request?.targetUrns ? new Set(request.targetUrns) : null
+      const cells = (aggregatedCells ?? []).filter(c => S.has(c.sourceUrn) && (!T || T.has(c.targetUrn)))
+      return { aggregatedEdges: cells, totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
     },
     // The server answers every URN it could count, so every URN asked about
     // is answered here: one the test did not list has no lineage, and one
@@ -583,6 +592,10 @@ export async function renderCanvasWithTrace(
     /** Parents whose children page never answers, so opening one leaves a
      *  child load in flight for as long as the test runs. */
     holdChildren?: readonly string[]
+    /** Roll-up cells for `/edges/aggregated`: each request is answered with
+     *  those from one of its sources to one of its targets, as the server
+     *  does. `aggregatedExtra.aggregatedEdges` overrides them. */
+    aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -650,7 +663,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][], chains: [] as string[][] }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][], aggregatedTargets: [] as string[][], chains: [] as string[][] }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -659,7 +672,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren),
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
@@ -940,6 +953,7 @@ export async function renderCanvasWithTrace(
     providerCalls: () => providerCalls.traceClosure,
     aggregatedGranularities: () => [...providerCalls.aggregated],
     aggregatedSources: () => providerCalls.aggregatedSources.map(urns => [...urns]),
+    aggregatedTargets: () => providerCalls.aggregatedTargets.map(urns => [...urns]),
     chainRequests: () => providerCalls.chains.map(urns => [...urns]),
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i

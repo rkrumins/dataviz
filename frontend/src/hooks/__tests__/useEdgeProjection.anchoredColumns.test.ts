@@ -128,11 +128,14 @@ describe('useEdgeProjection — lineage into another column', () => {
     expect(res.offCanvasByNode.get('r1')?.columns?.get('L2')?.in).toBe(1)
   })
 
-  it('drops a roll-up naming another column\'s anchor; a raw edge to it is that column, with no partner', () => {
-    const rolled = run({ aggregated: [agg('a1', 'r1', 'Y')] })
-    expect(rolled.lines).toEqual([])
-    expect(rolled.offCanvasByNode.size).toBe(0)
+  it('a roll-up naming another column\'s anchor keeps what its rows do not carry; a raw edge to it is that column, with no partner', () => {
+    const rolled = run({ aggregated: [agg('a1', 'r1', 'Y', 5), agg('a2', 'r1', 'y1', 2)] })
+    expect(rolled.lines).toEqual([['r1', 'y1']])
+    expect(rolled.offCanvasByNode.get('r1')?.columns?.get('L2')).toMatchObject({ out: 3 })
+    expect(rolled.offCanvasByNode.get('r1')?.columns?.get('L2')?.outPartners.size).toBe(0)
     expect(rolled.unresolvedEdgeCount).toBe(0)
+    const carried = run({ aggregated: [agg('a1', 'r1', 'Y', 2), agg('a2', 'r1', 'y1', 2)] })
+    expect(carried.offCanvasByNode.size).toBe(0)
 
     const raw = run({ edges: [edge('e1', 'r1', 'Y')] })
     const col = raw.offCanvasByNode.get('r1')?.columns?.get('L2')

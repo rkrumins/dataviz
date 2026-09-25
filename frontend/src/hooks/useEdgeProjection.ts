@@ -12,6 +12,7 @@
  */
 
 import { useMemo, useRef } from 'react'
+import type { AggregatedEdgeInfo } from '@/providers/GraphDataProvider'
 import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
 
@@ -103,6 +104,13 @@ export interface UseEdgeProjectionOptions {
    * or reaching it on a chain, is lineage into that column: in the view.
    */
   promotedAnchors?: ReadonlyMap<string, string>
+  /**
+   * Roll-ups between a row and a HOLDER, asked on their own
+   * (useHolderRollups): an anchor with rows past its loaded page, or an open
+   * container with children not loaded yet. Section A keeps of each only
+   * what the loaded rows under the holder do not carry.
+   */
+  holderEdges?: ReadonlyMap<string, AggregatedEdgeInfo>
 }
 
 // ============================================
@@ -261,6 +269,7 @@ export function useEdgeProjection({
   hiddenEdgeTypes,
   ancestorChains,
   promotedAnchors,
+  holderEdges,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -386,6 +395,14 @@ export function useEdgeProjection({
     return map
   }, [nodesByLayer, expandedNodes, displayFlat, nodeIndex])
 
+  // How many children each container has LOADED: in the store, wherever they
+  // are drawn. A child placed in another column is loaded all the same.
+  const loadedChildCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    ;(browseBundleParentMap ?? traceBundleParentMap)?.forEach(parent => counts.set(parent, (counts.get(parent) ?? 0) + 1))
+    return counts
+  }, [browseBundleParentMap, traceBundleParentMap])
+
   // ── Edge projection ────────────────────────────────────────────────────
   //
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
@@ -501,14 +518,14 @@ export function useEdgeProjection({
     const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows> }>()
     let unresolvedThisPass = 0
     const fileUndrawn = (S: Place, T: Place, sUrn: string, tUrn: string,
-      types: readonly string[], weight: number, aggregated: boolean) => {
+      types: readonly string[], weight: number, wholeColumn: boolean) => {
       const side = S.at === 'row' ? 'out' : 'in'
       const [near, far, farUrn] = side === 'out' ? [S, T, tUrn] : [T, S, sUrn]
       if (near.at !== 'row' || far.at === 'row' || far.at === 'pending' || allHidden(types)) return
       const isAnchor = promotedAnchors?.has(farUrn) ?? false
-      // A roll-up naming an anchor summarises the whole column; the rows'
-      // own roll-ups carry the same flows row by row.
-      if (far.at === 'column' && isAnchor && aggregated) return
+      // A roll-up naming an anchor that still counts its loaded rows' flows
+      // summarises the whole column; the rows' own roll-ups carry those.
+      if (far.at === 'column' && isAnchor && wholeColumn) return
       let entry = offCanvas.get(near.id)
       if (!entry) { entry = { ...noFlows(), columns: new Map() }; offCanvas.set(near.id, entry) }
       if (far.at === 'outside') {
@@ -530,36 +547,83 @@ export function useEdgeProjection({
     // this used to be discarded without a trace, which is how putting two
     // related entities into a group made their lineage "disappear".
     let hiddenInsideThisPass = 0
-    Array.from(aggregatedEdges.values())
-      .filter(e => e.state === 'collapsed')
-      .forEach(e => {
-        const agg = e.aggregated
-        // Suppress parent AGG when its drill is producing visible finer-level edges.
-        if (isTracing && suppressedAggEdgeKeys?.has(`${agg.sourceUrn}->${agg.targetUrn}`)) return
-        const S = place(agg.sourceUrn)
-        const T = place(agg.targetUrn)
-        if (isSelfRollup(agg.sourceUrn, agg.targetUrn, S, T, true)) return
-        if (S.at !== 'row' || T.at !== 'row') {
-          fileUndrawn(S, T, agg.sourceUrn, agg.targetUrn,
-            Array.isArray(agg.edgeTypes) && agg.edgeTypes.length > 0 ? agg.edgeTypes : ['AGGREGATED'],
-            memberWeight({ data: { isAggregated: true, edgeCount: agg.edgeCount } }), true)
-        } else if (S.id === T.id) {
-          hiddenInsideThisPass++
-        } else {
-          addEdgeToGroup(S.id, T.id, {
-            id: agg.id,
-            data: {
-              edgeType: 'AGGREGATED',
-              relationship: 'aggregated',
-              isAggregated: true,
-              edgeCount: agg.edgeCount,
-              edgeTypes: agg.edgeTypes,
-              confidence: agg.confidence,
-              sourceEdgeIds: agg.sourceEdgeIds,
-            }
-          }, 'AGGREGATED')
-        }
-      })
+    // The cells, one per pair: the rows' own, and a row's with a HOLDER
+    // (`holderEdges`) — the rows' own win a pair both hold. A drilled cell is
+    // drawn by section C, but its flows still count below.
+    const cells = new Map<string, AggregatedEdgeInfo>()
+    aggregatedEdges.forEach((e, id) => cells.set(id, e.aggregated))
+    holderEdges?.forEach((c, id) => { if (!cells.has(id)) cells.set(id, c) })
+    const cellWeight = (c: AggregatedEdgeInfo) => memberWeight({ data: { isAggregated: true, edgeCount: c.edgeCount } })
+
+    // A holder holds rows the view has not loaded: an anchor (drawn as its
+    // column), or an open container with children not loaded yet.
+    const idOf = (urn: string) => urnToIdMap.get(urn) ?? urn
+    const isHolder = (urn: string): boolean => {
+      if (promotedAnchors?.has(urn)) return true
+      const id = idOf(urn)
+      if (!expandedNodes.has(id)) return false
+      const node = displayMap.get(id)
+      const total = (node?.data?.childCount as number) || (node?.data?._collapsedChildCount as number) || 0
+      return total > (loadedChildCounts.get(id) ?? node?.children.length ?? 0)
+    }
+
+    // A holder's cell counts every flow into it, its loaded rows' included,
+    // and those rows carry theirs on their own lines and columns. So the
+    // holder keeps only the rest: w(row, holder) − Σ w(row, X) over the cell
+    // ends X whose nearest cell end above them is that holder, floored at 0
+    // (containment that is not a tree can overlap). An anchor's rest is
+    // lineage into its rows past the page; an open container's, into its
+    // children not loaded yet. A holder cannot say which rows of a row's OWN
+    // column it means: that cell is the row summarised against itself.
+    const ends = new Set<string>()
+    for (const c of cells.values()) { ends.add(c.sourceUrn); ends.add(c.targetUrn) }
+    const nearestEnd = (urn: string) => upPath(urn).find(up => ends.has(up))
+    const pairKey = (s: string, t: string) => `${s}->${t}`
+    const loadedShare = new Map<string, number>()
+    const share = (s: string, t: string, w: number) => loadedShare.set(pairKey(s, t), (loadedShare.get(pairKey(s, t)) ?? 0) + w)
+    cells.forEach(c => {
+      const aboveT = nearestEnd(c.targetUrn)
+      if (aboveT !== undefined && isHolder(aboveT)) share(c.sourceUrn, aboveT, cellWeight(c))
+      const aboveS = nearestEnd(c.sourceUrn)
+      if (aboveS !== undefined && isHolder(aboveS)) share(aboveS, c.targetUrn, cellWeight(c))
+    })
+
+    cells.forEach((agg, id) => {
+      const state = aggregatedEdges.get(id)?.state
+      if (state !== undefined && state !== 'collapsed') return
+      // Suppress parent AGG when its drill is producing visible finer-level edges.
+      if (isTracing && suppressedAggEdgeKeys?.has(`${agg.sourceUrn}->${agg.targetUrn}`)) return
+      const shared = loadedShare.get(pairKey(agg.sourceUrn, agg.targetUrn))
+      const weight = cellWeight(agg) - (shared ?? 0)
+      if (weight <= 0) return
+      const S = place(agg.sourceUrn)
+      const T = place(agg.targetUrn)
+      if (isSelfRollup(agg.sourceUrn, agg.targetUrn, S, T, true)) return
+      if (S.at !== 'row' || T.at !== 'row') {
+        // The weight leaves out what the loaded rows carry, so a cell naming
+        // an anchor is lineage into its rows not loaded yet: in the view.
+        fileUndrawn(S, T, agg.sourceUrn, agg.targetUrn,
+          Array.isArray(agg.edgeTypes) && agg.edgeTypes.length > 0 ? agg.edgeTypes : ['AGGREGATED'],
+          weight, false)
+      } else if (S.id === T.id) {
+        hiddenInsideThisPass++
+      } else {
+        addEdgeToGroup(S.id, T.id, {
+          id: agg.id,
+          // Into an open container's children not loaded yet: drawn faint.
+          _residual: isHolder(agg.sourceUrn) || isHolder(agg.targetUrn),
+          data: {
+            edgeType: 'AGGREGATED',
+            relationship: 'aggregated',
+            isAggregated: true,
+            edgeCount: shared === undefined ? agg.edgeCount : weight,
+            edgeTypes: agg.edgeTypes,
+            confidence: agg.confidence,
+            sourceEdgeIds: agg.sourceEdgeIds,
+          }
+        }, 'AGGREGATED')
+      }
+    })
 
     // Trace-mode bundling: walk an endpoint up the canvas containment
     // hierarchy until we land on an ancestor at the focus's trace level
@@ -766,6 +830,8 @@ export function useEdgeProjection({
       // A bundle is a roll-up when it summarises something other than the raw
       // relationship between the two cards it touches.
       const isGhost = isAggregated || members.some((e: any) => e._lifted === true)
+      // Nothing but the rest of an open container's children: a faint line.
+      const isResidual = members.every((e: { _residual?: boolean }) => e._residual === true)
 
       // TWO NUMBERS, because this bundle answers two different questions and
       // one field was doing both jobs.
@@ -812,7 +878,7 @@ export function useEdgeProjection({
         isAggregated,
         isReverseFlow,
         isDelegated: false,
-        isResidual: false,
+        isResidual,
         isBidirectional: false,
         data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize }
       })
@@ -863,7 +929,7 @@ export function useEdgeProjection({
           isAggregated: fwd.isAggregated || rev.isAggregated,
           isReverseFlow: false,
           isDelegated: false,
-          isResidual: false,
+          isResidual: fwd.isResidual && rev.isResidual,
           isBidirectional: true,
           data: { edgeTypes: typesArr, confidence: Math.max(fwd.confidence, rev.confidence), edgeCount, bundleSize },
         })
@@ -875,7 +941,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts])
 
   const projectedEdges = projection.edges
 

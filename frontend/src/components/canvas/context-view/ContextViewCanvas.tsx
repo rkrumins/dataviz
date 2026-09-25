@@ -50,7 +50,7 @@ import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
-import type { TraceV2Result } from '@/providers/GraphDataProvider'
+import type { AggregatedEdgeInfo, TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
@@ -66,6 +66,7 @@ import {
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useAncestorChains } from '@/hooks/useAncestorChains'
+import { useHolderRollups } from '@/hooks/useHolderRollups'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
 import { buildPlacements, type PlacementInfo } from './placement'
 import {
@@ -224,6 +225,7 @@ function makeConnectionTypeResolver(
  *  projecting it only produces noise (see the call site). */
 const EMPTY_EDGES: unknown[] = []
 const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
+const NO_HOLDER_EDGES: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 /** Module constant, not an inline `?? []`. `LayerColumn` is `React.memo`'d, and
  *  a fresh array literal per render defeated that memo for every EMPTY column —
  *  so the columns with nothing in them re-rendered on every canvas render. */
@@ -814,6 +816,9 @@ export function ContextViewCanvas({
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
     retryAggregated,
   } = useAggregatedLineage({ granularity: null })
+  // Beside the rows' own roll-ups: theirs with the rows the view holds but
+  // has not loaded (see the aggregated fetch below).
+  const { holderEdges, fetchHolders } = useHolderRollups(lineageGranularity)
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
   // when the visible container set (and so the URN key) hasn't changed. Scoped
   // to this canvas's provider, so an invalidation aimed at one graph (a node
@@ -3457,6 +3462,14 @@ export function ContextViewCanvas({
   // edges at the trace's effective level, so the parallel /aggregated-lineage
   // fetch is redundant + racy when a trace is active. In browse mode the
   // hook fires as before.
+  //
+  // Beside the rows, their roll-ups with the HOLDERS (useHolderRollups): each
+  // anchor with rows past its loaded page, and each open container with
+  // children not loaded yet, counted from the store, so a child drawn in
+  // another column is loaded all the same. They hold rows that are in the
+  // view, and the rows' lineage into them draws nothing else. None on a draft
+  // or a branch: there the server derives an anchor's cells by walking its
+  // whole column, which would cut the answer short.
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
     if (traceActive) return
@@ -3470,19 +3483,34 @@ export function ContextViewCanvas({
     const fetchDebounced = setTimeout(() => {
       aggregationPendingSinceRef.current = null
       const aggregationTargets = renderedAggregationTargets(nodesByLayer, expandedNodes)
+      const holders = new Set<string>()
+      if (!isDraft) {
+        anchorMoreByLayer.forEach(({ anchorUrn }) => holders.add(anchorUrn))
+        expandedNodes.forEach(id => {
+          const node = displayMap.get(id)
+          if (!node || node.isLogical) return
+          const total = Number(node.data?.childCount ?? 0) || 0
+          const pager = childPaging[id]
+          if (pager && !pager.hasMore && pager.childCount === total) return
+          if (total > (childMap.get(id) ?? []).length) holders.add(node.urn || id)
+        })
+      }
+      const aggregationHolders = [...holders].sort()
 
       // Only fetch if the target set actually changed
-      const aggregationKey = `${aggregatedCacheVersion}:` + aggregationTargets.sort().join(',')
+      const aggregationKey = `${aggregatedCacheVersion}:${lineageGranularity}:` + aggregationTargets.sort().join(',')
+        + `|${aggregationHolders.join(',')}`
       if (aggregationKey === prevAggregationKeyRef.current) return
       prevAggregationKeyRef.current = aggregationKey
 
       if (aggregationTargets.length > 0) {
         fetchAggregated(aggregationTargets, aggregationTargets)
+        void fetchHolders(aggregationTargets, aggregationHolders)
       }
     }, delay)
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes])
+  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, isDraft, anchorMoreByLayer, displayMap, childMap, childPaging])
 
   // Source-changed self-refresh: while the aggregated overlay is flagged
   // `source_changed`, poll readiness and invalidate the aggregated cache once
@@ -4406,6 +4434,7 @@ export function ContextViewCanvas({
     ancestorChains,
     // An anchor is drawn as its column: lineage naming it is in the view.
     promotedAnchors,
+    holderEdges: overlay.active ? NO_HOLDER_EDGES : holderEdges,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
