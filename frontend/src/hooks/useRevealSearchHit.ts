@@ -30,6 +30,7 @@ import { useCallback } from 'react'
 
 import { useCanvasStore } from '@/store/canvas'
 import { toCanvasNode, toCanvasEdge } from '@/hooks/useGraphHydration'
+import { primeRevealSpine } from '@/lib/primeRevealSpine'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 import { usePreferencesStore } from '@/store/preferences'
 import { primeLineageFor } from '@/lib/primeLineageFor'
@@ -142,67 +143,10 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView,
     const lineageEdgeTypes = useViewLineageEdgeTypes()
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]): Promise<RevealOutcome> => {
-        // Prime the spine: with lazy children loading, only top-level
-        // entities are in the canvas store after hydration. Each
-        // subsequent ancestor (and the hit itself) must be materialized
-        // before the spine walk can find them. One getNodes call covers
-        // the whole chain regardless of depth. `viaReveal` marks these
-        // out-of-band nodes so `loadChildren` doesn't count them as a
-        // loaded page (see useGraphHydration).
+        // Prime the spine: its missing nodes and its containment edges, so
+        // each level the walk opens holds the child that leads onward.
         const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
-        const loadedUrns = useCanvasStore.getState()._nodeIndex
-        const missingUrns = spineUrns.filter((u) => !loadedUrns.has(u))
-        if (missingUrns.length > 0) {
-            try {
-                const fetched = await provider.getNodes({ urns: missingUrns as any[] })
-                if (fetched.length > 0) {
-                    const { addGraph } = useCanvasStore.getState()
-                    addGraph(
-                        fetched.map((n) => {
-                            const node = toCanvasNode(n)
-                            return { ...node, data: { ...node.data, viaReveal: true } }
-                        }),
-                        [],
-                    )
-                }
-            } catch (e) {
-                console.warn('[reveal] spine priming failed', e)
-                // Continue — the walk will fall back to the deepest level
-                // it can open.
-            }
-        }
-
-        // The containment edges, on EVERY reveal: they are what makes the
-        // path-only walk possible at all. Each opened level draws its spine
-        // child through one of these, and a hit that is the 300th child of
-        // its parent has no other way to arrive. The missing NODES are not
-        // the condition — a spine whose nodes all arrived on an earlier
-        // reveal that lost its edges would otherwise never get them, and no
-        // amount of re-clicking would fix it. `addGraph` dedupes and
-        // /edges/between is response-cached, so the repeat is cheap. A
-        // failure costs the hit its attachment, not the reveal.
-        // A top-level hit has no spine to attach to — asking for the edges
-        // within a single URN can only ever answer nothing.
-        if (spineUrns.length > 1) {
-            try {
-                const edges = await provider.getEdgesBetween(
-                    spineUrns as any[],
-                    containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
-                )
-                if (edges.length > 0) {
-                    useCanvasStore.getState().addGraph([], edges.map((e) => toCanvasEdge(e)))
-                }
-            } catch (e) {
-                console.warn('[reveal] spine edge priming failed', e)
-                // The canvas surfaces a degraded edge picture from this
-                // flag; a reveal that lost its spine edges is exactly that,
-                // and it used to fail in silence (cf. useGraphHydration's
-                // cross-page supplement).
-                useCanvasStore.getState().noteEdgeFetchFailure(
-                    e instanceof Error ? e.message : undefined,
-                )
-            }
-        }
+        await primeRevealSpine(provider, spineUrns, containmentEdgeTypes)
 
         // The hit's own FLOWS. The spine prime above is containment only —
         // it exists to attach the hit to its parents — so a hit landing on a
@@ -304,7 +248,7 @@ export function usePrefetchSearchHitSpine(provider: GraphDataProvider) {
         const missingUrns = spineUrns.filter((u) => !nodeIndex.has(u))
         if (missingUrns.length === 0) return
         try {
-            const fetched = await provider.getNodes({ urns: missingUrns as any[] })
+            const fetched = await provider.getNodes({ urns: missingUrns, limit: missingUrns.length })
             if (fetched.length === 0) return
             const { addGraph } = useCanvasStore.getState()
             addGraph(

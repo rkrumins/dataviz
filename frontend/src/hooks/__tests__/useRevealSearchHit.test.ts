@@ -108,7 +108,7 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
       await result.current(HIT, SPINE)
     })
 
-    expect(provider.getNodes).toHaveBeenCalledWith({ urns: [PARENT, HIT] })
+    expect(provider.getNodes).toHaveBeenCalledWith({ urns: [PARENT, HIT], limit: 2 })
     expect(provider.getEdgesBetween).toHaveBeenCalledWith(
       [ROOT, PARENT, HIT],
       ['CONTAINS'],

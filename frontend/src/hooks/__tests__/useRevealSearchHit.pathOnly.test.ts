@@ -423,7 +423,7 @@ describe('usePrefetchSearchHitSpine', () => {
 
     await act(async () => { await result.current(HIT, SPINE) })
 
-    expect(provider.getNodes).toHaveBeenCalledWith({ urns: [L2, L3, HIT] })
+    expect(provider.getNodes).toHaveBeenCalledWith({ urns: [L2, L3, HIT], limit: 3 })
     expect(provider.getEdgesBetween).toHaveBeenCalledWith([L1, L2, L3, HIT], ['CONTAINS'])
 
     const { nodes, edges } = useCanvasStore.getState()
