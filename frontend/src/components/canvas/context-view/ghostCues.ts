@@ -12,9 +12,12 @@
  *     that leads to it starts at the row, at the row's own height, so a
  *     column of rows produces a stack of level lines, never the fan that
  *     every row converging on one exit point made.
- *   * A STUB beside a row, for lineage whose far end is not on the canvas at
- *     all (never loaded). It cannot say where — nothing is known but the
- *     count — so it says how many, and a click brings a batch of them in.
+ *   * A STUB beside a row, for lineage that LEAVES the view: its far end is
+ *     in none of the view's columns. It cannot say where — nothing is known
+ *     but the count — so it says how many flows, and a click shows the
+ *     entities they reach in the Focus Lens. Lineage into a row an anchored
+ *     column has not loaded is in the view and gets no stub; the card's
+ *     port says it.
  *
  * The stub itself is `OffCanvasStub.tsx`; this module holds what the two cues
  * say and how they are sized.

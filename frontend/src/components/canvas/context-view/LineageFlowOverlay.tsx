@@ -162,8 +162,8 @@ export function LineageFlowOverlay({
    *  drawn by this overlay rather than by a canvas re-render per hover. */
   hoverPool?: readonly PoolLine[],
   hoverBudget?: number,
-  /** Per row: lineage whose far end is not on the canvas at all (never
-   *  loaded) — drawn as a stub beside the row. See ghostCues. */
+  /** Per row: lineage whose far end is outside this view — drawn as a stub
+   *  beside the row. See ghostCues. */
   offCanvasLineage?: ReadonlyMap<string, OffCanvasLineage>,
   /** A stub's click: bring that row's off-canvas partners in. */
   onBringInOffCanvas?: (nodeId: string, side: 'in' | 'out') => void,
@@ -211,7 +211,7 @@ export function LineageFlowOverlay({
   const [ghostLines, setGhostLines] = useState<Array<{ key: string; pathD: string; color: string }>>([])
   // Off-canvas stubs — viewport coordinates, like the badges.
   const [offCanvasStubs, setOffCanvasStubs] = useState<Array<{
-    key: string; nodeId: string; side: 'in' | 'out'; x: number; y: number; count: number
+    key: string; nodeId: string; side: 'in' | 'out'; x: number; y: number; count: number; partners: number
   }>>([])
   // Latest off-canvas map for updateFlow, which must not take it as a
   // dependency (its identity changes whenever the projection does).
@@ -938,12 +938,14 @@ export function LineageFlowOverlay({
     setOverflowBadges(prev => (sameRows(prev, badges) ? prev : badges))
     setGhostLines(prev => (sameRows(prev, ghostLinesNext) ? prev : ghostLinesNext))
 
-    // ── Off-canvas stubs — lineage whose far end was never loaded ─────────
+    // ── Off-canvas stubs — lineage that leaves the view ───────────────────
     // Per visible row, beside its card and inside the viewport only: the
     // badge layer is pinned to the viewport, and anything placed past its
     // edge would widen the scrollable area (the bug the badge layer's
     // sticky pin exists to prevent).
-    const stubsNext: Array<{ key: string; nodeId: string; side: 'in' | 'out'; x: number; y: number; count: number }> = []
+    // Only `in`/`out` make a stub: they are what leaves the view. Flows into
+    // an anchored column's rows (`columns`) are in it, and never do.
+    const stubsNext: Array<{ key: string; nodeId: string; side: 'in' | 'out'; x: number; y: number; count: number; partners: number }> = []
     const offCanvas = offCanvasRef.current
     if (offCanvas && offCanvas.size > 0) {
       globalVisibleNodes.forEach(domId => {
@@ -962,10 +964,10 @@ export function LineageFlowOverlay({
         const right = r.right - viewportRect.left
         const left = r.left - viewportRect.left
         if (lineage.out > 0 && right >= 0 && right + OFF_CANVAS_STUB_WIDTH <= viewportRect.width) {
-          stubsNext.push({ key: `${nodeId}:out`, nodeId, side: 'out', x: right, y, count: lineage.out })
+          stubsNext.push({ key: `${nodeId}:out`, nodeId, side: 'out', x: right, y, count: lineage.out, partners: lineage.outPartners.size })
         }
         if (lineage.in > 0 && left - OFF_CANVAS_STUB_WIDTH >= 0 && left <= viewportRect.width) {
-          stubsNext.push({ key: `${nodeId}:in`, nodeId, side: 'in', x: left, y, count: lineage.in })
+          stubsNext.push({ key: `${nodeId}:in`, nodeId, side: 'in', x: left, y, count: lineage.in, partners: lineage.inPartners.size })
         }
       })
     }
@@ -1988,9 +1990,10 @@ export function LineageFlowOverlay({
           key={stub.key}
           side={stub.side}
           count={stub.count}
+          partners={stub.partners}
           x={stub.x}
           y={stub.y}
-          onBringIn={onBringInOffCanvas ? () => onBringInOffCanvas(stub.nodeId, stub.side) : undefined}
+          onOpen={onBringInOffCanvas ? () => onBringInOffCanvas(stub.nodeId, stub.side) : undefined}
         />
       ))}
     </div>

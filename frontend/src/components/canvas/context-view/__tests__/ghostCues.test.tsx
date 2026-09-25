@@ -4,7 +4,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { BRING_IN_BATCH, portalLabel } from '../ghostCues'
+import { portalLabel } from '../ghostCues'
 import { OffCanvasStub } from '../OffCanvasStub'
 
 describe('portalLabel — where lineage out of sight goes, named', () => {
@@ -23,31 +23,46 @@ describe('portalLabel — where lineage out of sight goes, named', () => {
   })
 })
 
-describe('OffCanvasStub — lineage whose far end is not on the canvas', () => {
+describe('OffCanvasStub — lineage that leaves the view', () => {
   it('says how many, in which direction, and what a click does', () => {
-    render(<OffCanvasStub side="out" count={12} x={0} y={0} onBringIn={vi.fn()} />)
+    render(<OffCanvasStub side="out" count={12} partners={3} x={0} y={0} onOpen={vi.fn()} />)
     expect(screen.getByRole('button', {
-      name: '12 underlying flows lead to entities that are not on the canvas. Click to bring them in.',
+      name: '12 underlying flows lead to entities outside this view. Click to see those 3 entities in the Focus Lens.',
     })).toBeInTheDocument()
   })
 
-  it('offers a first batch when there are more than one click brings in', () => {
-    render(<OffCanvasStub side="in" count={BRING_IN_BATCH + 73} x={0} y={0} onBringIn={vi.fn()} />)
+  it('one flow arrives, in the singular', () => {
+    render(<OffCanvasStub side="in" count={1} partners={1} x={0} y={0} onOpen={vi.fn()} />)
     expect(screen.getByRole('button', {
-      name: `${(BRING_IN_BATCH + 73).toLocaleString()} underlying flows arrive from entities that are not on the canvas. Click to bring the first ${BRING_IN_BATCH} in.`,
+      name: '1 underlying flow arrives from entities outside this view. Click to see that entity in the Focus Lens.',
     })).toBeInTheDocument()
   })
 
-  it('brings them in on a click', () => {
-    const onBringIn = vi.fn()
-    render(<OffCanvasStub side="out" count={3} x={0} y={0} onBringIn={onBringIn} />)
+  it('counts entities, not flows, in what a click offers', () => {
+    render(<OffCanvasStub side="out" count={900} partners={40} x={0} y={0} onOpen={vi.fn()} />)
+    expect(screen.getByRole('button', {
+      name: '900 underlying flows lead to entities outside this view. Click to see those 40 entities in the Focus Lens.',
+    })).toBeInTheDocument()
+  })
+
+  it('wears the direction colour', () => {
+    const { rerender } = render(<OffCanvasStub side="out" count={2} partners={1} x={0} y={0} />)
+    expect(screen.getByRole('button').className).toContain('text-lineage-out')
+    rerender(<OffCanvasStub side="in" count={2} partners={1} x={0} y={0} />)
+    expect(screen.getByRole('button').className).toContain('text-lineage-in')
+    expect(screen.getByRole('button').className).not.toContain('text-ink-muted')
+  })
+
+  it('opens on a click', () => {
+    const onOpen = vi.fn()
+    render(<OffCanvasStub side="out" count={3} partners={2} x={0} y={0} onOpen={onOpen} />)
     fireEvent.click(screen.getByRole('button'))
-    expect(onBringIn).toHaveBeenCalledTimes(1)
+    expect(onOpen).toHaveBeenCalledTimes(1)
   })
 
   it('only states the count when there is nothing it can do', () => {
-    render(<OffCanvasStub side="out" count={3} x={0} y={0} />)
-    const stub = screen.getByRole('button', { name: '3 underlying flows lead to entities that are not on the canvas' })
+    render(<OffCanvasStub side="out" count={3} partners={2} x={0} y={0} />)
+    const stub = screen.getByRole('button', { name: '3 underlying flows lead to entities outside this view' })
     expect(stub).toBeDisabled()
   })
 })

@@ -47,6 +47,7 @@ const SURFACES: Array<[string, string]> = [
   ['../../FlatTreeItem.tsx', './connections/connectionUnits'],
   ['../../CanvasStatusChips.tsx', './connections/connectionUnits'],
   ['../../LayerColumn.tsx', './connections/connectionUnits'],
+  ['../../OffCanvasStub.tsx', './connections/connectionUnits'],
   ['../../../../panels/LineageNeighbors.tsx', '@/components/canvas/context-view/connections/connectionUnits'],
 ]
 
