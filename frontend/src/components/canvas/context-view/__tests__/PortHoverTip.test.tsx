@@ -29,6 +29,22 @@ describe('PortHoverTip', () => {
     expect(tip.textContent).not.toMatch(/load/i)
   })
 
+  it('a hollow port says its lineage leads outside this view — never that anything is not loaded', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'beyond', 'data-dir': 'out', 'data-out': '4' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('4 underlying flows lead to entities outside this view')
+    expect(tip).not.toMatch(/load|canvas|render/i)
+  })
+
+  it('a hollow incoming port says where its lineage arrives from', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'beyond', 'data-dir': 'in', 'data-in': '1' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('1 underlying flow arrives from entities outside this view')
+    expect(tip).not.toMatch(/load|canvas|render/i)
+  })
+
   it('a solid port still counts its lines', () => {
     render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'here', 'data-dir': 'out', 'data-out': '3' }} />)
     fireEvent.pointerOver(screen.getByTestId('port'))

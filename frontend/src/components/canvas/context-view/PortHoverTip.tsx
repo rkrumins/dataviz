@@ -10,7 +10,7 @@
 import { useEffect, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
-import { unitNoun } from './connections/connectionUnits'
+import { formatUnitCount, unitNoun } from './connections/connectionUnits'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import type { PortSide, PortView } from './lineagePorts'
 
@@ -32,12 +32,13 @@ function describe(tip: Tip): { lead: string; detail: string } {
     }
   }
   if (tip.view.kind === 'beyond') {
+    // The count is the degree's — flows in the data, as the stubs say.
     const n = tip.view.dir === 'in' ? tip.inCount : tip.outCount
     return {
       lead: tip.view.dir === 'in'
-        ? `${lines(n)} come in from outside this canvas`
-        : `${lines(n)} go out to entities not on this canvas`,
-      detail: 'Lineage in the data source. None of its other ends is loaded here — trace it to see where it leads.',
+        ? `${formatUnitCount(n, 'flows')} ${n === 1 ? 'arrives' : 'arrive'} from entities outside this view`
+        : `${formatUnitCount(n, 'flows')} ${n === 1 ? 'leads' : 'lead'} to entities outside this view`,
+      detail: 'None of its other ends is in this view — trace it to see where it leads.',
     }
   }
   if (tip.view.dir === 'both') {

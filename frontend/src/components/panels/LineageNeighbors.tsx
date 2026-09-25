@@ -546,7 +546,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
         <div className="flex items-start gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
           <span className="min-w-0">
-            This view doesn&apos;t hold that entity, so the canvas can&apos;t show it.
+            The canvas couldn&apos;t bring that entity into view.
             Trace or the Focus Lens will still walk to it.
           </span>
           <button
@@ -1136,7 +1136,6 @@ function ExpandedDetail({
   }
 
   const isFilteredEmpty = filtered.length === 0
-  const unloadedCount = filtered.filter((r) => !r.neighborNode).length
 
   return (
     <div className="p-3 space-y-3">
@@ -1275,16 +1274,6 @@ function ExpandedDetail({
               onToggleGroup={handleToggleGroup}
             />
           ))
-        )}
-
-        {unloadedCount > 0 && !isFilteredEmpty && (
-          <div className="flex items-start gap-1.5 text-[11px] text-ink-muted/70 px-2 pt-1.5">
-            <LucideIcons.Info className="w-3 h-3 flex-shrink-0 mt-0.5" />
-            <span>
-              {unloadedCount} neighbor{unloadedCount === 1 ? '' : 's'} not
-              currently rendered on canvas — expand the graph to see details.
-            </span>
-          </div>
         )}
       </div>
 
@@ -1681,16 +1670,12 @@ function NeighborRow({
         <div className="text-[12.5px] text-ink truncate font-medium leading-snug">
           {label}
         </div>
-        {neighborNode ? (
-          showSecondary && (
-            <div className="text-[10px] text-ink-muted truncate font-mono leading-tight">
-              {secondary}
-            </div>
-          )
-        ) : (
-          <div className="text-[10px] text-amber-500/90 flex items-center gap-1 leading-tight">
-            <LucideIcons.AlertCircle className="w-2.5 h-2.5" />
-            Not rendered on canvas
+        {/* A partner the canvas has not drawn reads like any other: it may
+            well be in the view (a row past a column's loaded page), and a
+            click brings it in. */}
+        {showSecondary && (
+          <div className="text-[10px] text-ink-muted truncate font-mono leading-tight">
+            {secondary}
           </div>
         )}
       </div>
