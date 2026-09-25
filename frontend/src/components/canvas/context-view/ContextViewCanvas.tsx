@@ -4513,9 +4513,8 @@ export function ContextViewCanvas({
   // suppresses ambient edges in favour of per-node indicators (hover /
   // selection materializes); `auto` renders everything below
   // `autoStubThreshold` and switches to a BUDGETED presentation above it.
-  // The mode resolves identically in trace and browse — trace mode no
-  // longer bypasses the gate. Trace's focus-incident edges stay
-  // materialized via `effectiveLineageEdges` so the anchor is legible.
+  // A trace bypasses it: the walk already bounds its lines and every trace
+  // wire draws. Display › Edge Density says so.
   const isStubsMode = useMemo(() => {
     // Trace mode: the flow IS the point, and the walk budget already
     // bounds the edge count — every trace wire draws, no stub culling.

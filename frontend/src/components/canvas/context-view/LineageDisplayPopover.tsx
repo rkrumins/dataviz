@@ -243,6 +243,7 @@ export function LineageDisplaySections({
       >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           How many edges materialise on the canvas at once.
+          <span className="block mt-0.5">A trace draws every line it walks, whatever this is set to.</span>
         </p>
         <div
           role="radiogroup"
@@ -297,7 +298,7 @@ export function LineageDisplaySections({
             )
           })}
         </div>
-        {lineageRenderMode === 'auto' && <AdaptiveBudgetSlider disabled={disabled} />}
+        {lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
         {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
       </CollapsibleSection>
 
@@ -686,22 +687,25 @@ const BUDGET_STEP = 50
 
 /** Adaptive edge budget — how many of the strongest flows render at once
  *  above the threshold (and the size of a focused node's materialized
- *  fan). Reads/writes the persisted preference directly, mirroring the
+ *  fan). In On Hover the same number is only that fan: "Lines per entity".
+ *  Reads/writes the persisted preference directly, mirroring the
  *  self-contained MissingConnectionsToggle pattern. */
-function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
+function AdaptiveBudgetSlider({ disabled, mode }: { disabled: boolean; mode: LineageRenderMode }) {
   const budget = usePreferencesStore((s) => s.autoStubThreshold)
   const setBudget = usePreferencesStore((s) => s.setAutoStubThreshold)
   const clamped = Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, budget ?? 500))
+  const perEntity = mode === 'stubs'
   return (
     <div className="mt-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
       <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
         <Sliders className="w-3 h-3" />
-        <span>Edge Budget</span>
+        <span>{perEntity ? 'Lines per entity' : 'Edge Budget'}</span>
         <span className="ml-auto tabular-nums text-accent-lineage/80">{clamped.toLocaleString()}</span>
       </div>
       <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">
-        How many of the strongest flows stay visible at once on dense
-        graphs. Markers summarize the rest.
+        {perEntity
+          ? 'The most lines a hovered or selected entity draws at once, strongest first. When a selection has more, a chip on the canvas says so.'
+          : 'How many of the strongest flows stay visible at once on dense graphs, and the most a hovered or selected entity draws. Markers summarize the rest.'}
       </p>
       <input
         type="range"
@@ -712,7 +716,7 @@ function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
         disabled={disabled}
         onChange={(e) => setBudget(parseInt(e.target.value, 10))}
         className="w-full accent-accent-lineage"
-        aria-label="Adaptive edge budget"
+        aria-label={perEntity ? 'Lines per entity' : 'Adaptive edge budget'}
       />
       <div className="flex justify-between text-[9.5px] text-ink-muted/60 tabular-nums">
         <span>{BUDGET_MIN} · calm</span>

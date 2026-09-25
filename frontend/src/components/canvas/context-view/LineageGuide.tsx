@@ -170,14 +170,19 @@ export function LineageGuide({
             {hubs.length > 0 && <HubList hubs={hubs} onFocusHub={(id) => { setOpen(false); onFocusHub(id) }} />}
 
             <p className="mt-3 text-[11.5px] leading-snug text-ink-muted">
-              Select any entity to see all of its incoming and outgoing lines. Adaptive
-              keeps the rest of the board to the strongest.
+              Select any entity to draw its incoming and outgoing lines, strongest first.
+              Adaptive keeps the rest of the board to the strongest.
             </p>
 
             <div className="mt-3 pt-3 border-t border-black/[0.06] dark:border-white/[0.06] flex items-center gap-3">
               <PortLegend />
               {onShowAll && (
-                <button type="button" className={cn(ACTION_CLASS, 'ml-auto')} onClick={() => { setOpen(false); onShowAll() }}>
+                <button
+                  type="button"
+                  className={cn(ACTION_CLASS, 'ml-auto')}
+                  title="Switches Edge Density to All Edges — switch back under Display"
+                  onClick={() => { setOpen(false); onShowAll() }}
+                >
                   Show all lines
                 </button>
               )}

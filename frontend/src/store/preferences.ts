@@ -124,6 +124,8 @@ interface PreferencesState {
    * Global edge-count threshold for `auto` mode. When the projected edge
    * count exceeds this, the canvas falls back to stub rendering even if
    * per-node fan-in is low. Distinct from `lineageAutoThreshold` (per-node).
+   * In On Hover and Adaptive it is also the most lines a hovered or selected
+   * entity draws at once, strongest first ("Lines per entity" in On Hover).
    */
   autoStubThreshold: number
   setAutoStubThreshold: (n: number) => void

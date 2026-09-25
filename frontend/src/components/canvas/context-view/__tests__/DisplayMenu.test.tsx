@@ -7,6 +7,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { DisplayMenu } from '../header/DisplayMenu'
+import { usePreferencesStore } from '@/store/preferences'
 
 function baseProps() {
   return {
@@ -78,5 +79,32 @@ describe('DisplayMenu', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
     expect(props.onReset).toHaveBeenCalled()
+  })
+
+  it('On Hover shows the per-entity cap, and the slider sets it', () => {
+    usePreferencesStore.setState({ autoStubThreshold: 500 })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const slider = screen.getByRole('slider', { name: 'Lines per entity' })
+    expect(screen.getByText(/The most lines a hovered or selected entity draws at once/)).toBeInTheDocument()
+    fireEvent.change(slider, { target: { value: '300' } })
+    expect(usePreferencesStore.getState().autoStubThreshold).toBe(300)
+  })
+
+  it('Adaptive keeps its edge budget, and says it caps a focused entity too', () => {
+    render(<DisplayMenu {...baseProps()} lineageRenderMode="auto" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByRole('slider', { name: 'Adaptive edge budget' })).toBeInTheDocument()
+    expect(screen.queryByRole('slider', { name: 'Lines per entity' })).not.toBeInTheDocument()
+    expect(screen.getByText(/the most a hovered or selected entity draws/)).toBeInTheDocument()
+  })
+
+  it('the Edge Density section says a trace draws every line', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
   })
 })
