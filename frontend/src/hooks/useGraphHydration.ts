@@ -241,6 +241,21 @@ export function isHydrationFailure(status: HydrationStatus): status is Hydration
     return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error'
 }
 
+/** The types /edges/between is asked for: containment and lineage, never the
+ *  stored :AGGREGATED cells (see the reference hydration's edge fetch).
+ *  Untyped only while the view has not declared both kinds. */
+function betweenEdgeTypes(containmentEdgeTypes: string[], lineageEdgeTypes: string[]): string[] | undefined {
+    const lineageOnly = lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
+    return containmentEdgeTypes.length > 0 && lineageOnly.length > 0
+        ? [...containmentEdgeTypes, ...lineageOnly]
+        : undefined
+}
+
+/** A stored roll-up cell, which an untyped read can still bring. */
+function isAggregatedEdge(e: GraphEdge): boolean {
+    return String(e.edgeType ?? '').toUpperCase() === 'AGGREGATED'
+}
+
 export interface UseGraphHydrationResult {
     /** Load children for a node (empty string = load roots). */
     loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<ChildLoadSummary | undefined>
@@ -279,6 +294,8 @@ export interface UseGraphHydrationResult {
     hydrationStatus: HydrationStatus
     /** Explicit user-triggered retry for a warming/unavailable provider. */
     retryHydration: () => void
+    /** Refetch the edges among the loaded nodes, once (the edge banner's Retry). */
+    retryEdges: () => Promise<void>
     /** A partial load has used its fast attempts and stopped retrying on its
      *  own; retryHydration (the pill's Retry) starts it again. */
     autoRetryStopped: boolean
@@ -915,11 +932,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // anyway is dropped below.
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
-                    const lineageOnly = lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
-                    const betweenTypes = containmentEdgeTypes.length > 0 && lineageOnly.length > 0
-                        ? [...containmentEdgeTypes, ...lineageOnly]
-                        : undefined
-                    const allEdges = await provider.getEdgesBetween(allUrns, betweenTypes, 200_000).catch((err: unknown) => {
+                    const allEdges = await provider.getEdgesBetween(
+                        allUrns, betweenEdgeTypes(containmentEdgeTypes, lineageEdgeTypes), 200_000,
+                    ).catch((err: unknown) => {
                         // Nodes still render (graceful), but record the
                         // failure so the canvas can say edges are missing.
                         useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
@@ -939,7 +954,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     writeGraph(
                         allNodes.map(n => toCanvasNode(n)),
                         allEdges
-                            .filter(e => String(e.edgeType ?? '').toUpperCase() !== 'AGGREGATED')
+                            .filter(e => !isAggregatedEdge(e))
                             .map(e => toCanvasEdge(e)),
                     )
                     seedAnchorPagers()
@@ -1158,6 +1173,26 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         initializedKeyRef.current = null
         setRetryEpoch(e => e + 1)
     }, [forceReprobe])
+
+    // The edge banner's Retry. The banner reports a failed EDGE read, so this
+    // asks /edges/between once, over what is loaded, with the hydration's
+    // typed request: not a re-run of the view, which re-fetched every node
+    // batch and anchored page as well.
+    const retryEdges = useCallback(async () => {
+        const store = useCanvasStore.getState()
+        const urns = store.nodes.map(n => n.id).filter(id => !id.startsWith('logical:'))
+        store.clearEdgeFetchFailures()
+        if (urns.length < 2) return
+        try {
+            const edges = await provider.getEdgesBetween(
+                urns, betweenEdgeTypes(containmentEdgeTypes, lineageEdgeTypes), 200_000,
+            )
+            useCanvasStore.getState().addGraph([], edges.filter(e => !isAggregatedEdge(e)).map(e => toCanvasEdge(e)))
+            if (edges.length >= 200_000) useCanvasStore.getState().setEdgesTruncated(true)
+        } catch (err) {
+            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+        }
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes])
 
     // Auto-retry while the provider is warming/slow/unavailable — but SCALE-SAFELY:
     //  • a configurable, deliberately-unhurried interval (POLLING_INTERVALS.
@@ -1732,6 +1767,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         /** Explicit user retry (overlay "Retry" button). Re-arms a fresh round
          *  of bounded auto-retries. */
         retryHydration,
+        retryEdges,
         autoRetryStopped,
         loadMoreRoots,
         rootsLoaded,

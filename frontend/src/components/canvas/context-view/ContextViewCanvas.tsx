@@ -277,7 +277,7 @@ import { ExportDialog } from '@/features/import-export/ExportDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
-import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { invalidateAggregatedEdges, invalidateAggregatedEdgesForScope } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
 import { TraceWalkIndicator } from './TraceWalkIndicator'
@@ -405,7 +405,6 @@ export function ContextViewCanvas({
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
-  const clearEdgeFetchFailures = useCanvasStore((s) => s.clearEdgeFetchFailures)
   const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
@@ -3287,7 +3286,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryEdges, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -5602,7 +5601,8 @@ export function ContextViewCanvas({
             swallowed to keep nodes rendering; the canvas may be missing
             relationships. That fetch is the RAW one, structural edges
             included, so the banner uses the covering word rather than
-            "flows". Retry re-hydrates and refetches aggregated edges. */}
+            "flows". Retry refetches the edges among what is loaded, and
+            this source's roll-ups only when those are what failed. */}
         {(edgeFetchFailures > 0 || aggregationError) && (
           <div
             data-canvas-interactive
@@ -5612,9 +5612,8 @@ export function ContextViewCanvas({
             <button
               className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
               onClick={() => {
-                clearEdgeFetchFailures()
-                invalidateAggregatedEdges()
-                retryHydration()
+                if (aggregationError) invalidateAggregatedEdgesForScope(provider?.scopeKey)
+                if (edgeFetchFailures > 0) void retryEdges()
               }}
             >
               Retry

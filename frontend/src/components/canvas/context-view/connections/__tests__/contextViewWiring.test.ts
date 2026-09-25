@@ -131,3 +131,21 @@ describe('the Context View canvas names the kind of thing it is counting', () =>
     expect(source).not.toMatch(/connection\{framedContext\.count/)
   })
 })
+
+/**
+ * The edge banner reports a failed EDGE read, so its Retry refetches edges.
+ * It used to re-run the whole view (every node batch, every anchored page,
+ * /edges/between over everything) and drop every canvas's cached roll-ups,
+ * on every mounted canvas, whatever had failed.
+ */
+describe('the edge banner\'s Retry fetches the edges, not the whole view', () => {
+  it('refetches the edges, and this source\'s roll-ups only when those are what failed', () => {
+    const start = source.indexOf('Some relationships could not be loaded')
+    expect(start).toBeGreaterThan(-1)
+    const block = source.slice(start, source.indexOf('</button>', start))
+    expect(block).toContain('retryEdges()')
+    expect(block).toMatch(/if \(aggregationError\) invalidateAggregatedEdgesForScope\(provider\?\.scopeKey\)/)
+    expect(block).not.toContain('retryHydration()')
+    expect(block).not.toContain('invalidateAggregatedEdges()')
+  })
+})
