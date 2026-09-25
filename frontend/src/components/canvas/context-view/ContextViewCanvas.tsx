@@ -1879,7 +1879,7 @@ export function ContextViewCanvas({
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -4370,6 +4370,8 @@ export function ContextViewCanvas({
     // Chains already fetched stay cached, so switching the flag off must
     // also stop them being USED.
     ancestorChains: lineageRollup ? ancestorChains : undefined,
+    // An anchor is drawn as its column: lineage naming it is in the view.
+    promotedAnchors,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation

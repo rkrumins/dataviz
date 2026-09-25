@@ -83,6 +83,10 @@ export interface UseLayerAssignmentResult {
   /** Loaded nodes that resolved to NO layer and therefore render nowhere.
    *  Surfaced so the canvas can tell the user instead of hiding them. */
   unassignedNodes: Array<{ id: string; data?: Record<string, unknown> }>
+  /** Each PROMOTED anchor's URN → the column it is drawn as. An anchor
+   *  renders AS its column, so no map above holds it; lineage that names it
+   *  learns its column here. */
+  promotedAnchors: ReadonlyMap<string, string>
 }
 
 // ============================================
@@ -442,7 +446,7 @@ export function useLayerAssignment({
     // fell back to a row is an ordinary node; one that nothing places at all
     // (its assignment cleared, the anchorUrn left behind) genuinely renders
     // nowhere and must still be reported as such.
-    const promotedAnchors = new Set<string>()
+    const promotedAnchors = new Map<string, string>()
 
     nodes.forEach((node: any) => {
       const layerId = effectiveLayer.get(node.id)
@@ -469,7 +473,7 @@ export function useLayerAssignment({
         const total = Number(node.data?.childCount ?? children.length) || 0
         const canPromote = children.length > 0 || total === 0
         if (anchorByLayer.get(layerId) === nodeUrn && canPromote) {
-          promotedAnchors.add(nodeUrn)
+          promotedAnchors.set(nodeUrn, layerId)
           // They stay in this layer by ordinary containment inheritance, so each
           // carries its own subtree — and a child added at source simply appears.
           for (const childId of children) {
@@ -648,5 +652,5 @@ export function useLayerAssignment({
     [nodeEdgeFingerprint, nodeLayerMap, layerGrouping],
   )
 
-  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes }
+  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors: layerGrouping.promotedAnchors }
 }

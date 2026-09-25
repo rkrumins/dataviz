@@ -91,9 +91,18 @@ export interface UseEdgeProjectionOptions {
    * nothing on canvas is filed under the nearest ancestor that does, so its
    * line rolls up to the container the reader can see instead of being
    * counted as leading outside the view. Consulted only when the endpoint
-   * itself does not resolve.
+   * itself does not resolve. A URN missing from a map that IS given is
+   * pending: its place is still being asked, so it makes no stub and is not
+   * counted. With no map at all there is no chain source, and such an end
+   * leads outside.
    */
   ancestorChains?: ReadonlyMap<string, readonly string[]>
+  /**
+   * Each promoted anchor's URN → the column it is drawn as
+   * (useLayerAssignment). The anchor is never a row, so lineage naming it,
+   * or reaching it on a chain, is lineage into that column: in the view.
+   */
+  promotedAnchors?: ReadonlyMap<string, string>
 }
 
 // ============================================
@@ -184,18 +193,41 @@ function buildFullAncestorMap(
 }
 
 /**
- * Lineage from a row ON the canvas to entities that are NOT: its far ends
- * were never loaded. Per direction, as seen from the row — `in` flows arrive
- * at it, `out` flows leave it — counted in UNDERLYING flows (a roll-up edge
- * contributes every flow it stands for, as it does on a line), with the far
- * ends (capped) so a click can bring them in.
+ * Lineage from a row ON the canvas whose far end is not drawn. Per direction,
+ * as seen from the row — `in` flows arrive at it, `out` flows leave it —
+ * counted in UNDERLYING flows (a roll-up edge contributes every flow it
+ * stands for, as it does on a line), with the far ends (capped) so a click
+ * can bring them in.
  */
-export interface OffCanvasLineage {
+export interface OffCanvasFlows {
   in: number
   out: number
   inPartners: ReadonlySet<string>
   outPartners: ReadonlySet<string>
 }
+
+/**
+ * `in`/`out` are the flows that truly LEAVE the view. `columns` holds, per
+ * layer id, the flows into an anchored column that are not drawn yet: a row
+ * of it past its loaded page, or its anchor, which has no partner to bring
+ * in because it is drawn as the column. Those are in the view, never a stub.
+ */
+export interface OffCanvasLineage extends OffCanvasFlows {
+  columns: ReadonlyMap<string, OffCanvasFlows>
+}
+
+/** Where one end of a line lands (see `place` in the projection). */
+type Place =
+  | { at: 'row'; id: string }
+  | { at: 'column'; layerId: string }
+  | { at: 'outside' }
+  | { at: 'pending' }
+
+const OUTSIDE: Place = { at: 'outside' }
+const PENDING: Place = { at: 'pending' }
+
+type MutableFlows = { in: number; out: number; inPartners: Set<string>; outPartners: Set<string> }
+const noFlows = (): MutableFlows => ({ in: 0, out: 0, inPartners: new Set(), outPartners: new Set() })
 
 /** Far ends kept per row and direction — enough for a click to bring in a
  *  first batch; the counts stay exact beyond it. */
@@ -228,6 +260,7 @@ export function useEdgeProjection({
   nodeLayerIndexMap,
   hiddenEdgeTypes,
   ancestorChains,
+  promotedAnchors,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -371,18 +404,63 @@ export function useEdgeProjection({
       edgeGroups.get(groupKey)!.push({ ...edge, source: sourceId, target: targetId, originalType: type, _lifted: lifted })
     }
 
-    // An endpoint the canvas never loaded, filed under its nearest ancestor
-    // that IS on canvas (see `ancestorChains`). Undefined when nothing on its
-    // chain is — then it really does lead somewhere this view does not show.
-    const viaChain = (urn: string): string | undefined => {
-      const chain = ancestorChains?.get(urn)
-      if (!chain) return undefined
+    // The row an end is drawn on: itself, or the collapsed row it is folded
+    // into. `ancestorMap` first — displayMap holds every node of the tree,
+    // including those folded away inside a closed row.
+    const rowOf = (end: string): string | undefined => {
+      const id = urnToIdMap.get(end) ?? end
+      return ancestorMap.get(id) ?? (displayMap.has(id) ? id : undefined)
+    }
+
+    // Where one end lands, one answer for all three sections below: a row;
+    // an anchored column (its anchor, drawn AS the column, or a row of it
+    // not loaded yet — in the view, with no row to draw to); outside the
+    // view; or pending, while its chain is still being asked. An end the
+    // canvas never loaded is filed under its nearest ancestor that IS drawn
+    // (see `ancestorChains`); an anchor on the way stops the walk, even with
+    // something above it drawn elsewhere, because that column is where the
+    // partner is.
+    const place = (end: string): Place => {
+      const row = rowOf(end)
+      if (row) return { at: 'row', id: row }
+      const column = promotedAnchors?.get(end)
+      if (column) return { at: 'column', layerId: column }
+      if (!ancestorChains) return OUTSIDE
+      const chain = ancestorChains.get(end)
+      if (!chain) return PENDING
       for (const ancestor of chain) {
-        const id = urnToIdMap.get(ancestor) ?? ancestor
-        const anchor = ancestorMap.get(id) ?? (displayMap.has(id) ? id : undefined)
-        if (anchor) return anchor
+        const up = rowOf(ancestor)
+        if (up) return { at: 'row', id: up }
+        const layerId = promotedAnchors?.get(ancestor)
+        if (layerId) return { at: 'column', layerId }
       }
-      return undefined
+      return OUTSIDE
+    }
+
+    // The containment ancestors of one end: its loaded parents, else its
+    // fetched chain.
+    const containmentParents = browseBundleParentMap ?? traceBundleParentMap
+    const upPath = (end: string): readonly string[] => {
+      let cursor = containmentParents?.get(end)
+      if (cursor === undefined) return ancestorChains?.get(end) ?? []
+      const path: string[] = []
+      const seen = new Set([end])
+      while (cursor !== undefined && !seen.has(cursor)) {
+        seen.add(cursor)
+        path.push(cursor)
+        cursor = containmentParents!.get(cursor)
+      }
+      return path
+    }
+
+    // A line between an entity and one of its own ancestors — an anchor and
+    // its own row, a source and a cell inside it, an open row and its child —
+    // is the entity summarised against itself: no line, no stub, not counted.
+    // Walked only where that happens (a roll-up, or an end on a column), so a
+    // plain line between two rows costs nothing.
+    const isSelfRollup = (sUrn: string, tUrn: string, S: Place, T: Place, aggregated: boolean): boolean => {
+      if (!aggregated && S.at !== 'column' && T.at !== 'column') return false
+      return upPath(tUrn).includes(sUrn) || upPath(sUrn).includes(tUrn)
     }
 
     // How many underlying relationships ONE member stands for. A raw edge is
@@ -404,29 +482,47 @@ export function useEdgeProjection({
       return typeof n === 'number' && n > 0 ? n : 1
     }
 
-    // An edge with ONE end on canvas: the row it resolves to carries it as
-    // off-canvas lineage (see OffCanvasLineage). A type the reader hid is
-    // hidden here too — a stub must not count what the lines would not draw.
-    const offCanvas = new Map<string, { in: number; out: number; inPartners: Set<string>; outPartners: Set<string> }>()
-    const noteOffCanvas = (sId: string | null | undefined, tId: string | null | undefined,
-      source: string, target: string, types: readonly string[], weight: number) => {
-      if ((sId && tId) || (!sId && !tId)) return
-      if (hiddenEdgeTypes && hiddenEdgeTypes.size > 0 && types.length > 0
-        && types.every(t => hiddenEdgeTypes.has(t.toUpperCase()))) return
-      const anchor = (sId ?? tId)!
-      let entry = offCanvas.get(anchor)
-      if (!entry) { entry = { in: 0, out: 0, inPartners: new Set(), outPartners: new Set() }; offCanvas.set(anchor, entry) }
-      if (sId) {
-        entry.out += weight
-        if (entry.outPartners.size < OFF_CANVAS_PARTNER_CAP) entry.outPartners.add(target)
-      } else {
-        entry.in += weight
-        if (entry.inPartners.size < OFF_CANVAS_PARTNER_CAP) entry.inPartners.add(source)
+    // A type the reader hid is hidden from the stubs and the count too — they
+    // must not report what the lines would not draw.
+    const allHidden = (types: readonly string[]) =>
+      !!hiddenEdgeTypes && hiddenEdgeTypes.size > 0 && types.length > 0
+      && types.every(t => hiddenEdgeTypes.has(t.toUpperCase()))
+
+    const note = (flows: MutableFlows, side: 'in' | 'out', partner: string | undefined, weight: number) => {
+      const partners = side === 'out' ? flows.outPartners : flows.inPartners
+      flows[side] += weight
+      if (partner !== undefined && partners.size < OFF_CANVAS_PARTNER_CAP) partners.add(partner)
+    }
+
+    // An edge with ONE end on a row and the other not drawn: the row carries
+    // it (see OffCanvasLineage). Only an end OUTSIDE the view is counted as
+    // missing; one in an anchored column is in the view; a pending one waits
+    // for its chain rather than flash a stub.
+    const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows> }>()
+    let unresolvedThisPass = 0
+    const fileUndrawn = (S: Place, T: Place, sUrn: string, tUrn: string,
+      types: readonly string[], weight: number, aggregated: boolean) => {
+      const side = S.at === 'row' ? 'out' : 'in'
+      const [near, far, farUrn] = side === 'out' ? [S, T, tUrn] : [T, S, sUrn]
+      if (near.at !== 'row' || far.at === 'row' || far.at === 'pending' || allHidden(types)) return
+      const isAnchor = promotedAnchors?.has(farUrn) ?? false
+      // A roll-up naming an anchor summarises the whole column; the rows'
+      // own roll-ups carry the same flows row by row.
+      if (far.at === 'column' && isAnchor && aggregated) return
+      let entry = offCanvas.get(near.id)
+      if (!entry) { entry = { ...noFlows(), columns: new Map() }; offCanvas.set(near.id, entry) }
+      if (far.at === 'outside') {
+        note(entry, side, farUrn, weight)
+        unresolvedThisPass += weight
+        return
       }
+      let column = entry.columns.get(far.layerId)
+      if (!column) { column = noFlows(); entry.columns.set(far.layerId, column) }
+      // The anchor is drawn as the column: no partner to bring in.
+      note(column, side, isAnchor ? undefined : farUrn, weight)
     }
 
     // A. Aggregated Edges
-    let unresolvedThisPass = 0
     // Both endpoints rolled up to the SAME anchor — a connection that lives
     // entirely inside one collapsed container (most visibly, a closed
     // logical group). There is no line to draw between a node and itself,
@@ -440,12 +536,17 @@ export function useEdgeProjection({
         const agg = e.aggregated
         // Suppress parent AGG when its drill is producing visible finer-level edges.
         if (isTracing && suppressedAggEdgeKeys?.has(`${agg.sourceUrn}->${agg.targetUrn}`)) return
-        let sId = displayMap.has(agg.sourceUrn) ? agg.sourceUrn : ancestorMap.get(agg.sourceUrn)
-        let tId = displayMap.has(agg.targetUrn) ? agg.targetUrn : ancestorMap.get(agg.targetUrn)
-        if (!sId) sId = urnToIdMap.get(agg.sourceUrn) ?? viaChain(agg.sourceUrn)
-        if (!tId) tId = urnToIdMap.get(agg.targetUrn) ?? viaChain(agg.targetUrn)
-        if (sId && tId && sId !== tId) {
-          addEdgeToGroup(sId, tId, {
+        const S = place(agg.sourceUrn)
+        const T = place(agg.targetUrn)
+        if (isSelfRollup(agg.sourceUrn, agg.targetUrn, S, T, true)) return
+        if (S.at !== 'row' || T.at !== 'row') {
+          fileUndrawn(S, T, agg.sourceUrn, agg.targetUrn,
+            Array.isArray(agg.edgeTypes) && agg.edgeTypes.length > 0 ? agg.edgeTypes : ['AGGREGATED'],
+            memberWeight({ data: { isAggregated: true, edgeCount: agg.edgeCount } }), true)
+        } else if (S.id === T.id) {
+          hiddenInsideThisPass++
+        } else {
+          addEdgeToGroup(S.id, T.id, {
             id: agg.id,
             data: {
               edgeType: 'AGGREGATED',
@@ -457,14 +558,6 @@ export function useEdgeProjection({
               sourceEdgeIds: agg.sourceEdgeIds,
             }
           }, 'AGGREGATED')
-        } else if (!sId || !tId) {
-          // ANY unresolved endpoint hides the edge — count them all, not
-          // just the both-unresolved case, so the surfaced hidden-count
-          // matches what the user actually can't see.
-          unresolvedThisPass++
-          noteOffCanvas(sId, tId, agg.sourceUrn, agg.targetUrn,
-            Array.isArray(agg.edgeTypes) && agg.edgeTypes.length > 0 ? agg.edgeTypes : ['AGGREGATED'],
-            memberWeight({ data: { isAggregated: true, edgeCount: agg.edgeCount } }))
         }
       })
 
@@ -523,12 +616,19 @@ export function useEdgeProjection({
     edges
       .filter(edge => !isContainmentEdge(normalizeEdgeType(edge)))
       .forEach(edge => {
-        let sId = ancestorMap.get(edge.source) || (displayMap.has(edge.source) ? edge.source : null)
-          || viaChain(edge.source) || null
-        let tId = ancestorMap.get(edge.target) || (displayMap.has(edge.target) ? edge.target : null)
-          || viaChain(edge.target) || null
+        const type = normalizeEdgeType(edge)
+        const aggregated = type === 'AGGREGATED' || !!edge.data?.isAggregated
+        const S = place(edge.source)
+        const T = place(edge.target)
+        if (isSelfRollup(edge.source, edge.target, S, T, aggregated)) return
+        if (S.at !== 'row' || T.at !== 'row') {
+          fileUndrawn(S, T, edge.source, edge.target, [type], memberWeight(edge), aggregated)
+          return
+        }
+        let sId = S.id
+        let tId = T.id
 
-        if (sId && tId && bundleEnabled) {
+        if (bundleEnabled) {
           // Apply the trace-level rollup. Result endpoints are always at
           // the focus level (or coarser); ancestor pairs become the
           // visible bundle.
@@ -538,7 +638,7 @@ export function useEdgeProjection({
           if (bundledT) tId = bundledT
         }
 
-        if (sId && tId && sId !== tId) {
+        if (sId !== tId) {
           // Trace-merged edges (recorded in addedEdgeIds) bypass the
           // contextSet gate — they're definitionally part of the trace and
           // must render even if one endpoint hasn't been routed into the
@@ -556,12 +656,7 @@ export function useEdgeProjection({
           // After both the ancestorMap resolution and the trace-level rollup:
           // different endpoints than the edge names ⇒ lifted to an ancestor.
           const lifted = sId !== edge.source || tId !== edge.target
-          addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge), lifted)
-        } else if (!sId || !tId) {
-          // Endpoint resolves to nothing on canvas (unloaded or unassigned
-          // entity) — the edge is hidden, and counted.
-          unresolvedThisPass++
-          noteOffCanvas(sId, tId, edge.source, edge.target, [normalizeEdgeType(edge)], memberWeight(edge))
+          addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, type, lifted)
         } else {
           // sId === tId: a legitimate self-rollup, but not a non-event.
           // Counted separately so the canvas can offer to open the
@@ -576,25 +671,25 @@ export function useEdgeProjection({
       .filter(e => e.state === 'expanded')
       .flatMap(e => e.detailedEdges)
       .forEach(edge => {
-        const directS = ancestorMap.get(edge.sourceUrn)
-        const directT = ancestorMap.get(edge.targetUrn)
-        const sId = directS ?? viaChain(edge.sourceUrn)
-        const tId = directT ?? viaChain(edge.targetUrn)
-        if (sId && tId && sId !== tId) {
+        const S = place(edge.sourceUrn)
+        const T = place(edge.targetUrn)
+        if (isSelfRollup(edge.sourceUrn, edge.targetUrn, S, T, false)) return
+        if (S.at !== 'row' || T.at !== 'row') {
+          fileUndrawn(S, T, edge.sourceUrn, edge.targetUrn, edge.edgeType ? [edge.edgeType] : [], 1, false)
+        } else if (S.id === T.id) {
+          hiddenInsideThisPass++
+        } else {
           // Endpoints here are urns — compare against the node each urn owns,
           // not the urn itself. An unknown urn never asserts "lifted" on its
           // own — but one filed under an ancestor by its chain always is.
           const ownS = urnToIdMap.get(edge.sourceUrn)
           const ownT = urnToIdMap.get(edge.targetUrn)
-          const lifted = (ownS !== undefined && ownS !== sId) || (ownT !== undefined && ownT !== tId)
-            || directS === undefined || directT === undefined
-          addEdgeToGroup(sId, tId, {
+          const lifted = (ownS !== undefined && ownS !== S.id) || (ownT !== undefined && ownT !== T.id)
+            || ancestorMap.get(edge.sourceUrn) === undefined || ancestorMap.get(edge.targetUrn) === undefined
+          addEdgeToGroup(S.id, T.id, {
             id: edge.id,
             data: { edgeType: edge.edgeType, relationship: edge.edgeType, confidence: edge.confidence }
           }, edge.edgeType, lifted)
-        } else if (!sId || !tId) {
-          unresolvedThisPass++
-          noteOffCanvas(sId, tId, edge.sourceUrn, edge.targetUrn, edge.edgeType ? [edge.edgeType] : [], 1)
         }
       })
 
@@ -602,7 +697,7 @@ export function useEdgeProjection({
       const now = Date.now()
       if (now - lastWarnAtRef.current > 1000) {
         lastWarnAtRef.current = now
-        console.warn(`[useEdgeProjection] ${unresolvedThisPass} edges hidden — endpoints unresolvable via displayMap/ancestorMap/urnToIdMap`)
+        console.warn(`[useEdgeProjection] ${unresolvedThisPass} flows lead outside this view — nothing drawn holds their far end`)
       }
     }
 
@@ -780,7 +875,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap])
 
   const projectedEdges = projection.edges
 

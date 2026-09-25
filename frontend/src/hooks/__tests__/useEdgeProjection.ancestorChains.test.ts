@@ -110,14 +110,15 @@ describe('useEdgeProjection — ends filed under their chain', () => {
     expect(res.lines[0].isGhost).toBeFalsy()
   })
 
-  it('leaves an end unresolved when its chain is unknown or reaches nothing on canvas', () => {
+  it('counts an end outside only once its chain reaches nothing on canvas; one not answered yet is pending', () => {
     const res = run({
       roots: [hNode('fact')],
       edges: [edge('e1', 'fact', 'no-chain'), edge('e2', 'fact', 'elsewhere')],
       chains: { elsewhere: ['other-schema', 'other-platform'] },
     })
     expect(res.lines).toHaveLength(0)
-    expect(res.unresolvedEdgeCount).toBe(2)
+    expect(res.unresolvedEdgeCount).toBe(1)
+    expect([...res.offCanvasByNode.get('fact')!.outPartners]).toEqual(['elsewhere'])
   })
 
   it('draws no line when both ends land in the same container — and says so', () => {

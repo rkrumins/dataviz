@@ -9,7 +9,8 @@
  * 2. `hiddenEdgeTypes` is applied per GROUP MEMBER: a bundle whose members all
  *    carry only hidden types disappears; a mixed bundle keeps a reduced
  *    `edgeCount` and loses the hidden type from `types`. Grouping itself is
- *    untouched, and hiding never moves `unresolvedEdgeCount`.
+ *    untouched. A hidden type's flows that leave the view leave
+ *    `unresolvedEdgeCount` too, as they leave the stubs.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
@@ -258,7 +259,7 @@ describe('useEdgeProjection — hidden connection types', () => {
     expect(bundles(res)[0].types).toEqual(['FLOWS_TO'])
   })
 
-  it('hiding a type does not change unresolvedEdgeCount', () => {
+  it('hiding a type takes its flows out of unresolvedEdgeCount, as out of the stubs', () => {
     const edges = [
       edge('e1', 'a', 'b', 'FLOWS_TO'),
       edge('e2', 'a', 'ghost', 'DERIVES_FROM'),  // target unresolved → counted
@@ -270,7 +271,7 @@ describe('useEdgeProjection — hidden connection types', () => {
       hiddenEdgeTypes: new Set(['FLOWS_TO', 'DERIVES_FROM']),
     })
     expect(before.unresolvedEdgeCount).toBe(1)
-    expect(after.unresolvedEdgeCount).toBe(1)
+    expect(after.unresolvedEdgeCount).toBe(0)
     expect(after.visibleLineageEdges).toHaveLength(0)
   })
 
