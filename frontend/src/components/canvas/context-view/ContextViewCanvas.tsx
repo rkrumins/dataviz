@@ -824,7 +824,7 @@ export function ContextViewCanvas({
   const { holderEdges, fetchHolders } = useHolderRollups(lineageGranularity)
   // And a selected collapsed container's, all of them (see the selection
   // effects below).
-  const { containerEdges, fetchContainerRollups } = useContainerRollups(lineageGranularity)
+  const { containerEdges, containerPartial, fetchContainerRollups } = useContainerRollups(lineageGranularity)
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
   // when the visible container set (and so the URN key) hasn't changed. Scoped
   // to this canvas's provider, so an invalidation aimed at one graph (a node
@@ -4929,18 +4929,19 @@ export function ContextViewCanvas({
   // anchored column's rows that are not drawn is in the view too: it plugs
   // in on the side facing that column (unloadedColumnLines). Lineage whose
   // far end has no known place yet (unplacedLines), or read only in part
-  // (partialLines), is held: solid on the conventional side, never hollow.
-  // Browse only, as the stubs are — a trace's wires are its own.
+  // (partialLines: a row's flows, or a selected container's roll-ups), is
+  // held: solid on the conventional side, never hollow. Browse only, as the
+  // stubs are — a trace's wires are its own.
   const lineagePartial = useCanvasStore((s) => s.lineagePartial)
   const nodePorts = useMemo(() => {
     const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
     return buildNodePorts(
       overlay.active ? visibleLineageEdges
         : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode),
-          ...partialLines(lineagePartial)],
+          ...partialLines(lineagePartial), ...partialLines(containerPartial)],
       (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
     )
-  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, nodeLayerIndexMap, sortedLayers])
+  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, nodeLayerIndexMap, sortedLayers])
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()

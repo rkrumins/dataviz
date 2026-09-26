@@ -17,7 +17,9 @@
  * once. An invalidation keeps them until a fresh answer replaces them, and
  * the next ask asks again. A leg that fails — an older server cannot answer
  * the in-direction — costs only that leg, and is asked again next time; a
- * cut-short answer is kept and asked again next time.
+ * cut-short answer is kept and asked again next time, and meanwhile its
+ * container is `containerPartial` that way: what the cut left out may be in
+ * the view, so the card is never hollow on it.
  */
 import { useCallback, useRef, useState } from 'react'
 
@@ -29,6 +31,7 @@ import { useAggregatedEdgesCacheVersion } from './useAggregatedLineage'
 const CHUNK_SIZE = 500
 
 const NONE: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
+const WHOLE: { in: ReadonlySet<string>; out: ReadonlySet<string> } = { in: new Set(), out: new Set() }
 
 type Way = 'in' | 'out'
 
@@ -37,8 +40,9 @@ interface ContainerLedger {
   graph: string
   /** The cache version the answers were asked at. */
   version: number
-  /** Per container and direction (`legKey`): its cells, and whose they are. */
-  legs: Map<string, { urn: string; cells: AggregatedEdgeInfo[] }>
+  /** Per container and direction (`legKey`): its cells, whose they are,
+   *  and whether the answer was cut short. */
+  legs: Map<string, { urn: string; way: Way; cells: AggregatedEdgeInfo[]; cut: boolean }>
   /** Legs answered in full at `version`: not asked again. */
   answered: Set<string>
   /** Legs out now: not asked twice. */
@@ -58,6 +62,8 @@ function chunked(urns: string[]): string[][] {
 
 export function useContainerRollups(granularity: string | null): {
   containerEdges: ReadonlyMap<string, AggregatedEdgeInfo>
+  /** Containers whose roll-ups that way came back cut short. */
+  containerPartial: { in: ReadonlySet<string>; out: ReadonlySet<string> }
   /** Ask about `asks` (URNs, per direction), and drop the containers `kept`
    *  no longer holds: those no longer drawn closed. */
   fetchContainerRollups: (asks: { out: readonly string[]; in: readonly string[] }, kept: (urn: string) => boolean) => Promise<void>
@@ -66,6 +72,7 @@ export function useContainerRollups(granularity: string | null): {
   const cacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
   const graph = `${provider?.scopeKey ?? ''}:${granularity}`
   const [containerEdges, setContainerEdges] = useState<ReadonlyMap<string, AggregatedEdgeInfo>>(NONE)
+  const [containerPartial, setContainerPartial] = useState(WHOLE)
 
   const ledgerRef = useRef<ContainerLedger>(emptyLedger('', 0))
   // The latest `kept`: an answer that lands after a container was opened
@@ -79,8 +86,13 @@ export function useContainerRollups(granularity: string | null): {
     keptRef.current = kept
     const publish = (ledger: ContainerLedger) => {
       const cells = new Map<string, AggregatedEdgeInfo>()
-      ledger.legs.forEach(leg => leg.cells.forEach(c => cells.set(c.id, c)))
+      const partial = { in: new Set<string>(), out: new Set<string>() }
+      ledger.legs.forEach(leg => {
+        leg.cells.forEach(c => cells.set(c.id, c))
+        if (leg.cut) partial[leg.way].add(leg.urn)
+      })
       setContainerEdges(cells.size > 0 ? cells : NONE)
+      setContainerPartial(partial.in.size + partial.out.size > 0 ? partial : WHOLE)
     }
 
     let ledger = ledgerRef.current
@@ -129,7 +141,9 @@ export function useContainerRollups(granularity: string | null): {
         const key = legKey(way, urn)
         ledger.legs.set(key, {
           urn,
+          way,
           cells: answer.aggregatedEdges.filter(c => (way === 'out' ? c.sourceUrn : c.targetUrn) === urn),
+          cut: !!answer.truncated,
         })
         if (!answer.truncated && ledger.version === version) ledger.answered.add(key)
       }
@@ -137,5 +151,5 @@ export function useContainerRollups(granularity: string | null): {
     publish(ledger)
   }, [provider, graph, cacheVersion, granularity])
 
-  return { containerEdges, fetchContainerRollups }
+  return { containerEdges, containerPartial, fetchContainerRollups }
 }

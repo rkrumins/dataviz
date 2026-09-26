@@ -22,6 +22,7 @@ import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { anchoredPortsEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
+import type { AggregatedEdgeRequest, GraphDataProvider } from '@/providers/GraphDataProvider'
 
 vi.mock('@/hooks/useRevealPartners', async (original) => ({
   ...(await original<typeof import('@/hooks/useRevealPartners')>()),
@@ -141,5 +142,32 @@ describe('selecting a collapsed container', () => {
     act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
 
     await waitFor(() => expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'beyond:out' }), { timeout: 8000 })
+  }, 30_000)
+
+  it('an answer cut short never makes it hollow: what it left out may be in the view', async () => {
+    const estate = anchoredPortsEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      aggregatedCells: [rollUp('SRC.DB_A', 'far', 1)],
+      // Its own roll-ups out come back at the server's cap.
+      wrapProvider: (p: GraphDataProvider) => ({
+        ...p,
+        getAggregatedEdges: async (req: AggregatedEdgeRequest) => {
+          const answer = await p.getAggregatedEdges(req)
+          return req.targetUrns === undefined ? { ...answer, truncated: true, truncationReason: null } : answer
+        },
+      }) as GraphDataProvider,
+    })
+    await waitFor(() => expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' }), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['SRC.DB_A'], []]), { timeout: 8000 })
+    await h.settle()
+    await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
+    expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
   }, 30_000)
 })

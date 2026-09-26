@@ -95,14 +95,15 @@ describe('LayerColumn — lineage ports', () => {
     expect(port('b', 'right')).toBeNull()
   })
 
-  it('a card is hollow only for flows the canvas placed outside; a total alone makes it solid', () => {
+  it('a card is hollow only when the flows the canvas placed outside are all it counted', () => {
     renderColumn(new Map(), undefined, {
-      totals: new Map([['a', { in: 0, out: 5 }], ['b', { in: 0, out: 5 }]]),
-      outside: new Map([['a', { in: 0, out: 2 }]]),
+      totals: new Map([['a', { in: 0, out: 2 }], ['b', { in: 0, out: 5 }]]),
+      outside: new Map([['a', { in: 0, out: 2 }], ['b', { in: 0, out: 2 }]]),
     })
     expect(port('a', 'right')!.dataset.port).toBe('beyond')
     // The tip counts what leads outside, not the total.
     expect(port('a', 'right')!.dataset.out).toBe('2')
+    // Two of its five placed outside: the other three may be in the view.
     expect(port('b', 'right')!.dataset.port).toBe('lineage')
     expect(port('b', 'left')).toBeNull()
   })

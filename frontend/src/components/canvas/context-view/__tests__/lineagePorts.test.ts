@@ -68,11 +68,21 @@ describe('portView — what each side shows', () => {
   })
 
   it('hollow only for lineage the canvas placed outside the view', () => {
-    expect(portView('left', undefined, { in: 12, out: 0 }, false, { in: 3, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+    expect(portView('left', undefined, { in: 12, out: 0 }, false, { in: 12, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
     // Confirmed, it needs no total.
     expect(portView('right', undefined, undefined, false, { in: 0, out: 2 })).toEqual({ kind: 'beyond', dir: 'out' })
     // The other direction's outside says nothing about this one.
     expect(portView('right', undefined, { in: 12, out: 1 }, false, { in: 3, out: 0 })).toEqual({ kind: 'lineage', dir: 'out' })
+  })
+
+  it('hollow only when what it placed outside accounts for everything it counted that way', () => {
+    // Two flows in, one placed outside: the other is somewhere the canvas
+    // has not read — a partner pruned with a collapse, a member not primed.
+    expect(portView('left', undefined, { in: 2, out: 0 }, false, { in: 1, out: 0 })).toEqual({ kind: 'lineage', dir: 'in' })
+    expect(portView('left', undefined, { in: 2, out: 0 }, false, { in: 2, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+    // Roll-up cells it holds that way count as lineage placed nowhere yet.
+    expect(portView('right', undefined, { in: 0, out: 1, rollupIn: 0, rollupOut: 1 }, false, { in: 0, out: 1 }))
+      .toEqual({ kind: 'lineage', dir: 'out' })
   })
 
   it('no marker for a direction the canvas already shows', () => {

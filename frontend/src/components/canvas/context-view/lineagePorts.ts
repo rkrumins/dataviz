@@ -24,7 +24,9 @@
  * are — a row past a page, a row inside the card, a member of the same
  * group — so none of them makes a port HOLLOW. Only the canvas placing that
  * direction's flows outside the view does (`outside`), and then only while
- * nothing of that direction is in it.
+ * nothing of that direction is in it, and only when those flows are all it
+ * counted that way: a flow the canvas never read (pruned with a collapse, a
+ * group member not read, roll-up cells not asked for) may be in the view.
  *
  * An UNKNOWN total (not fetched yet, or its query failed) is never read as
  * zero, nor as some. Once counting has FAILED, and nothing else says the
@@ -144,7 +146,7 @@ export function portView(
   const placedOutside = outside?.[dir] ?? 0
   const counted = (total?.[dir] ?? 0) + ((dir === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
   if (drawn === 0) {
-    if (placedOutside > 0 && held + (ports?.delegated[dir] ?? 0) === 0) return { kind: 'beyond', dir }
+    if (placedOutside > 0 && placedOutside >= counted && held + (ports?.delegated[dir] ?? 0) === 0) return { kind: 'beyond', dir }
     // A line standing aside for its children's is theirs to show.
     if (placedOutside + held + counted > 0) return { kind: 'lineage', dir }
   }

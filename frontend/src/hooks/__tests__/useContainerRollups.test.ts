@@ -113,6 +113,34 @@ describe('useContainerRollups — what it keeps', () => {
     expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-far', 'agg-C-s9', 'agg-up-C'])
   })
 
+  it('a cut-short answer is kept, and says that way is known only in part until a whole one comes', async () => {
+    let cut = true
+    graph(FLOWS)
+    const answer = (holder.current as { getAggregatedEdges: (req: Ask) => Promise<Record<string, unknown>> }).getAggregatedEdges
+    holder.current = {
+      ...holder.current,
+      getAggregatedEdges: async (req: Ask) => ({ ...(await answer(req)), truncated: cut && req.sourceUrns.length > 0 }),
+    }
+    const hook = render()
+    await ask(hook, { out: ['C'], in: ['C'] })
+    expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-far', 'agg-C-s9', 'agg-up-C'])
+    expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
+    expect(hook.result.current.containerPartial.in.size).toBe(0)
+
+    cut = false
+    await ask(hook, { out: ['C'] })
+    expect(hook.result.current.containerPartial.out.size).toBe(0)
+
+    // One no longer drawn closed is nothing's partial answer.
+    cut = true
+    act(() => invalidateAggregatedEdgesForScope(SCOPE))
+    hook.rerender({ g: 'dataset' })
+    await ask(hook, { out: ['C'] })
+    expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
+    await ask(hook, {}, urn => urn !== 'C')
+    expect(hook.result.current.containerPartial.out.size).toBe(0)
+  })
+
   it('a container no longer drawn closed takes its cells, and asks nothing', async () => {
     const asks = graph(FLOWS)
     const hook = render()

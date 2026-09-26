@@ -213,3 +213,44 @@ describe('a card whose roll-up check failed', () => {
     expect(asks).toBe(2)
   }, 30_000)
 })
+
+describe('hollow only when the flows placed outside are all it counted', () => {
+  it('a row whose in-view partner was pruned with a collapse stays solid', async () => {
+    const h = await renderCanvasWithTrace(anchoredPortsEstate(), {
+      focus: 'SRC.raw_orders',
+      browseHolds: holds(),
+      ancestorChains: true,
+      nodeDegrees: { rpt: { in: 2, out: 0 }, 'SRC.DB_B.t2': { in: 0, out: 1 }, 'SRC.DB_B': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      flows: [{ sourceUrn: 'SRC.DB_B.t2', targetUrn: 'rpt' }, { sourceUrn: 'far', targetUrn: 'rpt' }],
+    })
+    await h.toggle('SRC.DB_B')
+    await waitFor(() => expect(h.visibleCardIds()).toContain('SRC.DB_B.t2'), { timeout: 8000 })
+    act(() => { useCanvasStore.getState().selectNode('rpt') })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_B.t2', target: 'rpt' }), { timeout: 8000 })
+    act(() => { useCanvasStore.getState().clearSelection() })
+    await h.settle()
+
+    // Collapsing SRC.DB_B drops its row's flow to rpt; the one from `far`
+    // is all the canvas still holds, and it is not all rpt has.
+    await h.toggle('SRC.DB_B')
+    await waitFor(() => {
+      expect(useCanvasStore.getState().edges.map(e => e.id)).not.toContain('f:SRC.DB_B.t2>rpt')
+    }, { timeout: 8000 })
+    await settled(h)
+    expect(ports('rpt').left).toBe('lineage:in')
+  }, 40_000)
+
+  it('a closed group one of whose members reaches outside, and the other somewhere unread, stays solid', async () => {
+    const h = await renderCanvasWithTrace(groupedEstate(), {
+      focus: 'solo',
+      nodeDegrees: { 'g.a': { in: 0, out: 1 }, 'g.b': { in: 0, out: 2 } },
+    })
+    // g.a's one flow leads outside the view; g.b's two were never read.
+    act(() => { useCanvasStore.getState().addGraph([], [flow('g.a', 'elsewhere')] as never) })
+    await waitFor(() => expect(ports('g.a').right).toBe('beyond:out'), { timeout: 8000 })
+
+    await h.toggle('logical:grp')
+    await settled(h)
+    expect(ports('logical:grp').right).toBe('lineage:out')
+  }, 30_000)
+})
