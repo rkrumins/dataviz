@@ -23,8 +23,13 @@
  * Flows are counted by type, never the stored :AGGREGATED roll-up cells.
  * Whether a card holds roll-up cells is asked for besides
  * (`includeRollups`): that is how a collapsed container whose lineage all
- * sits below it says it has some. A server that ignores the flag answers
- * flows alone.
+ * sits below it says it has some. The server leaves those flags out when
+ * its check for them failed, and keeps the flows it counted: such a URN
+ * keeps its flows, and the flags it had, in `totals`, and is in `failed`,
+ * asked again on the backoff like one left out, until the flags come back.
+ * A roll-up rebuild (the aggregated cache version) can change them for
+ * every card, so it asks every card again, keeping each total until the
+ * new answer replaces it.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { lookupRetryDelayMs } from '@/config/polling'
@@ -32,6 +37,7 @@ import { useGraphProvider } from '@/providers'
 import type { NodeDegree } from '@/providers/GraphDataProvider'
 import { useCanvasStore, useCanvasVersion } from '@/store/canvas'
 import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
+import { useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 
 const CHUNK_SIZE = 400
 const SETTLE_MS = 800
@@ -41,10 +47,15 @@ type Degree = NodeDegree
 const NO_TOTALS: ReadonlyMap<string, Degree> = new Map()
 const NONE_FAILED: ReadonlySet<string> = new Set()
 
+/** Answered in full: its flows, and whether it holds roll-up cells. */
+const whole = (d: Degree | undefined): boolean =>
+  !!d && d.rollupIn !== undefined && d.rollupOut !== undefined
+
 export interface ExternalDegrees {
   totals: ReadonlyMap<string, Degree>
-  /** URNs whose count failed or came back absent — being asked again.
-   *  Each leaves the set when it is answered. */
+  /** URNs whose count failed or came back absent, or without the roll-up
+   *  flags asked for — being asked again. Each leaves the set when it is
+   *  answered in full. */
   failed: ReadonlySet<string>
 }
 
@@ -56,14 +67,17 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
     [lineageEdgeTypes],
   )
   const canvasVersion = useCanvasVersion()
+  const cacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
   const [totals, setTotals] = useState<ReadonlyMap<string, Degree>>(NO_TOTALS)
   const [failed, setFailed] = useState<ReadonlySet<string>>(NONE_FAILED)
   // The provider that answered 501. Keyed on it, so a switch clears it.
   const [unsupportedBy, setUnsupportedBy] = useState<unknown>(null)
   // Bumped when a retry is due, to run the settle again.
   const [wake, setWake] = useState(0)
-  // Asked for (or answered): never asked again. Cleared per URN to retry.
+  // Asked for (or answered): never asked again. Cleared per URN to retry,
+  // and for all of them when a roll-up rebuild moves the cache version.
   const askedRef = useRef<Set<string>>(new Set())
+  const askedAtRef = useRef(cacheVersion)
   const failuresRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   // Bumped on a provider switch. A total is a fact about ONE graph: an
@@ -91,6 +105,10 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
   useEffect(() => {
     if (!supported) return
     const timer = setTimeout(async () => {
+      if (askedAtRef.current !== cacheVersion) {
+        askedAtRef.current = cacheVersion
+        askedRef.current = new Set()
+      }
       const urns = useCanvasStore.getState().nodes
         .map(n => n.id)
         .filter(id => id && !id.startsWith('logical:') && !askedRef.current.has(id))
@@ -120,10 +138,14 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
           break
         }
         if (generation !== generationRef.current) return
-        for (const urn of chunk) (res[urn] ? answered : missed).push(urn)
+        for (const urn of chunk) (whole(res[urn]) ? answered : missed).push(urn)
         setTotals(prev => {
           const next = new Map(prev)
-          for (const [urn, d] of Object.entries(res)) next.set(urn, d)
+          for (const [urn, d] of Object.entries(res)) {
+            // Flags left out: the ones it had stand until the retry.
+            const had = prev.get(urn)
+            next.set(urn, had && !whole(d) ? { rollupIn: had.rollupIn, rollupOut: had.rollupOut, ...d } : d)
+          }
           return next
         })
       }
@@ -145,7 +167,7 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
       }
     }, SETTLE_MS)
     return () => clearTimeout(timer)
-  }, [supported, provider, flowTypes, canvasVersion, wake])
+  }, [supported, provider, flowTypes, canvasVersion, cacheVersion, wake])
 
   return { totals, failed }
 }

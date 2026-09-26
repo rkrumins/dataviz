@@ -3,15 +3,18 @@
  * be counted.
  *
  * An answer is kept whatever the canvas does while it is in flight; only a
- * provider switch drops it. A URN the server left out, or whose request
- * failed, is reported as failed and asked again on the hook's own backoff,
- * with no canvas change needed. A pass stops at its first failed chunk. A
- * reader that cannot count (501) is left alone and nothing reads as failed.
+ * provider switch drops it. A URN the server left out, or answered without
+ * the roll-up flags asked for, or whose request failed, is reported as
+ * failed and asked again on the hook's own backoff, with no canvas change
+ * needed. A roll-up rebuild asks every card again. A pass stops at its first
+ * failed chunk. A reader that cannot count (501) is left alone and nothing
+ * reads as failed.
  */
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useCanvasStore } from '@/store/canvas'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 
 const holder: { current: Record<string, unknown> } = { current: {} }
 vi.mock('@/providers', async (original) => ({
@@ -25,7 +28,7 @@ vi.mock('@/hooks/useViewSchema', () => ({ useViewLineageEdgeTypes: () => LINEAGE
 
 import { useExternalDegrees } from '../useExternalDegrees'
 
-type Degrees = Record<string, { in: number; out: number }>
+type Degrees = Record<string, { in: number; out: number; rollupIn?: number; rollupOut?: number }>
 
 const node = (id: string) => ({ id, type: 'entity', position: { x: 0, y: 0 }, data: { urn: id } })
 
@@ -35,7 +38,9 @@ function seed(version: number, ids: string[]) {
   })
 }
 
-const counted = (urns: string[]): Degrees => Object.fromEntries(urns.map(u => [u, { in: 1, out: 2 }]))
+// As the server answers when roll-up presence is asked for: flows, and the flags.
+const COUNT = { in: 1, out: 2, rollupIn: 0, rollupOut: 0 }
+const counted = (urns: string[]): Degrees => Object.fromEntries(urns.map(u => [u, COUNT]))
 
 function deferred<T>() {
   let resolve!: (v: T) => void
@@ -72,7 +77,7 @@ describe('useExternalDegrees — answers are kept', () => {
     // Flows by type, never the roll-up cells as flows; whether a container
     // holds cells is asked for on its own.
     expect(getNodeDegrees.mock.calls[0]).toEqual([['a', 'b'], ['FLOWS_TO'], { includeRollups: true }])
-    expect(result.current.totals.get('a')).toEqual({ in: 1, out: 2 })
+    expect(result.current.totals.get('a')).toEqual(COUNT)
     expect(result.current.failed.size).toBe(0)
 
     seed(2, ['a', 'b', 'c'])
@@ -94,8 +99,8 @@ describe('useExternalDegrees — answers are kept', () => {
     seed(2, ['a', 'b', 'c'])
     await act(async () => { pending.resolve(counted(['a', 'b'])) })
     await settle()
-    expect(result.current.totals.get('a')).toEqual({ in: 1, out: 2 })
-    expect(result.current.totals.get('b')).toEqual({ in: 1, out: 2 })
+    expect(result.current.totals.get('a')).toEqual(COUNT)
+    expect(result.current.totals.get('b')).toEqual(COUNT)
   })
 
   it('the chunks after a canvas change are still asked', async () => {
@@ -130,24 +135,64 @@ describe('useExternalDegrees — answers are kept', () => {
     await act(async () => { stale.resolve({ a: { in: 99, out: 99 } }) })
     await settle()
     expect(after.getNodeDegrees).toHaveBeenCalledTimes(1)
-    expect(result.current.totals.get('a')).toEqual({ in: 1, out: 2 })
+    expect(result.current.totals.get('a')).toEqual(COUNT)
   })
 })
 
 describe('useExternalDegrees — roll-up presence', () => {
-  it('keeps whether a container holds roll-up cells, and a server that does not say is fine', async () => {
+  it('keeps whether a container holds roll-up cells', async () => {
     const getNodeDegrees = vi.fn(async () => ({
       a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 },
-      // A server from before the flag answers flows alone.
-      b: { in: 1, out: 2 },
+      b: COUNT,
     }))
     holder.current = { getNodeDegrees }
 
     const { result } = render()
     await settle()
     expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
-    expect(result.current.totals.get('b')).toEqual({ in: 1, out: 2 })
+    expect(result.current.totals.get('b')).toEqual(COUNT)
     expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a card answered without its flags keeps its flows, reads as failed, and is asked again', async () => {
+    // The server's roll-up check failed: flows counted, flags left out.
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(async () => ({ a: { in: 0, out: 0 }, b: { in: 1, out: 2, rollupOut: 0 } }))
+      .mockImplementation(async () => ({ a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, b: COUNT }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0 })
+    expect(result.current.totals.get('b')).toEqual({ in: 1, out: 2, rollupOut: 0 })
+    expect([...result.current.failed].sort()).toEqual(['a', 'b'])
+
+    await pastFirstRetry()
+    await settle()
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['a', 'b'])
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a roll-up rebuild asks every card again, and keeps what it knew until then', async () => {
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(async () => ({ a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, b: COUNT }))
+      // The fresh check fails for `a`: its flags are the ones it had.
+      .mockImplementationOnce(async () => ({ a: { in: 0, out: 0 }, b: { ...COUNT, rollupIn: 1 } }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+
+    act(() => { invalidateAggregatedEdges() })
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['a', 'b'])
+    expect(result.current.totals.get('b')).toEqual({ ...COUNT, rollupIn: 1 })
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect([...result.current.failed]).toEqual(['a'])
   })
 })
 
@@ -166,7 +211,7 @@ describe('useExternalDegrees — what could not be counted', () => {
     await pastFirstRetry()
     await settle()
     expect(getNodeDegrees.mock.calls[1][0]).toEqual(['b'])
-    expect(result.current.totals.get('b')).toEqual({ in: 1, out: 2 })
+    expect(result.current.totals.get('b')).toEqual(COUNT)
     expect(result.current.failed.size).toBe(0)
   })
 

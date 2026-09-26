@@ -120,9 +120,16 @@ describe('portView — a card whose lineage could not be counted', () => {
     expect(portView('left', held.get('rep'), undefined, true)).toBeNull()
   })
 
-  it('never once its total is known', () => {
-    expect(portView('left', undefined, { in: 0, out: 0 }, true)).toBeNull()
+  it('never once its total says it has lineage', () => {
     expect(portView('left', undefined, { in: 3, out: 0 }, true)).toEqual({ kind: 'lineage', dir: 'in' })
+    expect(portView('right', undefined, { in: 3, out: 0 }, true)).toBeNull()
+    expect(portView('left', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, true)).toBeNull()
+  })
+
+  it('a total whose roll-up check failed says nothing yet: unknown while nothing else does', () => {
+    // Flows counted, none; whether it holds roll-up cells, not known.
+    expect(portView('left', undefined, { in: 0, out: 0 }, true)).toEqual({ kind: 'unknown', dir: 'both' })
+    expect(portView('left', undefined, { in: 0, out: 0 })).toBeNull()
   })
 })
 
@@ -254,6 +261,25 @@ describe('portTotals — what each card reads for the lineage it has no line for
     const nothingKnown = portTotals(roots, new Map([['a', { in: 0, out: 0 }]]), new Set(['b']), closed)
     expect(nothingKnown.totals.has('logical:g')).toBe(false)
     expect(nothingKnown.failed.has('logical:g')).toBe(true)
+  })
+
+  it("a member whose roll-up check failed still lends the group the flows it counted", () => {
+    const roots = [group('logical:g', [entity('a'), entity('b')])]
+    const counted = portTotals(roots, new Map([['a', { in: 0, out: 2 }], ['b', { in: 0, out: 0 }]]), new Set(['a']), closed)
+    expect(counted.totals.get('logical:g')).toEqual({ in: 0, out: 2, rollupIn: 0, rollupOut: 0 })
+    expect(counted.failed.has('logical:g')).toBe(false)
+    const none = portTotals(roots, new Map([['a', { in: 0, out: 0 }], ['b', { in: 0, out: 0 }]]), new Set(['a']), closed)
+    expect(none.failed.has('logical:g')).toBe(true)
+  })
+
+  it('an open container reads its own flows alone, so a failed roll-up check leaves it counted', () => {
+    const open = (id: string) => id === 'box'
+    const { totals, failed } = portTotals([entity('box', [entity('box.t')])],
+      new Map([['box', { in: 0, out: 0 }]]), new Set(['box']), open)
+    expect(totals.get('box')).toEqual({ in: 0, out: 0 })
+    expect(failed.has('box')).toBe(false)
+    // Closed, whether it holds cells is what it has to say.
+    expect(portTotals([entity('box')], new Map([['box', { in: 0, out: 0 }]]), new Set(['box']), closed).failed.has('box')).toBe(true)
   })
 
   it('an open group, or an open container, leaves it to what it holds', () => {

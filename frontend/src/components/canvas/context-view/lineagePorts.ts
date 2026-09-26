@@ -30,7 +30,9 @@
  * zero, nor as some. Once counting has FAILED, and nothing else says the
  * card has lineage, the port says just that: UNKNOWN, on both sides, in
  * neither direction colour, until a retry counts it. Not while the first
- * count is still on its way — every card would flash.
+ * count is still on its way — every card would flash. A total whose roll-up
+ * check failed is counted only in part: its flows say what they say, and
+ * with none, whether it holds roll-up cells is still unknown.
  */
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import type { NodeDegree } from '@/providers/GraphDataProvider'
@@ -146,11 +148,12 @@ export function portView(
     // A line standing aside for its children's is theirs to show.
     if (placedOutside + held + counted > 0) return { kind: 'lineage', dir }
   }
-  if (!unknown || total) return null
+  if (!unknown) return null
   // Its count failed: unknown, unless anything else says it has lineage.
   const anything = sideVolume(ports, 'left') + sideVolume(ports, 'right')
     + (ports ? ports.delegated.in + ports.delegated.out + ports.held.in + ports.held.out : 0)
-    + (outside ? outside.in + outside.out : 0) > 0
+    + (outside ? outside.in + outside.out : 0)
+    + (total ? total.in + total.out + (total.rollupIn ?? 0) + (total.rollupOut ?? 0) : 0) > 0
   return anything ? null : { kind: 'unknown', dir: 'both' }
 }
 
@@ -165,9 +168,13 @@ const NO_TOTALS: ReadonlyMap<string, NodeDegree> = new Map()
  *
  * A logical group is no entity, so the server has no total for it. Closed,
  * it stands for its members (and a nested group's): its total is theirs,
- * summed. A member's lineage is the group's at once; with none found, it
- * waits for every member, and is unknown when one's count failed. Open, its
- * members speak for themselves.
+ * summed. A member's lineage is the group's at once — flows counted by a
+ * member whose roll-up check failed too; with none found, it waits for
+ * every member, and is unknown when one's count failed. Open, its members
+ * speak for themselves.
+ *
+ * An open container reads its own flows alone, so a total with its flows
+ * counted is its whole answer, whatever its roll-up check did.
  */
 export function portTotals<N extends { id: string; isLogical?: boolean; children: readonly N[] }>(
   roots: Iterable<N>,
@@ -176,8 +183,12 @@ export function portTotals<N extends { id: string; isLogical?: boolean; children
   isOpen: (id: string) => boolean,
 ): { totals: ReadonlyMap<string, NodeDegree>; failed: ReadonlySet<string> } {
   const read = new Map<string, NodeDegree>()
+  // Open and counted: not unknown, whatever its roll-up check did.
+  const counted = new Set<string>()
   totals.forEach((t, id) => {
-    read.set(id, isOpen(id) && (t.rollupIn !== undefined || t.rollupOut !== undefined) ? { in: t.in, out: t.out } : t)
+    if (!isOpen(id)) { read.set(id, t); return }
+    read.set(id, t.rollupIn !== undefined || t.rollupOut !== undefined ? { in: t.in, out: t.out } : t)
+    if (failed.has(id)) counted.add(id)
   })
   const failedGroups: string[] = []
   const sum = (group: N): NodeDegree | 'unknown' | undefined => {
@@ -185,7 +196,9 @@ export function portTotals<N extends { id: string; isLogical?: boolean; children
     let unknown = false
     let uncounted = false
     for (const member of group.children) {
-      const t = member.isLogical ? sum(member) : failed.has(member.id) ? 'unknown' : totals.get(member.id)
+      const own = totals.get(member.id)
+      const t = member.isLogical ? sum(member)
+        : failed.has(member.id) && !(own && own.in + own.out > 0) ? 'unknown' : own
       if (t === 'unknown') unknown = true
       else if (t === undefined) uncounted = true
       else {
@@ -204,7 +217,8 @@ export function portTotals<N extends { id: string; isLogical?: boolean; children
   for (const root of roots) if (root.isLogical) sum(root)
   return {
     totals: read.size > 0 ? read : NO_TOTALS,
-    failed: failedGroups.length > 0 ? new Set([...failed, ...failedGroups]) : failed,
+    failed: failedGroups.length > 0 || counted.size > 0
+      ? new Set([...failed, ...failedGroups].filter(id => !counted.has(id))) : failed,
   }
 }
 

@@ -16,6 +16,7 @@ import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { anchoredPortsEstate, groupedEstate, splitChildEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
+import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 
 beforeEach(() => {
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
@@ -180,5 +181,35 @@ describe('lineage that stays inside what the card stands for', () => {
     }, { timeout: 8000 })
     await settled(h)
     expect(ports('P')).toEqual({ left: null, right: 'lineage:out' })
+  }, 30_000)
+})
+
+describe('a card whose roll-up check failed', () => {
+  it('a closed container answered without its flags says unknown, then what it holds once asked again', async () => {
+    let asks = 0
+    await renderCanvasWithTrace(anchoredPortsEstate(), {
+      focus: 'SRC.raw_orders',
+      browseHolds: holds(),
+      ancestorChains: true,
+      // Its lineage all runs through its rows: no flow of its own.
+      nodeDegrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 1, rollupOut: 0 } },
+      // The server's roll-up check fails the first time: the flows it
+      // counted come back, the flags do not.
+      wrapProvider: (p: GraphDataProvider) => ({
+        ...p,
+        getNodeDegrees: async (urns: string[], types?: string[], options?: { includeRollups?: boolean }) => {
+          const answer = await p.getNodeDegrees!(urns, types, options)
+          if (!urns.includes('SRC.DB_A') || asks++ > 0) return answer
+          return { ...answer, 'SRC.DB_A': { in: 0, out: 0 } }
+        },
+      }) as GraphDataProvider,
+    })
+    await waitFor(() => {
+      expect(ports('SRC.DB_A')).toEqual({ left: 'unknown:both', right: 'unknown:both' })
+    }, { timeout: 8000 })
+    await waitFor(() => {
+      expect(ports('SRC.DB_A')).toEqual({ left: 'lineage:in', right: null })
+    }, { timeout: 8000 })
+    expect(asks).toBe(2)
   }, 30_000)
 })
