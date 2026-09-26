@@ -37,7 +37,8 @@ export function useEntityEditing(): EntityEditing {
 
   const offered = versioningEnabled && editModeEnabled && !readOnly
   if (inDraft) return { offered, blocked: null }
-  // No versioned graph (the lookup 404s), or one still being set up.
-  const unversioned = resolve.isError || !!resolve.data?.bootstrap
+  // No versioned graph (the lookup 404s — and says so while it is tried again on a new mount), or
+  // one still being set up.
+  const unversioned = resolve.isError || !!resolve.failureReason || !!resolve.data?.bootstrap
   return { offered, blocked: unversioned ? NO_VERSION_CONTROL : NO_DRAFT }
 }

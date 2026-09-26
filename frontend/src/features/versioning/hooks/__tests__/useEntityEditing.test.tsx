@@ -14,7 +14,9 @@ import { NO_DRAFT, NO_VERSION_CONTROL, useEntityEditing } from '../useEntityEdit
 
 let flags: Record<string, boolean>
 let readOnly: boolean
-let resolve: { data?: { graphId: string; bootstrap?: unknown }; isError: boolean }
+let resolve: {
+    data?: { graphId: string; bootstrap?: unknown }; isError: boolean; failureReason?: Error | null
+}
 
 vi.mock('@/store/features', () => ({ useFeature: (key: string) => flags[key] ?? false }))
 vi.mock('@/store/schema', () => ({
@@ -63,6 +65,12 @@ describe('useEntityEditing', () => {
         resolve = { isError: true }
         const { result } = renderHook(() => useEntityEditing())
         expect(result.current).toEqual({ offered: true, blocked: NO_VERSION_CONTROL })
+    })
+
+    it('keeps saying so while the lookup that failed is tried again', () => {
+        resolve = { isError: false, failureReason: new Error('no versioned graph for data source') }
+        const { result } = renderHook(() => useEntityEditing())
+        expect(result.current.blocked).toBe(NO_VERSION_CONTROL)
     })
 
     it('says so while version control is still being set up', () => {
