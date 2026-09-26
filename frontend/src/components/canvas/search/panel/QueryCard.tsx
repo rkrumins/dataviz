@@ -73,6 +73,7 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
+import type { CodeKind } from './AddFilterPalette'
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
@@ -141,13 +142,13 @@ export const QueryCard: FC<QueryCardProps> = ({
     const [mode, setMode] = useState<ViewMode>('visual')
 
     /**
-     * Code-only palette entries (path, withinHops) hand off to the
+     * Code-only palette entries (path, withinHops, degree) hand off to the
      * main panel's Code view rather than the AdvancedDrawer JSON tab.
      * Seed a stub predicate of the chosen kind into the draft
      * (preserving existing work via AND-wrap), then flip the local
      * mode to 'code' so the user lands directly in the DSL editor.
      */
-    const handleOpenCode = useCallback((kind: 'path' | 'withinHops') => {
+    const handleOpenCode = useCallback((kind: CodeKind) => {
         const stub: Predicate = kind === 'path'
             ? ({
                 kind: 'path',
@@ -157,13 +158,15 @@ export const QueryCard: FC<QueryCardProps> = ({
                 edgeClass: 'lineage',
                 direction: 'outgoing',
             } as unknown as Predicate)
-            : ({
-                kind: 'withinHops',
-                urns: [],
-                hops: 2,
-                direction: 'both',
-                edgeClass: 'lineage',
-            } as unknown as Predicate)
+            : kind === 'degree'
+                ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
+                : ({
+                    kind: 'withinHops',
+                    urns: [],
+                    hops: 2,
+                    direction: 'both',
+                    edgeClass: 'lineage',
+                } as unknown as Predicate)
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {

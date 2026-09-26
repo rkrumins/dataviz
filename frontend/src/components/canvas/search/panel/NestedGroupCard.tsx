@@ -59,7 +59,8 @@ export interface NestedGroupCardProps {
     onWrap?: (op: OpTone) => void
     /** Duplicate this whole group in the parent. */
     onDuplicate?: () => void
-    onOpenAdvanced: () => void
+    /** Omitted where there is no Advanced drawer (the rule editor). */
+    onOpenAdvanced?: () => void
     onSubmit?: () => void
     disabled?: boolean
     discovery: {
@@ -100,13 +101,13 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
                 <span className="text-[11.5px] text-ink-muted">
                     Deeply nested group — keep editing in Advanced
                 </span>
-                <button
+                {onOpenAdvanced && <button
                     type="button"
                     onClick={onOpenAdvanced}
                     className="text-[11px] text-accent-lineage hover:text-accent-lineage/80 transition-colors"
                 >
                     Open Advanced →
-                </button>
+                </button>}
             </div>
         )
     }

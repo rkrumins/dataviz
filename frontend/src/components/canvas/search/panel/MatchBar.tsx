@@ -75,6 +75,10 @@ export interface MatchBarProps {
     onClear?: () => void
     /** Export every match to a file. Shown only when there are matches. */
     onExport?: () => void
+    /** What ``count`` counts: a search's matches, or a path search's
+     *  routes — which stop at the path limit, not the candidate cap, and
+     *  say so beside the paths themselves. */
+    unit?: 'match' | 'path'
     /** The view this panel is bound to — passed to setCanvasFilterMode
      *  so the choice persists for this view in localStorage. */
     viewId: string
@@ -84,7 +88,7 @@ export interface MatchBarProps {
 export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
     deadlineExceeded, candidateCount, scanning, progress, onFrame,
-    onShowFocusedOnCanvas, onClear, onExport, viewId,
+    onShowFocusedOnCanvas, onClear, onExport, unit = 'match', viewId,
 }) => {
     const orderedMatchUrns = useOrderedMatchUrns()
     const focusedMatchIndex = useFocusedMatchIndex()
@@ -127,6 +131,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                     ? scannedPercent(progress) : null}
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
+                unit={unit}
             />
             {scanning && !isRunning && !isError && (
                 <ProgressBar
@@ -149,9 +154,9 @@ export const MatchBar: FC<MatchBarProps> = ({
                     onFrame={onFrame}
                 />
             )}
-            {(showTruncation || showDeadlineExceeded) && (
+            {((showTruncation && unit === 'match') || showDeadlineExceeded) && (
                 <WarningBanner
-                    truncated={showTruncation}
+                    truncated={showTruncation && unit === 'match'}
                     deadlineExceeded={showDeadlineExceeded}
                     candidateCount={candidateCount ?? null}
                 />
@@ -176,7 +181,7 @@ function scannedPercent(progress: { scanned: number; total: number } | null | un
 
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, onClear, onExport,
+    showPlus, scannedPercent: scanned, onClear, onExport, unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -188,6 +193,7 @@ function SummaryStrip({
     scannedPercent: number | null
     onClear?: () => void
     onExport?: () => void
+    unit: 'match' | 'path'
 }) {
     return (
         <div className={cn(
@@ -202,6 +208,7 @@ function SummaryStrip({
                 elapsedMs={elapsedMs}
                 showPlus={showPlus}
                 scannedPercent={scanned}
+                unit={unit}
             />
             <div className="flex items-center gap-1 shrink-0">
                 {onExport && (
@@ -339,7 +346,7 @@ function ToolbarStrip({
 
 
 function CountReadout({
-    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent,
+    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent, unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -348,6 +355,7 @@ function CountReadout({
     elapsedMs: number | null
     showPlus: boolean
     scannedPercent: number | null
+    unit: 'match' | 'path'
 }) {
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
@@ -384,7 +392,9 @@ function CountReadout({
                         {count.toLocaleString()}{showPlus && '+'}
                     </span>
                     <span className="text-[12px] text-ink-secondary leading-none">
-                        {count === 1 ? 'match' : 'matches'}
+                        {unit === 'path'
+                            ? (count === 1 ? 'path' : 'paths')
+                            : (count === 1 ? 'match' : 'matches')}
                     </span>
                     {elapsedMs !== null && (
                         <span className="text-[10.5px] text-ink-muted/70 tabular-nums leading-none">

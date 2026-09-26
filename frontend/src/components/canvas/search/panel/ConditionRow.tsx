@@ -99,7 +99,8 @@ export interface ConditionRowProps {
     autoFocus?: boolean
     onChange: (next: Predicate) => void
     onRemove: () => void
-    onOpenAdvanced: () => void
+    /** Omitted where there is no Advanced drawer (the rule editor). */
+    onOpenAdvanced?: () => void
     /** Pressing Enter inside a scalar value field fires this. The
      *  panel wires it to the same dispatch the Run button uses. */
     onSubmit?: () => void
@@ -230,7 +231,7 @@ interface EditorCtx {
     discoveredLayers: LayerOption[]
     isRunning: boolean
     autoFocus: boolean
-    onOpenAdvanced: () => void
+    onOpenAdvanced?: () => void
     /** Fires when the user presses Enter inside a scalar editor —
      *  signals "run this query now." Optional; rows that don't have
      *  an Enter-able input ignore it. */
@@ -274,11 +275,13 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'isRoot':
         case 'hasIncoming':
         case 'hasOutgoing':
+        case 'all':
             // Boolean rows: the header label + description already
             // says everything. No editor body needed.
             return null
         case 'withinHops':
         case 'path':
+        case 'degree':
             // No visual editor — these predicate kinds are Code-only.
             // Saved queries that still contain them render this banner;
             // editing happens via the JSON view in the Advanced drawer.
@@ -865,16 +868,18 @@ function CheckToggle({
 }
 
 
-function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
+function CodeOnlyHint({ onOpen }: { onOpen?: () => void }) {
     return (
         <div className={cn(
             'rounded-lg border border-glass-border/60 bg-canvas-base/30',
             'px-3 py-2.5 flex items-center justify-between gap-3',
         )}>
             <span className="text-[11.5px] text-ink-muted">
-                This filter lives in Code mode — open the JSON view to edit it.
+                {onOpen
+                    ? 'This filter lives in Code mode — open the JSON view to edit it.'
+                    : "This filter is edited as JSON in Advanced Search — it can't be changed here."}
             </span>
-            <button
+            {onOpen && <button
                 type="button"
                 onClick={onOpen}
                 className={cn(
@@ -885,7 +890,7 @@ function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
             >
                 <ExternalLink className="w-3 h-3" />
                 Open in Code
-            </button>
+            </button>}
         </div>
     )
 }
@@ -893,7 +898,7 @@ function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
 
 function GroupRowHint({
     op, count, onOpen,
-}: { op: string; count: number; onOpen: () => void }) {
+}: { op: string; count: number; onOpen?: () => void }) {
     return (
         <div className={cn(
             'rounded-lg border border-glass-border/60 bg-canvas-base/30',
@@ -903,7 +908,7 @@ function GroupRowHint({
                 <span className="font-mono uppercase font-semibold text-ink">{op}</span>{' '}
                 group · {count} condition{count === 1 ? '' : 's'}
             </span>
-            <button
+            {onOpen && <button
                 type="button"
                 onClick={onOpen}
                 className={cn(
@@ -914,7 +919,7 @@ function GroupRowHint({
             >
                 <ExternalLink className="w-3 h-3" />
                 Edit in Advanced
-            </button>
+            </button>}
         </div>
     )
 }
@@ -1089,6 +1094,14 @@ function getKindMeta(p: Predicate): KindMeta {
         case 'path': return {
             icon: '⤇', label: 'Path between two nodes',
             description: 'Lineage paths from a source URN to a target URN.',
+        }
+        case 'degree': return {
+            icon: '#', label: 'Number of edges',
+            description: 'Entities with more, fewer or exactly N edges of a class.',
+        }
+        case 'all': return {
+            icon: '∗', label: 'Every entity',
+            description: 'Every entity in the view.',
         }
         case 'group': return {
             icon: '⊕', label: 'Composite group',

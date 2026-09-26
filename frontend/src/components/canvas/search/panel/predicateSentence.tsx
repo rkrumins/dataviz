@@ -317,6 +317,8 @@ function leafSentence(p: Predicate): ReactNode {
             return <>lies on a path from <Value>{p.sourceUrns[0] ?? '…'}</Value> to <Value>{p.targetUrns[0] ?? '…'}</Value> (≤ {p.maxHops} hops)</>
         case 'degree':
             return <>has {p.direction ?? 'any'} edges {p.op} {p.value}</>
+        case 'all':
+            return <>every entity is included</>
         case 'group':
             return <>(nested group)</>
         default:

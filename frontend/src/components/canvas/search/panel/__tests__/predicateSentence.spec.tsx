@@ -116,6 +116,12 @@ describe('predicateSentence — plain-English summary', () => {
         expect(text).toContain('contacts')
     })
 
+    it('reads a condition matching every entity as that, not as unknown', () => {
+        const text = rendered({ kind: 'all' } as Predicate)
+        expect(text).toContain('every entity')
+        expect(text).not.toContain('unknown')
+    })
+
     it('renders entityType leaf naturally', () => {
         const draft: Predicate = {
             kind: 'entityType', op: 'in',

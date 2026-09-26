@@ -588,6 +588,7 @@ function PanelInner({
                                         ? handleClear
                                         : undefined}
                                     onExport={canExport ? () => setExportOpen(true) : undefined}
+                                    unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
                                     viewId={viewId}
                                 />
                                 <ResultsPane

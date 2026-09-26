@@ -37,9 +37,11 @@
 import { motion } from 'framer-motion'
 import {
     AlignLeft,
+    Asterisk,
     Boxes,
     Equal,
     Flag,
+    GitBranchPlus,
     GitMerge,
     Hash,
     KeyRound,
@@ -78,6 +80,9 @@ import { topLevelConditions } from './predicateComposition'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
+
+/** The condition kinds with no visual editor: authored as JSON in Code. */
+export type CodeKind = 'path' | 'withinHops' | 'degree'
 
 
 /**
@@ -164,10 +169,10 @@ export interface AddFilterPaletteProps {
     onOpenAdvanced?: () => void
     /** Open the Code (JSON) editor with a stub of the named predicate
      *  kind appended to the current draft. Used by the "Code-only"
-     *  Advanced entries (path, withinHops) — visual editors for these
-     *  shapes don't exist; the user authors them in JSON instead. Omit
-     *  to drop those entries (no Code mode in the rule editor). */
-    onOpenCode?: (kind: 'path' | 'withinHops') => void
+     *  Advanced entries (path, withinHops, degree) — visual editors for
+     *  these shapes don't exist; the user authors them in JSON instead.
+     *  Omit to drop those entries (no Code mode in the rule editor). */
+    onOpenCode?: (kind: CodeKind) => void
     disabled?: boolean
 }
 
@@ -192,10 +197,10 @@ interface PaletteEntry {
      *    - ``emit``: build a predicate and add it to the query.
      *    - ``advanced``: open the Advanced drawer (groups, options).
      *    - ``code``: open the JSON editor with a stub of ``codeKind``
-     *      appended to the current draft (path / withinHops). */
+     *      appended to the current draft (path / withinHops / degree). */
     action: 'emit' | 'advanced' | 'code'
     build?: () => Predicate
-    codeKind?: 'path' | 'withinHops'
+    codeKind?: CodeKind
 }
 
 
@@ -503,6 +508,25 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
                     codeKind: 'withinHops',
                 },
                 {
+                    id: 'degree',
+                    icon: GitBranchPlus, tone: 'group',
+                    label: 'Number of edges…',
+                    description:
+                        'Entities with more, fewer or exactly N edges — Code only. '
+                        + 'Opens the JSON editor with a stub; fill in '
+                        + 'direction, op and value.',
+                    action: 'code',
+                    codeKind: 'degree',
+                },
+                {
+                    id: 'all',
+                    icon: Asterisk, tone: 'group',
+                    label: 'Every entity',
+                    description: 'Every entity in the view — to count or export them all',
+                    action: 'emit',
+                    build: () => ({ kind: 'all' }),
+                },
+                {
                     id: 'and-group',
                     icon: Parentheses, tone: 'group',
                     label: 'AND group',
@@ -531,7 +555,7 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     ], [counts])
 
     // Drop entries whose handoff isn't wired in this context: ``code``
-    // entries (path / withinHops) need ``onOpenCode``; ``advanced``
+    // entries (path / withinHops / degree) need ``onOpenCode``; ``advanced``
     // entries need ``onOpenAdvanced``. In the Property Manager rule
     // editor neither is supplied, so those entries are hidden and
     // now-empty categories collapse — group authoring still works via
