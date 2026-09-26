@@ -797,7 +797,9 @@ async def test_rollups_on_a_reader_that_cannot_count_are_501(test_client: AsyncC
 
 class _ExpandEngine:
     """Drills each pair by its source: ``shed`` sheds, ``broken`` fails,
-    ``slow`` answers after 2 s unless cancelled first, anything else answers."""
+    ``failing_over`` and ``timeout`` cannot answer right now, ``slow`` answers
+    after 2 s unless cancelled first, ``capped`` and ``cut`` answer cut short
+    at a cap and at the deadline, anything else answers."""
 
     provider = None
 
@@ -806,23 +808,28 @@ class _ExpandEngine:
 
     async def expand_aggregated_edge(self, req):
         import asyncio
-        from backend.common.adapters import ProviderBusy
+        from backend.common.adapters import ProviderBusy, ProviderFailingOver
         from backend.common.models.graph import TraceResult
 
         if req.source_urn == "shed":
             raise ProviderBusy("falkordb", "queue full", retry_after_seconds=7)
         if req.source_urn == "broken":
             raise ValueError("no such level")
+        if req.source_urn == "failing_over":
+            raise ProviderFailingOver("falkordb", "node restarting")
+        if req.source_urn == "timeout":
+            raise asyncio.TimeoutError()
         if req.source_urn == "slow":
             try:
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
                 self.cancelled.append(req.source_urn)
                 raise
+        cut = {"capped": "max_nodes", "cut": "timeout"}.get(req.source_urn)
         return TraceResult(
             nodes=[GraphNode(urn=req.target_urn, displayName=req.target_urn, entityType="dataset")],
             edges=[], focus=TraceFocus(urn=req.source_urn, level=0, entityType="dataset"),
-            effectiveLevel=1)
+            effectiveLevel=1, truncated=cut is not None, truncationReason=cut)
 
 
 async def _post_expand_batch(test_client: AsyncClient, engine, sources):
@@ -867,6 +874,46 @@ async def test_a_pair_that_fails_otherwise_leaves_the_rest_answered(test_client:
     resp = await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "broken"])
     assert resp.status_code == 200
     assert [n["urn"] for n in resp.json()["nodes"]] == ["t-ok"]
+
+
+def _cached_as(body):
+    """Whether the response cache would hold this answer for the full TTL."""
+    from backend.app.services.graph_cache import _is_incomplete_result
+    from backend.common.models.graph import TraceResult
+
+    return "briefly" if _is_incomplete_result(TraceResult.model_validate(body)) else "full"
+
+
+@pytest.mark.parametrize("lost", ["failing_over", "timeout"])
+async def test_a_pair_that_could_not_answer_now_marks_the_batch_short(test_client: AsyncClient, lost):
+    """A pair the provider could not answer right now — its node failing
+    over, a deadline — was dropped from a 200 that read as complete, so the
+    response cache kept the batch for the full TTL and mirrored it as
+    last-known-good, and the pair's lines stayed missing that long. The
+    answer now says it is short, for a reason that may do better next time."""
+    resp = await _post_expand_batch(test_client, _ExpandEngine(), ["ok", lost])
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [n["urn"] for n in body["nodes"]] == ["t-ok"]
+    assert (body["truncated"], body["truncationReason"]) == (True, "failed")
+    assert _cached_as(body) == "briefly"
+
+
+async def test_a_batch_keeps_the_reason_a_pair_was_cut(test_client: AsyncClient):
+    """The merge kept that a pair was cut and dropped why, and with no
+    reason the cache reads a cut as a cap: a pair cut at its deadline was
+    kept as complete for the full TTL."""
+    body = (await _post_expand_batch(test_client, _ExpandEngine(), ["capped", "cut"])).json()
+    assert (body["truncated"], body["truncationReason"]) == (True, "timeout")
+    assert _cached_as(body) == "briefly"
+
+    body = (await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "capped"])).json()
+    assert (body["truncated"], body["truncationReason"]) == (True, "max_nodes")
+    assert _cached_as(body) == "full"
+
+    # A pair that fails for good is dropped as before: asking again cannot help.
+    body = (await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "broken"])).json()
+    assert (body["truncated"], body["truncationReason"]) == (False, None)
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────

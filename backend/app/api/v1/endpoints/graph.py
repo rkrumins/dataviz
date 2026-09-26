@@ -32,10 +32,11 @@ from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
-from backend.common.adapters import ProviderBusy, ProviderFailingOver
+from backend.common.adapters import ProviderBusy, ProviderFailingOver, ProviderUnavailable
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
 from backend.app.services.graph_cache import (
+    _DETERMINISTIC_CUTS,
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CANVAS_BOOTSTRAP,
@@ -1256,8 +1257,10 @@ async def trace_expand_batch(
     so the rest of the batch returns; total failure returns 404 with the
     list of pair-level error messages in the response body. A shed pair is
     not a failure: the batch answers 429 + Retry-After, as /trace/expand
-    does, and the client retries it. Shape matches /trace/expand so the
-    frontend's normalizeTraceV2 handles either."""
+    does, and the client retries it. A pair the provider could not answer
+    right now (a node failing over, a deadline) marks the answer truncated
+    with reason "failed", so it is not cached as complete. Shape matches
+    /trace/expand so the frontend's normalizeTraceV2 handles either."""
     import asyncio
     if not request.pairs:
         # Empty batch — return an empty payload. Use the first pair's URN as
@@ -1266,6 +1269,9 @@ async def trace_expand_batch(
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     pair_errors: List[str] = []
+    # Of those, the pairs the provider could not answer right now: asked
+    # again, they may answer.
+    unanswered: List[str] = []
 
     async def run_one(p: _TraceExpandPair):
         req = ExpandRequest(
@@ -1287,6 +1293,8 @@ async def trace_expand_batch(
             # frontend can render a partial result with the failure list.
             msg = f"{p.source_urn} → {p.target_urn} @ {p.next_level}: {type(exc).__name__}: {exc}"
             pair_errors.append(msg)
+            if isinstance(exc, (ProviderUnavailable, TimeoutError)):
+                unanswered.append(msg)
             logger.warning("trace/expand-batch pair failed: %s", msg, exc_info=False)
             return None
 
@@ -1300,7 +1308,7 @@ async def trace_expand_batch(
             for t in tasks:
                 t.cancel()
             raise
-        return _merge_expand_results(results, request, pair_errors)
+        return _merge_expand_results(results, request, pair_errors, short=bool(unanswered))
 
     # Response-cached like the single /trace/expand (this handler used to
     # bypass GraphCache entirely, so every re-expand of the same drilled
@@ -1329,7 +1337,7 @@ async def trace_expand_batch(
     )
 
 
-def _merge_expand_results(results, request, pair_errors) -> TraceResult:
+def _merge_expand_results(results, request, pair_errors, short: bool) -> TraceResult:
     successes = [r for r in results if r is not None]
     if not successes:
         raise HTTPException(
@@ -1368,6 +1376,11 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
             len(successes), len(request.pairs),
         )
 
+    # The response cache keeps an answer by its reason: a cap for the full
+    # TTL, a read that gave up only briefly. So a pair lost for now says
+    # "failed", and otherwise a pair's cut that may do better outranks a cap.
+    cuts = sorted((r.truncation_reason for r in successes if r.truncated),
+                  key=lambda why: why is None or why in _DETERMINISTIC_CUTS)
     return TraceResult(
         nodes=list(nodes_by_id.values()),
         edges=list(edges_by_id.values()),
@@ -1376,7 +1389,8 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
         downstream_urns=downstream_urns,
         focus=focus,
         effective_level=effective_level,
-        truncated=truncated_any,
+        truncated=truncated_any or short,
+        truncation_reason="failed" if short else next(iter(cuts), None),
     )
 
 
