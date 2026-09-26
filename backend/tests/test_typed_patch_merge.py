@@ -72,3 +72,14 @@ def test_patch_payload_still_deletes_with_the_sentinel():
 def test_patch_payload_new_keys_are_taken_as_sent():
     out = GraphVersioningService._patch_payload({"urn": "u", "properties": {}}, {"properties": {"n": "5"}})
     assert out["properties"] == {"n": "5"}
+
+
+def test_patch_payload_takes_a_rename_as_the_drawer_sends_it():
+    """A rename in the entity drawer: the whole bag as the browser holds it,
+    the new key set and the old one marked for deletion. The old key goes,
+    and nothing else changes — not even a 64-bit id the browser rounded."""
+    stored = {"urn": "u", "properties": {"team": "ops", "sourceId": BIG, "rows": 12}}
+    patch = {"properties": {"squad": "ops", "sourceId": BIG_AS_BROWSER_SENDS, "rows": 12,
+                            "team": "__nx_prop_delete__"}}
+    out = GraphVersioningService._patch_payload(stored, patch)
+    assert out["properties"] == {"squad": "ops", "sourceId": BIG, "rows": 12}
