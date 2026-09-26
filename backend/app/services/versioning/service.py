@@ -3684,25 +3684,36 @@ class GraphVersioningService:
         Each maps to rollup ``(Sx, Tx)`` for every requested **visible** source ``Sx`` that is an
         ancestor-or-self of ``sourceUrn`` and target ``Tx`` ancestor-or-self of ``targetUrn`` (``Sx`` ≠
         ``Tx``) — the same ancestor-pair semantics the FalkorDB materialiser bakes in, evaluated on the
-        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size."""
+        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size.
+
+        One side may be left open, as the base read allows: no targets means every ancestor-or-self of
+        ``targetUrn`` (every cell out of the sources), no sources every ancestor-or-self of
+        ``sourceUrn``. The named side is walked first, and a delta edge that misses it costs no walk
+        of the other."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         src_set = set(source_urns or [])
-        tgt_set = set(target_urns or source_urns or [])
+        tgt_set = set(target_urns or [])
         out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        if not (src_set or tgt_set):
+            return out
         async with self._session() as s:
-            async def _visible_ancestors(urn: str, visible: set) -> set:
-                if not visible:
-                    return set()
+            async def _visible_ancestors(urn: str, visible: Optional[set]) -> set:
+                """``urn``'s ancestors-or-self among ``visible``; all of them when it is None."""
                 eid = await self._eid_for_urn(s, graph_id, branch_id, urn)
-                hit = {urn} & visible                      # the node itself, if it is a visible container
+                hit = {urn} if visible is None else {urn} & visible  # the node itself, if it is a visible container
                 if eid is not None and cset:
                     anc_eids, _ = await self._containment_ancestors(s, graph_id, branch_id, {eid}, cset, None)
                     vals = await self._current_values(s, graph_id, branch_id, anc_eids)
-                    hit |= {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids} & visible
+                    urns = {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids}
+                    hit |= urns if visible is None else urns & visible
                 return hit
             for su, tu, et, sign in lineage_delta:
-                sxs = await _visible_ancestors(su, src_set)
-                txs = await _visible_ancestors(tu, tgt_set)
+                if src_set:
+                    sxs = await _visible_ancestors(su, src_set)
+                    txs = await _visible_ancestors(tu, tgt_set or None) if sxs else set()
+                else:
+                    txs = await _visible_ancestors(tu, tgt_set)
+                    sxs = await _visible_ancestors(su, None) if txs else set()
                 for sx in sxs:
                     for tx in txs:
                         if sx == tx:
