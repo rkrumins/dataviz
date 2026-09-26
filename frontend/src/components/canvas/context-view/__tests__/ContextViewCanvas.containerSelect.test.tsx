@@ -19,7 +19,7 @@ import { act, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { anchoredPortsEstate } from '@/test/fixtures/traceEstates'
+import { anchoredPortsEstate, groupAndAnchorEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
 import type { AggregatedEdgeRequest, GraphDataProvider } from '@/providers/GraphDataProvider'
@@ -185,5 +185,72 @@ describe('selecting a collapsed container', () => {
     await h.settle()
     await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
     expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
+  }, 30_000)
+})
+
+describe('selecting a closed logical group', () => {
+  /** s9 is a row of Staging past its loaded page; `far` is held by nothing. */
+  async function openGroup(opts: Pick<Parameters<typeof renderCanvasWithTrace>[1], 'nodeDegrees' | 'aggregatedCells' | 'flows' | 'wrapProvider'>) {
+    const estate = groupAndAnchorEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'solo',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      ...opts,
+    })
+    await waitFor(() => expect(h.visibleCardIds()).toContain('g.a'), { timeout: 8000 })
+    await h.toggle('logical:grp')
+    await waitFor(() => expect(h.visibleCardIds()).not.toContain('g.a'), { timeout: 8000 })
+    return h
+  }
+
+  it('reads its leaf members\' flows, and draws to the row they reach past a page', async () => {
+    const h = await openGroup({
+      nodeDegrees: { 'g.a': { in: 0, out: 1 } },
+      flows: [{ sourceUrn: 'g.a', targetUrn: 's9' }],
+    })
+    await waitFor(() => expect(ports('logical:grp').right).toBe('lineage:out'), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('logical:grp') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'logical:grp', target: 's9' }), { timeout: 8000 })
+  }, 30_000)
+
+  it("asks its container members' roll-ups, and draws to the row they reach past a page", async () => {
+    const h = await openGroup({
+      nodeDegrees: { 'g.c': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      aggregatedCells: [rollUp('g.c', 's9', 2)],
+    })
+    await waitFor(() => expect(ports('logical:grp').right).toBe('lineage:out'), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('logical:grp') })
+
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['g.c'], []]), { timeout: 8000 })
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'logical:grp', target: 's9' }), { timeout: 8000 })
+  }, 30_000)
+
+  it("is never hollow on a container member's roll-ups cut short", async () => {
+    const cut = (p: GraphDataProvider) => ({
+      ...p,
+      getAggregatedEdges: async (req: AggregatedEdgeRequest) => {
+        const answer = await p.getAggregatedEdges(req)
+        return req.targetUrns === undefined ? { ...answer, truncated: true, truncationReason: null } : answer
+      },
+    }) as GraphDataProvider
+    const h = await openGroup({
+      nodeDegrees: { 'g.c': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      aggregatedCells: [rollUp('g.c', 'far', 1)],
+      wrapProvider: cut,
+    })
+    await waitFor(() => expect(ports('logical:grp').right).toBe('lineage:out'), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('logical:grp') })
+
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['g.c'], []]), { timeout: 8000 })
+    await h.settle()
+    await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
+    expect(ports('logical:grp').right).toBe('lineage:out')
   }, 30_000)
 })

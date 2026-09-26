@@ -266,3 +266,36 @@ export function groupedEstate() {
   }
   return { model, layers, assignments }
 }
+
+/**
+ * A curated column holding a view-only group, beside an anchored column:
+ *
+ *   Group ⊃ {g.a, g.c}   a logical group in "Left"; g.c ⊃ {g.c.t}
+ *   solo                 beside it
+ *   STG ⊃ {s1, s2, s9}   the anchor of "Staging"
+ *   far                  in no column
+ */
+export function groupAndAnchorEstate() {
+  const nodes = [
+    wn('g.a', 'dataset'), wn('g.c', 'container', 1), wn('g.c.t', 'dataset'), wn('solo', 'dataset'),
+    wn('STG', 'dataPlatform', 3), wn('s1', 'dataset'), wn('s2', 'dataset'), wn('s9', 'dataset'),
+    wn('far', 'dataset'),
+  ]
+  const containmentEdges = [has('g.c', 'g.c.t'), has('STG', 's1'), has('STG', 's2'), has('STG', 's9')]
+  const model: LensWalkModel = {
+    focusUrn: 'solo', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'left', name: 'Left', order: 0, entityTypes: [], logicalNodes: [{ id: 'grp', name: 'Group', type: 'group' }] },
+    { id: 'stg', name: 'Staging', order: 1, entityTypes: [], anchorUrn: 'STG' },
+  ]
+  const assignments = {
+    'g.a': { layerId: 'left', logicalNodeId: 'grp' },
+    'g.c': { layerId: 'left', logicalNodeId: 'grp' },
+    solo: { layerId: 'left' },
+    STG: { layerId: 'stg' },
+  }
+  return { model, layers, assignments }
+}

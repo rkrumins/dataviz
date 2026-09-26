@@ -4835,14 +4835,34 @@ export function ContextViewCanvas({
       })
   }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked, containerEdges, partnerRetryDue])
 
+  // What each closed logical group on the canvas stands for: its members,
+  // through the groups nested in it, each to the group's row. A group is no
+  // entity and has no flows of its own, so selecting one acts through them:
+  // its leaf members are read (below), its container members asked for
+  // their roll-ups (the container effect further down).
+  const closedGroupOf = useMemo(() => {
+    const rowOf = new Map<string, string>()
+    for (const id of drawnRows) {
+      const group = renderMap.get(id)
+      if (!group?.isLogical || expandedForRender.has(id)) continue
+      const stack = [...group.children]
+      while (stack.length > 0) {
+        const member = stack.pop()!
+        if (member.isLogical) stack.push(...member.children)
+        else rowOf.set(member.id, id)
+      }
+    }
+    return rowOf
+  }, [drawnRows, renderMap, expandedForRender])
+
   // A leaf row the view opened with never read its own flows: a first page
   // arrives with the view, and only a page loaded through loadChildren reads
   // them (useGraphHydration). The store then holds none of its flows to rows
   // past another column's page, and selecting it had no partner to bring
-  // in. Selecting a leaf reads them, once per graph: their far ends get
-  // their places (useAncestorChains), and the effect above brings in the
-  // rows among them. A container's lineage is its descendants', not its own
-  // flows, so a container is not read here.
+  // in. Selecting a leaf, or a closed group holding it, reads them, once per
+  // graph: their far ends get their places (useAncestorChains), and the
+  // effect above brings in the rows among them. A container's lineage is its
+  // descendants', not its own flows, so a container is not read here.
   const primedOnSelectRef = useRef<{ generation: number; ids: Set<string> }>({ generation: -1, ids: new Set() })
   useEffect(() => {
     if (traceWriteLocked()) return
@@ -4851,9 +4871,11 @@ export function ContextViewCanvas({
       primedOnSelectRef.current = { generation: graphGeneration, ids: new Set() }
     }
     const { ids } = primedOnSelectRef.current
-    const leaves = selectedNodeIds.filter(id => {
+    const selected = new Set(selectedNodeIds)
+    const members = [...closedGroupOf].filter(([, row]) => selected.has(row)).map(([member]) => member)
+    const leaves = [...selectedNodeIds.filter(id => drawnRows.has(id)), ...members].filter(id => {
       const node = displayMap.get(id)
-      return !ids.has(id) && drawnRows.has(id) && !!node && !id.startsWith('logical:')
+      return !ids.has(id) && !!node && !id.startsWith('logical:')
         && node.children.length === 0 && !(Number(node.data?.childCount) > 0)
     }).slice(0, REVEAL_PARTNERS_CAP)
     if (leaves.length === 0) return
@@ -4870,7 +4892,7 @@ export function ContextViewCanvas({
         store.markLineagePartial(partial)
       })
       .catch(e => console.warn('[select] lineage priming failed', e))
-  }, [selectedNodeIds, displayMap, drawnRows, provider, lineageEdgeTypes, containmentEdgeTypes, traceWriteLocked])
+  }, [selectedNodeIds, closedGroupOf, displayMap, drawnRows, provider, lineageEdgeTypes, containmentEdgeTypes, traceWriteLocked])
 
   // The panel lists every line the canvas can draw — not the budgeted
   // subset the overlay is handed, which in On Hover is empty until something
@@ -4935,13 +4957,15 @@ export function ContextViewCanvas({
   const lineagePartial = useCanvasStore((s) => s.lineagePartial)
   const nodePorts = useMemo(() => {
     const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
+    // A closed group's member holds it on the group's row.
+    const heldOn = (ids: ReadonlySet<string>) => new Set([...ids].map(id => closedGroupOf.get(id) ?? id))
     return buildNodePorts(
       overlay.active ? visibleLineageEdges
         : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode),
-          ...partialLines(lineagePartial), ...partialLines(containerPartial)],
+          ...partialLines(lineagePartial), ...partialLines({ in: heldOn(containerPartial.in), out: heldOn(containerPartial.out) })],
       (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
     )
-  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, nodeLayerIndexMap, sortedLayers])
+  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, closedGroupOf, nodeLayerIndexMap, sortedLayers])
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()
@@ -5216,8 +5240,10 @@ export function ContextViewCanvas({
   // flows counted than drawn — the canvas asks for all of its roll-ups that
   // way (useContainerRollups). The projection places their far ends, and the
   // partner reveal above brings in the rows of other columns among them.
-  // Each way of each container once per selection; one opened, or gone,
-  // takes its cells. Never while a trace holds the canvas. A cell to what the
+  // A closed group selected asks for its container members, each on its own
+  // counts: their lines are the group's. Each way of each container once per
+  // selection; one opened, or gone, takes its cells. Never while a trace
+  // holds the canvas. A cell to what the
   // container holds or what holds it, as far as the canvas knows (loaded
   // containment, chains it has), is dropped before its end is asked about.
   const containerAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
@@ -5229,13 +5255,19 @@ export function ContextViewCanvas({
       containerAskedRef.current = { selection, asked: new Set() }
     }
     const { asked } = containerAskedRef.current
-    const drawnClosed = (id: string) => {
+    const closedContainer = (id: string) => {
       const node = displayMap.get(id)
-      return !!node && drawnRows.has(id) && !expandedNodes.has(id) && !id.startsWith('logical:')
+      return !!node && !expandedNodes.has(id) && !id.startsWith('logical:')
         && (node.children.length > 0 || Number(node.data?.childCount) > 0)
     }
+    // Drawn closed, or folded into a closed group on the canvas.
+    const heldClosed = (id: string) => closedContainer(id) && (drawnRows.has(id) || closedGroupOf.has(id))
     const asks = { out: [] as string[], in: [] as string[] }
-    const selected = traceWriteLocked() ? [] : selectedNodeIds.filter(drawnClosed)
+    const picked = new Set(selectedNodeIds)
+    const selected = traceWriteLocked() ? [] : [
+      ...selectedNodeIds.filter(id => drawnRows.has(id) && closedContainer(id)),
+      ...[...closedGroupOf].filter(([member, row]) => picked.has(row) && closedContainer(member)).map(([member]) => member),
+    ]
     if (selected.length > 0) {
       // The flows each card's drawn lines stand for, per way.
       const drawn = { in: new Map<string, number>(), out: new Map<string, number>() }
@@ -5274,8 +5306,8 @@ export function ContextViewCanvas({
       }
       return up(far).includes(container) || up(container).includes(far)
     }
-    void fetchContainerRollups(asks, urn => drawnClosed(urnToIdMap.get(urn) ?? urn), inside)
-  }, [selectedNodeIds, displayMap, drawnRows, expandedNodes, drawableLineageEdges, lineagePortTotals, nodePorts,
+    void fetchContainerRollups(asks, urn => heldClosed(urnToIdMap.get(urn) ?? urn), inside)
+  }, [selectedNodeIds, displayMap, drawnRows, expandedNodes, closedGroupOf, drawableLineageEdges, lineagePortTotals, nodePorts,
     offCanvasByNode, urnToIdMap, fetchContainerRollups, traceWriteLocked])
 
   // The curated "outside this view" cue on each card, and the selected
