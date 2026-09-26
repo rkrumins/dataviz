@@ -68,6 +68,7 @@ import {
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import { useAncestorChains } from '@/hooks/useAncestorChains'
 import { useHolderRollups } from '@/hooks/useHolderRollups'
+import { useContainerRollups } from '@/hooks/useContainerRollups'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
 import { buildPlacements, type PlacementInfo } from './placement'
 import {
@@ -820,6 +821,9 @@ export function ContextViewCanvas({
   // Beside the rows' own roll-ups: theirs with the rows the view holds but
   // has not loaded (see the aggregated fetch below).
   const { holderEdges, fetchHolders } = useHolderRollups(lineageGranularity)
+  // And a selected collapsed container's, all of them (see the selection
+  // effects below).
+  const { containerEdges, fetchContainerRollups } = useContainerRollups(lineageGranularity)
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
   // when the visible container set (and so the URN key) hasn't changed. Scoped
   // to this canvas's provider, so an invalidation aimed at one graph (a node
@@ -4450,8 +4454,18 @@ export function ContextViewCanvas({
   // Drawn rows with no loaded parent are asked too: a row placed in another
   // column than the closed row above it must not be counted twice.
   const unparented = useMemo(() => unparentedRows(nodesByLayer, parentMap), [nodesByLayer, parentMap])
+  // A selected container's own roll-ups (useContainerRollups) are placed as
+  // a holder's are: their far ends get chains, and the projection keeps of
+  // each only what the rows it reaches do not carry.
+  const chainedCells = useMemo(() => containerEdges.size === 0 ? aggregatedEdges
+    : new Map<string, { aggregated: AggregatedEdgeInfo }>([
+      ...[...containerEdges].map(([id, aggregated]) => [id, { aggregated }] as const),
+      ...aggregatedEdges,
+    ]), [aggregatedEdges, containerEdges])
+  const extraCells = useMemo(() => containerEdges.size === 0 ? holderEdges
+    : new Map([...containerEdges, ...holderEdges]), [holderEdges, containerEdges])
   const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge,
-    renderMap, promotedAnchors, aggregatedEdges, unparented)
+    renderMap, promotedAnchors, chainedCells, unparented)
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -4472,7 +4486,7 @@ export function ContextViewCanvas({
     ancestorChains,
     // An anchor is drawn as its column: lineage naming it is in the view.
     promotedAnchors,
-    holderEdges: overlay.active ? NO_HOLDER_EDGES : holderEdges,
+    holderEdges: overlay.active ? NO_HOLDER_EDGES : extraCells,
     // A view open to its whole data source holds every partner somewhere.
     openScope: activeEntityScope === 'all',
   })
@@ -4750,10 +4764,11 @@ export function ContextViewCanvas({
   // brings those partners in along their paths (useRevealPartners), quietly:
   // there is nothing to announce, the lines just draw. With several cards
   // selected, the partners of each, taken in turn so one card cannot use up
-  // the rest's share. At most REVEAL_PARTNERS_CAP per selection, whether they
-  // are placed at once or later, as their chains arrive (`partnersAskedRef`
-  // keeps count, and asks no partner twice); never while a trace holds the
-  // canvas.
+  // the rest's share, strongest first where a container's own roll-ups say
+  // how many flows each stands for. At most REVEAL_PARTNERS_CAP per
+  // selection, whether they are placed at once or later, as their chains
+  // arrive (`partnersAskedRef` keeps count, and asks no partner twice); never
+  // while a trace holds the canvas.
   const revealPartners = useRevealPartners({
     provider,
     setExpandedNodes,
@@ -4773,8 +4788,13 @@ export function ContextViewCanvas({
     }
     const { asked } = partnersAskedRef.current
     if (selectedNodeIds.length === 0 || traceWriteLocked()) return
+    const strength = new Map<string, number>()
+    containerEdges.forEach(c => {
+      for (const end of [c.sourceUrn, c.targetUrn]) strength.set(end, Math.max(strength.get(end) ?? 0, c.edgeCount))
+    })
     const each = selectedNodeIds.map(id => [...(offCanvasByNode.get(id)?.columns.values() ?? [])]
-      .flatMap(flows => [...flows.inPartners, ...flows.outPartners]))
+      .flatMap(flows => [...flows.inPartners, ...flows.outPartners])
+      .sort((a, b) => (strength.get(b) ?? 0) - (strength.get(a) ?? 0)))
     const batch = new Set<string>()
     const room = () => asked.size + batch.size < REVEAL_PARTNERS_CAP
     for (let i = 0; room() && each.some(partners => i < partners.length); i++) {
@@ -4785,7 +4805,7 @@ export function ContextViewCanvas({
     if (batch.size === 0) return
     batch.forEach(partner => asked.add(partner))
     void revealPartners([...batch])
-  }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked])
+  }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked, containerEdges])
 
   // A leaf row the view opened with never read its own flows: a first page
   // arrives with the view, and only a page loaded through loadChildren reads
@@ -5156,6 +5176,57 @@ export function ContextViewCanvas({
     portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
       id => expandedForRender.has(id)),
   [renderByLayer, externalDegrees, degreeFailures, expandedForRender])
+
+  // Selecting a collapsed container draws its lines. Its lineage is its
+  // rows', and the canvas asks for roll-ups only among the rows it draws and
+  // those it holds past a page: one whose partners are rows past another
+  // column's page that no holder cell names, or rows inside a closed row,
+  // had lineage and no line. So for a selected container drawn closed, with
+  // lineage one way and no line drawn that way, the canvas asks for all of
+  // its roll-ups that way (useContainerRollups). The projection places their
+  // far ends, and the partner reveal above brings in the rows of other
+  // columns among them. Each way of each container once per selection; one
+  // opened, or gone, takes its cells. Never while a trace holds the canvas.
+  const containerAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
+  useEffect(() => {
+    const selection = selectedNodeIds.join('\n')
+    if (containerAskedRef.current.selection !== selection) {
+      containerAskedRef.current = { selection, asked: new Set() }
+    }
+    const { asked } = containerAskedRef.current
+    const drawnClosed = (id: string) => {
+      const node = displayMap.get(id)
+      return !!node && drawnRows.has(id) && !expandedNodes.has(id) && !id.startsWith('logical:')
+        && (node.children.length > 0 || Number(node.data?.childCount) > 0)
+    }
+    const asks = { out: [] as string[], in: [] as string[] }
+    const selected = traceWriteLocked() ? [] : selectedNodeIds.filter(drawnClosed)
+    if (selected.length > 0) {
+      const drawn = { in: new Set<string>(), out: new Set<string>() }
+      for (const e of drawableLineageEdges) {
+        drawn.out.add(e.source)
+        drawn.in.add(e.target)
+        if (e.isBidirectional) { drawn.in.add(e.source); drawn.out.add(e.target) }
+      }
+      for (const id of selected) {
+        const urn = displayMap.get(id)?.urn || id
+        const total = lineagePortTotals.get(id)
+        const ports = nodePorts.get(id)
+        const outside = offCanvasByNode.get(id)
+        for (const way of ['out', 'in'] as const) {
+          const evidence = (total?.[way] ?? 0) + ((way === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
+            + (ports ? ports.left[way] + ports.right[way] + ports.held[way] : 0) + (outside?.[way] ?? 0)
+          const key = `${way}\n${urn}`
+          if (drawn[way].has(id) || evidence === 0 || asked.has(key)) continue
+          asked.add(key)
+          asks[way].push(urn)
+        }
+      }
+    }
+    void fetchContainerRollups(asks, urn => drawnClosed(urnToIdMap.get(urn) ?? urn))
+  }, [selectedNodeIds, displayMap, drawnRows, expandedNodes, drawableLineageEdges, lineagePortTotals, nodePorts,
+    offCanvasByNode, urnToIdMap, fetchContainerRollups, traceWriteLocked])
+
   // The curated "outside this view" cue on each card, and the selected
   // card's chip: the flows the projection PLACED outside the view
   // (offCanvasByNode), never a total less the edges loaded — a partner past

@@ -425,7 +425,8 @@ function stubProvider(
       calls.aggregatedTargets.push([...(request?.targetUrns ?? [])])
       const S = new Set(request?.sourceUrns ?? [])
       const T = request?.targetUrns ? new Set(request.targetUrns) : null
-      const cells = (aggregatedCells ?? []).filter(c => S.has(c.sourceUrn) && (!T || T.has(c.targetUrn)))
+      // Naming no source asks for everything into the targets.
+      const cells = (aggregatedCells ?? []).filter(c => (S.size === 0 ? !!T : S.has(c.sourceUrn)) && (!T || T.has(c.targetUrn)))
       return { aggregatedEdges: cells, totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
     },
     // The server answers every URN it could count, so every URN asked about
@@ -606,7 +607,8 @@ export async function renderCanvasWithTrace(
     holdChildren?: readonly string[]
     /** Roll-up cells for `/edges/aggregated`: each request is answered with
      *  those from one of its sources to one of its targets, as the server
-     *  does. `aggregatedExtra.aggregatedEdges` overrides them. */
+     *  does — to any target when it names none, from any source when it
+     *  names none. `aggregatedExtra.aggregatedEdges` overrides them. */
     aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
     /** The view's entityScope. Curated by default; 'all' opens the view to
      *  its whole data source. */

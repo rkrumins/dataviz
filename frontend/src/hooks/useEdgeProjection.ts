@@ -110,7 +110,8 @@ export interface UseEdgeProjectionOptions {
    * Roll-ups between a row and a HOLDER, asked on their own
    * (useHolderRollups): an anchor with rows past its loaded page, or an open
    * container with children not loaded yet. Section A keeps of each only
-   * what the loaded rows under the holder do not carry.
+   * what the loaded rows under the holder do not carry. A selected closed
+   * container's own roll-ups (useContainerRollups) come in here too.
    */
   holderEdges?: ReadonlyMap<string, AggregatedEdgeInfo>
   /**
