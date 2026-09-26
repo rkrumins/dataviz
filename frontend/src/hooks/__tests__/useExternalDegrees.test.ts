@@ -6,15 +6,16 @@
  * provider switch drops it. A URN the server left out, or answered without
  * the roll-up flags asked for, or whose request failed, is reported as
  * failed and asked again on the hook's own backoff, with no canvas change
- * needed. A roll-up rebuild asks every card again. A pass stops at its first
- * failed chunk. A reader that cannot count (501) is left alone and nothing
- * reads as failed.
+ * needed. A roll-up rebuild asks every card again; a failover retry poking
+ * one graph's cache does not. A pass stops at its first failed chunk. A
+ * reader that cannot count (501) is left alone, with nothing read as
+ * failed, until a long wait or a rebuild: then it is asked again.
  */
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useCanvasStore } from '@/store/canvas'
-import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { invalidateAggregatedEdges, invalidateAggregatedEdgesForScope } from '@/hooks/useAggregatedLineage'
 
 const holder: { current: Record<string, unknown> } = { current: {} }
 vi.mock('@/providers', async (original) => ({
@@ -194,6 +195,21 @@ describe('useExternalDegrees — roll-up presence', () => {
     expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
     expect([...result.current.failed]).toEqual(['a'])
   })
+
+  it("a failover retry poking one graph's cache asks no card again", async () => {
+    const getNodeDegrees = vi.fn(async (urns: string[]) => counted(urns))
+    holder.current = { scopeKey: 'ds1:main', getNodeDegrees }
+
+    render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+
+    act(() => { invalidateAggregatedEdgesForScope('ds1:main') })
+    await settle()
+    act(() => { invalidateAggregatedEdgesForScope('ds1:main') })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('useExternalDegrees — what could not be counted', () => {
@@ -253,7 +269,7 @@ describe('useExternalDegrees — what could not be counted', () => {
     expect(result.current.failed.size).toBe(0)
   })
 
-  it('a reader that cannot count (501) is left alone, and nothing reads as failed', async () => {
+  it('a reader that cannot count (501) is left alone for a long while, and nothing reads as failed', async () => {
     const getNodeDegrees = vi.fn().mockRejectedValue(Object.assign(new Error('no'), { status: 501 }))
     holder.current = { getNodeDegrees }
 
@@ -268,6 +284,57 @@ describe('useExternalDegrees — what could not be counted', () => {
     expect(result.current.failed.size).toBe(0)
     // No total is then evidence of none.
     expect(result.current.uncountable).toBe(true)
+  })
+
+  it('a 501 is asked again after a long wait: main counts again once its projection caught up', async () => {
+    let lagging = true
+    const getNodeDegrees = vi.fn(async (urns: string[]) => {
+      if (lagging) throw Object.assign(new Error('no'), { status: 501 })
+      return counted(urns)
+    })
+    holder.current = { scopeKey: 'ds1:main', getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.uncountable).toBe(true)
+    lagging = false
+    seed(2, ['a', 'b', 'c'])
+    act(() => { invalidateAggregatedEdgesForScope('ds1:main') })
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000) })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(result.current.uncountable).toBe(false)
+    expect([...result.current.totals.keys()].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('a 501 is asked again at once on a roll-up rebuild', async () => {
+    let lagging = false
+    const getNodeDegrees = vi.fn(async (urns: string[]) => {
+      if (lagging) throw Object.assign(new Error('no'), { status: 501 })
+      return counted(urns)
+    })
+    holder.current = { scopeKey: 'ds1:main', getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    // A publish: main's projection lags, and the canvas invalidates at once.
+    lagging = true
+    act(() => { invalidateAggregatedEdges() })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(result.current.uncountable).toBe(true)
+
+    // It catches up, and invalidates again; a row loaded after is counted.
+    lagging = false
+    act(() => { invalidateAggregatedEdges() })
+    await settle()
+    expect(result.current.uncountable).toBe(false)
+    seed(3, ['a', 'b', 'c'])
+    await settle()
+    expect(result.current.totals.has('c')).toBe(true)
   })
 
   it('a reader with no count at all says so; one that counts does not', async () => {

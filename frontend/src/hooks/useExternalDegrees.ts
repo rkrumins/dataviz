@@ -17,8 +17,10 @@
  * (lookupRetryDelayMs) — not on the next canvas change, which on an idle
  * canvas never comes. A pass stops at its first failed chunk rather than
  * send the rest to a struggling server; they are failed with it and
- * asked on the retry. A reader that cannot count (501) is left alone:
- * nothing is asked again and nothing reads as failed.
+ * asked on the retry. A reader that cannot count (501) is left alone, and
+ * nothing reads as failed, for UNCOUNTABLE_RETRY_MS or until a roll-up
+ * rebuild: main answers 501 while its projection lags behind a publish,
+ * and counts again once it has caught up.
  *
  * Flows are counted by type, never the stored :AGGREGATED roll-up cells.
  * Whether a card holds roll-up cells is asked for besides
@@ -27,9 +29,12 @@
  * its check for them failed, and keeps the flows it counted: such a URN
  * keeps its flows, and the flags it had, in `totals`, and is in `failed`,
  * asked again on the backoff like one left out, until the flags come back.
- * A roll-up rebuild (the aggregated cache version) can change them for
- * every card, so it asks every card again, keeping each total until the
- * new answer replaces it.
+ * A roll-up rebuild can change them for every card, so it asks every card
+ * again, keeping each total until the new answer replaces it. A rebuild is
+ * a GLOBAL invalidation of the aggregated cache (a new materialisation
+ * epoch, a publish, a draft save, a projection caught up); a failover
+ * retry pokes one graph's cache every few seconds while a node is replaced,
+ * and asks no card again.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { lookupRetryDelayMs } from '@/config/polling'
@@ -41,6 +46,8 @@ import { useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 
 const CHUNK_SIZE = 400
 const SETTLE_MS = 800
+/** How long a reader that answered 501 is left before it is asked again. */
+const UNCOUNTABLE_RETRY_MS = 5 * 60_000
 
 type Degree = NodeDegree
 
@@ -70,11 +77,14 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
     [lineageEdgeTypes],
   )
   const canvasVersion = useCanvasVersion()
-  const cacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
+  // Global invalidations only: a rebuild, never a failover poke.
+  const cacheVersion = useAggregatedEdgesCacheVersion()
   const [totals, setTotals] = useState<ReadonlyMap<string, Degree>>(NO_TOTALS)
   const [failed, setFailed] = useState<ReadonlySet<string>>(NONE_FAILED)
-  // The provider that answered 501. Keyed on it, so a switch clears it.
-  const [unsupportedBy, setUnsupportedBy] = useState<unknown>(null)
+  // The provider that answered 501, and the rebuild it answered at: a
+  // switch, a rebuild, or the long wait clears it.
+  const [unsupported, setUnsupported] = useState<{ by: unknown; at: number } | null>(null)
+  const unsupportedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   // Bumped when a retry is due, to run the settle again.
   const [wake, setWake] = useState(0)
   // Asked for (or answered): never asked again. Cleared per URN to retry,
@@ -100,10 +110,12 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
       cancelAnimationFrame(raf)
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = undefined
+      clearTimeout(unsupportedTimerRef.current)
     }
   }, [provider])
 
-  const uncountable = typeof provider.getNodeDegrees !== 'function' || unsupportedBy === provider
+  const uncountable = typeof provider.getNodeDegrees !== 'function'
+    || (unsupported?.by === provider && unsupported.at === cacheVersion)
   const supported = enabled && !uncountable
 
   useEffect(() => {
@@ -133,8 +145,11 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
         } catch (err) {
           if (generation !== generationRef.current) return
           if ((err as { status?: number }).status === 501) {
-            setUnsupportedBy(provider)
+            urns.slice(i).forEach(u => askedRef.current.delete(u))
+            setUnsupported({ by: provider, at: cacheVersion })
             setFailed(NONE_FAILED)
+            clearTimeout(unsupportedTimerRef.current)
+            unsupportedTimerRef.current = setTimeout(() => setUnsupported(null), UNCOUNTABLE_RETRY_MS)
             return
           }
           // Unknown, not zero — this chunk and the ones not yet asked.
