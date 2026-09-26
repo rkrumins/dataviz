@@ -200,6 +200,23 @@ describe('useRevealPartners', () => {
     expect(outcome).toEqual({ landed: ['p'], missed: [] })
   })
 
+  it('one it brought in as itself that no column places is taken out again, and its flows stay', async () => {
+    const flow = { ...contains('src', 'p'), id: 'f:src>p', data: { edgeType: 'FLOWS_TO', relationship: 'FLOWS_TO' } }
+    // `q` was in the store before; the reveal leaves it as it found it.
+    seed(['A', 'src', 'q'], [flow])
+    const p = provider()
+    const c = { ...canvas(['A'], ['src']), isVisible: (id: string) => id === 'src' }
+
+    const result = reveal(p, c, new Map([['p', []], ['q', []]]), true)
+    let outcome: { landed: string[]; missed: string[] } | undefined
+    await act(async () => { outcome = await result.current(['p', 'q']) })
+
+    expect(outcome).toEqual({ landed: [], missed: ['p', 'q'] })
+    expect(useCanvasStore.getState()._nodeIndex.has('p')).toBe(false)
+    expect(useCanvasStore.getState()._nodeIndex.has('q')).toBe(true)
+    expect(useCanvasStore.getState()._edgeIndex.has('f:src>p')).toBe(true)
+  })
+
   it('landing is counted by drawn rows, not by the store', async () => {
     PARENTS.p = 'A'
     seed(['A'])

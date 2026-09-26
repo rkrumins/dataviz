@@ -269,6 +269,37 @@ describe('selecting a card in a view open to its whole data source', () => {
     await waitFor(() => expect(h.visibleCardIds()).toContain('rep9'), { timeout: 8000 })
     await waitFor(() => expect(h.wires()).toContainEqual({ source: 'src1', target: 'rep9' }), { timeout: 8000 })
   }, 30_000)
+
+  it('leaves no partner behind that no column places, and says nothing of it', async () => {
+    let asked = 0
+    const h = await renderCanvasWithTrace(perTypeEstate(), {
+      focus: 'src1',
+      entityScope: 'all',
+      browseHolds: ['src1', 'src2', 'rep1', 'rep2'],
+      ancestorChains: true,
+      flows: [{ sourceUrn: 'src1', targetUrn: 'rep9' }, { sourceUrn: 'src1', targetUrn: 'misc1' }],
+      wrapProvider: (p: GraphDataProvider) => ({
+        ...p,
+        getNodes: async (query?: { urns?: string[] }) => {
+          if (query?.urns?.includes('misc1')) asked++
+          return p.getNodes(query as never)
+        },
+      }) as GraphDataProvider,
+    })
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().selectNode('src1') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('rep9'), { timeout: 8000 })
+    // Brought in, placed nowhere, and taken out again.
+    await waitFor(() => expect(asked).toBeGreaterThan(0), { timeout: 8000 })
+    await waitFor(() => expect(useCanvasStore.getState()._nodeIndex.has('misc1')).toBe(false), { timeout: 8000 })
+    await h.settle()
+    expect(useCanvasStore.getState()._nodeIndex.has('misc1')).toBe(false)
+    expect(document.body.textContent).not.toMatch(/entities not in any layer/)
+    // Its flow from the card stays where it was.
+    expect(useCanvasStore.getState()._edgeIndex.has('f:src1>misc1')).toBe(true)
+  }, 30_000)
 })
 
 describe('a stub\'s click', () => {

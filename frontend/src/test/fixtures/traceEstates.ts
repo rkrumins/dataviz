@@ -305,9 +305,12 @@ export function groupAndAnchorEstate() {
  *
  *   Sources   src1, src2
  *   Reports   rep1, rep2, rep9   (rep9 past the column's first page)
+ *
+ * and misc1, of a type no column places.
  */
 export function perTypeEstate() {
-  const nodes = [wn('src1', 'source'), wn('src2', 'source'), wn('rep1', 'report'), wn('rep2', 'report'), wn('rep9', 'report')]
+  const nodes = [wn('src1', 'source'), wn('src2', 'source'), wn('rep1', 'report'), wn('rep2', 'report'), wn('rep9', 'report'),
+    wn('misc1', 'misc')]
   const model: LensWalkModel = {
     focusUrn: 'src1', nodes, lineageEdges: [], containmentEdges: [],
     upstreamUrns: new Set(), downstreamUrns: new Set(),

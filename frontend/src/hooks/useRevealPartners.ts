@@ -118,11 +118,13 @@ export function useRevealPartners(
     const spine = new Set<string>()
     const levels = new Set<string>()
     const steps: Array<[string, string]> = []
+    // Brought in as itself, for its type column to place.
+    const loose: string[] = []
     for (const [partner, chain] of chains) {
       const stop = chain.findIndex(a => isVisible(a) || isAnchor(a))
       if (stop === -1) {
         // Nothing on its path is in this view — unless the view holds all of it.
-        if (openScope && !scope?.anchoredOnly) spine.add(partner)
+        if (openScope && !scope?.anchoredOnly) { spine.add(partner); loose.push(partner) }
         continue
       }
       if (scope?.anchoredOnly && !isAnchor(chain[stop])) continue
@@ -136,6 +138,8 @@ export function useRevealPartners(
     }
     if (spine.size === 0) return outcome()
 
+    const before = useCanvasStore.getState()
+    const added = loose.filter(p => !before._nodeIndex.has(p))
     await primeRevealSpine(provider, [...spine], containmentEdgeTypes)
 
     const held = new Set(useCanvasStore.getState().edges.map(e => `${e.source}>${e.target}`))
@@ -150,6 +154,17 @@ export function useRevealPartners(
     }
 
     await appearsWithin(() => wanted.every(p => optsRef.current.isVisible(p)), settleMs)
+
+    // One brought in as itself that no column placed is drawn nowhere: out
+    // it goes again, or it would sit in the store as "not in any layer"
+    // because a card was selected. The flows the store held for it stay.
+    const store = useCanvasStore.getState()
+    const strays = new Set(added.filter(p => !optsRef.current.isVisible(p)))
+    if (strays.size > 0 && store.graphGeneration === before.graphGeneration) {
+      const flows = store.edges.filter(e => (strays.has(e.source) || strays.has(e.target)) && before._edgeIndex.has(e.id))
+      store.removeNodes([...strays])
+      if (flows.length > 0) useCanvasStore.getState().addGraph([], flows)
+    }
 
     const landed = wanted.filter(p => optsRef.current.isVisible(p))
     if (landed.length > 0) {
