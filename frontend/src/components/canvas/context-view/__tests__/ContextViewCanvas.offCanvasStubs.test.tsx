@@ -19,6 +19,7 @@ import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import { useNotificationStore } from '@/components/ui/notifications'
+import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 
 const overlay = vi.hoisted(() => ({
   offCanvas: undefined as ReadonlyMap<string, OffCanvasLineage> | undefined,
@@ -148,7 +149,8 @@ describe('a card\'s lines into rows of an anchored column that are not loaded', 
 describe('selecting cards the view opened with', () => {
   // Nothing is added by hand: the flows come the way the app reads them,
   // from the provider, and only because a card was selected.
-  async function openWithFlows(flows: Array<{ sourceUrn: string; targetUrn: string }>) {
+  async function openWithFlows(flows: Array<{ sourceUrn: string; targetUrn: string }>,
+    wrapProvider?: (provider: GraphDataProvider) => GraphDataProvider) {
     const estate = anchoredPortsEstate()
     // s9 and `uncounted` are rows of Staging and Report past their loaded page.
     const unloaded = new Set(['s9', 'uncounted', 'far'])
@@ -157,10 +159,57 @@ describe('selecting cards the view opened with', () => {
       browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => !unloaded.has(urn)),
       ancestorChains: true,
       flows,
+      wrapProvider,
     })
     await h.settle()
     return h
   }
+
+  it('a row whose read failed is read again when selected again', async () => {
+    let shedding = true
+    let reads = 0
+    const h = await openWithFlows([{ sourceUrn: 's2', targetUrn: 's9' }], p => ({
+      ...p,
+      getEdges: async (q: Parameters<GraphDataProvider['getEdges']>[0]) => {
+        reads++
+        if (shedding) throw Object.assign(new Error('shed'), { status: 429 })
+        return p.getEdges(q)
+      },
+    }) as GraphDataProvider)
+
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+    await waitFor(() => expect(reads).toBeGreaterThan(0), { timeout: 8000 })
+    await h.settle()
+    // Not again while it stays selected.
+    const failedReads = reads
+    await act(async () => { await new Promise(r => setTimeout(r, 1000)) })
+    expect(reads).toBe(failedReads)
+
+    shedding = false
+    act(() => { useCanvasStore.getState().clearSelection() })
+    await h.settle()
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+  }, 30_000)
+
+  it('a row whose flows a collapse pruned reads them again when selected', async () => {
+    const h = await openWithFlows([{ sourceUrn: 'SRC.DB_B.t2', targetUrn: 'rpt' }])
+    await h.toggle('SRC.DB_B')
+    await waitFor(() => expect(h.visibleCardIds()).toContain('SRC.DB_B.t2'), { timeout: 8000 })
+    act(() => { useCanvasStore.getState().selectNode('rpt') })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_B.t2', target: 'rpt' }), { timeout: 8000 })
+    act(() => { useCanvasStore.getState().clearSelection() })
+    await h.settle()
+
+    await h.toggle('SRC.DB_B')
+    await waitFor(() => {
+      expect(useCanvasStore.getState().edges.map(e => e.id)).not.toContain('f:SRC.DB_B.t2>rpt')
+    }, { timeout: 8000 })
+    act(() => { useCanvasStore.getState().selectNode('rpt') })
+
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_B', target: 'rpt' }), { timeout: 8000 })
+  }, 30_000)
 
   it('a row on a first page reads its own flows, and brings in the rows they reach', async () => {
     const h = await openWithFlows([{ sourceUrn: 's2', targetUrn: 's9' }])

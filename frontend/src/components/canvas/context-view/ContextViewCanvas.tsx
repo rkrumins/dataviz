@@ -4863,35 +4863,61 @@ export function ContextViewCanvas({
   // graph: their far ends get their places (useAncestorChains), and the
   // effect above brings in the rows among them. A container's lineage is its
   // descendants', not its own flows, so a container is not read here.
-  const primedOnSelectRef = useRef<{ generation: number; ids: Set<string> }>({ generation: -1, ids: new Set() })
+  //
+  // A leaf is read once its read has landed, and keeps the flows it landed:
+  // one a collapse since pruned is read again. A read that failed is asked
+  // again when the leaf is selected again, not while it stays selected.
+  // `turn` counts selections; a failed read notes the one it failed in.
+  const primedOnSelectRef = useRef({
+    generation: -1, selection: '', turn: 0,
+    read: new Map<string, string[]>(), reading: new Set<string>(), failed: new Map<string, number>(),
+  })
   useEffect(() => {
     if (traceWriteLocked()) return
     const { graphGeneration } = useCanvasStore.getState()
+    const selection = selectedNodeIds.join('\n')
     if (primedOnSelectRef.current.generation !== graphGeneration) {
-      primedOnSelectRef.current = { generation: graphGeneration, ids: new Set() }
+      primedOnSelectRef.current = { generation: graphGeneration, selection, turn: 0, read: new Map(), reading: new Set(), failed: new Map() }
     }
-    const { ids } = primedOnSelectRef.current
+    const round = primedOnSelectRef.current
+    if (round.selection !== selection) { round.selection = selection; round.turn += 1 }
+    const { read, reading, failed } = round
+    const edgeIndex = useCanvasStore.getState()._edgeIndex
     const selected = new Set(selectedNodeIds)
     const members = [...closedGroupOf].filter(([, row]) => selected.has(row)).map(([member]) => member)
     const leaves = [...selectedNodeIds.filter(id => drawnRows.has(id)), ...members].filter(id => {
       const node = displayMap.get(id)
-      return !ids.has(id) && !!node && !id.startsWith('logical:')
+      return !reading.has(id) && failed.get(id) !== round.turn
+        && !read.get(id)?.every(e => edgeIndex.has(e))
+        && !!node && !id.startsWith('logical:')
         && node.children.length === 0 && !(Number(node.data?.childCount) > 0)
     }).slice(0, REVEAL_PARTNERS_CAP)
     if (leaves.length === 0) return
-    leaves.forEach(id => ids.add(id))
-    const reading = new Set(leaves)
+    leaves.forEach(id => reading.add(id))
+    const asked = new Set(leaves)
+    const turn = round.turn
+    const missed = (ids: readonly string[]) => ids.forEach(id => failed.set(id, turn))
     void primeLineageFor(provider, leaves, lineageEdgeTypes, containmentEdgeTypes)
-      .then(({ edges: flows, partial }) => {
+      .then(({ edges: flows, partial, failed: lost }) => {
         // Not for a graph since replaced, nor on a row removed meanwhile.
         const store = useCanvasStore.getState()
         if (store.graphGeneration !== graphGeneration) return
         const kept = flows.filter(e =>
-          [e.source, e.target].every(end => !reading.has(end) || store._nodeIndex.has(end)))
+          [e.source, e.target].every(end => !asked.has(end) || store._nodeIndex.has(end)))
         if (kept.length > 0) store.addGraph([], kept)
         store.markLineagePartial(partial)
+        const landed = useCanvasStore.getState()._edgeIndex
+        const notRead = new Set(lost)
+        missed(lost)
+        for (const id of leaves) {
+          if (!notRead.has(id)) read.set(id, kept.filter(e => (e.source === id || e.target === id) && landed.has(e.id)).map(e => e.id))
+        }
       })
-      .catch(e => console.warn('[select] lineage priming failed', e))
+      .catch(e => {
+        missed(leaves)
+        console.warn('[select] lineage priming failed', e)
+      })
+      .finally(() => leaves.forEach(id => reading.delete(id)))
   }, [selectedNodeIds, closedGroupOf, displayMap, drawnRows, provider, lineageEdgeTypes, containmentEdgeTypes, traceWriteLocked])
 
   // The panel lists every line the canvas can draw — not the budgeted

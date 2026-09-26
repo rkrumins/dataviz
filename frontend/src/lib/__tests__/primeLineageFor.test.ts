@@ -121,8 +121,10 @@ describe('primeLineageFor', () => {
       if (q.sourceUrns?.includes('n0')) throw new Error('boom')
       return (q.sourceUrns?.includes('n29') ? [edge('e29', 'n29', 'far')] : []) as never
     })
-    const { edges } = await primeLineageFor({ getEdges } as unknown as GraphDataProvider, urns, ['FLOWS_TO'])
+    const { edges, failed } = await primeLineageFor({ getEdges } as unknown as GraphDataProvider, urns, ['FLOWS_TO'])
     expect(edges.map((e) => e.id)).toEqual(['e29'])
+    // Its rows were not read: the caller can ask about them again.
+    expect(failed).toEqual(urns.slice(0, 25))
   })
 
   it('lets a failure reach the caller, which decides what it costs', async () => {

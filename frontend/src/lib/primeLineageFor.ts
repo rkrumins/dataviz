@@ -26,8 +26,8 @@
  * nothing, silently. A direction that still comes back AT its cap was cut
  * short, and which rows lost flows cannot be told, so that batch's rows are
  * reported `partial` that way: their ports must not claim their lineage only
- * leaves the view. A failed batch costs its own rows; the call fails only
- * when every batch did.
+ * leaves the view. A failed batch costs its own rows, reported `failed`; the
+ * call fails only when every batch did.
  *
  * Flows only. The stored :AGGREGATED roll-up cells are never asked for (the
  * rows on screen get theirs from /edges/aggregated), and when the view
@@ -48,6 +48,8 @@ export interface PrimedLineage {
   edges: LineageEdge[]
   /** Rows whose flows that way came back at the cap: there may be more. */
   partial: { in: string[]; out: string[] }
+  /** Rows whose batch failed: none of their flows was read. */
+  failed: string[]
 }
 
 export async function primeLineageFor(
@@ -57,7 +59,7 @@ export async function primeLineageFor(
   containmentEdgeTypes: readonly string[] = [],
   limit: number = PRIME_LINEAGE_LIMIT,
 ): Promise<PrimedLineage> {
-  const primed: PrimedLineage = { edges: [], partial: { in: [], out: [] } }
+  const primed: PrimedLineage = { edges: [], partial: { in: [], out: [] }, failed: [] }
   if (!provider || typeof provider.getEdges !== 'function' || urns.length === 0) return primed
   const lineage = lineageEdgeTypes.filter((t) => t.toUpperCase() !== 'AGGREGATED')
   const types = lineage.length > 0 ? lineage : undefined
@@ -75,6 +77,7 @@ export async function primeLineageFor(
       ])
     } catch (e) {
       failure ??= e
+      primed.failed.push(...batch)
       continue
     }
     answered = true
