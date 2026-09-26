@@ -97,6 +97,28 @@ describe('expandAggregatedEdgesBatch — a batch the server shed', () => {
   })
 })
 
+describe('expandAggregatedEdgesBatch — an answer that lost a pair for now', () => {
+  it('draws what came back, but caches no pair, so the next expand asks again', async () => {
+    const { provider: p, expandAggregatedBatch } = provider(vi.fn()
+      .mockResolvedValue(answer(['e1'], { truncated: true, truncationReason: 'failed' })))
+
+    const first = await useTraceStore.getState().expandAggregatedEdgesBatch(PAIRS, p)
+    expect(first?.edges.map(e => e.id)).toEqual(['e1'])
+    expect(drilled()).toEqual([])
+
+    await useTraceStore.getState().expandAggregatedEdgesBatch(PAIRS, p)
+    expect(expandAggregatedBatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('cut at a cap, it is the answer: every pair is cached', async () => {
+    const { provider: p } = provider(vi.fn()
+      .mockResolvedValue(answer(['e1'], { truncated: true, truncationReason: 'max_nodes' })))
+
+    await useTraceStore.getState().expandAggregatedEdgesBatch(PAIRS, p)
+    expect(drilled()).toEqual([drilldownKey('a', 'b', 1), drilldownKey('a', 'c', 1)])
+  })
+})
+
 describe('expandAggregatedEdgesBatch — a trace cleared while it was out', () => {
   it('is not written into: nothing cached, nothing handed back', async () => {
     const { provider: p } = provider(vi.fn()

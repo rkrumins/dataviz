@@ -295,6 +295,10 @@ const DEFAULT_CONFIG: TraceConfig = {
  *  started): a drill still out then writes nothing. */
 let traceGeneration = 0
 
+/** Why a drill is cut the same way every time it is asked: a cap. The
+ *  server's own list (graph_cache._DETERMINISTIC_CUTS). */
+const DETERMINISTIC_CUTS = new Set(['max_nodes', 'degree_cap', 'orphan', 'truncated'])
+
 export const useTraceStore = create<TraceState>((set, get) => ({
     status: 'idle',
     error: null,
@@ -544,6 +548,13 @@ export const useTraceStore = create<TraceState>((set, get) => ({
                 if (!merged) return null
             }
             if (!current()) return null
+
+            // An answer cut short for a reason that is not a cap lost some
+            // pair for now (failover, a breaker, a deadline), and it does not
+            // say which. Its lines are drawn, but no pair is cached, so the
+            // next expand asks again. A cap cuts the same way every time.
+            if (merged?.truncated && merged.truncationReason != null
+                && !DETERMINISTIC_CUTS.has(merged.truncationReason)) drilled = []
 
             // Cache the merged response under each (s, t, nextLevel) key so
             // future calls for the same pair are no-ops. The cached entry per
