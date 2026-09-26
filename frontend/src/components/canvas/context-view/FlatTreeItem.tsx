@@ -16,7 +16,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
-import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { formatUnitCount, unitMeaning } from './connections/connectionUnits'
 import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
@@ -1005,14 +1005,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(var(--nx-lineage-in-rgb))', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
+          title={`${formatUnitCount(externalIn, 'flows')} ${externalIn === 1 ? 'arrives' : 'arrive'} from entities outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(var(--nx-lineage-out-rgb))', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
+          title={`${formatUnitCount(externalOut, 'flows')} ${externalOut === 1 ? 'leads' : 'lead'} to entities outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>

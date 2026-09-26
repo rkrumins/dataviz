@@ -31,7 +31,7 @@ function ports(id: string): { left: string | null; right: string | null } {
   return { left: at('left'), right: at('right') }
 }
 
-/** The card's dashed "… lead outside this view" cues. */
+/** The card's dashed "… outside this view" cues. */
 function cues(id: string): string[] {
   const card = document.getElementById(`layer-node-${id}`)
   return [...(card?.querySelectorAll<HTMLElement>('[title]') ?? [])]
@@ -94,7 +94,7 @@ describe('a curated anchored view: in view is never "outside"', () => {
       expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
       expect(cues('dash')).toHaveLength(1)
     }, { timeout: 8000 })
-    expect(cues('dash')[0]).toMatch(/^1 incoming underlying flow lead outside this view/)
+    expect(cues('dash')[0]).toMatch(/^1 underlying flow arrives from entities outside this view/)
 
     act(() => { useCanvasStore.getState().selectNode('dash') })
     await waitFor(() => {
