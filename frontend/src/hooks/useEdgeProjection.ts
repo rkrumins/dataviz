@@ -563,7 +563,7 @@ export function useEdgeProjection({
     const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows & ColumnFlows>; unplaced: { in: number; out: number } }>()
     let unresolvedThisPass = 0
     const fileUndrawn = (S: Place, T: Place, sUrn: string, tUrn: string,
-      types: readonly string[], weight: number, wholeColumn: boolean) => {
+      types: readonly string[], weight: number, wholeColumn: boolean, cell = false) => {
       const side = S.at === 'row' ? 'out' : 'in'
       const [near, far, farUrn] = side === 'out' ? [S, T, tUrn] : [T, S, sUrn]
       if (near.at !== 'row' || far.at === 'row' || allHidden(types)) return
@@ -578,8 +578,12 @@ export function useEdgeProjection({
         return
       }
       if (far.at === 'outside') {
-        note(entry, side, farUrn, weight)
-        unresolvedThisPass += weight
+        // A roll-up of this row to that end, or to what holds it (a selected
+        // container's own), counts this flow already: its far end is kept,
+        // its flow is not counted twice.
+        const counted = !cell && countedByCell(near.id, farUrn, side)
+        note(entry, side, farUrn, counted ? 0 : weight)
+        if (!counted) unresolvedThisPass += weight
         return
       }
       let column = entry.columns.get(far.layerId)
@@ -641,6 +645,13 @@ export function useEdgeProjection({
       return up !== undefined && holds(up) ? up : undefined
     }
     const pairKey = (s: string, t: string) => `${s}->${t}`
+    const cellPairs = new Set<string>()
+    cells.forEach(c => cellPairs.add(pairKey(c.sourceUrn, c.targetUrn)))
+    const countedByCell = (row: string, farUrn: string, side: 'in' | 'out') => {
+      const rowUrn = displayMap.get(row)?.urn ?? row
+      return ends.has(rowUrn)
+        && [farUrn, ...upPath(farUrn)].some(end => cellPairs.has(side === 'out' ? pairKey(rowUrn, end) : pairKey(end, rowUrn)))
+    }
     const loadedShare = new Map<string, number>()
     const share = (s: string, t: string, w: number) => loadedShare.set(pairKey(s, t), (loadedShare.get(pairKey(s, t)) ?? 0) + w)
     cells.forEach(c => {
@@ -667,7 +678,7 @@ export function useEdgeProjection({
         // an anchor is lineage into its rows not loaded yet: in the view.
         fileUndrawn(S, T, agg.sourceUrn, agg.targetUrn,
           Array.isArray(agg.edgeTypes) && agg.edgeTypes.length > 0 ? agg.edgeTypes : ['AGGREGATED'],
-          weight, false)
+          weight, false, true)
       } else if (S.id === T.id) {
         hiddenInsideThisPass++
       } else {
