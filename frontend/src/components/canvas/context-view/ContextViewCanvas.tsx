@@ -3472,9 +3472,9 @@ export function ContextViewCanvas({
   // anchor with rows past its loaded page, and each open container with
   // children not loaded yet, counted from the store, so a child drawn in
   // another column is loaded all the same. They hold rows that are in the
-  // view, and the rows' lineage into them draws nothing else. None on a draft
-  // or a branch: there the server derives an anchor's cells by walking its
-  // whole column, which would cut the answer short.
+  // view, and the rows' lineage into them draws nothing else. On a draft or
+  // a branch too: an answer cut short there costs only the holders' own
+  // request, which asks again on its own clock, never the rows' lines.
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
     if (traceActive) return
@@ -3489,17 +3489,15 @@ export function ContextViewCanvas({
       aggregationPendingSinceRef.current = null
       const aggregationTargets = renderedAggregationTargets(nodesByLayer, expandedNodes)
       const holders = new Set<string>()
-      if (!isDraft) {
-        anchorMoreByLayer.forEach(({ anchorUrn }) => holders.add(anchorUrn))
-        expandedNodes.forEach(id => {
-          const node = displayMap.get(id)
-          if (!node || node.isLogical) return
-          const total = Number(node.data?.childCount ?? 0) || 0
-          const pager = childPaging[id]
-          if (pager && !pager.hasMore && pager.childCount === total) return
-          if (total > (childMap.get(id) ?? []).length) holders.add(node.urn || id)
-        })
-      }
+      anchorMoreByLayer.forEach(({ anchorUrn }) => holders.add(anchorUrn))
+      expandedNodes.forEach(id => {
+        const node = displayMap.get(id)
+        if (!node || node.isLogical) return
+        const total = Number(node.data?.childCount ?? 0) || 0
+        const pager = childPaging[id]
+        if (pager && !pager.hasMore && pager.childCount === total) return
+        if (total > (childMap.get(id) ?? []).length) holders.add(node.urn || id)
+      })
       const aggregationHolders = [...holders].sort()
 
       // Only fetch if the target set actually changed
@@ -3515,7 +3513,7 @@ export function ContextViewCanvas({
     }, delay)
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, isDraft, anchorMoreByLayer, displayMap, childMap, childPaging])
+  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, anchorMoreByLayer, displayMap, childMap, childPaging])
 
   // Source-changed self-refresh: while the aggregated overlay is flagged
   // `source_changed`, poll readiness and invalidate the aggregated cache once

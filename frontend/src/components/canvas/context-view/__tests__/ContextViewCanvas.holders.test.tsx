@@ -9,9 +9,9 @@
  *
  * The canvas now also asks about the anchor, against its rows, both ways, in
  * a request of its own; what the loaded rows do not carry is lineage into the
- * rows not loaded yet, and the card is solid facing that column. Not on a
- * draft: there the server derives an anchor's cells by walking its whole
- * column.
+ * rows not loaded yet, and the card is solid facing that column. On a draft
+ * or a branch too: a holder answer cut short there costs only the holders'
+ * own request, never the rows' lines.
  */
 import { waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -66,14 +66,14 @@ describe('lineage into the rows an anchored column has not loaded', () => {
     expect(asks).toContainEqual([['STG'], expect.arrayContaining(['SRC.quiet', 's1', 's2'])])
   }, 20_000)
 
-  it('asks nothing about the anchor on a draft', async () => {
+  it('asks about the anchor on a draft too, in a request of its own', async () => {
     const h = await open(true)
 
     await waitFor(() => {
-      if (h.aggregatedSources().length === 0) throw new Error('no aggregated request went out')
-    }, { timeout: 4000 })
-    await h.settle()
-    expect(h.aggregatedSources().some(sources => sources.includes('STG'))).toBe(false)
-    expect(h.aggregatedTargets().some(targets => targets.includes('STG'))).toBe(false)
+      expect(ports('SRC.quiet')).toEqual({ left: null, right: 'here:out' })
+    }, { timeout: 8000 })
+    const asks = h.aggregatedSources().map((sources, i) => [sources.sort(), h.aggregatedTargets()[i].sort()])
+    expect(asks).toContainEqual([expect.arrayContaining(['SRC.quiet', 's1', 's2']), ['STG']])
+    expect(asks).toContainEqual([['STG'], expect.arrayContaining(['SRC.quiet', 's1', 's2'])])
   }, 20_000)
 })
