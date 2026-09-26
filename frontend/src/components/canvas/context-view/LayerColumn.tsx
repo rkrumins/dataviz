@@ -183,7 +183,7 @@ interface LayerColumnProps {
    *  drives the density gutter AND the per-row ambient hairlines. */
   lineageCounts?: Map<string, { in: number; out: number }>
   /** Per-node out-of-view lineage counts (curated views) — sky cue. */
-  externalCue?: Map<string, { in: number; out: number }>
+  externalCue?: ReadonlyMap<string, { in: number; out: number }>
   /** Lineage in/out per entity over the whole graph (`/nodes/degree`) —
    *  absent = not known. Lets a card's port say "lineage exists" even when
    *  none of it leads to anything on this canvas. */

@@ -2,11 +2,10 @@
  * useExternalDegrees — TOTAL lineage degrees per loaded URN, fetched
  * once per hydration settle from `/nodes/degree`.
  *
- * Powers the curated-view "lineage outside this view" cue: external
- * degree = total (full graph) − internal (edges already loaded). The
- * strictly-cheaper alternative to an XOR set-membership query — the
- * backend counts per-node adjacency with label-bucketed seeks and
- * caches by chunk.
+ * Powers each card's lineage ports: whether it has lineage at all, even
+ * with no line of it drawn (lineagePorts.ts). Never what lies outside the
+ * view — that is where the projection places a far end. The backend counts
+ * per-node adjacency with label-bucketed seeks and caches by chunk.
  *
  * Resilience contract: a URN absent from `totals` is UNKNOWN — callers
  * must render nothing for it, never "zero" (a degraded backend must not
@@ -21,11 +20,11 @@
  * asked on the retry. A reader that cannot count (501) is left alone:
  * nothing is asked again and nothing reads as failed.
  *
- * Flows are counted by type, never the stored :AGGREGATED roll-up cells
- * (the store holds none, so the cue compares flows with flows). Whether a
- * card holds roll-up cells is asked for besides (`includeRollups`): that is
- * how a collapsed container whose lineage all sits below it says it has
- * some. A server that ignores the flag answers flows alone.
+ * Flows are counted by type, never the stored :AGGREGATED roll-up cells.
+ * Whether a card holds roll-up cells is asked for besides
+ * (`includeRollups`): that is how a collapsed container whose lineage all
+ * sits below it says it has some. A server that ignores the flag answers
+ * flows alone.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { lookupRetryDelayMs } from '@/config/polling'

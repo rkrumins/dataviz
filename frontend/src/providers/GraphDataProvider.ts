@@ -793,9 +793,9 @@ export interface GraphDataProvider {
     /**
      * TOTAL lineage degree (in/out) per URN over the full graph —
      * optional capability. Absent URNs in the result are UNKNOWN, never
-     * zero. The canvas derives "lineage outside this view" as
-     * total − internal(loaded). `includeRollups` asks, besides, whether
-     * each holds roll-up cells (see NodeDegree).
+     * zero. The canvas reads whether an entity has lineage from it.
+     * `includeRollups` asks, besides, whether each holds roll-up cells
+     * (see NodeDegree).
      */
     getNodeDegrees?(
         urns: URN[], edgeTypes?: string[], options?: { includeRollups?: boolean },
