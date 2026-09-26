@@ -130,6 +130,22 @@ describe('selecting a collapsed container', () => {
     await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_A', target: 'SRC.DB_B' }), { timeout: 8000 })
   }, 30_000)
 
+  it('asks even with a line of its own drawn, when a column holds more of its lineage', async () => {
+    const h = await open({
+      degrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      // rpt is drawn; Staging holds four flows past its page, s9's.
+      cells: [rollUp('SRC.DB_A', 'rpt', 1), rollUp('SRC.DB_A', 'STG', 4), rollUp('SRC.DB_A', 's9', 4)],
+    })
+    await waitFor(() => expect(ports('SRC.DB_A').right).toBe('here:out'), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_A', target: 'rpt' }), { timeout: 8000 })
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['SRC.DB_A'], []]), { timeout: 8000 })
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_A', target: 's9' }), { timeout: 8000 })
+  }, 30_000)
+
   it('reads hollow once every far end its roll-ups name is outside the view, and not before', async () => {
     const h = await open({
       degrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },

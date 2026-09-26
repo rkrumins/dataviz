@@ -5211,12 +5211,18 @@ export function ContextViewCanvas({
   // those it holds past a page: one whose partners are rows past another
   // column's page that no holder cell names, or rows inside a closed row,
   // had lineage and no line. So for a selected container drawn closed, with
-  // lineage one way and no line drawn that way, the canvas asks for all of
-  // its roll-ups that way (useContainerRollups). The projection places their
-  // far ends, and the partner reveal above brings in the rows of other
-  // columns among them. Each way of each container once per selection; one
-  // opened, or gone, takes its cells. Never while a trace holds the canvas.
+  // lineage one way that its drawn lines do not account for — none drawn,
+  // flows into a column that names no row, lineage held, or more of its own
+  // flows counted than drawn — the canvas asks for all of its roll-ups that
+  // way (useContainerRollups). The projection places their far ends, and the
+  // partner reveal above brings in the rows of other columns among them.
+  // Each way of each container once per selection; one opened, or gone,
+  // takes its cells. Never while a trace holds the canvas. A cell to what the
+  // container holds or what holds it, as far as the canvas knows (loaded
+  // containment, chains it has), is dropped before its end is asked about.
   const containerAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
+  const containmentRef = useRef({ parentMap, ancestorChains })
+  useEffect(() => { containmentRef.current = { parentMap, ancestorChains } })
   useEffect(() => {
     const selection = selectedNodeIds.join('\n')
     if (containerAskedRef.current.selection !== selection) {
@@ -5231,11 +5237,14 @@ export function ContextViewCanvas({
     const asks = { out: [] as string[], in: [] as string[] }
     const selected = traceWriteLocked() ? [] : selectedNodeIds.filter(drawnClosed)
     if (selected.length > 0) {
-      const drawn = { in: new Set<string>(), out: new Set<string>() }
+      // The flows each card's drawn lines stand for, per way.
+      const drawn = { in: new Map<string, number>(), out: new Map<string, number>() }
+      const add = (way: 'in' | 'out', id: string, n: number) => drawn[way].set(id, (drawn[way].get(id) ?? 0) + n)
       for (const e of drawableLineageEdges) {
-        drawn.out.add(e.source)
-        drawn.in.add(e.target)
-        if (e.isBidirectional) { drawn.in.add(e.source); drawn.out.add(e.target) }
+        const n = Number(e.edgeCount) || 1
+        add('out', e.source, n)
+        add('in', e.target, n)
+        if (e.isBidirectional) { add('in', e.source, n); add('out', e.target, n) }
       }
       for (const id of selected) {
         const urn = displayMap.get(id)?.urn || id
@@ -5245,14 +5254,27 @@ export function ContextViewCanvas({
         for (const way of ['out', 'in'] as const) {
           const evidence = (total?.[way] ?? 0) + ((way === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
             + (ports ? ports.left[way] + ports.right[way] + ports.held[way] : 0) + (outside?.[way] ?? 0)
+          const drawnFlows = drawn[way].get(id) ?? 0
+          const undrawn = drawnFlows === 0 ? evidence > 0
+            : [...(outside?.columns.values() ?? [])].some(flows => flows[way] > 0)
+              || (ports?.held[way] ?? 0) > 0 || (total?.[way] ?? 0) > drawnFlows
           const key = `${way}\n${urn}`
-          if (drawn[way].has(id) || evidence === 0 || asked.has(key)) continue
+          if (!undrawn || asked.has(key)) continue
           asked.add(key)
           asks[way].push(urn)
         }
       }
     }
-    void fetchContainerRollups(asks, urn => drawnClosed(urnToIdMap.get(urn) ?? urn))
+    const inside = (container: string, far: string) => {
+      const { parentMap: parents, ancestorChains: chains } = containmentRef.current
+      const up = (end: string): readonly string[] => {
+        const path: string[] = []
+        for (let p = parents.get(end); p !== undefined && !path.includes(p); p = parents.get(p)) path.push(p)
+        return path.length > 0 ? path : (chains?.get(end) ?? [])
+      }
+      return up(far).includes(container) || up(container).includes(far)
+    }
+    void fetchContainerRollups(asks, urn => drawnClosed(urnToIdMap.get(urn) ?? urn), inside)
   }, [selectedNodeIds, displayMap, drawnRows, expandedNodes, drawableLineageEdges, lineagePortTotals, nodePorts,
     offCanvasByNode, urnToIdMap, fetchContainerRollups, traceWriteLocked])
 

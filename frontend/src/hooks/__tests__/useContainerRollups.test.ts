@@ -17,7 +17,7 @@ vi.mock('@/providers/GraphProviderContext', async (original) => ({
 }))
 
 import { invalidateAggregatedEdges, invalidateAggregatedEdgesForScope } from '../useAggregatedLineage'
-import { useContainerRollups } from '../useContainerRollups'
+import { CONTAINER_CELLS_CAP, useContainerRollups } from '../useContainerRollups'
 
 const SCOPE = 'ws:ds:main:'
 
@@ -59,8 +59,9 @@ async function ask(
   hook: ReturnType<typeof render>,
   asks: { out?: string[]; in?: string[] },
   kept: (urn: string) => boolean = always,
+  inside?: (container: string, far: string) => boolean,
 ) {
-  await act(async () => { await hook.result.current.fetchContainerRollups({ out: asks.out ?? [], in: asks.in ?? [] }, kept) })
+  await act(async () => { await hook.result.current.fetchContainerRollups({ out: asks.out ?? [], in: asks.in ?? [] }, kept, inside) })
 }
 
 const FLOWS: Array<[string, string]> = [['C', 's9'], ['C', 'far'], ['up', 'C'], ['D', 'x']]
@@ -95,6 +96,36 @@ describe('useContainerRollups — what it asks', () => {
     await ask(hook, { out: ['C'] })
     expect(asks).toEqual([])
     expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-far', 'agg-C-s9'])
+  })
+})
+
+describe('useContainerRollups — how much it keeps', () => {
+  it('drops the cells to what the container holds, or what holds it', async () => {
+    graph([['C', 'C.t1'], ['up', 'C'], ['C', 's9'], ['x', 'C']])
+    const hook = render()
+    const inside = (container: string, far: string) => far === `${container}.t1` || far === 'up'
+    await ask(hook, { out: ['C'], in: ['C'] }, always, inside)
+    expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-s9', 'agg-x-C'])
+    expect(hook.result.current.containerPartial.out.size + hook.result.current.containerPartial.in.size).toBe(0)
+  })
+
+  it('keeps the strongest cells of a leg, and says it holds that way only in part', async () => {
+    const flows = Array.from({ length: CONTAINER_CELLS_CAP + 1 }, (_, i): [string, string] => ['C', `p${i}`])
+    graph(flows)
+    const getAggregatedEdges = (holder.current as { getAggregatedEdges: (req: Ask) => Promise<{ aggregatedEdges: ReturnType<typeof cell>[] }> }).getAggregatedEdges
+    // The weakest is the last.
+    holder.current = {
+      ...holder.current,
+      getAggregatedEdges: async (req: Ask) => {
+        const answer = await getAggregatedEdges(req)
+        return { ...answer, aggregatedEdges: answer.aggregatedEdges.map((c, i) => ({ ...c, edgeCount: flows.length - i })) }
+      },
+    }
+    const hook = render()
+    await ask(hook, { out: ['C'] })
+    expect(hook.result.current.containerEdges.size).toBe(CONTAINER_CELLS_CAP)
+    expect(hook.result.current.containerEdges.has(`agg-C-p${CONTAINER_CELLS_CAP}`)).toBe(false)
+    expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
   })
 })
 

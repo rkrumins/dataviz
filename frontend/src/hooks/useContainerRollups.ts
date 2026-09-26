@@ -20,6 +20,12 @@
  * cut-short answer is kept and asked again next time, and meanwhile its
  * container is `containerPartial` that way: what the cut left out may be in
  * the view, so the card is never hollow on it.
+ *
+ * Bounded: every far end kept is one more chain to ask for and place. A
+ * cell to what the container holds, or to what holds it (`inside`, as far
+ * as the canvas knows its containment), is the container summarised
+ * against itself and is dropped at once; of the rest, a leg keeps its
+ * CONTAINER_CELLS_CAP strongest, and is partial when it had more.
  */
 import { useCallback, useRef, useState } from 'react'
 
@@ -29,6 +35,8 @@ import type { AggregatedEdgeInfo, AggregatedEdgeRequest } from '@/providers/Grap
 import { useAggregatedEdgesCacheVersion } from './useAggregatedLineage'
 
 const CHUNK_SIZE = 500
+/** Cells kept per container and direction: the strongest. */
+export const CONTAINER_CELLS_CAP = 250
 
 const NONE: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 const WHOLE: { in: ReadonlySet<string>; out: ReadonlySet<string> } = { in: new Set(), out: new Set() }
@@ -65,8 +73,13 @@ export function useContainerRollups(granularity: string | null): {
   /** Containers whose roll-ups that way came back cut short. */
   containerPartial: { in: ReadonlySet<string>; out: ReadonlySet<string> }
   /** Ask about `asks` (URNs, per direction), and drop the containers `kept`
-   *  no longer holds: those no longer drawn closed. */
-  fetchContainerRollups: (asks: { out: readonly string[]; in: readonly string[] }, kept: (urn: string) => boolean) => Promise<void>
+   *  no longer holds: those no longer drawn closed. `inside(container, far)`:
+   *  the far end is under the container, or holds it. */
+  fetchContainerRollups: (
+    asks: { out: readonly string[]; in: readonly string[] },
+    kept: (urn: string) => boolean,
+    inside?: (container: string, far: string) => boolean,
+  ) => Promise<void>
 } {
   const provider = useGraphProvider()
   const cacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
@@ -78,12 +91,15 @@ export function useContainerRollups(granularity: string | null): {
   // The latest `kept`: an answer that lands after a container was opened
   // is not kept for it.
   const keptRef = useRef<(urn: string) => boolean>(() => true)
+  const insideRef = useRef<(container: string, far: string) => boolean>(() => false)
 
   const fetchContainerRollups = useCallback(async (
     asks: { out: readonly string[]; in: readonly string[] },
     kept: (urn: string) => boolean,
+    inside: (container: string, far: string) => boolean = () => false,
   ): Promise<void> => {
     keptRef.current = kept
+    insideRef.current = inside
     const publish = (ledger: ContainerLedger) => {
       const cells = new Map<string, AggregatedEdgeInfo>()
       const partial = { in: new Set<string>(), out: new Set<string>() }
@@ -139,11 +155,16 @@ export function useContainerRollups(granularity: string | null): {
       for (const urn of urns) {
         if (!keptRef.current(urn)) continue
         const key = legKey(way, urn)
+        const cells = answer.aggregatedEdges
+          .filter(c => way === 'out'
+            ? c.sourceUrn === urn && !insideRef.current(urn, c.targetUrn)
+            : c.targetUrn === urn && !insideRef.current(urn, c.sourceUrn))
+          .sort((a, b) => b.edgeCount - a.edgeCount)
         ledger.legs.set(key, {
           urn,
           way,
-          cells: answer.aggregatedEdges.filter(c => (way === 'out' ? c.sourceUrn : c.targetUrn) === urn),
-          cut: !!answer.truncated,
+          cells: cells.slice(0, CONTAINER_CELLS_CAP),
+          cut: !!answer.truncated || cells.length > CONTAINER_CELLS_CAP,
         })
         if (!answer.truncated && ledger.version === version) ledger.answered.add(key)
       }
