@@ -6,12 +6,12 @@
  * held by the store is a row; below that, a node is drawn when its parent is
  * drawn and open. What the hook opens and loads is read off that.
  */
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useRevealPartners } from '../useRevealPartners'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
-import type { GraphDataProvider, GraphNode } from '@/providers/GraphDataProvider'
+import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 
 const graphNode = (urn: string): GraphNode => ({ urn, entityType: 'dataset', displayName: urn, properties: {} })
 const lineageNode = (id: string) => ({ id, position: { x: 0, y: 0 }, data: { label: id, urn: id, type: 'generic' } }) as LineageNode
@@ -37,6 +37,8 @@ function provider() {
       return urns.filter(u => PARENTS[u] && asked.has(PARENTS[u]))
         .map(u => ({ id: `c:${PARENTS[u]}>${u}`, sourceUrn: PARENTS[u], targetUrn: u, edgeType: 'CONTAINS' }))
     }),
+    // Flows: none unless a test says so.
+    getEdges: vi.fn(async (_q: { sourceUrns?: string[]; targetUrns?: string[] }): Promise<GraphEdge[]> => []),
     getAncestors: vi.fn(),
     getChildren: vi.fn(),
     getChildrenWithEdges: vi.fn(),
@@ -78,6 +80,7 @@ function seed(ids: string[], edges: ReturnType<typeof contains>[] = []) {
     _nodeIndex: new Set(ids),
     _edgeIndex: new Set(edges.map(e => e.id)),
     visibleEdges: [],
+    lineagePartial: { in: new Set(), out: new Set() },
   })
 }
 
@@ -90,6 +93,7 @@ function reveal(p: ReturnType<typeof provider>, c: ReturnType<typeof canvas>, ch
     isVisible: c.isVisible,
     isAnchor: c.isAnchor,
     containmentEdgeTypes: ['CONTAINS'],
+    lineageEdgeTypes: ['FLOWS_TO'],
     settleMs: 20,
   })).result
 }
@@ -207,5 +211,49 @@ describe('useRevealPartners', () => {
     expect(p.getAncestorChains).not.toHaveBeenCalled()
     expect(p.getNodes).not.toHaveBeenCalled()
     expect(outcome).toEqual({ landed: ['p'], missed: [] })
+  })
+
+  it('a partner it lands gets its own flows, so its other lines draw', async () => {
+    PARENTS.p = 'A'
+    PARENTS.q = 'ROOT'
+    seed(['A'])
+    const p = provider()
+    const flowsTo = (source: string, target: string): GraphEdge => ({ id: `f:${source}>${target}`, sourceUrn: source, targetUrn: target, edgeType: 'FLOWS_TO' })
+    // p's flows out come back at the cap: there may be more of them.
+    p.getEdges.mockImplementation(async (q) => q.sourceUrns
+      ? [flowsTo('p', 'x'), ...Array.from({ length: 499 }, (_, i) => flowsTo('p', `x${i}`))]
+      : [flowsTo('w', 'p')])
+    const c = canvas(['A'], [])
+
+    const result = reveal(p, c)
+    let outcome: { landed: string[]; missed: string[] } | undefined
+    await act(async () => { outcome = await result.current(['p', 'q']) })
+
+    expect(outcome).toEqual({ landed: ['p'], missed: ['q'] })
+    await waitFor(() => expect(useCanvasStore.getState().edges.map(e => e.id)).toEqual(expect.arrayContaining(['f:p>x', 'f:w>p'])))
+    // Only what landed is read: q is not on the canvas to draw from.
+    expect(p.getEdges).toHaveBeenCalledTimes(2)
+    expect(p.getEdges).toHaveBeenCalledWith({ sourceUrns: ['p'], edgeTypes: ['FLOWS_TO'], limit: 500 })
+    expect(p.getEdges).toHaveBeenCalledWith({ targetUrns: ['p'], edgeTypes: ['FLOWS_TO'], limit: 500 })
+    expect([...useCanvasStore.getState().lineagePartial.out]).toEqual(['p'])
+  })
+
+  it('flows read for a graph that has since been replaced are not kept', async () => {
+    PARENTS.p = 'A'
+    seed(['A'])
+    const p = provider()
+    let answer: (edges: GraphEdge[]) => void = () => {}
+    p.getEdges.mockImplementation(async (q) => q.sourceUrns
+      ? new Promise<GraphEdge[]>(resolve => { answer = resolve })
+      : [])
+    const c = canvas(['A'], [])
+
+    const result = reveal(p, c)
+    await act(async () => { await result.current(['p']) })
+    await waitFor(() => expect(p.getEdges).toHaveBeenCalledTimes(2))
+    act(() => { useCanvasStore.getState().setGraph(useCanvasStore.getState().nodes, useCanvasStore.getState().edges) })
+    await act(async () => { answer([{ id: 'f:p>x', sourceUrn: 'p', targetUrn: 'x', edgeType: 'FLOWS_TO' }]) })
+
+    expect(useCanvasStore.getState().edges.some(e => e.id === 'f:p>x')).toBe(false)
   })
 })

@@ -59,6 +59,7 @@ import { SelectionBar } from './SelectionBar'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
+import { primeLineageFor } from '@/lib/primeLineageFor'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
@@ -4728,10 +4729,12 @@ export function ContextViewCanvas({
   // A partner that is a row of an anchored column past its loaded page is in
   // the view (the card's port says so) but has none, so selecting the card
   // brings those partners in along their paths (useRevealPartners), quietly:
-  // there is nothing to announce, the lines just draw. At most
-  // REVEAL_PARTNERS_CAP per selection, whether they are placed at once or
-  // later, as their chains arrive (`partnersAskedRef` keeps count, and asks
-  // no partner twice); never while a trace holds the canvas.
+  // there is nothing to announce, the lines just draw. With several cards
+  // selected, the partners of each, taken in turn so one card cannot use up
+  // the rest's share. At most REVEAL_PARTNERS_CAP per selection, whether they
+  // are placed at once or later, as their chains arrive (`partnersAskedRef`
+  // keeps count, and asks no partner twice); never while a trace holds the
+  // canvas.
   const revealPartners = useRevealPartners({
     provider,
     setExpandedNodes,
@@ -4740,27 +4743,66 @@ export function ContextViewCanvas({
     isVisible: isDrawnRow,
     isAnchor: (urn) => promotedAnchors.has(urn),
     containmentEdgeTypes,
+    lineageEdgeTypes,
   })
-  const partnersAskedRef = useRef<{ nodeId: string | null; asked: Set<string> }>({ nodeId: null, asked: new Set() })
+  const partnersAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
   useEffect(() => {
-    if (partnersAskedRef.current.nodeId !== selectedNodeId) {
-      partnersAskedRef.current = { nodeId: selectedNodeId, asked: new Set() }
+    const selection = selectedNodeIds.join('\n')
+    if (partnersAskedRef.current.selection !== selection) {
+      partnersAskedRef.current = { selection, asked: new Set() }
     }
     const { asked } = partnersAskedRef.current
-    if (!selectedNodeId || traceWriteLocked()) return
-    const columns = offCanvasByNode.get(selectedNodeId)?.columns
-    if (!columns) return
+    if (selectedNodeIds.length === 0 || traceWriteLocked()) return
+    const each = selectedNodeIds.map(id => [...(offCanvasByNode.get(id)?.columns.values() ?? [])]
+      .flatMap(flows => [...flows.inPartners, ...flows.outPartners]))
     const batch = new Set<string>()
-    for (const flows of columns.values()) {
-      for (const partner of [...flows.inPartners, ...flows.outPartners]) {
-        if (asked.size + batch.size >= REVEAL_PARTNERS_CAP) break
-        if (!asked.has(partner)) batch.add(partner)
+    const room = () => asked.size + batch.size < REVEAL_PARTNERS_CAP
+    for (let i = 0; room() && each.some(partners => i < partners.length); i++) {
+      for (const partners of each) {
+        if (i < partners.length && room() && !asked.has(partners[i])) batch.add(partners[i])
       }
     }
     if (batch.size === 0) return
     batch.forEach(partner => asked.add(partner))
     void revealPartners([...batch])
-  }, [selectedNodeId, offCanvasByNode, revealPartners, traceWriteLocked])
+  }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked])
+
+  // A leaf row the view opened with never read its own flows: a first page
+  // arrives with the view, and only a page loaded through loadChildren reads
+  // them (useGraphHydration). The store then holds none of its flows to rows
+  // past another column's page, and selecting it had no partner to bring
+  // in. Selecting a leaf reads them, once per graph: their far ends get
+  // their places (useAncestorChains), and the effect above brings in the
+  // rows among them. A container's lineage is its descendants', not its own
+  // flows, so a container is not read here.
+  const primedOnSelectRef = useRef<{ generation: number; ids: Set<string> }>({ generation: -1, ids: new Set() })
+  useEffect(() => {
+    if (traceWriteLocked()) return
+    const { graphGeneration } = useCanvasStore.getState()
+    if (primedOnSelectRef.current.generation !== graphGeneration) {
+      primedOnSelectRef.current = { generation: graphGeneration, ids: new Set() }
+    }
+    const { ids } = primedOnSelectRef.current
+    const leaves = selectedNodeIds.filter(id => {
+      const node = displayMap.get(id)
+      return !ids.has(id) && drawnRows.has(id) && !!node && !id.startsWith('logical:')
+        && node.children.length === 0 && !(Number(node.data?.childCount) > 0)
+    }).slice(0, REVEAL_PARTNERS_CAP)
+    if (leaves.length === 0) return
+    leaves.forEach(id => ids.add(id))
+    const reading = new Set(leaves)
+    void primeLineageFor(provider, leaves, lineageEdgeTypes, containmentEdgeTypes)
+      .then(({ edges: flows, partial }) => {
+        // Not for a graph since replaced, nor on a row removed meanwhile.
+        const store = useCanvasStore.getState()
+        if (store.graphGeneration !== graphGeneration) return
+        const kept = flows.filter(e =>
+          [e.source, e.target].every(end => !reading.has(end) || store._nodeIndex.has(end)))
+        if (kept.length > 0) store.addGraph([], kept)
+        store.markLineagePartial(partial)
+      })
+      .catch(e => console.warn('[select] lineage priming failed', e))
+  }, [selectedNodeIds, displayMap, drawnRows, provider, lineageEdgeTypes, containmentEdgeTypes, traceWriteLocked])
 
   // The panel lists every line the canvas can draw — not the budgeted
   // subset the overlay is handed, which in On Hover is empty until something

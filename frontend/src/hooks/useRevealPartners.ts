@@ -25,15 +25,19 @@
  * is a row, are opened in one update, each first marked as holding its first
  * page (it holds its spine child; its "N more" row fetches the rest), as the
  * search reveal does. No child page is loaded, and nothing on the way gets
- * its own lineage: only the partner's line to the card is wanted.
+ * its own lineage.
  *
  * Landing is judged by what is drawn (`isVisible`), after the canvas has had
- * time to paint it.
+ * time to paint it. A partner that landed then reads its own flows
+ * (primeLineageFor), as a row from a page does: it arrived with only its line
+ * to the card, and its other lines, to rows already drawn among them, would
+ * never draw. Fired after the landing, so the outcome does not wait on it.
  */
 import { useCallback, useLayoutEffect, useRef } from 'react'
 
 import { useCanvasStore } from '@/store/canvas'
 import { primeRevealSpine } from '@/lib/primeRevealSpine'
+import { primeLineageFor } from '@/lib/primeLineageFor'
 import { appearsWithin } from './useLocateManyOnCanvas'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 
@@ -53,6 +57,7 @@ export interface UseRevealPartnersOptions {
   /** A promoted anchor: drawn as its column. */
   isAnchor: (urn: string) => boolean
   containmentEdgeTypes: readonly string[]
+  lineageEdgeTypes: readonly string[]
   /** How long to wait for the partners to be drawn. */
   settleMs?: number
 }
@@ -72,7 +77,7 @@ export function useRevealPartners(
   return useCallback(async (partners: readonly string[]): Promise<RevealPartnersOutcome> => {
     const {
       provider, setExpandedNodes, markFirstPageHandled, chainOf, isVisible, isAnchor,
-      containmentEdgeTypes, settleMs = 1500,
+      containmentEdgeTypes, lineageEdgeTypes, settleMs = 1500,
     } = optsRef.current
     const outcome = (): RevealPartnersOutcome => ({
       landed: partners.filter(p => optsRef.current.isVisible(p)),
@@ -130,6 +135,24 @@ export function useRevealPartners(
     }
 
     await appearsWithin(() => wanted.every(p => optsRef.current.isVisible(p)), settleMs)
+
+    const landed = wanted.filter(p => optsRef.current.isVisible(p))
+    if (landed.length > 0) {
+      const generation = useCanvasStore.getState().graphGeneration
+      const primed = new Set(landed)
+      void primeLineageFor(provider, landed, lineageEdgeTypes, containmentEdgeTypes)
+        .then(({ edges, partial }) => {
+          // Flows read for a graph since replaced do not belong in the new
+          // one, nor on a partner removed while they were read.
+          const store = useCanvasStore.getState()
+          if (store.graphGeneration !== generation) return
+          const kept = edges.filter(e =>
+            [e.source, e.target].every(end => !primed.has(end) || store._nodeIndex.has(end)))
+          if (kept.length > 0) store.addGraph([], kept)
+          store.markLineagePartial(partial)
+        })
+        .catch(e => console.warn('[reveal] partner lineage priming failed', e))
+    }
     return outcome()
   }, [])
 }

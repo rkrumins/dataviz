@@ -93,6 +93,64 @@ describe('a card\'s lines into rows of an anchored column that are not loaded', 
   }, 20_000)
 })
 
+describe('selecting cards the view opened with', () => {
+  // Nothing is added by hand: the flows come the way the app reads them,
+  // from the provider, and only because a card was selected.
+  async function openWithFlows(flows: Array<{ sourceUrn: string; targetUrn: string }>) {
+    const estate = anchoredPortsEstate()
+    // s9 and `uncounted` are rows of Staging and Report past their loaded page.
+    const unloaded = new Set(['s9', 'uncounted', 'far'])
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => !unloaded.has(urn)),
+      ancestorChains: true,
+      flows,
+    })
+    await h.settle()
+    return h
+  }
+
+  it('a row on a first page reads its own flows, and brings in the rows they reach', async () => {
+    const h = await openWithFlows([{ sourceUrn: 's2', targetUrn: 's9' }])
+    expect(h.visibleCardIds()).not.toContain('s9')
+
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    await h.settle()
+    expect(h.consoleErrors()).toEqual([])
+  }, 20_000)
+
+  it('with several selected, brings in the rows of each', async () => {
+    const h = await openWithFlows([
+      { sourceUrn: 's2', targetUrn: 's9' },
+      { sourceUrn: 'SRC.raw_orders', targetUrn: 'uncounted' },
+    ])
+
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    act(() => { useCanvasStore.getState().selectNode('SRC.raw_orders', true) })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('uncounted'), { timeout: 8000 })
+    await h.settle()
+    expect(h.consoleErrors()).toEqual([])
+  }, 20_000)
+
+  it('a row brought in reads its own flows, so its other lines draw', async () => {
+    const h = await openWithFlows([
+      { sourceUrn: 's2', targetUrn: 's9' },
+      { sourceUrn: 's9', targetUrn: 'dash' },
+    ])
+
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    await waitFor(() => expect(useCanvasStore.getState().edges.some(e => e.id === 'f:s9>dash')).toBe(true), { timeout: 8000 })
+    await h.settle()
+    expect(h.consoleErrors()).toEqual([])
+  }, 20_000)
+})
+
 describe('a stub\'s click', () => {
   it('opens the Focus Lens on its row', async () => {
     await openView()

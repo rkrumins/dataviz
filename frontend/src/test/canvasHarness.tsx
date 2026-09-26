@@ -341,6 +341,8 @@ function stubProvider(
   holdChildren?: readonly string[],
   /** Roll-up cells `/edges/aggregated` answers with (see `renderCanvasWithTrace`). */
   aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
+  /** Flows `getEdges` answers with (see `renderCanvasWithTrace`). */
+  flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -401,7 +403,11 @@ function stubProvider(
       if (!urns) return nodes
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
-    getEdges: async () => [],
+    // One-sided flow reads (lineage priming, the external preview): those
+    // from one of its sources, or into one of its targets.
+    getEdges: async (query?: { sourceUrns?: string[]; targetUrns?: string[] }) => (flows ?? [])
+      .filter(f => query?.sourceUrns?.includes(f.sourceUrn) || query?.targetUrns?.includes(f.targetUrn))
+      .map(f => ({ id: `f:${f.sourceUrn}>${f.targetUrn}`, sourceUrn: f.sourceUrn, targetUrn: f.targetUrn, edgeType: 'TRANSFORMS' })),
     // Containment among the URNs asked — what a reveal primes its paths with.
     getEdgesBetween: async (urns: string[]) => {
       const asked = new Set(urns)
@@ -605,6 +611,9 @@ export async function renderCanvasWithTrace(
     /** The view's entityScope. Curated by default; 'all' opens the view to
      *  its whole data source. */
     entityScope?: 'all' | 'curated'
+    /** Flows `getEdges` answers with, by source or target, as TRANSFORMS
+     *  edges with id `f:<source>><target>`. Absent: it answers none. */
+    flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -681,7 +690,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells),
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells, opts.flows),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
