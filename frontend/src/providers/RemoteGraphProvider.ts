@@ -35,6 +35,7 @@ import type {
     LensClosureExtras,
     ExpandAggregatedRequest,
     ExpandAggregatedBatchRequest,
+    ExpandPairError,
     LayerAssignmentRequest,
     LayerAssignmentResult,
     GraphSchemaStats,
@@ -893,13 +894,20 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return normalizeTraceV2(raw)
     }
 
-    async expandAggregatedBatch(request: ExpandAggregatedBatchRequest): Promise<TraceV2Result> {
+    async expandAggregatedBatch(request: ExpandAggregatedBatchRequest): Promise<TraceV2Result & { pairErrors?: ExpandPairError[] }> {
         const raw = await this.fetch<RawTraceV2Result>('/trace/expand-batch', {
             method: 'POST',
             body: JSON.stringify(request),
             timeoutMs: TIMEOUTS.TRACE_MS,
         })
-        return normalizeTraceV2(raw)
+        // The pairs it could not expand, when it says: read what is well
+        // formed, and nothing from a server that does not say.
+        const listed = (raw as { pairErrors?: unknown }).pairErrors
+        const pairErrors = Array.isArray(listed)
+            ? listed.filter((e): e is ExpandPairError =>
+                typeof e?.sourceUrn === 'string' && typeof e?.targetUrn === 'string')
+            : undefined
+        return pairErrors ? { ...normalizeTraceV2(raw), pairErrors } : normalizeTraceV2(raw)
     }
 
     // ==========================================

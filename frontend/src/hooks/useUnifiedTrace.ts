@@ -16,10 +16,11 @@
 import { create } from 'zustand'
 import { useCallback, useMemo, useEffect, useRef } from 'react'
 import type {
-    GraphDataProvider, GraphEdge, LineageResult, TraceOptions,
+    ExpandPairError, GraphDataProvider, GraphEdge, LineageResult, TraceOptions,
     TraceV2Result, TraceV2Request,
 } from '@/providers/GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
+import { lookupRetryDelayMs } from '@/config/polling'
 import { mapWithConcurrency } from '@/lib/concurrency'
 import { useCanvasStore } from '@/store/canvas'
 import { recordEvent } from '@/services/telemetryService'
@@ -492,16 +493,51 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             return ok.length > 0 ? mergeDrilldownResults(ok) : null
         }
 
+        // A 429 here has already been asked again by the transport: the
+        // store is shedding. Drilling per pair would put that many more reads
+        // on it, so the batch is asked once more after the backoff, and a
+        // second shed leaves it: nothing is cached, so the next expand asks
+        // again. A pair the server says it could not expand (`pairErrors`)
+        // is never cached as drilled; one it says may answer if asked again
+        // is asked once more, after the backoff.
+        const isShed = (err: unknown) => (err as { status?: number } | null)?.status === 429
+        const pause = (err?: unknown) => new Promise<void>(resolve => setTimeout(resolve,
+            Math.max(lookupRetryDelayMs(1), (err as { retryAfterMs?: number } | undefined)?.retryAfterMs ?? 0)))
+        const askBatch = (batch: typeof uncached) => provider.expandAggregatedBatch!({
+            pairs: batch,
+            lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
+            includeContainmentEdges: config.includeContainmentEdges,
+        })
+        const samePair = (a: { sourceUrn: string; targetUrn: string }, b: { sourceUrn: string; targetUrn: string }) =>
+            a.sourceUrn === b.sourceUrn && a.targetUrn === b.targetUrn
+
         let merged: TraceV2Result | null = null
+        let failedPairs: ExpandPairError[] = []
         try {
             if (typeof provider.expandAggregatedBatch === 'function') {
                 try {
-                    merged = await provider.expandAggregatedBatch({
-                        pairs: uncached,
-                        lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
-                        includeContainmentEdges: config.includeContainmentEdges,
+                    let answer = await askBatch(uncached).catch(async (err: unknown) => {
+                        if (!isShed(err)) throw err
+                        await pause(err)
+                        return askBatch(uncached)
                     })
+                    failedPairs = answer.pairErrors ?? []
+                    const again = uncached.filter(p => failedPairs.some(e => e.retryable && samePair(e, p)))
+                    if (again.length > 0) {
+                        await pause()
+                        const retried = await askBatch(again).catch(() => null)
+                        if (retried) {
+                            const still = retried.pairErrors ?? []
+                            failedPairs = failedPairs.filter(e => !again.some(p => samePair(e, p)) || still.some(s => samePair(s, e)))
+                            answer = mergeDrilldownResults([answer, retried])!
+                        }
+                    }
+                    merged = answer
                 } catch (err) {
+                    if (isShed(err)) {
+                        set({ error: err instanceof Error ? err.message : 'Failed to expand aggregated edges (batch)' })
+                        return null
+                    }
                     // Log the batch failure but don't abort — drill back via per-edge.
                     console.warn('[trace] expand-batch failed, falling back to per-edge expand:', err)
                     merged = await callPerEdge()
@@ -522,6 +558,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             const next = new Map(get().drilldowns)
             if (merged) {
                 for (const p of uncached) {
+                    if (failedPairs.some(e => samePair(e, p))) continue
                     const key = drilldownKey(p.sourceUrn, p.targetUrn, p.nextLevel)
                     next.set(key, merged)
                 }
