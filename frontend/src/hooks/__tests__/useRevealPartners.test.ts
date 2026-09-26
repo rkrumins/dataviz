@@ -84,7 +84,8 @@ function seed(ids: string[], edges: ReturnType<typeof contains>[] = []) {
   })
 }
 
-function reveal(p: ReturnType<typeof provider>, c: ReturnType<typeof canvas>, chains: ReadonlyMap<string, readonly string[]> = new Map()) {
+function reveal(p: ReturnType<typeof provider>, c: ReturnType<typeof canvas>, chains: ReadonlyMap<string, readonly string[]> = new Map(),
+  openScope?: boolean) {
   return renderHook(() => useRevealPartners({
     provider: p as unknown as GraphDataProvider,
     setExpandedNodes: c.setExpandedNodes as never,
@@ -92,6 +93,7 @@ function reveal(p: ReturnType<typeof provider>, c: ReturnType<typeof canvas>, ch
     chainOf: (urn) => chains.get(urn),
     isVisible: c.isVisible,
     isAnchor: c.isAnchor,
+    openScope,
     containmentEdgeTypes: ['CONTAINS'],
     lineageEdgeTypes: ['FLOWS_TO'],
     settleMs: 20,
@@ -181,6 +183,21 @@ describe('useRevealPartners', () => {
     expect(p.getEdgesBetween).not.toHaveBeenCalled()
     expect(c.setExpandedNodes).not.toHaveBeenCalled()
     expect(outcome).toEqual({ landed: [], missed: ['p'] })
+  })
+
+  it('in a view open to its whole data source, such a partner is brought in as itself', async () => {
+    seed(['A'])
+    const p = provider()
+    // Its type column places whatever of its type the canvas holds.
+    const c = { ...canvas(['A'], []), isVisible: (id: string) => useCanvasStore.getState()._nodeIndex.has(id) }
+
+    const result = reveal(p, c, new Map([['p', []]]), true)
+    let outcome: { landed: string[]; missed: string[] } | undefined
+    await act(async () => { outcome = await result.current(['p']) })
+
+    expect(p.getNodes).toHaveBeenCalledWith(expect.objectContaining({ urns: ['p'] }))
+    expect(c.setExpandedNodes).not.toHaveBeenCalled()
+    expect(outcome).toEqual({ landed: ['p'], missed: [] })
   })
 
   it('landing is counted by drawn rows, not by the store', async () => {

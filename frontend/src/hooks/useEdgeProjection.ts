@@ -241,10 +241,14 @@ export interface ColumnFlows extends OffCanvasFlows {
  * `unplaced` counts the flows whose far end has no known place: still being
  * asked (pending), or never found (unknown). Neither in the view nor out of
  * it as far as anyone can tell, so never a stub, and never a hollow port.
+ * In a view open to its whole data source such an end is in the view (a row
+ * past its type column's page): `unknownPartners` names those, for
+ * selecting the card to bring in.
  */
 export interface OffCanvasLineage extends OffCanvasFlows {
   columns: ReadonlyMap<string, ColumnFlows>
   unplaced: { readonly in: number; readonly out: number }
+  unknownPartners?: ReadonlySet<string>
 }
 
 /** Where one end of a line lands (see `place` in the projection). */
@@ -560,7 +564,9 @@ export function useEdgeProjection({
     // it (see OffCanvasLineage). Only an end OUTSIDE the view is counted as
     // missing; one in an anchored column is in the view; one with no known
     // place (pending or unknown) is held, neither a stub nor a hollow port.
-    const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows & ColumnFlows>; unplaced: { in: number; out: number } }>()
+    const offCanvas = new Map<string, MutableFlows & {
+      columns: Map<string, MutableFlows & ColumnFlows>; unplaced: { in: number; out: number }; unknownPartners?: Set<string>
+    }>()
     let unresolvedThisPass = 0
     const fileUndrawn = (S: Place, T: Place, sUrn: string, tUrn: string,
       types: readonly string[], weight: number, wholeColumn: boolean, cell = false) => {
@@ -575,6 +581,10 @@ export function useEdgeProjection({
       if (!entry) { entry = { ...noFlows(), columns: new Map(), unplaced: { in: 0, out: 0 } }; offCanvas.set(near.id, entry) }
       if (far.at === 'pending' || far.at === 'unknown') {
         entry.unplaced[side] += weight
+        if (openScope && far.at === 'unknown') {
+          entry.unknownPartners ??= new Set()
+          if (entry.unknownPartners.size < OFF_CANVAS_PARTNER_CAP) entry.unknownPartners.add(farUrn)
+        }
         return
       }
       if (far.at === 'outside') {

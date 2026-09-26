@@ -4758,10 +4758,11 @@ export function ContextViewCanvas({
   )
 
   // Selecting a card draws its lines, and a line needs a row at its far end.
-  // A partner that is a row of an anchored column past its loaded page is in
-  // the view (the card's port says so) but has none, so selecting the card
-  // brings those partners in along their paths (useRevealPartners), quietly:
-  // there is nothing to announce, the lines just draw. With several cards
+  // A partner that is a row of an anchored column past its loaded page — or,
+  // in a view open to its whole data source, past its type column's page —
+  // is in the view (the card's port says so) but has none, so selecting the
+  // card brings those partners in along their paths (useRevealPartners),
+  // quietly: there is nothing to announce, the lines just draw. With several cards
   // selected, the partners of each, taken in turn so one card cannot use up
   // the rest's share, strongest first where a container's own roll-ups say
   // how many flows each stands for. At most REVEAL_PARTNERS_CAP per
@@ -4777,6 +4778,7 @@ export function ContextViewCanvas({
     chainOf: (urn) => ancestorChains?.get(urn),
     isVisible: isDrawnRow,
     isAnchor: (urn) => promotedAnchors.has(urn),
+    openScope: activeEntityScope === 'all',
     containmentEdgeTypes,
     lineageEdgeTypes,
   })
@@ -4804,9 +4806,13 @@ export function ContextViewCanvas({
     containerEdges.forEach(c => {
       for (const end of [c.sourceUrn, c.targetUrn]) strength.set(end, Math.max(strength.get(end) ?? 0, c.edgeCount))
     })
-    const each = selectedNodeIds.map(id => [...(offCanvasByNode.get(id)?.columns.values() ?? [])]
-      .flatMap(flows => [...flows.inPartners, ...flows.outPartners])
-      .sort((a, b) => (strength.get(b) ?? 0) - (strength.get(a) ?? 0)))
+    const each = selectedNodeIds.map(id => {
+      const lineage = offCanvasByNode.get(id)
+      return [...(lineage?.columns.values() ?? [])]
+        .flatMap(flows => [...flows.inPartners, ...flows.outPartners])
+        .concat([...(lineage?.unknownPartners ?? [])])
+        .sort((a, b) => (strength.get(b) ?? 0) - (strength.get(a) ?? 0))
+    })
     const batch = new Set<string>()
     const held = (partner: string) => asked.has(partner) || out.has(partner) || waiting.has(partner)
     const room = () => asked.size + out.size + waiting.size + batch.size < REVEAL_PARTNERS_CAP

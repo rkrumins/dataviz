@@ -14,7 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { anchoredPortsEstate } from '@/test/fixtures/traceEstates'
+import { anchoredPortsEstate, perTypeEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
@@ -250,6 +250,25 @@ describe('selecting cards the view opened with', () => {
     await h.settle()
     expect(h.consoleErrors()).toEqual([])
   }, 20_000)
+})
+
+describe('selecting a card in a view open to its whole data source', () => {
+  it("brings in the row its flows reach past its type column's page", async () => {
+    const h = await renderCanvasWithTrace(perTypeEstate(), {
+      focus: 'src1',
+      entityScope: 'all',
+      browseHolds: ['src1', 'src2', 'rep1', 'rep2'],
+      ancestorChains: true,
+      flows: [{ sourceUrn: 'src1', targetUrn: 'rep9' }],
+    })
+    await h.settle()
+    expect(h.visibleCardIds()).not.toContain('rep9')
+
+    act(() => { useCanvasStore.getState().selectNode('src1') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('rep9'), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'src1', target: 'rep9' }), { timeout: 8000 })
+  }, 30_000)
 })
 
 describe('a stub\'s click', () => {

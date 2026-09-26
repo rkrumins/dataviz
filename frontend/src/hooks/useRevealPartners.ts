@@ -56,6 +56,10 @@ export interface UseRevealPartnersOptions {
   isVisible: (id: string) => boolean
   /** A promoted anchor: drawn as its column. */
   isAnchor: (urn: string) => boolean
+  /** The view is open to its whole data source: a partner nothing on its
+   *  path is drawn for is a row past its type column's page, brought in as
+   *  itself for its column to place. */
+  openScope?: boolean
   containmentEdgeTypes: readonly string[]
   lineageEdgeTypes: readonly string[]
   /** How long to wait for the partners to be drawn. */
@@ -82,7 +86,7 @@ export function useRevealPartners(
 
   return useCallback(async (partners: readonly string[], scope?: RevealPartnersScope): Promise<RevealPartnersOutcome> => {
     const {
-      provider, setExpandedNodes, markFirstPageHandled, chainOf, isVisible, isAnchor,
+      provider, setExpandedNodes, markFirstPageHandled, chainOf, isVisible, isAnchor, openScope,
       containmentEdgeTypes, lineageEdgeTypes, settleMs = 1500,
     } = optsRef.current
     const outcome = (): RevealPartnersOutcome => ({
@@ -116,7 +120,11 @@ export function useRevealPartners(
     const steps: Array<[string, string]> = []
     for (const [partner, chain] of chains) {
       const stop = chain.findIndex(a => isVisible(a) || isAnchor(a))
-      if (stop === -1) continue // nothing on its path is in this view
+      if (stop === -1) {
+        // Nothing on its path is in this view — unless the view holds all of it.
+        if (openScope && !scope?.anchoredOnly) spine.add(partner)
+        continue
+      }
       if (scope?.anchoredOnly && !isAnchor(chain[stop])) continue
       const path = chain.slice(0, stop + 1).reverse()
       path.forEach((level, i) => {

@@ -177,6 +177,8 @@ describe('useEdgeProjection — a view open to its whole data source', () => {
     const fact = res.offCanvasByNode.get('fact')!
     expect(fact.in + fact.out).toBe(0)
     expect(fact.unplaced).toEqual({ in: 1, out: 1 })
+    // Named, for selecting the card to bring in.
+    expect([...fact.unknownPartners!].sort()).toEqual(['a-root', 'feed-row-201'])
     expect(res.unresolvedEdgeCount).toBe(0)
     // An end a drawn container holds still rolls up to it.
     expect(res.lines.map(l => [l.source, l.target])).toEqual([['fact', 'warehouse']])

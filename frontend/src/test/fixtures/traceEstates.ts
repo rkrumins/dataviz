@@ -299,3 +299,23 @@ export function groupAndAnchorEstate() {
   }
   return { model, layers, assignments }
 }
+
+/**
+ * A view open to its whole data source, one column per entity type:
+ *
+ *   Sources   src1, src2
+ *   Reports   rep1, rep2, rep9   (rep9 past the column's first page)
+ */
+export function perTypeEstate() {
+  const nodes = [wn('src1', 'source'), wn('src2', 'source'), wn('rep1', 'report'), wn('rep2', 'report'), wn('rep9', 'report')]
+  const model: LensWalkModel = {
+    focusUrn: 'src1', nodes, lineageEdges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'sources', name: 'Sources', order: 0, entityTypes: ['source'] },
+    { id: 'reports', name: 'Reports', order: 1, entityTypes: ['report'] },
+  ]
+  return { model, layers, assignments: {} }
+}
